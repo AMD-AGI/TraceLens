@@ -21,13 +21,21 @@ traces and writes a conservative map of names it is **certain** are equivalent
 that are already identical need no entry -- they unify by default.  The goal is
 to establish clear anchors, not to resolve every ambiguity.
 
-Three subcommands:
+Four subcommands:
 
   prepare-context    Aggregate the unique kernel names from both traces (with
-                     per-name stats) into a compact LLM packet.  When the
-                     combined unique-name count exceeds ``--threshold`` it emits
-                     a representative *sample* plus ``needs_stem_preprocessing:
-                     true`` instead of the full lists (see apply-stem-rules).
+                     per-name stats) into a compact LLM packet.  Each one-sided
+                     candidate is stamped with a short ``id`` (``a0``, ``b1``,
+                     ...) the agent references instead of re-emitting the full
+                     name.  When the combined unique-name count exceeds
+                     ``--threshold`` it emits a representative *sample* plus
+                     ``needs_stem_preprocessing: true`` instead of the full
+                     lists (see apply-stem-rules).
+
+  expand-map         Resolve the agent's id-referenced
+                     ``kernel_unification_decisions.json`` back into the
+                     name-keyed ``kernel_unification_map.json`` that apply-map
+                     consumes.
 
   apply-stem-rules   Apply an LLM-authored ``stem_rules.json`` (custom regexes +
                      collapse/preserve/drop actions) to the full unique-name set,
@@ -142,6 +150,21 @@ def _entry_list(agg, keys):
     return [e for name, e in agg.items() if name in keyset]
 
 
+def _stamp_ids(entries, prefix):
+    """Give each candidate a short stable id (``a0``, ``b1``, ...).
+
+    The id lets the unification agent reference a candidate without re-emitting
+    its (often very long) kernel name; ``expand-map`` resolves ids back to names.
+    """
+    stamped = []
+    for i, e in enumerate(entries):
+        out = OrderedDict()
+        out["id"] = f"{prefix}{i}"
+        out.update(e)
+        stamped.append(out)
+    return stamped
+
+
 def _build_context(agg_a, agg_b, name_a, name_b, level, extra=None):
     """Assemble the unification-context dict from two aggregations."""
     set_a = set(agg_a)
@@ -162,8 +185,8 @@ def _build_context(agg_a, agg_b, name_a, name_b, level, extra=None):
         f"only_in_{name_a}": len(only_a),
         f"only_in_{name_b}": len(only_b),
     }
-    ctx[f"only_in_{name_a}"] = _entry_list(agg_a, only_a)
-    ctx[f"only_in_{name_b}"] = _entry_list(agg_b, only_b)
+    ctx[f"only_in_{name_a}"] = _stamp_ids(_entry_list(agg_a, only_a), "a")
+    ctx[f"only_in_{name_b}"] = _stamp_ids(_entry_list(agg_b, only_b), "b")
     ctx["in_both"] = in_both
     if extra:
         ctx.update(extra)
@@ -399,6 +422,65 @@ def cmd_apply_stem_rules(args):  # pragma: no cover
 
 
 # ===========================================================================
+# expand-map
+# ===========================================================================
+
+
+def expand_unification_map(decisions, context):
+    """Resolve id-referenced unification *decisions* into the name-keyed map.
+
+    ``decisions`` is the agent output (``pairs`` plus optional ``renames_a`` /
+    ``renames_b``, each referencing the candidate ids stamped by
+    ``prepare-context``); ``context`` is that same unification context. Returns
+    the ``kernel_unification_map.json`` shape (``name_a`` / ``name_b`` /
+    ``map_a`` / ``map_b``) that ``apply-map`` consumes, so everything downstream
+    is unchanged. Raises ``KeyError`` on an id absent from the context.
+    """
+    name_a = context.get("name_a")
+    name_b = context.get("name_b")
+    id_to_name_a = {
+        e["id"]: e["name"]
+        for e in context.get(f"only_in_{name_a}", [])
+        if isinstance(e, dict) and "id" in e and "name" in e
+    }
+    id_to_name_b = {
+        e["id"]: e["name"]
+        for e in context.get(f"only_in_{name_b}", [])
+        if isinstance(e, dict) and "id" in e and "name" in e
+    }
+
+    def _name(idmap, _id, side):
+        if _id not in idmap:
+            raise KeyError(f"unknown {side} candidate id {_id!r}")
+        return idmap[_id]
+
+    map_a, map_b = {}, {}
+    for p in decisions.get("pairs", []) or []:
+        label = p["label"]
+        map_a[_name(id_to_name_a, p["a"], "a")] = label
+        map_b[_name(id_to_name_b, p["b"], "b")] = label
+    for r in decisions.get("renames_a", []) or []:
+        map_a[_name(id_to_name_a, r.get("id", r.get("a")), "a")] = r["label"]
+    for r in decisions.get("renames_b", []) or []:
+        map_b[_name(id_to_name_b, r.get("id", r.get("b")), "b")] = r["label"]
+
+    return {"name_a": name_a, "name_b": name_b, "map_a": map_a, "map_b": map_b}
+
+
+def cmd_expand_map(args):  # pragma: no cover
+    decisions = load_json(args.decisions)
+    context = load_json(args.context)
+    doc = expand_unification_map(decisions, context)
+    with open(args.output, "w") as f:
+        json.dump(doc, f, indent=2)
+    print(
+        f"Expanded {len(doc['map_a'])} {doc['name_a']} + "
+        f"{len(doc['map_b'])} {doc['name_b']} map entries -> {args.output}",
+        file=sys.stderr,
+    )
+
+
+# ===========================================================================
 # apply-map
 # ===========================================================================
 
@@ -537,6 +619,24 @@ def main():  # pragma: no cover
         "--raw-to-stem", help="raw-name -> stem map (if stem preprocessing was used)"
     )
     p_apply.set_defaults(func=cmd_apply_map)
+
+    p_expand = sub.add_parser(
+        "expand-map",
+        help="Resolve id-referenced unification decisions into "
+        "kernel_unification_map.json",
+    )
+    p_expand.add_argument(
+        "--decisions",
+        required=True,
+        help="kernel_unification_decisions.json (id-referenced)",
+    )
+    p_expand.add_argument(
+        "--context", required=True, help="kernel_unification_context.json"
+    )
+    p_expand.add_argument(
+        "-o", "--output", required=True, help="Output kernel_unification_map.json"
+    )
+    p_expand.set_defaults(func=cmd_expand_map)
 
     args = parser.parse_args()
     args.func(args)

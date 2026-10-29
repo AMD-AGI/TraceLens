@@ -26,18 +26,22 @@ import re
 import subprocess
 import sys
 
+import pandas as pd
 import pytest
 
 from TraceLens.Agent.Analysis.post_processing import (
+    TASK_SOURCE_COLUMNS,
     AnalysisReport,
     ComputeMember,
     ComputeTask,
     Impact,
     ReportInfo,
+    compute_tasks,
     render_analysis_json,
 )
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
+    build_operation_metrics,
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     _find_data_table,
@@ -1219,3 +1223,50 @@ def test_fusion_blocks_do_not_change_compute_tasks(tmp_path):
     assert base["fusion_optimizations"] == []
     assert both["compute_optimizations"] == base["compute_optimizations"]
     assert len(both["fusion_optimizations"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# compute_tasks: tasks built from per-row op metrics, no md
+# --------------------------------------------------------------------------- #
+
+
+def test_compute_tasks_group_rows_by_op():
+    perf_rows = pd.DataFrame(
+        [
+            {
+                "name": "op_a",
+                "count": 2,
+                "Kernel Time (µs)_sum": 10000.0,
+                "Pct Roofline_mean": 60.0,
+                "Roofline Bound": "COMPUTE_BOUND",
+                "Input Dims": "[[2, 3]]",
+                "Input type": "['c10::BFloat16']",
+                "call_stack_full": "['mod.py', 'kernel_a']",
+            },
+            {"name": "op_a", "count": 1, "Kernel Time (µs)_sum": 10000.0},
+            {"name": "op_b", "count": 1, "Kernel Time (µs)_sum": 5000.0},
+        ]
+    )
+    metadata = {
+        "peak_mem_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 700.0},
+        "gpu_utilization": {"total_time_ms": 100.0},
+    }
+    ops = build_operation_metrics(
+        perf_rows, metadata, {"extra_fields": list(TASK_SOURCE_COLUMNS)}
+    )
+
+    task_a, task_b = compute_tasks(ops)
+
+    assert (task_a["operation"], task_a["priority"]) == ("op_a", 1)
+    assert task_a["impact"] == {"mid": 6.5}
+    assert (task_b["operation"], task_b["priority"]) == ("op_b", 2)
+    full, bare = task_a["members"]
+    assert full["args_shapes"] == ["(2,3)"]
+    assert full["args_datatypes"] == ["bf16"]
+    assert full["kernel_name"] == ["kernel_a"]
+    assert full["bound"] == "compute-bound"
+    assert full["efficiency_peak_value"] == 700.0
+    assert full["efficiency_peak_unit"] == "TFLOPS"
+    assert bare["args_shapes"] is None
+    assert bare["kernel_name"] == []

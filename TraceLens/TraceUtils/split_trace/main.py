@@ -514,7 +514,63 @@ def _write_execution_details(execution_details, output_dir):
     print(f"Wrote execution details CSV to {csv_path}")
 
 
-def main():
+def run(args: argparse.Namespace) -> list[dict]:
+    """Programmatic entry point: run the split pipeline on a prepared args
+    Namespace (no argv parsing) and return the execution_details list.
+
+    Thin wrapper over main(), which holds the orchestration. Used by the
+    in-process split_and_enumerate() entry point; the CLI goes through main()
+    directly. Returns the execution_details list (same shape written to
+    execution_details.json), or [] when nothing was extracted.
+    """
+    return main(args)
+
+
+def split_and_enumerate(
+    trace_path: str,
+    output_dir: str,
+    *,
+    iterations: str = "all",
+    store_single_iteration: bool = False,
+    find_steady_state: bool = False,
+    num_steps: int = 32,
+    CONC: int | None = None,
+    OSL: float | None = None,
+    R: float | None = None,
+    divide_phases: bool = False,
+    no_gap_fill: bool = False,
+    allow_degraded: bool = False,
+    llm_inference: bool = False,
+    max_num_seq: int | None = None,
+) -> list[dict]:
+    """Programmatic (in-process) equivalent of the CLI.
+
+    Splits trace_path and writes outputs into output_dir exactly as
+    python -m TraceLens.TraceUtils.split_trace.main would with the
+    corresponding flags, but runs in-process (no subprocess, no argv) and
+    returns the execution_details list directly. Keyword defaults mirror
+    the CLI argparse defaults exactly.
+    """
+    args = argparse.Namespace(
+        trace_path=trace_path,
+        output_dir=output_dir,
+        iterations=iterations,
+        store_single_iteration=store_single_iteration,
+        find_steady_state=find_steady_state,
+        num_steps=num_steps,
+        CONC=CONC,
+        OSL=OSL,
+        R=R,
+        divide_phases=divide_phases,
+        no_gap_fill=no_gap_fill,
+        allow_degraded=allow_degraded,
+        llm_inference=llm_inference,
+        max_num_seq=max_num_seq,
+    )
+    return run(args)
+
+
+def main(args: argparse.Namespace | None = None) -> list[dict]:
     parser = argparse.ArgumentParser(
         description="Split vLLM trace into per-iteration traces"
     )
@@ -626,11 +682,12 @@ def main():
             "prefill-bearing. When not set, a heuristic is used."
         ),
     )
-    args = parser.parse_args()
+    if args is None:
+        args = parser.parse_args()
 
     loaded = _load_and_detect(args)
     if loaded is None:
-        return
+        return []
     detection, trace_json, trace_index = loaded
     events = trace_json.get("traceEvents", [])
     iteration_roots = detection.roots
@@ -680,6 +737,7 @@ def main():
     _write_manifest(args.output_dir, manifest)
     if execution_details:
         _write_execution_details(execution_details, args.output_dir)
+    return execution_details
 
 
 if __name__ == "__main__":

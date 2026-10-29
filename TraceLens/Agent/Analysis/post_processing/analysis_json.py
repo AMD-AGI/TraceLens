@@ -21,11 +21,16 @@ from pathlib import Path
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
+    _arg_pairs,
+    _kernel_name_list,
     phase_field,
 )
-from TraceLens.Agent.Analysis.post_processing.candidate_schema import TaskMember
+from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
+    ComputeTask,
+    TaskMember,
+)
 from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
-from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms, _efficiency_parts
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     TIER_COMPUTE,
     TIER_FUSION,
@@ -33,6 +38,7 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _find_data_table,
     _iter_candidate_blocks,
 )
+from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +47,9 @@ MAX_TASKS = 100
 IDENTIFICATION_CAP = 2000
 REASONING_CAP = 2000
 RESOLUTION_CAP = 2000
+# Raw perf-report columns a caller passes as ``extra_fields`` to
+# ``build_operation_metrics`` so ``compute_tasks`` can build task members.
+TASK_SOURCE_COLUMNS = ("Input Dims", "Input type", "call_stack_full")
 
 _TITLE_RE = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
 _LABEL_RE = re.compile(
@@ -118,6 +127,50 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
         json.dumps(report, sort_keys=False, indent=2, ensure_ascii=False) + "\n"
     )
     return out_path
+
+
+def compute_tasks(op_metrics: list[dict]) -> list[ComputeTask]:
+    """Group ``build_operation_metrics`` rows into ``analysis.json`` compute tasks.
+
+    One task per op name, one member per row, grouped, sorted and capped by the
+    same ``TaskGrouper`` that renders the md-driven report. The rows must carry
+    ``TASK_SOURCE_COLUMNS`` as ``extra_fields``; a row missing one yields an
+    empty field.
+    """
+    return TaskGrouper(
+        [_op_finding(op) for op in op_metrics], TIER_COMPUTE, "non-llm"
+    ).group()
+
+
+def _op_finding(op: dict) -> dict:
+    """One op-metrics row as a single-member finding for ``TaskGrouper``."""
+    eff = op["efficiency"]
+    pct, peak, unit, bound = _efficiency_parts(eff)
+    args = _arg_pairs(op.get("Input Dims"), op.get("Input type"))
+    member = {
+        "operation_cell": op["name"],
+        "kernel_launcher_path": op["launcher_path"],
+        "library": op["library"],
+        "category": None,
+        "analysis_md_rank": None,
+        "kernel_name": _kernel_name_list(op.get("call_stack_full")),
+        "args_shapes": [shape for shape, _ in args] or None,
+        "args_datatypes": [kind or None for _, kind in args] or None,
+        "time_ms": op["time_ms"],
+        "count": op["count"],
+        "pct_e2e": op["percent_of_total"],
+        "flops_per_byte": eff["flops_per_byte"],
+        "efficiency_percent": pct,
+        "efficiency_peak_value": peak,
+        "efficiency_peak_unit": unit,
+        "bound": bound,
+    }
+    return {
+        "members": [member],
+        "impacts": [op["impact_score"]],
+        "prose": {},
+        "phase": op.get(PHASE_COL),
+    }
 
 
 class AnalysisMdParser:

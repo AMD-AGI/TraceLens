@@ -453,6 +453,25 @@ class OpResolver:
         return {"op_uid": op.get("UID", uid), "perf_key": self.perf_key(op)}
 
 
+def _efficiency_parts(eff: dict) -> tuple:
+    """(pct, peak, unit, bound) of a ``calculate_efficiency`` result.
+
+    ``bound`` reads ``compute-bound`` / ``memory-bound``; pct, peak and unit are
+    None when the row has no efficiency or no bound to pick the peak from.
+    """
+    bound = eff["bound_type"]
+    bound_label = f"{bound}-bound" if bound else None
+    pct = eff["efficiency_percent"]
+    if pct is None or bound is None:
+        return None, None, None, bound_label
+    peak, unit = (
+        (eff["resolved_peak_maf"], "TFLOPS")
+        if bound == "compute"
+        else (eff["resolved_peak_mem_bw"], "TB/s")
+    )
+    return pct, peak, unit, bound_label
+
+
 @dataclass
 class _Group:
     """The instances of one module (or sibling parent) found in the trace.
@@ -1223,16 +1242,10 @@ class FusionPricer:
 
     def _efficiency_cells(self, eff: dict) -> tuple:
         """(Efficiency, Bound) table cells from a ``calculate_efficiency`` result."""
-        bound = eff["bound_type"]
-        bound_cell = f"{bound}-bound" if bound else NO_VALUE
-        pct = eff["efficiency_percent"]
-        if pct is None or bound is None:
+        pct, peak, unit, bound = _efficiency_parts(eff)
+        bound_cell = bound or NO_VALUE
+        if pct is None:
             return NO_VALUE, bound_cell
-        peak, unit = (
-            (eff["resolved_peak_maf"], "TFLOPS")
-            if bound == "compute"
-            else (eff["resolved_peak_mem_bw"], "TB/s")
-        )
         return f"{pct:.2f}% of {peak:g} {unit}", bound_cell
 
     def build_rows(

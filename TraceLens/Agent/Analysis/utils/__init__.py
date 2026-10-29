@@ -26,6 +26,7 @@ from .report_utils import (
     load_findings,
     load_manifest,
     load_manifest_categories,
+    write_csv,
 )
 from .validation_utils import (
     validate_findings_file,
@@ -50,4 +51,5 @@ __all__ = [
     "validate_findings_file",
     "validate_report",
     "validate_subagent_outputs",
+    "write_csv",
 ]
