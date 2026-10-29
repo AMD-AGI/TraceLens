@@ -2477,6 +2477,122 @@ def test_is_conditionally_assigned_false_for_an_unconditional_assign():
 
 
 # --------------------------------------------------------------------------- #
+# _ternary_submodule_choice
+# --------------------------------------------------------------------------- #
+def _ifexp(src: str) -> ast.IfExp:
+    return ast.parse(src, mode="eval").body
+
+
+def test_ternary_submodule_choice_requires_both_arms_be_self_attrs():
+    node = _ifexp("self.moe if self.is_moe_layer else other_module")
+    assert aa._ternary_submodule_choice(node, {}, frozenset()) is None
+
+
+def test_ternary_submodule_choice_rules_out_a_known_scalar_arm():
+    # A constructor-pass scalar recorded under either arm's attr name means
+    # this ternary picks between VALUES, not submodules.
+    node = _ifexp("self.bias_a if cond else self.bias_b")
+    assert (
+        aa._ternary_submodule_choice(node, {"bias_a": 0.1}, frozenset({"bias_b"}))
+        is None
+    )
+
+
+def test_ternary_submodule_choice_ambiguous_when_both_or_neither_arm_is_unbuilt():
+    node = _ifexp("self.moe if cond else self.mlp")
+    assert aa._ternary_submodule_choice(node, {}, frozenset()) is None
+    assert aa._ternary_submodule_choice(node, {}, frozenset({"moe", "mlp"})) is None
+
+
+def test_ternary_submodule_choice_resolves_to_the_arm_this_variant_built():
+    node = _ifexp("self.moe if cond else self.mlp")
+    # "moe" never assigned on this layer variant's __init__ -- "mlp" is the
+    # one it actually holds.
+    assert aa._ternary_submodule_choice(node, {}, frozenset({"moe"})) == "mlp"
+    assert aa._ternary_submodule_choice(node, {}, frozenset({"mlp"})) == "moe"
+
+
+def test_expression_resolves_a_submodule_ternary_through_the_choice_helper():
+    extractor = aa._ForwardOperationExtractor(
+        self_values={}, all_tensor_ops=True, unbuilt_attrs=frozenset({"moe"})
+    )
+    producer, external = extractor.expression(_ifexp("self.moe if cond else self.mlp"))
+    assert producer == "mlp"
+    assert external == []
+
+
+def test_call_step_producer_resolves_a_local_aliased_to_a_submodule():
+    # ``ffn = self.moe if ... else self.mlp`` binds var_producer["ffn"] to the
+    # chosen submodule attr; a later bare ``ffn(x)`` must resolve through it.
+    extractor = aa._ForwardOperationExtractor(self_values={}, all_tensor_ops=True)
+    extractor.var_producer["ffn"] = "mlp"
+    call = ast.parse("ffn(x)", mode="eval").body
+    assert extractor._call_step_producer(call, None) == "mlp"
+
+
+def test_call_step_producer_suffixes_a_repeated_aliased_submodule():
+    extractor = aa._ForwardOperationExtractor(
+        self_values={},
+        all_tensor_ops=True,
+        repeated_submodule_attrs=frozenset({"mlp"}),
+    )
+    extractor.var_producer["ffn"] = "mlp"
+    call = ast.parse("ffn(x)", mode="eval").body
+    assert extractor._call_step_producer(call, None) == aa.submodule_callsite_attr(
+        "mlp", 1
+    )
+
+
+def _walk_stmt(src: str, *, submodule_aliases: dict, unbuilt_attrs: frozenset):
+    stmt = ast.parse(src).body[0]
+    aa._walk_forward_stmt(
+        stmt,
+        [],
+        [],
+        None,
+        {},
+        {},
+        {},
+        set(),
+        {},
+        unbuilt_attrs=unbuilt_attrs,
+        submodule_aliases=submodule_aliases,
+    )
+
+
+def test_walk_forward_stmt_records_a_ternary_submodule_alias_on_assign():
+    aliases: dict[str, str] = {}
+    _walk_stmt(
+        "ffn = self.moe if self.is_moe_layer else self.mlp",
+        submodule_aliases=aliases,
+        unbuilt_attrs=frozenset({"moe"}),
+    )
+    assert aliases == {"ffn": "mlp"}
+
+
+def test_walk_forward_stmt_records_a_ternary_submodule_alias_on_annassign():
+    aliases: dict[str, str] = {}
+    _walk_stmt(
+        "ffn: object = self.moe if self.is_moe_layer else self.mlp",
+        submodule_aliases=aliases,
+        unbuilt_attrs=frozenset({"moe"}),
+    )
+    assert aliases == {"ffn": "mlp"}
+
+
+def test_walk_forward_stmt_skips_an_ambiguous_ternary_alias():
+    # Neither arm is unbuilt here, so the choice is ambiguous and no alias is
+    # recorded -- a later ``ffn(...)`` falls back to the generic value path.
+    aliases: dict[str, str] = {}
+    _walk_stmt(
+        "ffn = self.moe if self.is_moe_layer else self.mlp",
+        submodule_aliases=aliases,
+        unbuilt_attrs=frozenset(),
+    )
+    assert aliases == {}
+
+
+# --------------------------------------------------------------------------- #
 # _ternary_submodule_dispatch_assignments / _desugar_ternary_submodule_dispatch
 # --------------------------------------------------------------------------- #
 def _forward(src: str) -> ast.FunctionDef:
@@ -2556,10 +2672,12 @@ def test_desugar_ternary_submodule_dispatch_rewrites_every_call_site():
         "        out = ffn(x)\n"
         "    for _layer in range(1):\n"
         "        out = ffn(x)\n"
+        "    with torch.no_grad():\n"
+        "        out = ffn(x)\n"
         "    return out\n"
     )
     dumped = ast.unparse(aa._desugar_ternary_submodule_dispatch(func))
-    assert dumped.count("if self.is_moe_layer:") == 2
+    assert dumped.count("if self.is_moe_layer:") == 3
     assert "ffn" not in dumped
 
 
