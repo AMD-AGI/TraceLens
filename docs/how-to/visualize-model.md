@@ -15,7 +15,14 @@ This topic shows how to run the *model visualizer* agent. The agent exports a
 Hugging Face checkpoint, a local checkpoint directory, or a whitelisted modeling
 repo to an interactive Model Explorer graph. The export parses the model's
 `modeling_*.py` source and fills symbolic tensor shapes. It runs on CPU and
-does not load checkpoint weights. A gated checkpoint needs `HF_TOKEN`.
+does not load checkpoint weights.
+
+## Before you begin
+
+- TraceLens with the Visualizer extra. See [Install TraceLens](../install/install.md).
+- A Hugging Face model id, a local checkpoint directory, or an allowlisted modeling repo.
+- `HF_TOKEN`, when the checkpoint is gated.
+- Network access the first time a Hub model is fetched. No GPU is required.
 
 ## Run the agent from a chat
 
@@ -65,10 +72,9 @@ its font textures load from unpkg the first time you open the file.
 
 Shapes use the symbols `B` (batch), `S` (sequence), `H` (hidden), and the
 attention, expert, and vocabulary symbols documented in the Visualizer README.
-Unless you name another regime, the graph shows a cold rectangular prefill
-in inference mode, and attention follows the checkpoint. `--device hip` draws
-the HIP branches in the modeling source. It does not choose the machine that
-runs the export.
+By default, the model renders a non-cached rectangular prefill in inference
+mode. Attention follows the checkpoint. `--device hip` draws the HIP branches
+in the modeling source. It does not choose the machine that runs the export.
 
 ## What the agent runs
 
