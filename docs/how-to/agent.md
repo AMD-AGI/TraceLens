@@ -122,7 +122,7 @@ two jobs with `compare_to` on the first job run as `comparative`, and a config w
 | `standalone` | One job. |
 | `comparative` | Two jobs, each with an optional `capture_folder`. `compare_to` on the first job can name the second job instead of repeating its paths. |
 | `semantic` | Two graph-replay-only jobs with `analysis_mode: inference` and no `capture_folder`. |
-| `multi_trace` | Two or more named jobs on the same platform, each with a `phase`, and an `aggregation` block with policy `combine_only_same_phase`. Jobs that share a phase are combined in the report, and the first job is the one that kernel fusion and system analysis focus on. |
+| `multi_trace` | Two or more named jobs on the same platform, each with a `phase`, and an `aggregation` block with policy `combine_by_phase`. Jobs that share a phase are combined in the report, and the first job is the one that kernel fusion and system analysis focus on. `combine_by_phase` is not supported by the aggregation yet, so a `multi_trace` run currently stops after the per-job reports. |
 
 For example, a `multi_trace` config for a prefill trace and a decode trace:
 
@@ -130,7 +130,7 @@ For example, a `multi_trace` config for a prefill trace and a decode trace:
 analysis_mode: inference
 output_dir: /abs/path/analysis_output
 aggregation:
-  policy: combine_only_same_phase
+  policy: combine_by_phase
 jobs:
   - name: prefill_0
     phase: prefill

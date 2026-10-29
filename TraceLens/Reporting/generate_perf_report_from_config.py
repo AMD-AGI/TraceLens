@@ -31,9 +31,9 @@ one job, every job needs a ``name`` and writes ``perf_report_<name>.xlsx`` and
 back as ``run_config.resolved.yaml`` with every flag explicit and absolute
 paths. Jobs run in order, and the first failure stops the run.
 
-With ``aggregation: {policy: ...}``, every job needs a ``phase``. After the last
-job, the jobs' CSVs are combined into ``perf_report_aggregated_csvs/`` with
-``aggregate_perf_report_csvs``.
+With ``aggregation: {policy: ...}``, every job needs a ``phase``, and a ``node``
+under ``combine_by_node``. After the last job, the jobs' CSVs are combined into
+``perf_report_aggregated_csvs/`` with ``aggregate_perf_report_csvs``.
 """
 
 import argparse
@@ -47,6 +47,8 @@ import yaml
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Reporting.aggregate_perf_reports import (
     POLICIES,
+    POLICY_BY_NODE,
+    ReportInput,
     aggregate_perf_report_csvs,
 )
 
@@ -57,6 +59,7 @@ _JOB_KEYS = frozenset(
     {
         "name",
         "phase",
+        "node",
         "trace_path",
         "platform",
         "gpu_arch_json_path",
@@ -104,6 +107,7 @@ class PlannedJob:
     analysis_mode: str
     name: Optional[str]
     phase: Optional[str]
+    node: Optional[str]
     trace_path: str
     platform: Optional[str]
     gpu_arch_json_path: Optional[str]
@@ -154,14 +158,19 @@ def plan_reports(config: Mapping[str, Any]) -> List[PlannedJob]:
 
     accepted = _accepted_params(_report_targets()[mode])
     kwargs = _report_kwargs(config, accepted, _CLI_DEFAULTS[mode])
-    aggregate = _aggregation_policy(config) is not None
+    policy = _aggregation_policy(config)
 
     multi = len(jobs) > 1
     names = set()
     planned: List[PlannedJob] = []
     for index, job in enumerate(jobs):
         parsed = _validate_job(
-            job, index, mode, require_name=multi, require_phase=aggregate
+            job,
+            index,
+            mode,
+            require_name=multi,
+            require_phase=policy is not None,
+            require_node=policy == POLICY_BY_NODE,
         )
         name = parsed["name"]
         if name is not None:
@@ -234,7 +243,10 @@ def run_config(
         results.append(selected[plan.analysis_mode](**call))
     if policy is not None:
         aggregate_perf_report_csvs(
-            [(plan.phase, plan.output_csvs_dir) for plan in plans],
+            [
+                ReportInput(plan.phase, plan.node, plan.output_csvs_dir)
+                for plan in plans
+            ],
             policy,
             os.path.join(output_dir, AGGREGATED_CSVS_DIR),
         )
@@ -265,6 +277,8 @@ def _resolved_from_plans(plans: List[PlannedJob], policy: Optional[str]) -> dict
             job["name"] = plan.name
         if plan.phase is not None:
             job["phase"] = plan.phase
+        if plan.node is not None:
+            job["node"] = plan.node
         job["trace_path"] = plan.trace_path
         if plan.platform is not None:
             job["platform"] = plan.platform
@@ -381,7 +395,13 @@ def _aggregation_policy(config: Mapping[str, Any]) -> Optional[str]:
 
 
 def _validate_job(
-    job: Any, index: int, mode: str, *, require_name: bool, require_phase: bool
+    job: Any,
+    index: int,
+    mode: str,
+    *,
+    require_name: bool,
+    require_phase: bool,
+    require_node: bool,
 ) -> dict:
     where = f"jobs[{index}]"
     if not isinstance(job, dict):
@@ -414,6 +434,15 @@ def _validate_job(
             raise ConfigError(f"{where}.phase is required when aggregation is set.")
     elif not isinstance(phase, str) or not phase.strip():
         raise ConfigError(f"{where}.phase must be a non-empty string.")
+
+    node = job.get("node")
+    if node is None:
+        if require_node:
+            raise ConfigError(
+                f"{where}.node is required when aggregation.policy is {POLICY_BY_NODE}."
+            )
+    elif not isinstance(node, str) or not node.strip():
+        raise ConfigError(f"{where}.node must be a non-empty string.")
 
     trace_path = _existing_file(job.get("trace_path"), f"{where}.trace_path")
 
@@ -472,6 +501,7 @@ def _validate_job(
     return {
         "name": name,
         "phase": phase,
+        "node": node,
         "trace_path": trace_path,
         "platform": platform,
         "gpu_arch_json_path": arch_path,

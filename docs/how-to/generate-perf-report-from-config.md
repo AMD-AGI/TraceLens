@@ -57,7 +57,7 @@ jobs:
 | `analysis_mode` | yes | `default` for training and plain PyTorch traces. `inference` for vLLM, SGLang, ATOM, and xDiT traces, with or without graph capture. |
 | `output_dir` | yes | Directory for the reports. |
 | `jobs` | yes | List of jobs. See the job keys below. |
-| `aggregation` | no | `{policy: combine_only_same_phase}` or `{policy: combine}`. Combines the jobs' reports. See [Combine reports](#combine-reports). |
+| `aggregation` | no | `{policy: combine_by_node}`. Combines the jobs' reports. See [Combine reports](#combine-reports). |
 | any report option | no | Any parameter of the selected report function, by its Python name (for example `kernel_summary: true`, `topk_ops: 50`). Applies to every job. |
 
 ### Job keys
@@ -66,6 +66,7 @@ jobs:
 |-----|----------|-------------|
 | `name` | when there's more than one job | Used in the output file names. Letters, digits, `_`, `-`, and `.`. |
 | `phase` | when `aggregation` is set | Phase label used by the aggregation, for example `prefill`, `decode`, or `mixed`. |
+| `node` | when `aggregation.policy` is `combine_by_node` | Node label used by the aggregation, for example `prefill_w0`. Jobs with the same node combine. |
 | `trace_path` | yes | Trace to analyze. |
 | `platform` | one of the two | Bundled or `TL_EXTENSION` architecture name, for example `MI300X`. |
 | `gpu_arch_json_path` | one of the two | Path to an architecture JSON file, for hardware that isn't bundled. |
@@ -170,22 +171,24 @@ jobs:
 
 Aggregation is experimental. The policies and the columns that combine may still change.
 
-Add `aggregation` and a `phase` on every job to combine the jobs' CSVs into
-`perf_report_aggregated_csvs/` after the last job:
+Add `aggregation`, and a `phase` and `node` on every job, to combine the jobs'
+CSVs into `perf_report_aggregated_csvs/` after the last job:
 
 ```yaml
 analysis_mode: inference
 output_dir: /data/dsv2lite_pd/analysis_output
 aggregation:
-  policy: combine_only_same_phase
+  policy: combine_by_node
 jobs:
   - name: prefill_rank0
     phase: prefill
+    node: prefill_w0
     trace_path: /data/dsv2lite_pd/prefill/rank0.json.gz
     platform: MI300X
     capture_folder: /data/dsv2lite_pd/prefill/capture_traces
   - name: decode_rank0
     phase: decode
+    node: decode_w0
     trace_path: /data/dsv2lite_pd/decode/rank0.json.gz
     platform: MI300X
     capture_folder: /data/dsv2lite_pd/decode/capture_traces
@@ -193,17 +196,19 @@ jobs:
 
 | Policy | Rows with the same key in different reports |
 |--------|---------------------------------------------|
-| `combine_only_same_phase` | Combined only when the reports have the same `phase`. Rows of different phases stay separate, each tagged with its phase. |
-| `combine` | Combined regardless of phase. The `phase` column lists every contributing phase. |
+| `combine_by_node` | Combined only when the reports have the same `node`. Every table is one block per node, in job order, tagged with `node` and `phase`. |
+| `combine`, `combine_by_phase`, `combine_stack` | Reserved. Not supported yet; the run stops with an error after the per-job reports. |
 
 When rows combine:
 - times and counts add up;
 - means and standard deviations are recomputed from the per-report counts;
-- minimum and maximum take the overall extreme;
-- `Percentage (%)` is recomputed as a share of all reports together.
+- minimum and maximum take the overall extreme.
 
-`gpu_timeline` is always one timeline summed over all reports, so its
-`busy_time` covers the whole run. Medians and per-kernel summaries can't be
+Each node block reads like that node's own report: rows are sorted by time,
+and `Percentage (%)` and `Cumulative Percentage (%)` are shares of that node's
+kernel time, so each block's cumulative ends at 100. `gpu_timeline` has one
+block per node, with percentages of that node's `total_time`, and a final block
+with `node` set to `all`, summed over every report. Medians and per-kernel summaries can't be
 combined exactly. They're taken from the contributing row with the most
 instances. Reports with sheets or columns the aggregation doesn't know, for
 example `kernel_summary` or the `_kl_overlap` sheets, stop the run with an error.
