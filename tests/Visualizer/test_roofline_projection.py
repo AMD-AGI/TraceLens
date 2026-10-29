@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from TraceLens.ModelUtils import roofline_cli
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.extract import load_architecture
-from TraceLens.ModelUtils.roofline_projection import (
+from TraceLens.Visualizer.model_explorer_export import roofline_cli
+from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     DimResolutionError,
     RooflineOp,
     RooflineProjection,

@@ -30,7 +30,10 @@ from TraceLens.ModelUtils.cli_common import (
 )
 from TraceLens.ModelUtils.loader import resolve_checkpoint_arg
 from TraceLens.ModelUtils.parallel_plan import ParallelDegree, build_parallel_layout
-from TraceLens.ModelUtils.roofline_projection import RooflineOp, project_roofline
+from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
+    RooflineOp,
+    project_roofline,
+)
 
 # Constants
 
