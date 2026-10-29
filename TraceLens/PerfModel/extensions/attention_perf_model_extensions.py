@@ -1569,6 +1569,9 @@ class pseudo_flash_indexer_topk:
             dims = event["args"]["Input Dims"]
             types = event["args"].get("Input type") or []
             rows, cols = dims[0][0], dims[0][1]
+            # Guard: only Flash indexer-scale score matrices (avoid generic aten::topk).
+            if cols is None or int(cols) < 1024:
+                return {"_no_perf": True}
             # k may be Concrete Inputs or a trailing empty dim; default Flash 512.
             k = 512
             concrete = event["args"].get("Concrete Inputs") or []

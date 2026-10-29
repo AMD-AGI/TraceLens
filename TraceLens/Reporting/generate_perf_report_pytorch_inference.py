@@ -71,6 +71,7 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "fused_k_norm_rope_q_flashmla",
     "pseudo_hc_boundary",
     "pseudo_hc_mix_reduce_sinkhorn",
+    "aten::topk",
 ]
 
 

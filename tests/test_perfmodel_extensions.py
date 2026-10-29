@@ -202,6 +202,7 @@ class TestPseudoOpsPerfUtils:
         )
         assert mappings["pseudo_pa_mqa_logits_fp4"] is pseudo_pa_mqa_logits_fp4
         assert mappings["pseudo_hc_boundary"] is hc_boundary
+        assert mappings["aten::topk"] is pseudo_flash_indexer_topk
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -6879,6 +6880,13 @@ class TestFlashDSv41PerfModels:
         model = pseudo_flash_indexer_topk(event)
         assert model.flops() == 563 * 47599
         assert model.bytes() > 0
+        small = pseudo_flash_indexer_topk(
+            {
+                "annotation": self._ANN,
+                "args": {"Input Dims": [(8, 64), ()], "Input type": ["float"]},
+            }
+        )
+        assert small.flops() is None
 
     def test_hc_boundary_and_sinkhorn(self):
         event = {
