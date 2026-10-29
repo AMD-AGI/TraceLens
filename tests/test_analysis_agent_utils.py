@@ -3225,6 +3225,21 @@ def test_validate_report_reasoning_candidates_r5(tmp_path):
     assert any("R5:" in e for e in errs)
 
 
+def test_validate_report_r5_compute_block_needs_its_data_table():
+    """analysis.json names a compute finding's kernels from its Data table only."""
+    block = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### P1: GEMM (hipBLASLt)\n\n**Identification:** prose only.\n"
+    )
+    table = "\n**Data:**\n\n| Operation | Args |\n|---|---|\n| aten::mm | (4, 8) |\n"
+
+    assert _validate_report_reasoning_candidates(block + table) == []
+    assert _validate_report_reasoning_candidates(block) == [
+        "R5: compute P1 at line 1 has no **Data:** table; paste it verbatim from "
+        "its category findings"
+    ]
+
+
 def test_extract_detailed_analysis_subsection():
     content = "## Detailed Analysis\n\n### Compute Kernel Insights\n\n#### P1: x\nbody\n### Other\n"
     sub = _extract_detailed_analysis_subsection(content, "### Compute Kernel Insights")
