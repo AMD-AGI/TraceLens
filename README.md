@@ -197,6 +197,7 @@ TraceLens/
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
 | TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
+| Model Roofline Projection    | [docs/how-to/generate-model-roofline-projection.md](docs/how-to/generate-model-roofline-projection.md)                           |
 
 ---
 
