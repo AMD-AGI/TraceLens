@@ -1065,9 +1065,6 @@ class TestPerfModelExtensions:
             vllm_all_reduce,
         )
         from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
-            _compact_sort_ops,
-            _distributed_sort_ops,
-            _next_pow2,
             moe_opus_stage1_a8w4,
             moe_sorting_opus_fwd,
         )
@@ -1271,8 +1268,9 @@ class TestPerfModelExtensions:
             }
         }
         sorter = moe_sorting_opus_fwd(sort_decode)
-        assert sorter.param_details["compact"] is True
-        assert sorter.flops() == _compact_sort_ops(8)
+        assert sorter.param_details["written"] == 6 * 32
+        assert sorter.flops() == 2 * 6 + 384 + 2 * (6 * 32) + 7168
+        assert sorter.bytes() == 6 * 8 + (6 * 32) * 8 + 6 * 4 + 8 + 7168 * 2
         assert sorter.get_compute_precision() is None
         assert sorter.get_maf_type() == "vector"
         prefill = {
@@ -1314,10 +1312,65 @@ class TestPerfModelExtensions:
         }
         prefill_sort = moe_sorting_opus_fwd(prefill)
         pairs = 1754 * 6
-        assert prefill_sort.param_details["compact"] is False
+        written = 35136
         assert prefill_sort.param_details["block_size"] == 64
-        assert prefill_sort.flops() == _distributed_sort_ops(
-            pairs, _next_pow2(pairs), 384
+        assert prefill_sort.param_details["written"] == written
+        assert prefill_sort.flops() == 2 * pairs + 384 + 2 * written
+        assert prefill_sort.bytes() == pairs * 8 + written * 8 + 549 * 4 + 8
+        glm_prefill = {
+            "args": {
+                "Input Dims": [
+                    [1113, 9],
+                    [1113, 9],
+                    [26456],
+                    [26456],
+                    [414],
+                    [2],
+                    [1113, 6144],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [289120],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                    "Scalar",
+                    "Scalar",
+                    "",
+                    "",
+                    "unsigned char",
+                ],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "257",
+                    "64",
+                    "",
+                    "",
+                    "",
+                    "0",
+                ],
+            }
+        }
+        glm_sort = moe_sorting_opus_fwd(glm_prefill)
+        glm_pairs = 1113 * 9
+        glm_written = 26456
+        assert glm_sort.param_details["written"] == glm_written
+        assert glm_sort.flops() == 2 * glm_pairs + 257 + 2 * glm_written + 1113 * 6144
+        assert glm_sort.bytes() == (
+            glm_pairs * 8 + glm_written * 8 + 414 * 4 + 8 + 1113 * 6144 * 2 + 289120
         )
         assert (
             moe_sorting_opus_fwd(

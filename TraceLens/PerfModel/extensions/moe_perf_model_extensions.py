@@ -2178,28 +2178,40 @@ class SglangMoeSortingSmall(MoeSortScatterGather):
         return None
 
 
-class moe_sorting_opus_fwd(SglangMoeSortingSmall):
-    """HBM bytes of the routed pairs and the compiled pad stores; the workspace and the unused sorted-id tail are not written."""
+class moe_sorting_opus_fwd(MoeSortScatterGather):
+    """Linear integer work over routed pairs and block-padded slots; HBM is those slots, moe_buf, and workspace."""
 
     @staticmethod
     def get_param_details(event):
-        details = SglangMoeSortingSmall.get_param_details(event)
-        if details.get("block_size") and details.get("num_experts"):
-            return details
+        details = MoeSortScatterGather.get_param_details(event)
         args = event.get("args") or {}
         dims = args.get("Input Dims") or []
         concrete = args.get("Concrete Inputs") or []
-        if not dims or not dims[0] or len(dims[0]) < 2 or len(concrete) <= 8:
-            return details
+        if not dims or not dims[0] or len(dims[0]) < 2:
+            return add_logical_batch_size(details, event)
         try:
             rows, topk = dims[0]
-            num_experts = int(concrete[7])
-            block = int(concrete[8])
         except (TypeError, ValueError):
-            return details
-        if not rows or not topk or not num_experts or not block:
-            return details
+            return add_logical_batch_size(details, event)
+        if not rows or not topk:
+            return add_logical_batch_size(details, event)
         pairs = rows * topk
+        block, num_experts = None, None
+        sorted_len = dims[2][0] if len(dims) > 2 and dims[2] else None
+        if sorted_len and len(dims) > 4 and dims[4]:
+            block, num_experts = _moe_sort_block_size(
+                sorted_len, dims[4][0], pairs, topk
+            )
+        if (not block or not num_experts) and len(concrete) > 8:
+            try:
+                num_experts = int(concrete[7])
+                block = int(concrete[8])
+            except (TypeError, ValueError):
+                block, num_experts = None, None
+        written = None
+        if block and sorted_len:
+            # Empty experts are not stored. pairs * block bounds the padded slots.
+            written = min(sorted_len, pairs * block)
         details.update(
             {
                 "rows": rows,
@@ -2207,7 +2219,56 @@ class moe_sorting_opus_fwd(SglangMoeSortingSmall):
                 "pairs": pairs,
                 "block_size": block,
                 "num_experts": num_experts,
-                "compact": pairs <= 64 and pairs <= 2 * block,
+                "written": written,
             }
         )
-        return details
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        pairs = self.param_details.get("pairs")
+        experts = self.param_details.get("num_experts")
+        written = self.param_details.get("written")
+        if not pairs or not experts or not written:
+            return None
+        dims = self.event.get("args", {}).get("Input Dims") or []
+        moe_elems = (
+            prod(dims[6]) if len(dims) > 6 and dims[6] and prod(dims[6]) > 0 else 0
+        )
+        return 2 * pairs + experts + 2 * written + moe_elems
+
+    def bytes(self):
+        if not dense_counted_tensor(self.event, (0, 1)):
+            return None
+        pairs = self.param_details.get("pairs")
+        written = self.param_details.get("written")
+        block = self.param_details.get("block_size")
+        if not pairs or not written or not block:
+            return None
+        dims = self.event.get("args", {}).get("Input Dims") or []
+        types = self.event.get("args", {}).get("Input type") or []
+        moe_bytes = _optional_tensor_bytes(dims, types, 6)
+        workspace_bytes = _optional_tensor_bytes(dims, types, 11)
+        if moe_bytes is None or workspace_bytes is None:
+            return None
+        return (
+            pairs * 8
+            + written * 8
+            + ((written + block - 1) // block) * 4
+            + 8
+            + moe_bytes
+            + workspace_bytes
+        )
+
+    def get_compute_precision(self):
+        return None
+
+
+def _optional_tensor_bytes(dims, types, index):
+    if len(dims) <= index or not dims[index] or prod(dims[index]) <= 0:
+        return 0
+    if index >= len(types):
+        return None
+    bpe = name2bpe(types[index])
+    if bpe is None:
+        return None
+    return prod(dims[index]) * bpe
