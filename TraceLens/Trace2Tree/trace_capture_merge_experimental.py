@@ -19,12 +19,15 @@ from collections import OrderedDict, deque, defaultdict
 from typing import Dict, List, Optional, Tuple
 import json
 import os
+import re
 import warnings
 import TraceLens
 
+_SGLANG_CAPTURE_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_\d+_")
+
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
-from ..util import extract_rank
+from ..util import GPU_KERNEL_CATEGORIES, extract_rank
 from ..TraceUtils.utils.annotation_utils import (
     SPEC_ROLE_TARGET,
     find_known_annotations,
@@ -61,6 +64,7 @@ def _capture_kernel_name(event):
     return event.get("args", {}).get("kernel", event["name"])
 
 
+
 def _align_capture_to_graph(capture_events, graph_events):
     """
     Robust greedy alignment of capture dispatch events to graph kernel
@@ -82,7 +86,6 @@ def _align_capture_to_graph(capture_events, graph_events):
             c_event = capture_events[ci]
             ci += 1
             c_name = _capture_kernel_name(c_event)
-            # Memcpy/Memset events carry no kernel arg — match when both sides agree
             if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
                 "Memset" in c_event["name"]
                 and ("Memset" in g_name or "fillBuffer" in g_name)
@@ -602,7 +605,7 @@ def load_capture_folder(
     capture_folder: str,
     metadata_json_path: str,
     replay_rank: Optional[int] = None,
-) -> Tuple[Dict[str, str], Dict[str, List[int]]]:
+) -> Tuple[Dict[str, List[str]], Dict[str, List[int]]]:
     """Load capture traces from a folder and group by ``{role}_{batch_size}_{mode}``.
 
     Args:
@@ -615,7 +618,7 @@ def load_capture_folder(
 
     Returns:
         Dictionary keyed by ``"{role}_{batch_size}_{mode}"`` whose values are
-        capture file paths, and the captured batch sizes per role.
+        lists of capture file paths, and the captured batch sizes per role.
     """
 
     with open(metadata_json_path, "r") as f:
@@ -625,8 +628,9 @@ def load_capture_folder(
             e for e in metadata_list if extract_rank(e["file"]) == replay_rank
         ]
 
-    result: Dict[str, str] = {}
+    result: Dict[str, List[str]] = defaultdict(list)
     batch_sizes: Dict[str, List[int]] = defaultdict(list)
+    request_bs_multiplier: Dict[str, int] = {}
     for entry in metadata_list:
         filename = entry["file"]
         batch_size = entry["batch_size"]
@@ -637,12 +641,16 @@ def load_capture_folder(
             continue
         key = "{}_{}_{}".format(role, batch_size, mode)
         batch_sizes[role].append(int(batch_size))
+        rbs = entry.get("request_bs")
+        if rbs is not None and rbs > 0 and _SGLANG_CAPTURE_PATTERN.match(filename):
+            request_bs_multiplier.setdefault(role, int(batch_size) // int(rbs))
         filepath = os.path.join(capture_folder, filename)
         if not os.path.isfile(filepath):
             print("Warning: capture file not found, skipping: {}".format(filepath))
             continue
 
-        result[key] = filepath
+        if filepath not in result[key]:
+            result[key].append(filepath)
 
     print(
         "\nCapture folder loaded: {} unique batch_size_mode keys".format(
@@ -650,26 +658,95 @@ def load_capture_folder(
         )
     )
 
-    return result, batch_sizes
+    return dict(result), batch_sizes, request_bs_multiplier
 
 
-def _same_graph_replay(graph_tree, graph_roots) -> bool:
-    """True when every graph launch replays one kernel sequence.
+def _load_all_capture_sources(capture_map, role, batch_sizes):
+    """Load all capture files for *role* across FULL and PIECEWISE modes.
 
-    Speculative decoding replays one FULL drafter graph several times in a
-    step. A piecewise capture is the case where those sequences differ.
+    *batch_sizes* is an iterable of batch sizes to try (e.g. the resolved
+    spec-decode batch size and the tensor batch size from the annotation).
+
+    Returns a list of ``(capture_tree, capture_roots, capture_root_data)``
+    tuples — one per distinct capture file.
     """
-    if len(graph_roots) <= 1:
-        return True
-    signatures = []
-    for root in graph_roots:
+    sources = []
+    for bs in batch_sizes:
+        if bs is None:
+            continue
+        for mode in ("PIECEWISE", "FULL"):
+            key = "{}_{}_{}".format(role, bs, mode)
+            for filepath in capture_map.get(key, []):
+                cache_key = (key, os.path.abspath(filepath))
+                tree, roots, root_data = _get_cached_capture_tree(cache_key, filepath)
+                sources.append((tree, roots, root_data))
+    return sources
+
+
+def _find_closest_capture(kernel_count, all_counts):
+    """Find the pool index whose dispatch count is closest to *kernel_count*.
+
+    Exact matches are preferred.  When no exact match exists, the nearest
+    count wins (handles off-by-one mismatches common in profiler traces).
+    """
+    if kernel_count in all_counts:
+        return all_counts[kernel_count][0]
+    best_idx = None
+    best_diff = float("inf")
+    for dispatch_count, indices in all_counts.items():
+        diff = abs(dispatch_count - kernel_count)
+        if diff < best_diff:
+            best_diff = diff
+            best_idx = indices[0]
+    return best_idx
+
+
+def _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources):
+    """Match graph roots to capture roots from multiple capture sources by count.
+
+    Each graph root is matched to the capture root whose dispatch count is
+    closest to the graph root's kernel count.  Identical graph roots (same
+    kernel count) share the same capture root.
+
+    Returns ``(pairs, data, trees)`` — lists of ``(capture_root, graph_root)``,
+    corresponding ``capture_root_data`` entries, and the ``capture_tree`` each
+    root came from — or ``None`` when no captures are available.
+    """
+    # candidate capture roots
+    pool = []
+    for src_tree, cap_roots, cap_root_data in all_sources:
+        for capture_root, (events, filtered_uids) in zip(cap_roots, cap_root_data):
+            dispatch_count = len(filtered_uids)
+            pool.append(
+                (src_tree, capture_root, (events, filtered_uids), dispatch_count)
+            )
+
+    if not pool:
+        return None
+
+    # dispatch_count -> list of pool indices with that count
+    all_counts: Dict[int, List[int]] = defaultdict(list)
+    for idx, (_, _, _, dispatch_count) in enumerate(pool):
+        all_counts[dispatch_count].append(idx)
+
+    match_cache: Dict[int, int] = {}
+    pairs = []
+    data = []
+    trees = []
+    for gr in graph_roots:
         _, filtered = get_subtree_events(
-            graph_tree,
-            root,
-            cat_filter=["kernel", "gpu_memset", "gpu_memcpy"],
+            graph_tree, gr, cat_filter=list(GPU_KERNEL_CATEGORIES)
         )
-        signatures.append(tuple(event["name"] for event in filtered))
-    return len(set(signatures)) == 1
+        kernel_count = len(filtered)
+        if kernel_count not in match_cache:
+            match_cache[kernel_count] = _find_closest_capture(kernel_count, all_counts)
+        pool_idx = match_cache[kernel_count]
+        src_tree, capture_root, crd, _ = pool[pool_idx]
+        pairs.append((capture_root, gr))
+        data.append(crd)
+        trees.append(src_tree)
+
+    return pairs, data, trees
 
 
 def find_closest_batch_size(
@@ -732,7 +809,7 @@ def merge_capture_trace_into_graph(
 
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
 
-    capture_map, capture_batch_sizes = load_capture_folder(
+    capture_map, capture_batch_sizes, request_bs_multiplier = load_capture_folder(
         capture_folder,
         metadata_json_path,
         extract_rank(os.path.basename(graph_tree_filepath)),
@@ -757,6 +834,11 @@ def merge_capture_trace_into_graph(
 
         # ── Resolve capture tree + roots for this execution root ──
         role = spec_decode_role(execution_root["name"]) or SPEC_ROLE_TARGET
+        # spec_batch_size is a tuple of candidate batch sizes.  For vLLM
+        # drafter roots this contains both the decode batch size
+        # (num_requests) and the prefill batch size
+        # (num_requests * (num_spec_tokens + 1)), because the drafter
+        # uses separate CUDA graph managers for each phase.
         batch_size = spec_batch_size or find_execution_details(execution_root)
         if batch_size is None:
             print(
@@ -765,69 +847,64 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
-        closest_batch_size = find_closest_batch_size(
-            int(batch_size), capture_batch_sizes[role]
-        )
-        if closest_batch_size is None:
+        if not isinstance(batch_size, tuple):
+            batch_size = (batch_size,)
+        candidate_batch_sizes = set()
+        for bs in batch_size:
+            bs_int = int(bs) * request_bs_multiplier.get(role, 1)
+            cbs = find_closest_batch_size(bs_int, capture_batch_sizes[role])
+            if cbs is not None:
+                candidate_batch_sizes.add(cbs)
+        if not candidate_batch_sizes:
             print(
-                "Warning: no {} capture batch size found for batch size {}".format(
-                    role, batch_size
+                "Warning: no {} capture batch size found for execution root {}".format(
+                    role, execution_root["name"]
                 )
             )
             continue
-        # Look up the capture trace by batch_size.  The mode (FULL vs
-        # PIECEWISE) is already determined in execution_details.json from
-        # the capture trace's StreamBeginCapture count.  Try both modes
-        # and use whichever is available; when both exist, repeated replays
-        # of one kernel sequence use FULL, and differing sequences use
-        # PIECEWISE.
-        full_key = "{}_{}_FULL".format(role, closest_batch_size)
-        piece_key = "{}_{}_PIECEWISE".format(role, closest_batch_size)
-        if full_key in capture_map and piece_key in capture_map:
-            str_key = (
-                full_key if _same_graph_replay(graph_tree, graph_roots) else piece_key
-            )
-        elif full_key in capture_map:
-            str_key = full_key
-        elif piece_key in capture_map:
-            str_key = piece_key
-        else:
-            print(
-                "Warning: no {} capture trace for batch size {}".format(
-                    role, closest_batch_size
-                )
-            )
-            continue
-        filepath = capture_map[str_key]
-        key = (str_key, os.path.abspath(filepath))
-        capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
-            key, filepath
-        )
 
-        # Build (capture_root, graph_root) pairs. When there is a single
-        # capture root , map it to every graph root.
-        # Otherwise pair 1:1 positionally.
-        if len(capture_roots) == 1:
-            pairs = [(capture_roots[0], g) for g in graph_roots]
-            data = [capture_root_data[0]] * len(graph_roots)
-        else:
-            if len(capture_roots) == len(graph_roots):
-                pairs = list(zip(capture_roots, graph_roots))
-                data = capture_root_data
-            else:
-                print(
-                    "Warning: number of capture roots ({}) does not match number of graph roots ({}), merging may be incorrect".format(
-                        len(capture_roots), len(graph_roots)
-                    )
+        all_sources = _load_all_capture_sources(
+            capture_map, role, sorted(candidate_batch_sizes)
+        )
+        # When a single source has the right root count, pair positionally
+        # (preserves the old 1:1 and 1:N behaviour and avoids mis-pairing
+        # roots that share the same dispatch count).
+        result = None
+        for src_tree, cap_roots, cap_root_data in all_sources:
+            if len(cap_roots) == 1:
+                result = (
+                    [(cap_roots[0], g) for g in graph_roots],
+                    [cap_root_data[0]] * len(graph_roots),
+                    [src_tree] * len(graph_roots),
                 )
-                continue
+                break
+            if len(cap_roots) == len(graph_roots):
+                result = (
+                    list(zip(cap_roots, graph_roots)),
+                    cap_root_data,
+                    [src_tree] * len(graph_roots),
+                )
+                break
+        if result is None:
+            result = _match_graph_roots_to_captures(
+                graph_tree, graph_roots, all_sources
+            )
+        if result is None:
+            print(
+                "Warning: could not match capture roots to graph roots "
+                "for execution root {}".format(execution_root["name"])
+            )
+            continue
+        pairs, data, capture_trees = result
 
         print(
             "Found {} capture roots and {} graph roots".format(
-                len(capture_roots), len(graph_roots)
+                len(pairs), len(graph_roots)
             )
         )
-        for (c_root, g_root), (cached_events, filtered_uids) in zip(pairs, data):
+        for (c_root, g_root), (cached_events, filtered_uids), capture_tree in zip(
+            pairs, data, capture_trees
+        ):
             # Shallow-copy each event dict: every mutation downstream replaces
             # top-level keys (UID, ts, dur, parent, children) or adds new ones
             # (gpu_events). No nested structure is ever mutated in-place, so a

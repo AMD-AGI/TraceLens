@@ -484,15 +484,19 @@ def find_spec_decode_annotations(annotations: List[dict]) -> List[dict]:
     return matches
 
 
-def spec_decode_batch_sizes(roots: List[dict]) -> List[Optional[int]]:
-    """Request batch size per root, aligned with *roots*.
+def spec_decode_batch_sizes(
+    roots: List[dict],
+) -> List[Optional[Tuple[int, ...]]]:
+    """Candidate capture batch sizes per root, aligned with *roots*.
 
-    Requests, not tokens: SGLang and ATOM captures are keyed by request bs,
-    while a detailed verify label's ``batch_size`` counts draft tokens.
-    Drafter stage spans carry no batch size; they take it from the VERIFY root
-    closest in time, which belongs to the same iteration. A vLLM ``sample_``
-    span carries its own generation request count. ``None`` for roots that are
-    not spec-decode roots or have no VERIFY to borrow from.
+    Returns a tuple of batch sizes to try for each root.  vLLM drafter
+    ``sample_`` roots return two sizes: the decode batch size
+    (``num_requests``) and the prefill batch size
+    (``num_requests * (num_speculative_tokens + 1)``), because the drafter
+    uses separate CUDA graph managers for each phase.  SGLang / ATOM
+    drafter roots and target roots return a single-element tuple with the
+    request count.  ``None`` for roots that are not spec-decode roots or
+    have no VERIFY to borrow from.
     """
 
     def requests(root):
@@ -508,16 +512,19 @@ def spec_decode_batch_sizes(roots: List[dict]) -> List[Optional[int]]:
     def gap(a, b):
         return max(0, b["ts"] - a["ts"] - a["dur"], a["ts"] - b["ts"] - b["dur"])
 
-    sizes = []
+    sizes: List[Optional[Tuple[int, ...]]] = []
     for root in roots:
         name = root.get("name", "")
         if VLLM_SAMPLE_PATTERN.match(name):
             ann = IterationAnnotation("execute_" + name[len("sample_") :])
-            sizes.append(ann.generation_requests or ann.num_requests)
+            decode_bs = ann.context_requests + ann.generation_requests
+            prefill_bs = ann.batch_size
+            candidates = {decode_bs, prefill_bs}
+            sizes.append(tuple(sorted(candidates)) if candidates else None)
             continue
         role = spec_decode_role(name)
         if role == SPEC_ROLE_TARGET:
-            sizes.append(requests(root))
+            sizes.append((requests(root),))
             continue
         i = bisect.bisect_left(starts, root["ts"])
         nearby = verify[max(i - 1, 0) : i + 1]
@@ -525,7 +532,7 @@ def spec_decode_batch_sizes(roots: List[dict]) -> List[Optional[int]]:
             sizes.append(None)
             continue
         nearest = min(nearby, key=lambda v: gap(root, v))
-        sizes.append(requests(nearest))
+        sizes.append((requests(nearest),))
     return sizes
 
 

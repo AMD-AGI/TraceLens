@@ -27,7 +27,6 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _capture_kernel_name,
     _capture_tree_cache,
     _get_cached_capture_tree,
-    _same_graph_replay,
     align_streams,
     build_execution_graph_root_map,
     capture_has_kernel_names,
@@ -581,12 +580,6 @@ def _write_capture_index(folder, rows, present):
 
 
 class TestCaptureMergeHelpers:
-    def test_same_graph_replay_keeps_repeated_full_launches_together(self):
-        tree = _ChildTree()
-        assert _same_graph_replay(tree, [_launch("draft")])
-        assert _same_graph_replay(tree, [_launch("draft"), _launch("draft")])
-        assert not _same_graph_replay(tree, [_launch("draft"), _launch("extend")])
-
     def test_repeated_full_launches_select_full_when_both_modes_exist(
         self, tmp_path, capsys
     ):
