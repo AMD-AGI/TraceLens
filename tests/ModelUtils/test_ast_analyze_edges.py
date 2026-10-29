@@ -2413,3 +2413,169 @@ class TestBoundaryOperandIsRecorded:
             forward_input_names={"attention_mask"},
         )
         assert "scratch" not in captured
+
+
+# --------------------------------------------------------------------------- #
+# _analyzed_base_module / _single_local_base_name / _resolve_inherited_forward
+# --------------------------------------------------------------------------- #
+def test_analyzed_base_module_prefers_the_pinned_module_key():
+    # A file resolved from an inference engine's own pinned source carries its
+    # real package under this key, which must win over the transformers-layout
+    # guess derived from model_type.
+    config = {
+        aa.ANALYZED_MODULE_KEY: "fla.models.minimax.modeling_minimax",
+        "model_type": "minimax",
+    }
+    assert aa._analyzed_base_module(config) == "fla.models.minimax.modeling_minimax"
+
+
+def test_single_local_base_name_rejects_multiple_or_non_local_bases():
+    multi_base = ast.parse("class Foo(A, B):\n    pass\n").body[0]
+    assert aa._single_local_base_name(multi_base) is None
+
+    dotted_base = ast.parse("class Foo(nn.Module):\n    pass\n").body[0]
+    assert aa._single_local_base_name(dotted_base) is None
+
+    local_base = ast.parse("class Foo(Bar):\n    pass\n").body[0]
+    assert aa._single_local_base_name(local_base) == "Bar"
+
+
+def test_resolve_inherited_forward_stops_at_an_unresolvable_base():
+    # nn.Module is a dotted base this registry never holds -- there is nothing
+    # further to climb to, so the frame as found is returned unchanged.
+    leaf = _cls("LeafModule", node_src="class LeafModule(nn.Module):\n    pass\n")
+    assert aa._resolve_inherited_forward(leaf, {"LeafModule": leaf}) is leaf
+
+
+# --------------------------------------------------------------------------- #
+# _is_conditionally_assigned
+# --------------------------------------------------------------------------- #
+def test_is_conditionally_assigned_false_without_an_init():
+    cls = ast.parse("class Foo:\n    def forward(self, x):\n        return x\n").body[0]
+    assert aa._is_conditionally_assigned(cls, "quant_method") is False
+
+
+def test_is_conditionally_assigned_true_for_an_annotated_conditional_assign():
+    cls = ast.parse(
+        "class Foo:\n"
+        "    def __init__(self, cfg):\n"
+        "        if cfg is None:\n"
+        "            self.quant_method: object = UnquantizedLinearMethod()\n"
+        "        else:\n"
+        "            self.quant_method = resolve_quant_method(cfg)\n"
+    ).body[0]
+    assert aa._is_conditionally_assigned(cls, "quant_method") is True
+
+
+def test_is_conditionally_assigned_false_for_an_unconditional_assign():
+    cls = ast.parse(
+        "class Foo:\n"
+        "    def __init__(self, cfg):\n"
+        "        self.quant_method = resolve_quant_method(cfg)\n"
+    ).body[0]
+    assert aa._is_conditionally_assigned(cls, "quant_method") is False
+
+
+# --------------------------------------------------------------------------- #
+# _ternary_submodule_dispatch_assignments / _desugar_ternary_submodule_dispatch
+# --------------------------------------------------------------------------- #
+def _forward(src: str) -> ast.FunctionDef:
+    return ast.parse(src).body[0]
+
+
+def test_ternary_submodule_dispatch_assignments_finds_a_call_only_alias():
+    func = _forward(
+        "def forward(self, x):\n"
+        "    ffn = self.moe if self.is_moe_layer else self.mlp\n"
+        "    return ffn(x)\n"
+    )
+    found = aa._ternary_submodule_dispatch_assignments(func)
+    assert set(found) == {"ffn"}
+    _test, attr_a, attr_b = found["ffn"]
+    assert (attr_a, attr_b) == ("moe", "mlp")
+
+
+def test_ternary_submodule_dispatch_assignments_excludes_non_call_reads():
+    # `ffn` is passed around, not called -- desugaring would change what this
+    # other read sees, so it must not be treated as a dispatch alias.
+    func = _forward(
+        "def forward(self, x):\n"
+        "    ffn = self.moe if self.is_moe_layer else self.mlp\n"
+        "    return describe(ffn)\n"
+    )
+    assert aa._ternary_submodule_dispatch_assignments(func) == {}
+
+
+def test_ternary_submodule_dispatch_assignments_excludes_multiply_declared_vars():
+    func = _forward(
+        "def forward(self, x, other_cond):\n"
+        "    ffn = self.moe if self.is_moe_layer else self.mlp\n"
+        "    ffn = self.a if other_cond else self.b\n"
+        "    return ffn(x)\n"
+    )
+    assert aa._ternary_submodule_dispatch_assignments(func) == {}
+
+
+def test_ternary_submodule_dispatch_assignments_requires_both_arms_be_self_attrs():
+    func = _forward(
+        "def forward(self, x):\n"
+        "    ffn = self.moe if self.is_moe_layer else other_module\n"
+        "    return ffn(x)\n"
+    )
+    assert aa._ternary_submodule_dispatch_assignments(func) == {}
+
+
+def test_desugar_ternary_submodule_dispatch_rewrites_call_to_if_else():
+    func = _forward(
+        "def forward(self, x):\n"
+        "    ffn = self.moe if self.is_moe_layer else self.mlp\n"
+        "    out = ffn(x)\n"
+        "    return out\n"
+    )
+    rewritten = aa._desugar_ternary_submodule_dispatch(func)
+    assert ast.unparse(rewritten) == (
+        "def forward(self, x):\n"
+        "    if self.is_moe_layer:\n"
+        "        out = self.moe(x)\n"
+        "    else:\n"
+        "        out = self.mlp(x)\n"
+        "    return out"
+    )
+
+
+def test_desugar_ternary_submodule_dispatch_is_a_no_op_without_a_ternary_alias():
+    func = _forward("def forward(self, x):\n    return self.mlp(x)\n")
+    assert aa._desugar_ternary_submodule_dispatch(func) is func
+
+
+def test_desugar_ternary_submodule_dispatch_rewrites_every_call_site():
+    func = _forward(
+        "def forward(self, x, flag):\n"
+        "    ffn = self.moe if self.is_moe_layer else self.mlp\n"
+        "    if flag:\n"
+        "        out = ffn(x)\n"
+        "    for _layer in range(1):\n"
+        "        out = ffn(x)\n"
+        "    return out\n"
+    )
+    dumped = ast.unparse(aa._desugar_ternary_submodule_dispatch(func))
+    assert dumped.count("if self.is_moe_layer:") == 2
+    assert "ffn" not in dumped
+
+
+def test_desugar_ternary_submodule_dispatch_leaves_a_two_alias_statement_intact():
+    # `ffn1(x) + ffn2(x)` names two different aliases in one statement, which
+    # cannot be desugared without a cross product of arms. Both declarations
+    # must stay in place -- dropping either would leave this call referencing
+    # an undefined name.
+    func = _forward(
+        "def forward(self, x):\n"
+        "    ffn1 = self.a if self.c1 else self.b\n"
+        "    ffn2 = self.d if self.c2 else self.e\n"
+        "    out = ffn1(x) + ffn2(x)\n"
+        "    return out\n"
+    )
+    dumped = ast.unparse(aa._desugar_ternary_submodule_dispatch(func))
+    assert "ffn1 = self.a if self.c1 else self.b" in dumped
+    assert "ffn2 = self.d if self.c2 else self.e" in dumped
+    assert "out = ffn1(x) + ffn2(x)" in dumped

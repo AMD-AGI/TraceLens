@@ -3727,6 +3727,30 @@ def _desugar_ternary_submodule_dispatch(func: ast.FunctionDef) -> ast.FunctionDe
     # `id()` of nodes in `func`, which the deepcopy does not share.
     aliases = _ternary_submodule_dispatch_assignments(resolved)
 
+    # A statement calling two different aliases together (``ffn1(x) + ffn2(y)``)
+    # is left unresolved below rather than guessed at via a cross product of
+    # arms. Both aliases must be excluded here too, or their declarations get
+    # dropped as "fully desugared" while that statement still reads them.
+    multi_alias_vars: set[str] = set()
+    for stmt in ast.walk(resolved):
+        if not isinstance(stmt, ast.stmt) or isinstance(
+            stmt, (ast.If, ast.For, ast.While, ast.With)
+        ):
+            continue
+        called = {
+            node.func.id
+            for node in ast.walk(stmt)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in aliases
+        }
+        if len(called) > 1:
+            multi_alias_vars |= called
+    if multi_alias_vars:
+        aliases = {k: v for k, v in aliases.items() if k not in multi_alias_vars}
+    if not aliases:
+        return func
+
     def rewrite_call_func(stmt: ast.stmt, var: str, attr: str) -> ast.stmt:
         clone = copy.deepcopy(stmt)
         for node in ast.walk(clone):

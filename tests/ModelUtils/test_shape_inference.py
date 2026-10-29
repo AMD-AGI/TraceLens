@@ -1127,6 +1127,57 @@ def test_entry_spec_prefers_the_forwards_own_rank_over_the_global_meta_fallback(
     assert result == TensorSpec(("B*S", 6144), inferencer.context.dtype)
 
 
+def test_entry_spec_recognizes_a_raising_rank2_guard_as_batch_seq():
+    """A raising ``attention_mask.dim() != 2`` guard declares that parameter's
+    rank directly off the forward body -- ``(B, S)`` -- the same own-class
+    precedence as the token/hidden unpack case above, for the OTHER rank-2
+    pattern ``_rank_constrained_param`` recognizes."""
+    from TraceLens.ModelUtils.block_tree import BlockNode
+    from TraceLens.ModelUtils.model_graph import ModelGraphNode, NodeKind, OperationKind
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure
+    from TraceLens.ModelUtils.shape_inference import Symbol
+    import ast as _ast
+
+    class_node = _ast.parse(
+        "class CustomIndexer:\n"
+        "    def forward(self, hidden_states, attention_mask=None):\n"
+        "        if attention_mask is not None and attention_mask.dim() != 2:\n"
+        "            raise ValueError('attention_mask must be [batch_size, seq_len]')\n"
+        "        q_len = hidden_states.shape[1]\n"
+        "        indices = attention_mask[:, -q_len:]\n"
+        "        return hidden_states\n"
+    ).body[0]
+    structure = ClassStructure(
+        name="CustomIndexer",
+        node=class_node,
+        init_assignments={},
+        init_details={},
+        forward_calls=[],
+        norm_before=[],
+    )
+    spec = ArchitectureSpec(name="T", model_type="t", raw_config={}, hidden_size=6144)
+    spec.class_registry = {"CustomIndexer": structure}
+    inferencer = ShapeInferencer(spec)
+    inferencer._meta_input_specs_loaded = True
+    root = BlockNode(
+        attr_name="indexer",
+        class_name="CustomIndexer",
+        role="other",
+        label="CustomIndexer",
+    )
+    node = ModelGraphNode(
+        id="@input:attention_mask",
+        kind=NodeKind.LEAF,
+        label="attention_mask",
+        operation=OperationKind.UNKNOWN,
+        metadata={"synthetic": "@input"},
+    )
+    result = inferencer._entry_spec_for(node, root)
+    assert result == TensorSpec(
+        (Symbol.BATCH.value, Symbol.SEQ.value), inferencer.context.dtype
+    )
+
+
 def test_entry_spec_falls_back_to_the_activation_default_with_no_caller_context():
     """A method expansion inferred on its own (a representative per-class
     warm-up pass, or a section whose spine predecessor could not be resolved)

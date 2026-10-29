@@ -20,16 +20,21 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     DimResolutionError,
     RooflineOp,
     RooflineProjection,
+    _attr_text,
     _classify_normalization,
     _dispatch_op_cost,
     _engine_boundary_cost,
     _engine_head_cost,
     _moe_cost,
+    _parse_op_node,
+    _project_op,
+    _split_shape_text,
     build_projection_dims,
     project_roofline,
     resolve_dim,
     resolve_shape,
 )
+from TraceLens.Visualizer.model_explorer_export.shapes import parse_shape_dims
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -82,8 +87,65 @@ def test_resolve_dim_missing_symbol_raises():
         resolve_dim("unknown_dim", {})
 
 
+def test_resolve_dim_self_mapped_symbol_raises():
+    # ShapeContext.dims maps a genuinely-unset symbol to itself rather than
+    # omitting it; this is a different unresolved shape than a name dims never
+    # mentions at all (test_resolve_dim_missing_symbol_raises above).
+    with pytest.raises(DimResolutionError):
+        resolve_dim("B", {"B": "B"})
+
+
 def test_resolve_shape():
     assert resolve_shape(["B", "S", 4096], {"B": 2, "S": 10}) == (2, 10, 4096)
+
+
+# _attr_text / _parse_op_node
+def test_attr_text_returns_none_for_non_list_attrs():
+    assert _attr_text(None, "op_type") is None
+    assert _attr_text("not-a-list", "op_type") is None
+
+
+def test_parse_op_node_skips_a_collective_boundary_node():
+    node = {
+        "id": "allreduce@comm:0",
+        "attrs": [{"key": "op_type", "value": "Collective"}],
+    }
+    assert _parse_op_node(node) is None
+
+
+def test_parse_op_node_skips_a_node_without_op_type():
+    node = {"id": "n1", "attrs": [{"key": "class_name", "value": "Linear"}]}
+    assert _parse_op_node(node) is None
+
+
+def test_parse_op_node_skips_a_node_without_output_shape():
+    node = {
+        "id": "n1",
+        "attrs": [
+            {"key": "op_type", "value": "GEMM"},
+            {"key": "class_name", "value": "Linear"},
+        ],
+    }
+    assert _parse_op_node(node) is None
+
+
+def test_parse_op_node_classifies_an_engine_parallel_linear_as_linear():
+    # vLLM/SGLang split-aware linear subclasses (QKVParallelLinear, ...) carry
+    # their own op_type label but cost exactly like a plain Linear GEMM.
+    node = {
+        "id": "n1",
+        "namespace": "decoder/0x_layer",
+        "attrs": [
+            {"key": "op_type", "value": "QKVParallelLinear"},
+            {"key": "class_name", "value": "QKVParallelLinear"},
+            {"key": "output_shape", "value": "[B, S, H]"},
+        ],
+    }
+    parsed = _parse_op_node(node)
+    assert parsed is not None
+    _section, computation, class_name, _operation, _output_text, _input_texts = parsed
+    assert computation == "Linear"
+    assert class_name == "QKVParallelLinear"
 
 
 # _classify_normalization
@@ -130,12 +192,22 @@ def test_dispatch_gemm_linear():
     assert bytes_moved is not None
 
 
+def test_dispatch_gemm_linear_without_an_input_shape_is_unmodeled():
+    assert _dispatch_op_cost("Linear", [], (2, 10, 1024), 2) is None
+    assert _dispatch_op_cost("Linear", [None], (2, 10, 1024), 2) is None
+
+
 def test_dispatch_gemm_functional_matmul():
     category, _, flops, _ = _dispatch_op_cost(
         "MatMul", [(2, 10, 64), (64, 128)], (2, 10, 128), 2
     )
     assert category == "GEMM"
     assert flops == 2 * 20 * 128 * 64
+
+
+def test_dispatch_gemm_matmul_with_a_missing_operand_is_unmodeled():
+    assert _dispatch_op_cost("MatMul", [(2, 10, 64)], (2, 10, 128), 2) is None
+    assert _dispatch_op_cost("MatMul", [(2, 10, 64), None], (2, 10, 128), 2) is None
 
 
 def test_dispatch_sdpa():
@@ -163,6 +235,20 @@ def test_dispatch_sdpa_insufficient_operands_is_unmodeled():
     )
 
 
+def test_dispatch_sdpa_requires_four_dimensional_operands():
+    # A flattened (seq, head_dim) operand -- e.g. a batch/head axis already
+    # folded away -- cannot be read as [B, heads, seq, head_dim].
+    assert (
+        _dispatch_op_cost(
+            "scaled_dot_product_attention",
+            [(2048, 128), (2048, 128), (2048, 128)],
+            (1, 32, 2048, 128),
+            2,
+        )
+        is None
+    )
+
+
 def test_dispatch_normalization_rmsnorm_subclass():
     category, maf_type, flops, bytes_moved = _dispatch_op_cost(
         "LlamaRMSNorm", [(2, 10, 4096)], (2, 10, 4096), 2
@@ -171,6 +257,20 @@ def test_dispatch_normalization_rmsnorm_subclass():
     assert maf_type == "vector"
     assert flops > 0
     assert bytes_moved is not None
+
+
+def test_dispatch_normalization_generic_layernorm_has_bias_cost():
+    category, maf_type, flops, bytes_moved = _dispatch_op_cost(
+        "LayerNorm", [(2, 10, 4096)], (2, 10, 4096), 2
+    )
+    assert category == "Normalization (LayerNorm)"
+    assert maf_type == "vector"
+    assert flops > 0
+    assert bytes_moved is not None
+
+
+def test_dispatch_normalization_zero_channels_is_unmodeled():
+    assert _dispatch_op_cost("RMSNorm", [(2, 10, 0)], (2, 10, 0), 2) is None
 
 
 def test_dispatch_softmax():
@@ -182,12 +282,20 @@ def test_dispatch_softmax():
     assert flops > 0
 
 
+def test_dispatch_softmax_without_output_shape_is_unmodeled():
+    assert _dispatch_op_cost("Softmax", [(2, 32, 10, 10)], (), 2) is None
+
+
 def test_dispatch_unary_elementwise():
     category, _, flops, bytes_moved = _dispatch_op_cost(
         "Silu", [(2, 10, 4096)], (2, 10, 4096), 2
     )
     assert category == "UnaryElementwise"
     assert flops == 2 * 10 * 4096
+
+
+def test_dispatch_unary_elementwise_without_output_shape_is_unmodeled():
+    assert _dispatch_op_cost("Silu", [(2, 10, 4096)], (), 2) is None
 
 
 def test_dispatch_binary_elementwise():
@@ -213,6 +321,11 @@ def test_dispatch_reduce():
     assert category == "Reduce"
     assert flops > 0
     assert bytes_moved is not None
+
+
+def test_dispatch_reduce_without_an_input_shape_is_unmodeled():
+    assert _dispatch_op_cost("sum", [], (2, 10), 2) is None
+    assert _dispatch_op_cost("sum", [None], (2, 10), 2) is None
 
 
 def test_dispatch_unmapped_computation_returns_none():
@@ -261,6 +374,10 @@ def test_moe_cost_missing_top_k_or_intermediate_returns_none():
     assert _moe_cost(dims, top_k=2, intermediate_size=None, bpe=2) is None
 
 
+def test_moe_cost_missing_hidden_dim_returns_none():
+    assert _moe_cost({"B": 1, "S": 10}, top_k=2, intermediate_size=1024, bpe=2) is None
+
+
 def test_engine_boundary_cost_dispatches_by_class_name_marker():
     dims = {"B": 1, "S": 10, "H": 4096, "V": 32000}
     assert _engine_boundary_cost("ParallelLMHead", dims, 2, 1024, 2) is not None
@@ -271,6 +388,93 @@ def test_engine_boundary_cost_unrelated_class_returns_none():
     dims = {"B": 1, "S": 10, "H": 4096, "V": 32000}
     assert _engine_boundary_cost("Linear", dims, 2, 1024, 2) is None
     assert _engine_boundary_cost("", dims, 2, 1024, 2) is None
+
+
+# _split_shape_text / _project_op
+def test_split_shape_text_without_brackets_has_no_dtype():
+    # A bracketless shape text is unexpected from the real graph builder, but
+    # must not be mistaken for one with a trailing dtype suffix.
+    dims, dtype = _split_shape_text("B, S, H")
+    assert dims == parse_shape_dims("B, S, H")
+    assert dtype is None
+
+
+def test_project_op_uses_the_engine_boundary_cost_when_the_class_name_matches():
+    dims = {"B": 2, "S": 10, "H": 4096, "V": 32000}
+    op = _project_op(
+        "n1",
+        "section",
+        "Linear",
+        "ParallelLMHead",
+        "nn_module",
+        "[B, S, H] bfloat16",
+        [],
+        dims,
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=2,
+        moe_intermediate_size=1024,
+    )
+    assert op.modeled is True
+    assert op.category == "GEMM"
+    assert op.output_elements == 20 * 32000
+
+
+def test_project_op_records_an_unresolved_output_dim():
+    op = _project_op(
+        "n1",
+        "section",
+        "Linear",
+        "Linear",
+        "nn_module",
+        "[B, S, unknown_dim] bfloat16",
+        [["B", "S", "H"]],
+        {"B": 2, "S": 10, "H": 4096},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is False
+    assert "unresolved output dim" in op.reason
+
+
+def test_project_op_records_an_unresolved_input_dim():
+    op = _project_op(
+        "n1",
+        "section",
+        "Linear",
+        "Linear",
+        "nn_module",
+        "[B, S, H] bfloat16",
+        [["B", "S", "unknown_dim"]],
+        {"B": 2, "S": 10, "H": 4096},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is False
+    assert "unresolved input dim" in op.reason
+
+
+def test_project_op_records_an_unmapped_computation():
+    op = _project_op(
+        "n1",
+        "section",
+        "Reshape",
+        "Reshape",
+        "nn_module",
+        "[B, S, H] bfloat16",
+        [["B", "S", "H"]],
+        {"B": 2, "S": 10, "H": 4096},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is False
+    assert "no PerfModel mapping" in op.reason
 
 
 # RooflineProjection.totals()
@@ -455,6 +659,41 @@ def test_cli_unknown_gpu_arch_name_errors(capsys):
 def test_cli_requires_a_checkpoint():
     with pytest.raises(SystemExit):
         roofline_cli.main([])
+
+
+def test_cli_rejects_a_malformed_dim_override(capsys):
+    with pytest.raises(SystemExit):
+        roofline_cli.main(
+            [
+                str(FIXTURES / "custom_model"),
+                "--no-meta-shapes",
+                "--dim",
+                "not_a_kv_pair",
+            ]
+        )
+    assert "not_a_kv_pair" in capsys.readouterr().err
+
+
+def test_cli_gpu_arch_json_path_takes_precedence(tmp_path):
+    arch_path = tmp_path / "arch.json"
+    arch_path.write_text(json.dumps(_ARCH), encoding="utf-8")
+    exit_code = roofline_cli.main(
+        [
+            str(FIXTURES / "custom_model"),
+            "--no-meta-shapes",
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--seq-len",
+            "64",
+        ]
+    )
+    assert exit_code == 0
+
+
+def test_cli_reports_an_architecture_load_failure_without_a_traceback(capsys):
+    exit_code = roofline_cli.main(["/nonexistent/path/for/testing", "--no-meta-shapes"])
+    assert exit_code == 1
+    assert "Error loading architecture" in capsys.readouterr().err
 
 
 def test_cli_tp_ep_pp_flags_wire_a_parallel_layout_and_warn_when_undeclared(capsys):

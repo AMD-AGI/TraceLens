@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from TraceLens.Visualizer.model_explorer_export import (
+    ast_build,
     labels,
     merge,
     overview,
@@ -3540,3 +3541,209 @@ def _slice_graph(
             }
         )
     return nodes
+
+
+# --------------------------------------------------------------------------- #
+# _step_boundary_sources
+# --------------------------------------------------------------------------- #
+def test_step_boundary_sources_reads_the_matching_method_input_ref():
+    refs = {
+        "@method_input:q_residual": "node_a",
+        "@method_input": "node_default",
+    }
+    sources = merge._step_boundary_sources(
+        "indexer", {"indexer": ("q_residual", "grid_thw")}, refs
+    )
+    # "q_residual" has its own named ref; "grid_thw" falls back to the
+    # method's single generic input ref.
+    assert sources == ["node_a", "node_default"]
+
+
+def test_step_boundary_sources_skips_an_unresolved_param():
+    assert merge._step_boundary_sources("indexer", {"indexer": ("missing",)}, {}) == []
+
+
+# --------------------------------------------------------------------------- #
+# _merge_local_shapes: overlaying a per-GPU local-shape graph onto the full one
+# --------------------------------------------------------------------------- #
+def test_attr_value_and_set_attr_value():
+    attrs = [{"key": "a", "value": "1"}, {"key": "b", "value": "2"}]
+    assert ast_build._attr_value(attrs, "a") == "1"
+    assert ast_build._attr_value(attrs, "missing") is None
+    assert ast_build._attr_value(None, "a") is None
+    assert ast_build._attr_value("not-a-list", "a") is None
+
+    ast_build._set_attr_value(attrs, "a", "99")
+    assert attrs[0] == {"key": "a", "value": "99"}
+    ast_build._set_attr_value(attrs, "c", "3")
+    assert attrs[-1] == {"key": "c", "value": "3"}
+
+
+def test_overlay_local_output_shape_copies_output_input_and_port_shapes():
+    node = {
+        "attrs": [{"key": "output_shape", "value": "[B, 4096]"}],
+        "outputsMetadata": [
+            {"id": "0", "attrs": [{"key": "shape", "value": "[B, 4096]"}]}
+        ],
+        "inputsMetadata": [
+            {"id": "0", "attrs": [{"key": "shape", "value": "[B, 4096]"}]}
+        ],
+    }
+    local_node = {
+        "attrs": [
+            {"key": "output_shape", "value": "[B, 2048]"},
+            {"key": "input_shapes", "value": '[["B", "4096"]]'},
+        ],
+        "outputsMetadata": [
+            {"id": "0", "attrs": [{"key": "shape", "value": "[B, 2048]"}]}
+        ],
+        "inputsMetadata": [
+            {"id": "0", "attrs": [{"key": "shape", "value": "[B, 4096]"}]}
+        ],
+    }
+    ast_build._overlay_local_output_shape(node, local_node)
+    assert ast_build._attr_value(node["attrs"], "output_shape") == "[B, 2048]"
+    assert ast_build._attr_value(node["attrs"], "input_shapes") == '[["B", "4096"]]'
+    assert (
+        ast_build._attr_value(node["outputsMetadata"][0]["attrs"], "shape")
+        == "[B, 2048]"
+    )
+    assert (
+        ast_build._attr_value(node["inputsMetadata"][0]["attrs"], "shape")
+        == "[B, 4096]"
+    )
+
+
+def test_overlay_local_output_shape_no_op_without_local_data():
+    # A local node missing shape data (never resolved, e.g. a dead branch of
+    # the local-config build) leaves the full graph's own shape untouched
+    # rather than overwriting it with nothing.
+    node = {"attrs": [{"key": "output_shape", "value": "[B, 4096]"}]}
+    ast_build._overlay_local_output_shape(node, {})
+    assert ast_build._attr_value(node["attrs"], "output_shape") == "[B, 4096]"
+
+
+def test_merge_local_shapes_no_op_without_overrides(monkeypatch):
+    # A layout whose checks never touch tp/ep/pp (degree requested but every
+    # mesh partition count is 1) has nothing to localize -- never pay for a
+    # second graph build.
+    import TraceLens.ModelUtils.parallel_plan as parallel_plan_module
+
+    monkeypatch.setattr(parallel_plan_module, "local_config_overrides", lambda *a: {})
+    built = []
+    monkeypatch.setattr(
+        ast_build, "build_merged_model_graph", lambda *a, **k: built.append(1)
+    )
+    full_graph = {"nodes": [{"id": "a", "attrs": []}]}
+    ast_build._merge_local_shapes(
+        full_graph,
+        spec=object(),
+        layout=object(),
+        basic_ops=object(),
+        inline_expansion=True,
+        meta_shapes_checkpoint=None,
+    )
+    assert built == []
+
+
+def test_merge_local_shapes_overlays_only_the_locally_sharded_nodes(monkeypatch):
+    import TraceLens.ModelUtils.extract as extract_module
+    import TraceLens.ModelUtils.parallel_plan as parallel_plan_module
+
+    full_graph = {
+        "nodes": [
+            {"id": "a", "attrs": [{"key": "output_shape", "value": "[B, 4096]"}]},
+            {"id": "b", "attrs": [{"key": "output_shape", "value": "[B, 4096]"}]},
+        ]
+    }
+    local_graph = {
+        "nodes": [
+            {"id": "a", "attrs": [{"key": "output_shape", "value": "[B, 2048]"}]},
+            {"id": "b", "attrs": [{"key": "output_shape", "value": "[B, 2048]"}]},
+        ]
+    }
+    monkeypatch.setattr(
+        parallel_plan_module,
+        "local_config_overrides",
+        lambda *a: {"num_attention_heads": 16},
+    )
+    monkeypatch.setattr(
+        parallel_plan_module, "locally_sharded_node_ids", lambda *a: {"a"}
+    )
+    monkeypatch.setattr(
+        extract_module,
+        "rebuild_architecture_with_overrides",
+        lambda spec, overrides: spec,
+    )
+    monkeypatch.setattr(
+        ast_build, "build_merged_model_graph", lambda *a, **k: local_graph
+    )
+    loaded_checkpoints = []
+    monkeypatch.setattr(
+        ast_build,
+        "ShapeInferencer",
+        lambda spec: SimpleNamespace(
+            load_meta_shapes=lambda path: loaded_checkpoints.append(path)
+        ),
+    )
+    ast_build._merge_local_shapes(
+        full_graph,
+        spec=object(),
+        layout=object(),
+        basic_ops=object(),
+        inline_expansion=True,
+        meta_shapes_checkpoint="meta.json",
+    )
+    # "a" is locally sharded -- takes the local build's (gathered) shape.
+    assert (
+        ast_build._attr_value(full_graph["nodes"][0]["attrs"], "output_shape")
+        == "[B, 2048]"
+    )
+    # "b" is not -- its full-build shape stands even though the local build
+    # (irrelevantly, for a node this is not responsible for) differs too.
+    assert (
+        ast_build._attr_value(full_graph["nodes"][1]["attrs"], "output_shape")
+        == "[B, 4096]"
+    )
+    assert loaded_checkpoints == ["meta.json"]
+
+
+def test_merge_local_shapes_raises_on_structural_divergence(monkeypatch):
+    # A locally-sharded config that changes the graph's own shape (not just a
+    # tensor's size) breaks the merge-by-id assumption; this must fail loudly
+    # instead of silently pairing up the wrong nodes.
+    import TraceLens.ModelUtils.extract as extract_module
+    import TraceLens.ModelUtils.parallel_plan as parallel_plan_module
+
+    full_graph = {"nodes": [{"id": "a", "attrs": []}, {"id": "b", "attrs": []}]}
+    local_graph = {"nodes": [{"id": "a", "attrs": []}]}  # "b" never appears locally
+    monkeypatch.setattr(
+        parallel_plan_module,
+        "local_config_overrides",
+        lambda *a: {"num_hidden_layers": 1},
+    )
+    monkeypatch.setattr(
+        parallel_plan_module, "locally_sharded_node_ids", lambda *a: set()
+    )
+    monkeypatch.setattr(
+        extract_module,
+        "rebuild_architecture_with_overrides",
+        lambda spec, overrides: spec,
+    )
+    monkeypatch.setattr(
+        ast_build, "build_merged_model_graph", lambda *a, **k: local_graph
+    )
+    monkeypatch.setattr(
+        ast_build,
+        "ShapeInferencer",
+        lambda spec: SimpleNamespace(load_meta_shapes=lambda path: None),
+    )
+    with pytest.raises(ValueError, match="diverged"):
+        ast_build._merge_local_shapes(
+            full_graph,
+            spec=object(),
+            layout=object(),
+            basic_ops=object(),
+            inline_expansion=True,
+            meta_shapes_checkpoint=None,
+        )

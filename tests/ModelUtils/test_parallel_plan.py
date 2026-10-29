@@ -8,16 +8,20 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from TraceLens.ModelUtils.extract import ArchitectureSpec
 from TraceLens.ModelUtils.parallel_plan import (
     GpuGroup,
     ParallelDegree,
+    WidthCheck,
     annotate_parallel_nodes,
     build_parallel_layout,
     gpu_group_report,
     layout_from_plans,
+    local_config_overrides,
     locally_sharded_node_ids,
     parse_class_plans,
     parse_engine_class_plans,
@@ -568,6 +572,42 @@ def test_local_config_overrides_divides_declared_widths_uneven_lands_on_rank_0()
     assert unsharded == {}
 
 
+def test_local_config_overrides_skips_non_sharding_mesh_and_undivided_checks():
+    spec = ArchitectureSpec(
+        name="demo",
+        model_type="demo",
+        num_attention_heads=8,
+        hidden_size=64,
+        raw_config={"model_type": "demo", "architectures": []},
+    )
+    layout = SimpleNamespace(
+        checks=[
+            # A non-tp/ep/pp mesh (e.g. data-parallel) never shards a model
+            # dim and must be skipped outright.
+            WidthCheck(
+                name="batch_size", size=8, partitions=2, divides=True, mesh="dp"
+            ),
+            # A declared width whose own mesh has partitions == 1 (ep=1 while
+            # tp shards something else): nothing to override here.
+            WidthCheck(
+                name="num_experts", size=8, partitions=1, divides=True, mesh="ep"
+            ),
+            WidthCheck(
+                name="num_attention_heads",
+                size=8,
+                partitions=2,
+                divides=True,
+                mesh="tp",
+            ),
+        ]
+    )
+    overrides = local_config_overrides(layout, spec)
+    assert overrides == {
+        "num_attention_heads": 4,
+        "head_dim": spec.hidden_size // spec.num_attention_heads,
+    }
+
+
 def test_locally_sharded_node_ids_stops_at_a_gather_and_a_replicated_router():
     """A ``gather`` leaf's own output is local, but what it feeds is the full
     tensor on every rank -- until a fresh rule-matched leaf (its own division)
@@ -631,6 +671,59 @@ def test_locally_sharded_node_ids_stops_at_a_gather_and_a_replicated_router():
     assert fresh_leaf["id"] in sharded
     assert past_fresh_leaf["id"] in sharded
     assert replicated_router["id"] not in sharded
+
+
+def test_locally_sharded_node_ids_does_not_revisit_a_converging_consumer():
+    """Two branches restoring from the same gather both reach a shared
+    downstream consumer; the second arrival must not re-walk (or re-flip) a
+    node the first arrival already excluded."""
+    layout = _layout(ParallelDegree(tp=4))
+    gathered = {
+        "id": "block/linear_attn/in_proj_qkv",
+        "label": "in_proj_qkv",
+        "namespace": "block/linear_attn",
+        "attrs": [{"key": "attr_name", "value": "in_proj_qkv"}],
+        "incomingEdges": [_edge("@input")],
+    }
+    branch_a = {
+        "id": "block/linear_attn/branch_a",
+        "label": "view",
+        "namespace": "block/linear_attn",
+        "attrs": [],
+        "incomingEdges": [_edge(gathered["id"])],
+    }
+    branch_b = {
+        "id": "block/linear_attn/branch_b",
+        "label": "view",
+        "namespace": "block/linear_attn",
+        "attrs": [],
+        "incomingEdges": [_edge(gathered["id"])],
+    }
+    merge = {
+        "id": "block/linear_attn/merge",
+        "label": "add",
+        "namespace": "block/linear_attn",
+        "attrs": [],
+        "incomingEdges": [_edge(branch_a["id"]), _edge(branch_b["id"])],
+    }
+    graph = {
+        "nodes": [
+            {
+                "id": "@input",
+                "label": "hidden_states",
+                "namespace": "",
+                "attrs": [{"key": "synthetic", "value": "@input"}],
+            },
+            gathered,
+            branch_a,
+            branch_b,
+            merge,
+        ]
+    }
+    sharded = locally_sharded_node_ids(graph, layout)
+    assert branch_a["id"] not in sharded
+    assert branch_b["id"] not in sharded
+    assert merge["id"] not in sharded
 
 
 def test_expert_count_on_one_gpu_is_the_local_slice():
