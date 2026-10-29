@@ -36,7 +36,7 @@ Python 3.10 or newer. No GPU, ROCm, or CUDA wheel is required. A gated checkpoin
 
 One of:
 
-- a Hugging Face model id
+- a Hugging Face model id (`org/model`)
 - a local directory that contains `config.json`
 - a GitHub modeling repo that is already allowlisted, or passed with `--allow-repo`
 
