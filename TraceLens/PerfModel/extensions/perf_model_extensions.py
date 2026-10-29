@@ -2307,3 +2307,261 @@ class topk_softplus_sqrt(topk_gating_fwd):
         if self.param_details.get("use_hash"):
             total += self.M * bpe_i + self.M * topk * bpe_i
         return total
+
+
+class hc_boundary(_MHCBase):
+    """
+    Performance model for Flash SGLang mHC boundary kernels
+    (`hc_boundary` / `hc_boundary_fused` / `_hc_boundary_partials`).
+
+    Boundary recombines / projects the n-stream residual at layer edges.
+    When Input Dims match aiter::mhc_post layout use that; otherwise accept
+    injector-stamped M/n/C (Flash residual streams).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        try:
+            if dims and len(dims) > 1 and dims[1] and len(dims[1]) >= 2:
+                # mhc_post-like: out(M,n,C), x(M,C), residual(M,n,C), ...
+                M, C = dims[1][0], dims[1][1]
+                n = dims[0][1] if dims[0] and len(dims[0]) > 1 else int(args.get("n") or 4)
+                dtype_in = types[1] if len(types) > 1 else "c10::BFloat16"
+            else:
+                M = int(args.get("M") or args.get("num_tokens") or 0)
+                n = int(args.get("n") or 4)
+                C = int(args.get("C") or 5120)
+                dtype_in = args.get("dtype_in") or "c10::BFloat16"
+                if M <= 0:
+                    raise ValueError("missing M")
+            return {"M": M, "n": n, "C": C, "hc3": None, "dtype_in": dtype_in}
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"M": 0, "n": 1, "C": 0, "hc3": None, "dtype_in": None, "_no_perf": True}
+
+    def flops(self):
+        if self.param_details.get("_no_perf") or self.M <= 0:
+            return None
+        # Same order as mhc_post: mix residual streams + layer contrib.
+        return 2 * self.M * self.n * self.C * (self.n + 1)
+
+    def bytes(self):
+        if self.param_details.get("_no_perf") or self.bpe_in is None or self.M <= 0:
+            return None
+        read_x = self.M * self.C * self.bpe_in
+        read_residual = self.M * self.n * self.C * self.bpe_in
+        read_mixes = self.M * self.n * 4 + self.M * self.n * self.n * 4
+        write_out = self.M * self.n * self.C * self.bpe_in
+        return read_x + read_residual + read_mixes + write_out
+
+
+class hc_mix_reduce_sinkhorn(_MHCBase):
+    """
+    Flash SGLang `_hc_mix_reduce_sinkhorn_vec` — Sinkhorn / mix reduce on the
+    n-stream residual manifold (vector path).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        try:
+            if dims and dims[0] and len(dims[0]) >= 2:
+                M, n = dims[0][0], dims[0][1]
+                C = dims[0][2] if len(dims[0]) > 2 else int(args.get("C") or 1)
+            else:
+                M = int(args.get("M") or args.get("num_tokens") or 0)
+                n = int(args.get("n") or 4)
+                C = int(args.get("C") or 1)
+                if M <= 0:
+                    raise ValueError("missing M")
+            dtype_in = types[0] if types else args.get("dtype_in") or "float"
+            return {"M": M, "n": n, "C": C, "hc3": None, "dtype_in": dtype_in}
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"M": 0, "n": 1, "C": 0, "hc3": None, "dtype_in": None, "_no_perf": True}
+
+    def flops(self):
+        if self.param_details.get("_no_perf") or self.M <= 0:
+            return None
+        # Sinkhorn iterations on n x n mixes + residual scale; approximate as
+        # a few matvec-equivalent passes over the mix matrix per token.
+        return 8 * self.M * self.n * self.n
+
+    def bytes(self):
+        if self.param_details.get("_no_perf") or self.bpe_in is None or self.M <= 0:
+            return None
+        return 2 * self.M * self.n * self.n * self.bpe_in
+
+
+class mxfp8_gemv:
+    """
+    Flash SGLang MXFP8 GEMV / shuffled GEMM family
+    (`sglang::mxfp8_gemv::mxfp8_gemv_kernel`, `_mxfp8_shuffled_gemm_kernel`).
+
+    Shapes stamped by injector (M, N, K) or parsed from parent linear args.
+    """
+
+    category = "GEMM"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        try:
+            if dims and len(dims) >= 2 and dims[0] and dims[1]:
+                # A(M,K) @ B(N,K) style GEMV/GEMM
+                M, K = dims[0][0], dims[0][-1]
+                N = dims[1][0] if len(dims[1]) == 2 else dims[1][1]
+            else:
+                M = int(args.get("M") or args.get("num_tokens") or 0)
+                N = int(args.get("N") or 0)
+                K = int(args.get("K") or 0)
+                if min(M, N, K) <= 0:
+                    raise ValueError("missing gemv dims")
+            return {"M": M, "N": N, "K": K, "dtype": "fp8"}
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return 2 * p["M"] * p["N"] * p["K"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # MXFP8 activations/weights ~1B, BF16 out ~2B
+        return p["M"] * p["K"] + p["N"] * p["K"] + p["M"] * p["N"] * 2
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "fp8"
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class router_gemv_split_k:
+    """
+    Flash SGLang router GEMV (`_router_gemv_split_k` / `rocm_router_gemv_split_k`).
+    """
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        try:
+            if dims and len(dims) >= 2 and dims[0] and dims[1]:
+                M, K = dims[0][0], dims[0][-1]
+                E = dims[1][0]
+            else:
+                M = int(args.get("M") or args.get("num_tokens") or 0)
+                E = int(args.get("E") or args.get("num_experts") or 0)
+                K = int(args.get("K") or args.get("hidden_dim") or 0)
+                if min(M, E, K) <= 0:
+                    raise ValueError("missing router dims")
+            return {
+                "M": M,
+                "E": E,
+                "K": K,
+                "dtype_in": types[0] if types else "c10::BFloat16",
+            }
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return 2 * p["M"] * p["E"] * p["K"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe = name2bpe(p["dtype_in"]) or 2
+        return p["M"] * p["K"] * bpe + p["E"] * p["K"] * bpe + p["M"] * p["E"] * 4
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map(self.param_details.get("dtype_in"))
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class router_gate:
+    """Flash SGLang `_router_gate` / `rocm_router_gate` (topk over expert logits)."""
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        try:
+            if dims and len(dims) >= 3 and dims[2]:
+                M, E = dims[2][0], dims[2][1]
+                topk = dims[0][1] if dims[0] and len(dims[0]) > 1 else 6
+            else:
+                M = int(args.get("M") or args.get("num_tokens") or 0)
+                E = int(args.get("E") or args.get("num_experts") or 0)
+                topk = int(args.get("topk") or 6)
+                if min(M, E) <= 0:
+                    raise ValueError("missing gate dims")
+            return {"M": M, "E": E, "topk": topk}
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return 6 * p["M"] * p["E"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["M"] * p["E"] * 2 + p["M"] * p["topk"] * 8
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "bf16"
+
+    def get_maf_type(self):
+        return "vector"
