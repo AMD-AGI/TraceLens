@@ -85,11 +85,11 @@ def _inject_named_owners(trace_tree, pattern, pseudo_name, extra=None):
 
 
 def _inject_aten_topk_parents(trace_tree, model_name):
-    """Wrap Flash PD aten::topk score selections in a dedicated pseudo parent.
+    """Attach a Flash indexer TopK pseudo around qualifying aten::topk ops.
 
-    Only attaches when the topk input looks like an indexer score matrix
-    (rank-2 float buffer with a large second dim) so unrelated aten::topk
-    sites are left alone.
+    Prefer injecting above the event when it has a parent; if it is a CPU root
+    (common on Flash PD captures), wrap its children instead so kernel time
+    still rolls under a FLOPs-capable pseudo name.
     """
     uids = list(trace_tree.name2event_uids.get(ATEN_TOPK, []))
     for uid in uids:
@@ -99,6 +99,11 @@ def _inject_aten_topk_parents(trace_tree, model_name):
         parent = trace_tree.get_parent_event(evt)
         if parent is not None and parent.get("name") == "pseudo_flash_indexer_topk":
             continue
+        children = evt.get("children") or []
+        if len(children) == 1:
+            child = trace_tree.get_UID2event(children[0])
+            if child and child.get("name") == "pseudo_flash_indexer_topk":
+                continue
         args = evt.get("args") or {}
         dims = args.get("Input Dims") or []
         types = args.get("Input type") or []
@@ -110,10 +115,22 @@ def _inject_aten_topk_parents(trace_tree, model_name):
         dtype0 = str(types[0]) if types else ""
         if types and "int" in dtype0.lower() and "float" not in dtype0.lower():
             continue
-        inject_pseudo_op_above_event(
-            trace_tree,
-            evt,
-            "pseudo_flash_indexer_topk",
-            shape_donor_evt=evt,
-            extra_args={"v4_model_name": model_name, "indexer_topk_parent": True},
-        )
+        extra = {"v4_model_name": model_name, "indexer_topk_parent": True}
+        if parent is None:
+            if not children and not evt.get("gpu_events"):
+                continue
+            inject_pseudo_op_wrap_children(
+                trace_tree,
+                evt,
+                "pseudo_flash_indexer_topk",
+                shape_donor_evt=evt,
+                extra_args=extra,
+            )
+        else:
+            inject_pseudo_op_above_event(
+                trace_tree,
+                evt,
+                "pseudo_flash_indexer_topk",
+                shape_donor_evt=evt,
+                extra_args=extra,
+            )
