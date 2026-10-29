@@ -18,7 +18,7 @@ Detailed procedure for the **model-visualizer** skill ([SKILL.md](SKILL.md)). Re
 - [Config overrides](#config-overrides)
 - [Attention implementation](#attention-implementation)
 - [Device sharding](#device-sharding)
-- [Every CLI option](#every-cli-option)
+- [Other flags](#other-flags)
 - [Footguns](#footguns)
 
 ## Workflow
@@ -49,7 +49,7 @@ Take every value the user already gave. Ask only for the gaps.
 | Partition counts | no | `--tp 1 --pp 1 --ep 1` (that axis stays unsplit) |
 | Shapes | no | on (`--no-shapes` only when the user asks to skip them) |
 
-Before writing the command, walk [Config overrides](#config-overrides), [Attention implementation](#attention-implementation), [Device sharding](#device-sharding), and [Every CLI option](#every-cli-option). Each option the user named becomes a flag. An option they left out stays at the default in this table. Do not pass a default that would overrule the checkpoint: leaving `--attention` unset is what preserves a checkpoint that asks for something other than `sdpa`.
+Before writing the command, walk [Config overrides](#config-overrides), [Attention implementation](#attention-implementation), [Device sharding](#device-sharding), and [Other flags](#other-flags). Each option the user named becomes a flag. An option they left out stays at the exporter default. Do not pass a default that would overrule the checkpoint: leaving `--attention` unset is what preserves a checkpoint that asks for something other than `sdpa`.
 
 A local directory is a checkpoint when it contains `config.json`. A path to `modeling_*.py` is `--code-path`, not the positional source. A GitHub repo that is not already whitelisted needs `--allow-repo OWNER/REPO` or `TRACELENS_ALLOWED_GITHUB_REPOS`.
 
@@ -195,8 +195,6 @@ Rules:
 | `flash_attn`, `flash_attn_2`, or `kernels-community/flash-attn` | that string, unchanged |
 | any other implementation the modeling file compares against | the string they gave, unchanged |
 
-`eager` draws the matmul and softmax chain. `sdpa` draws one fused kernel. `flash_attention_2`, `flash_attention_3`, `flash_attention`, `flash_attn`, `flash_attn_2`, and `kernels-community/flash-attn` take the flash arm.
-
 Do not pass `--attention sdpa` merely because that is the usual default. Passing it forces `sdpa` on a checkpoint that asked for something else. Combine `--attention` with `--sequence-layout`, `--phase`, `--cache`, `--mode`, and `--device` when the user named those too. Each flag is independent and each picks one arm.
 
 ## Device sharding
@@ -211,54 +209,37 @@ Decide the source first:
 | vLLM | `--engine vllm` plus the counts. Modeling source is the pin `vllm-project/vllm@v0.32.0` unless `--code-path` or `--github` already names a file |
 | SGLang | `--engine sglang` plus the counts. Pin `sgl-project/sglang@v0.5.22`, with the same exception |
 
-Engine plans are read from the parallel-layer classes in that source, not from a Hugging Face plan dict. The classes are `ColumnParallelLinear`, `MergedColumnParallelLinear`, `QKVParallelLinear`, `RowParallelLinear`, `VocabParallelEmbedding`, `ParallelLMHead`, and `FusedMoE`. vLLM pipeline stages use `make_layers`. SGLang uses `make_pp_layers`. A subclass is matched by its longest matching suffix when the exact name misses. `ReplicatedLinear` is not sharded.
-
 `--engine` does not replace the counts. "vLLM tensor parallel 8 and pipeline parallel 2" is `--engine vllm --tp 8 --pp 2`. "SGLang, tp 2, expert parallel 4" is `--engine sglang --tp 2 --ep 4`. "Sharded across 8 GPUs" with no engine is Hugging Face `--tp 8`.
 
 When the user also passes `--code-path` or `--github`, that file is the modeling source and the engine pin is not fetched. Still pass `--engine` if they asked for vLLM or SGLang sharding: it selects the engine plan parser instead of the Hugging Face plan dicts.
 
 Counts are integers of at least 1. A count that does not divide heads, intermediate size, expert count, or layer count is still exported. The warning on stdout is expected. Report every `*_subgraph_*.html` the command names.
 
-## Every CLI option
+## Other flags
 
-Set a flag when the user asked for that behavior. Leave a default off the command line when passing it would change the drawing.
+Pass a flag only when the user asked for that behavior. Leave these at the exporter default, and do not put them on the command line: rectangular layout, prefill, cold cache, inference, `--device hip`, shapes on, meta-device pass on, constants dropped from HTML, auto-venv on, inline expansion on, port 8765. The positional model id is enough; do not also pass `--checkpoint`. The full flag list lives in the Visualizer README.
 
 | User asked for | Flag |
 | --- | --- |
-| Browser file, email, or "save HTML" | `-o <file>.html` and no `--serve` |
-| JSON payload for another tool | `-o <file>.json` |
+| An HTML file | `-o <file>.html` and no `--serve` |
+| A JSON payload | `-o <file>.json` |
 | HTML from a payload already written | `--from-payload <file>.json -o <file>.html` (this skips loading the model) |
-| Watch it in a browser now | `--serve` (add `--open` only when they asked to open a browser) |
-| A port other than 8765 | `--port N` together with `--serve` |
-| A display name other than the checkpoint id | `--title TEXT` |
-| The same model via the long option | `--checkpoint` / `-c`. The positional source is the usual form; if both are set, `--checkpoint` wins |
+| A live viewer | `--serve`, and `--open` only when they asked to open a browser |
+| Packed tokens `[1, nnz, ...]` | `--sequence-layout packed` |
+| One new token | `--phase decode` (decode always reads a cache) |
+| A cache that already holds keys and values | `--cache warm` |
+| A training forward (`self.training` true) | `--mode training` |
+| Branches for another accelerator | `--device` one of `cuda`, `npu`, `xpu`, `cpu` |
 | No symbolic shapes | `--no-shapes` |
 | Skip the meta-device pass | `--no-meta-shapes` |
 | Stay on the installed transformers | `--no-auto-venv` |
-| Keep weight and constant nodes in the HTML | `--no-drop-constants` (JSON always keeps them) |
-| Padded batch `[B, S, ...]` | `--sequence-layout rectangular` (default) |
-| Packed tokens `[1, nnz, ...]` | `--sequence-layout packed` |
-| Prompt scoring | `--phase prefill` (default) |
-| One new token | `--phase decode` (decode always reads a cache) |
-| First forward | `--cache cold` (default) |
-| Cache already holds keys and values | `--cache warm` |
-| An attention implementation | see [Attention implementation](#attention-implementation) |
-| Training forward (`self.training` true) | `--mode training` |
-| Draw the graph for a different accelerator | `--device` one of `hip` (default), `cuda`, `npu`, `xpu`, `cpu` |
-| One or more config fields | see [Config overrides](#config-overrides) |
-| Tensor, pipeline, or expert split, and which plan | see [Device sharding](#device-sharding) |
-| Explicit `config.json` | `--config-path PATH` |
-| Explicit modeling file | `--code-path PATH` |
-| Modeling source from GitHub | `--github` / `-g`, plus `--allow-repo` when the repo is not already allowed |
-| The parsed AST on disk | `--dump-ast PATH` |
-| Extra leaf-op name patterns | `--basic-op-add REGEX` (repeatable). Defaults already include `(?i)aten.`, `(?i).aten.`, `(?i)^aten_` |
-| Drop one of those default patterns | `--basic-op-remove REGEX` with the exact default text |
-| Tensor housekeeping in the detailed graph | `--all-tensor-ops` |
-| Flat op list | `--operators-json PATH` |
+| Weight and constant nodes in the HTML | `--no-drop-constants` (JSON always keeps them) |
+| An explicit modeling file | `--code-path PATH` |
+| Modeling source from GitHub | `--github`, plus `--allow-repo` when the repo is not already allowed |
+| A flat operator list | `--operators-json PATH` |
 | Opaque modules, no internal steps | `--no-inline-expansion` |
-| Debug one `nn.Module` | `--torch-module PKG.MOD:FACTORY` with exactly one of `--input-shape` or repeated `--input-spec` |
 
-`--torch-module` is a debugging path for a plain `torch.nn.Module`. It is not the Hugging Face export. Use `--input-shape N,...` for one floating-point input traced with `torch.fx`. Use `--input-spec NAME=DIM,...[:DTYPE]` (repeatable) for several inputs, integer inputs, or shape-dependent control flow; those are traced with `torch.export`. A dimension may be a symbol such as `B` or `S`, and a name shared across inputs is one dimension.
+`--torch-module` debugs one plain `torch.nn.Module`. It is not the Hugging Face export. Pair it with exactly one of `--input-shape` or repeated `--input-spec`.
 
 Allowed GitHub sources without `--allow-repo`: the checkpoint's own Hub tree, `huggingface/transformers`, `fla-org/flash-linear-attention`, and the pinned vLLM and SGLang repos. Everything else is blocked until it is allowlisted.
 

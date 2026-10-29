@@ -26,7 +26,7 @@ Drive **`visualize_model_in_explorer`** so a Hugging Face checkpoint, a local ch
 
 ## Full procedure
 
-Follow **[reference.md](reference.md)** for every step: inputs, install check, the single CLI invocation, config overrides, attention selection, Hugging Face / vLLM / SGLang sharding, the rest of the flag table, verification, and footguns. The tool's long flag list lives in [the Visualizer README](../../../../Visualizer/README.md).
+Follow **[reference.md](reference.md)** for every step: inputs, install check, the single CLI invocation, config overrides, attention selection, Hugging Face / vLLM / SGLang sharding, the other flags, verification, and footguns. The tool's long flag list lives in [the Visualizer README](../../../../Visualizer/README.md).
 
 ## Workflow index
 

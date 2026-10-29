@@ -36,7 +36,7 @@ Python 3.10 or newer. No GPU, ROCm, or CUDA wheel is required. A gated checkpoin
 
 One of:
 
-- a Hugging Face model id (`moonshotai/Kimi-K3`)
+- a Hugging Face model id (`org/model`)
 - a local directory that contains `config.json`
 - a GitHub modeling repo that is already allowlisted, or passed with `--allow-repo`
 
@@ -113,7 +113,7 @@ A live viewer (`--serve`, default port 8765) prints `Open viewer: http://127.0.0
 4. Report the absolute path (or the viewer URL)
 ```
 
-The procedure, flag table, and footguns are in [reference.md](skills/model-visualizer/reference.md).
+The procedure and footguns are in [reference.md](skills/model-visualizer/reference.md).
 
 | Choice | What the skill does |
 | --- | --- |

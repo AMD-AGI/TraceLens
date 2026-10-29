@@ -15,29 +15,7 @@ This topic shows how to run the *model visualizer* agent. The agent exports a
 Hugging Face checkpoint, a local checkpoint directory, or a whitelisted modeling
 repo to an interactive Model Explorer graph. The export parses the model's
 `modeling_*.py` source and fills symbolic tensor shapes. It runs on CPU and
-does not load checkpoint weights.
-
-The skill and the step-by-step procedure live in the package at
-`TraceLens/Agent/Visualizer/`. The exporter's flag reference is
-`TraceLens/Visualizer/README.md`.
-
-## Before you begin
-
-Install TraceLens with the Visualizer extra (see
-[Install TraceLens](../install/install.md)):
-
-```bash
-pip install -e ".[Visualizer]"
-```
-
-From a published install:
-
-```bash
-pip install "TraceLens[Visualizer] @ git+https://github.com/AMD-AGI/TraceLens.git"
-```
-
-You need Python 3.10 or newer and network access the first time a Hub model is
-fetched. No GPU is required. Set `HF_TOKEN` for a gated checkpoint.
+does not load checkpoint weights. A gated checkpoint needs `HF_TOKEN`.
 
 ## Run the agent from a chat
 
@@ -87,10 +65,10 @@ its font textures load from unpkg the first time you open the file.
 
 Shapes use the symbols `B` (batch), `S` (sequence), `H` (hidden), and the
 attention, expert, and vocabulary symbols documented in the Visualizer README.
-The default drawing is a cold rectangular prefill in inference mode, with
-attention taken from the checkpoint and `--device hip` selecting HIP branches
-in the modeling source. `--device` does not choose the machine that runs the
-export.
+Unless you name another regime, the graph shows a cold rectangular prefill
+in inference mode, and attention follows the checkpoint. `--device hip` draws
+the HIP branches in the modeling source. It does not choose the machine that
+runs the export.
 
 ## What the agent runs
 
