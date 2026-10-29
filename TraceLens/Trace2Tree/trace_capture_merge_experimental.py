@@ -19,8 +19,11 @@ from collections import OrderedDict, deque, defaultdict
 from typing import Dict, List, Optional, Tuple
 import json
 import os
+import re
 import warnings
 import TraceLens
+
+_SGLANG_CAPTURE_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_\d+_")
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
@@ -639,7 +642,7 @@ def load_capture_folder(
         key = "{}_{}_{}".format(role, batch_size, mode)
         batch_sizes[role].append(int(batch_size))
         rbs = entry.get("request_bs")
-        if rbs is not None:
+        if rbs is not None and _SGLANG_CAPTURE_PATTERN.match(filename):
             request_bs_map[role][int(rbs)] = int(batch_size)
         filepath = os.path.join(capture_folder, filename)
         if not os.path.isfile(filepath):
