@@ -61,6 +61,7 @@ def _capture_kernel_name(event):
     return event.get("args", {}).get("kernel", event["name"])
 
 
+
 def _align_capture_to_graph(capture_events, graph_events):
     """
     Robust greedy alignment of capture dispatch events to graph kernel
@@ -82,7 +83,6 @@ def _align_capture_to_graph(capture_events, graph_events):
             c_event = capture_events[ci]
             ci += 1
             c_name = _capture_kernel_name(c_event)
-            # Memcpy/Memset events carry no kernel arg — match when both sides agree
             if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
                 "Memset" in c_event["name"]
                 and ("Memset" in g_name or "fillBuffer" in g_name)
@@ -627,6 +627,7 @@ def load_capture_folder(
 
     result: Dict[str, List[str]] = defaultdict(list)
     batch_sizes: Dict[str, List[int]] = defaultdict(list)
+    request_bs_map: Dict[str, Dict[int, int]] = defaultdict(dict)
     for entry in metadata_list:
         filename = entry["file"]
         batch_size = entry["batch_size"]
@@ -637,6 +638,9 @@ def load_capture_folder(
             continue
         key = "{}_{}_{}".format(role, batch_size, mode)
         batch_sizes[role].append(int(batch_size))
+        rbs = entry.get("request_bs")
+        if rbs is not None:
+            request_bs_map[role][int(rbs)] = int(batch_size)
         filepath = os.path.join(capture_folder, filename)
         if not os.path.isfile(filepath):
             print("Warning: capture file not found, skipping: {}".format(filepath))
@@ -651,7 +655,7 @@ def load_capture_folder(
         )
     )
 
-    return dict(result), batch_sizes
+    return dict(result), batch_sizes, dict(request_bs_map)
 
 
 def _load_all_capture_sources(capture_map, role, batch_sizes):
@@ -802,7 +806,7 @@ def merge_capture_trace_into_graph(
 
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
 
-    capture_map, capture_batch_sizes = load_capture_folder(
+    capture_map, capture_batch_sizes, request_bs_map = load_capture_folder(
         capture_folder,
         metadata_json_path,
         extract_rank(os.path.basename(graph_tree_filepath)),
@@ -844,7 +848,13 @@ def merge_capture_trace_into_graph(
             batch_size = (batch_size,)
         candidate_batch_sizes = set()
         for bs in batch_size:
-            cbs = find_closest_batch_size(int(bs), capture_batch_sizes[role])
+            bs_int = int(bs)
+            rmap = request_bs_map.get(role, {})
+            if rmap:
+                token_bs = find_closest_batch_size(bs_int, sorted(rmap.keys()))
+                if token_bs is not None:
+                    bs_int = rmap[token_bs]
+            cbs = find_closest_batch_size(bs_int, capture_batch_sizes[role])
             if cbs is not None:
                 candidate_batch_sizes.add(cbs)
         if not candidate_batch_sizes:
