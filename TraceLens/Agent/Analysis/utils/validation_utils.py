@@ -968,6 +968,8 @@ def _validate_report_reasoning_candidates(content):
     ``<!-- reasoning-candidate tier=<tier> -->`` markers must equal the number
     of ``#### P<N>:`` headings in the corresponding subsection. Missing markers
     break Hyperloom's ``parse_analysis_md()`` which uses them as block delimiters.
+    Each compute block must also keep its **Data:** table: ``analysis.json``
+    reads its kernels from that table alone.
     """
     errors = []
     checks = [
@@ -989,6 +991,13 @@ def _validate_report_reasoning_candidates(content):
                 f"R5: {label} has {n_headings} #### P<N>: headings but "
                 f"{n_markers} reasoning-candidate tier={tier} markers"
             )
+    lines = content.splitlines()
+    errors.extend(
+        f"R5: compute P{rank} at line {start + 1} has no **Data:** table; paste it "
+        f"verbatim from its category findings"
+        for start, end, rank in _iter_candidate_blocks(content, TIER_COMPUTE)
+        if _find_data_table(lines, start, end) is None
+    )
     return errors
 
 

@@ -3225,6 +3225,21 @@ def test_validate_report_reasoning_candidates_r5(tmp_path):
     assert any("R5:" in e for e in errs)
 
 
+def test_validate_report_r5_compute_block_needs_its_data_table():
+    """analysis.json names a compute finding's kernels from its Data table only."""
+    block = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### P1: GEMM (hipBLASLt)\n\n**Identification:** prose only.\n"
+    )
+    table = "\n**Data:**\n\n| Operation | Args |\n|---|---|\n| aten::mm | (4, 8) |\n"
+
+    assert _validate_report_reasoning_candidates(block + table) == []
+    assert _validate_report_reasoning_candidates(block) == [
+        "R5: compute P1 at line 1 has no **Data:** table; paste it verbatim from "
+        "its category findings"
+    ]
+
+
 def test_extract_detailed_analysis_subsection():
     content = "## Detailed Analysis\n\n### Compute Kernel Insights\n\n#### P1: x\nbody\n### Other\n"
     sub = _extract_detailed_analysis_subsection(content, "### Compute Kernel Insights")
@@ -3625,9 +3640,9 @@ def test_standalone_module_candidates(tmp_path):
     assert mlp.kernel_type_signature == ["GEMM", "Add"]
     assert mlp.total_kernel_time_us == 2 * (50 + 50)
     # Data moved of each kernel's perf row, split into in and out.
-    assert [(k.data_in_mb, k.data_out_mb) for k in mlp.kernels] == pytest.approx(
-        [(10 * 18 / 26, 10 * 8 / 26), (4.0, 2.0)]
-    )
+    assert [
+        mb for k in mlp.kernels for mb in (k.data_in_mb, k.data_out_mb)
+    ] == pytest.approx([10 * 18 / 26, 10 * 8 / 26, 4.0, 2.0])
 
 
 def test_standalone_attention_narrows_to_core():
