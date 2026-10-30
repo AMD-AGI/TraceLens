@@ -8434,6 +8434,14 @@ def _quant_storage_dtype(quant: dict[str, Any]) -> str | None:
     bits = quant.get("bits")
     if method in {"gptq", "awq"} or bits in {4, 8}:
         return "int8" if bits == 8 else "int4"
+    # Quark (AMD) nests the scheme under global_quant_config.weight.dtype
+    # (e.g. MXFP4 -> "fp4" with per-group e8m0 scales).
+    if method == "quark" or "global_quant_config" in quant:
+        gqc = quant.get("global_quant_config") or {}
+        weight = gqc.get("weight") if isinstance(gqc.get("weight"), dict) else None
+        wd = weight.get("dtype") if weight else None
+        if isinstance(wd, str) and wd:
+            return _clean_dtype(wd)
     return None
 
 
