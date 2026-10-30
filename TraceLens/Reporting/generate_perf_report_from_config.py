@@ -26,13 +26,16 @@ columns and a ``diff_stats`` sheet to that job's report and writes nothing for
 the compared trace.
 
 One job writes ``perf_report.xlsx`` and ``perf_report_csvs/``. With more than
-one job, every job needs a ``name`` and writes ``perf_report_<name>.xlsx`` and
+one job, every job needs a ``name`` (except under ``combine_by_node``, where it
+defaults to the node id) and writes ``perf_report_<name>.xlsx`` and
 ``perf_report_<name>_csvs/``. Before the first job runs, the config is written
 back as ``run_config.resolved.yaml`` with every flag explicit and absolute
 paths. Jobs run in order, and the first failure stops the run.
 
-With ``aggregation: {policy: ...}``, every job needs a ``phase``, and a ``node``
-under ``combine_by_node``. After the last job, the jobs' CSVs are combined into
+With ``aggregation: {policy: ...}``, every job needs a ``phase``. Under
+``combine_by_node`` it also needs a ``node``, its index within the phase. The
+node id ``<phase>_<node>`` labels the aggregated rows and is the default
+``name``. After the last job, the jobs' CSVs are combined into
 ``perf_report_aggregated_csvs/`` with ``aggregate_perf_report_csvs``.
 """
 
@@ -107,7 +110,8 @@ class PlannedJob:
     analysis_mode: str
     name: Optional[str]
     phase: Optional[str]
-    node: Optional[str]
+    node: Optional[int]
+    node_id: Optional[str]
     trace_path: str
     platform: Optional[str]
     gpu_arch_json_path: Optional[str]
@@ -168,10 +172,14 @@ def plan_reports(config: Mapping[str, Any]) -> List[PlannedJob]:
             job,
             index,
             mode,
-            require_name=multi,
+            require_name=multi and policy != POLICY_BY_NODE,
             require_phase=policy is not None,
             require_node=policy == POLICY_BY_NODE,
         )
+        node_id = None
+        if policy == POLICY_BY_NODE:
+            node_id = f"{parsed['phase']}_{parsed['node']}"
+            parsed["name"] = parsed["name"] or node_id
         name = parsed["name"]
         if name is not None:
             if name in names:
@@ -184,6 +192,7 @@ def plan_reports(config: Mapping[str, Any]) -> List[PlannedJob]:
                 output_xlsx_path=os.path.join(output_dir, stem + ".xlsx"),
                 output_csvs_dir=os.path.join(output_dir, stem + "_csvs"),
                 kwargs=dict(kwargs),
+                node_id=node_id,
                 **parsed,
             )
         )
@@ -244,7 +253,7 @@ def run_config(
     if policy is not None:
         aggregate_perf_report_csvs(
             [
-                ReportInput(plan.phase, plan.node, plan.output_csvs_dir)
+                ReportInput(plan.phase, plan.node_id, plan.output_csvs_dir)
                 for plan in plans
             ],
             policy,
@@ -419,11 +428,7 @@ def _validate_job(
             raise ConfigError(
                 f"{where}.name is required when there is more than one job."
             )
-    elif (
-        not isinstance(name, str)
-        or not name
-        or any(ch not in _NAME_CHARS for ch in name)
-    ):
+    elif not _is_name(name):
         raise ConfigError(
             f"{where}.name must contain only letters, digits, '_', '-' or '.'."
         )
@@ -432,8 +437,11 @@ def _validate_job(
     if phase is None:
         if require_phase:
             raise ConfigError(f"{where}.phase is required when aggregation is set.")
-    elif not isinstance(phase, str) or not phase.strip():
-        raise ConfigError(f"{where}.phase must be a non-empty string.")
+    elif not _is_name(phase):
+        raise ConfigError(
+            f"{where}.phase must be a non-empty string of letters, digits, "
+            "'_', '-' or '.'."
+        )
 
     node = job.get("node")
     if node is None:
@@ -441,8 +449,8 @@ def _validate_job(
             raise ConfigError(
                 f"{where}.node is required when aggregation.policy is {POLICY_BY_NODE}."
             )
-    elif not isinstance(node, str) or not node.strip():
-        raise ConfigError(f"{where}.node must be a non-empty string.")
+    elif not isinstance(node, int) or isinstance(node, bool) or node < 0:
+        raise ConfigError(f"{where}.node must be a non-negative integer.")
 
     trace_path = _existing_file(job.get("trace_path"), f"{where}.trace_path")
 
@@ -510,6 +518,10 @@ def _validate_job(
         "compare_capture_folder": compare_capture,
         "precomputed_diff_stats": diff_stats,
     }
+
+
+def _is_name(value: Any) -> bool:
+    return isinstance(value, str) and bool(value) and set(value) <= _NAME_CHARS
 
 
 def _existing_file(value: Any, where: str) -> str:

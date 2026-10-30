@@ -480,7 +480,7 @@ def _phase_jobs(tmp_path, phases):
         {
             "name": f"job{i}",
             "phase": phase,
-            "node": f"node{i}",
+            "node": i,
             "trace_path": _touch(tmp_path, f"t{i}.json"),
             "platform": "MI300X",
         }
@@ -514,12 +514,23 @@ def test_by_node_requires_node_on_every_job(tmp_path):
         plan_reports(cfg)
 
 
-@pytest.mark.parametrize("node", ["", "   ", 1])
-def test_blank_node_rejected(tmp_path, node):
+@pytest.mark.parametrize("node", [-1, "a", True])
+def test_bad_node_rejected(tmp_path, node):
     jobs = _phase_jobs(tmp_path, ["decode"])
     jobs[0]["node"] = node
-    with pytest.raises(ConfigError, match="node must be a non-empty string"):
+    with pytest.raises(ConfigError, match="node must be a non-negative integer"):
         plan_reports(_config(tmp_path, jobs=jobs))
+
+
+def test_by_node_builds_node_id_and_defaults_name(tmp_path):
+    jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
+    for job in jobs:
+        del job["name"]
+    plans = plan_reports(
+        _config(tmp_path, jobs=jobs, aggregation={"policy": "combine_by_node"})
+    )
+    assert [plan.node_id for plan in plans] == ["prefill_0", "decode_1"]
+    assert [plan.name for plan in plans] == ["prefill_0", "decode_1"]
 
 
 def test_resolved_config_records_phase_node_and_aggregation(tmp_path):
@@ -529,7 +540,7 @@ def test_resolved_config_records_phase_node_and_aggregation(tmp_path):
     )
     assert resolved["aggregation"] == {"policy": "combine_by_node"}
     assert [job["phase"] for job in resolved["jobs"]] == ["prefill", "decode"]
-    assert [job["node"] for job in resolved["jobs"]] == ["node0", "node1"]
+    assert [job["node"] for job in resolved["jobs"]] == [0, 1]
 
 
 def test_aggregation_writes_combined_csvs(tmp_path):
@@ -551,8 +562,8 @@ def test_aggregation_writes_combined_csvs(tmp_path):
     )
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
-    assert "node0,prefill,busy_time,2.0,50.0" in text
-    assert "node1,decode,busy_time,2.0,50.0" in text
+    assert "prefill_0,prefill,busy_time,2.0,50.0" in text
+    assert "decode_1,decode,busy_time,2.0,50.0" in text
     assert "all,decode+prefill,busy_time,4.0,50.0" in text
 
 
@@ -606,8 +617,8 @@ def test_job_must_be_a_mapping(tmp_path):
         plan_reports(_config(tmp_path, jobs=["nope"]))
 
 
-@pytest.mark.parametrize("phase", ["", "   ", 1])
-def test_blank_phase_rejected(tmp_path, phase):
+@pytest.mark.parametrize("phase", ["", "   ", 1, "a/b"])
+def test_bad_phase_rejected(tmp_path, phase):
     jobs = _phase_jobs(tmp_path, [phase])
     with pytest.raises(ConfigError, match="phase must be a non-empty string"):
         plan_reports(_config(tmp_path, jobs=jobs, aggregation={"policy": "combine"}))
