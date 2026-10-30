@@ -20,11 +20,14 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     DimResolutionError,
     RooflineOp,
     RooflineProjection,
+    _RT,
+    _attention_boundary_cost,
     _attr_text,
     _classify_normalization,
     _dispatch_op_cost,
     _engine_boundary_cost,
     _engine_head_cost,
+    _introspect_weight_bpe,
     _moe_cost,
     _parse_op_node,
     _project_op,
@@ -143,7 +146,15 @@ def test_parse_op_node_classifies_an_engine_parallel_linear_as_linear():
     }
     parsed = _parse_op_node(node)
     assert parsed is not None
-    _section, computation, class_name, _operation, _output_text, _input_texts = parsed
+    (
+        _section,
+        computation,
+        class_name,
+        _operation,
+        _output_text,
+        _input_texts,
+        _role,
+    ) = parsed
     assert computation == "Linear"
     assert class_name == "QKVParallelLinear"
 
@@ -372,6 +383,60 @@ def test_moe_cost_missing_top_k_or_intermediate_returns_none():
     dims = {"B": 1, "S": 10, "H": 4096}
     assert _moe_cost(dims, top_k=None, intermediate_size=1024, bpe=2) is None
     assert _moe_cost(dims, top_k=2, intermediate_size=None, bpe=2) is None
+
+
+def test_introspect_weight_bpe_reads_quant_config():
+    # MXFP4 (quark) -> 4-bit element + e8m0 scale per 32.
+    assert (
+        _introspect_weight_bpe(
+            {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "fp4"}}}
+        )
+        == 0.53125
+    )
+    assert _introspect_weight_bpe({"quant_method": "fp8", "fmt": "e4m3"}) == 1.0
+    assert (
+        _introspect_weight_bpe(
+            {"quant_method": "bitsandbytes", "load_in_4bit": True, "bnb_4bit_quant_type": "nf4"}
+        )
+        == 0.5
+    )
+    assert _introspect_weight_bpe(None) is None
+    assert _introspect_weight_bpe({"quant_method": "unknown"}) is None
+
+
+def test_moe_cost_uses_introspected_weight_bpe():
+    dims = {"B": 1, "S": 10, "H": 4096}
+    _RT.reset()
+    try:
+        _, _, _, bytes_bf16, _ = _moe_cost(dims, top_k=2, intermediate_size=1024, bpe=2)
+        _RT.weight_bpe = 0.5  # as if MXFP4 weights were introspected
+        _, _, _, bytes_fp4, _ = _moe_cost(dims, top_k=2, intermediate_size=1024, bpe=2)
+    finally:
+        _RT.reset()
+    # Weight reads dominate the GEMM, so a smaller weight dtype cuts total bytes.
+    assert bytes_fp4 < bytes_bf16
+
+
+def test_attention_boundary_cost_honors_sliding_window_mix():
+    dims = {"B": 1, "S": 1, "past_len": 4096}
+    base = dict(attn_heads=8, attn_kv_heads=2, attn_head_dim=64, n_layers=4)
+    _RT.reset()
+    try:
+        # All-global (no sliding window) vs mixed (3 of 4 layers windowed at 512).
+        for k, v in base.items():
+            setattr(_RT, k, v)
+        _RT.sliding_window = None
+        _RT.n_local_layers = 0
+        cat, maf, flops_global, bytes_global = _attention_boundary_cost(dims, bpe=2)
+        _RT.sliding_window = 512
+        _RT.n_local_layers = 3
+        _, _, flops_windowed, bytes_windowed = _attention_boundary_cost(dims, bpe=2)
+    finally:
+        _RT.reset()
+    assert cat == "Attention" and maf == "matrix"
+    # Windowing the local layers shrinks the effective KV length -> fewer FLOPs/bytes.
+    assert flops_windowed < flops_global
+    assert bytes_windowed < bytes_global
 
 
 def test_moe_cost_missing_hidden_dim_returns_none():

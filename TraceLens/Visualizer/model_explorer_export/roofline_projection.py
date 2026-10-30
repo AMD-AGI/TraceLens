@@ -399,6 +399,7 @@ def project_roofline(
     dims = build_projection_dims(
         spec, batch_size=batch_size, seq_len=seq_len, extra_dims=extra_dims
     )
+    _populate_introspection(spec)
     moe_top_k = spec.num_experts_per_tok
     moe_intermediate_size = spec.moe_intermediate_size or spec.intermediate_size
     payload = build_model_explorer_payload(
@@ -414,7 +415,7 @@ def project_roofline(
         parsed = _parse_op_node(node)
         if parsed is None:
             continue
-        section, computation, class_name, operation, output_text, input_texts = parsed
+        section, computation, class_name, operation, output_text, input_texts, role = parsed
         instances = _repeat_count(str(node.get("namespace") or ""))
         result.ops.append(
             _project_op(
@@ -430,6 +431,7 @@ def project_roofline(
                 gpu_arch,
                 moe_top_k,
                 moe_intermediate_size,
+                role,
             )
         )
     return result
@@ -484,7 +486,8 @@ def _parse_op_node(
     )
     namespace = str(node.get("namespace") or "")
     section = namespace.split("/")[-1] if namespace else node_id
-    return section, computation, class_name, operation, output_text, input_texts
+    role = _attr_text(attrs, "role") or ""
+    return section, computation, class_name, operation, output_text, input_texts, role
 
 
 def _project_op(
@@ -500,6 +503,7 @@ def _project_op(
     gpu_arch: dict[str, Any] | None,
     moe_top_k: int | None,
     moe_intermediate_size: int | None,
+    role: str = "",
 ) -> RooflineOp:
     base = RooflineOp(
         name=node_id,
@@ -514,6 +518,26 @@ def _project_op(
     )
     _dims_only, dtype = _split_shape_text(output_text)
     bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+
+    # Introspective boundaries: the modeling source tags each module with a role
+    # ("attention"/"ffn") and the arch spec says whether the model is MoE, so we
+    # cost the custom attention and routed-expert blocks without matching names.
+    if role == "attention":
+        att = _attention_boundary_cost(dims, bpe)
+        if att is not None:
+            category, maf_type, flops, bytes_moved = att
+            try:
+                oshape = resolve_shape(_dims_only, dims)
+                base.output_elements = prod(oshape) if oshape else 1
+            except DimResolutionError:
+                base.output_elements = None
+            return _finish_op(base, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+    if role == "ffn" and _RT.moe_top_k and "moe" in class_name.lower():
+        moe = _moe_cost(dims, _RT.moe_top_k, _RT.moe_intermediate, bpe)
+        if moe is not None:
+            category, maf_type, flops, bytes_moved, output_elements = moe
+            base.output_elements = output_elements
+            return _finish_op(base, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
 
     engine_cost = _engine_boundary_cost(
         class_name, dims, moe_top_k, moe_intermediate_size, bpe
@@ -611,6 +635,120 @@ def _engine_head_cost(
     return "GEMM", "matrix", flops, bytes_moved, tokens * vocab
 
 
+
+class _RuntimeIntrospection:
+    """Per-run values introspected from the ArchitectureSpec (config.json +
+    modeling source) so MoE / attention / quantization costs need no hardcoded
+    model names. Populated by :func:`project_roofline`."""
+
+    __slots__ = (
+        "weight_bpe", "moe_top_k", "moe_intermediate", "attn_heads",
+        "attn_kv_heads", "attn_head_dim", "sliding_window", "n_local_layers",
+        "n_layers",
+    )
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.weight_bpe = None
+        self.moe_top_k = None
+        self.moe_intermediate = None
+        self.attn_heads = None
+        self.attn_kv_heads = None
+        self.attn_head_dim = None
+        self.sliding_window = None
+        self.n_local_layers = None
+        self.n_layers = None
+
+
+_RT = _RuntimeIntrospection()
+
+
+def _introspect_weight_bpe(quant):
+    """Bytes/element of the quantized WEIGHT storage, from a HF
+    quantization_config. None when weights are unquantized."""
+    if not isinstance(quant, dict):
+        return None
+    try:
+        from TraceLens.ModelUtils.shape_inference import _quant_storage_dtype
+        wd = _quant_storage_dtype(quant)
+    except Exception:
+        wd = None
+    if not wd:
+        return None
+    w = wd.lower()
+    if "fp4" in w or "float4" in w or "mxfp4" in w or "e2m1" in w:
+        return 0.53125  # 4-bit element + 1-byte e8m0 scale per 32 (MXFP4)
+    if "fp8" in w or "float8" in w or "int8" in w:
+        return 1.0
+    if "int4" in w or "nf4" in w:
+        return 0.5
+    return None
+
+
+def _populate_introspection(spec):
+    _RT.reset()
+    cfg = getattr(spec, "raw_config", None) or {}
+    tcfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else cfg
+    _RT.weight_bpe = _introspect_weight_bpe(cfg.get("quantization_config"))
+    _RT.moe_top_k = spec.num_experts_per_tok
+    _RT.moe_intermediate = spec.moe_intermediate_size or spec.intermediate_size
+    _RT.attn_heads = spec.num_attention_heads
+    _RT.attn_kv_heads = spec.num_key_value_heads or spec.num_attention_heads
+    if spec.head_dim:
+        _RT.attn_head_dim = spec.head_dim
+    elif spec.hidden_size and spec.num_attention_heads:
+        _RT.attn_head_dim = spec.hidden_size // spec.num_attention_heads
+    sw = tcfg.get("sliding_window_size") or tcfg.get("sliding_window")
+    _RT.sliding_window = sw if isinstance(sw, int) and sw > 0 else None
+    lli = tcfg.get("local_layer_ids")
+    _RT.n_local_layers = len(lli) if isinstance(lli, list) else None
+    _RT.n_layers = spec.num_hidden_layers
+
+
+def _attention_boundary_cost(dims, bpe):
+    """Roofline cost of ONE attention layer, introspected from the arch spec
+    (query/kv heads, head dim, sliding window, local/global layer mix). KV length
+    is averaged across the local (windowed) and global layers so the per-layer
+    cost times the layer-repeat count reproduces the true aggregate."""
+    if not (_RT.attn_heads and _RT.attn_head_dim):
+        return None
+    try:
+        b = resolve_dim(dims["B"], dims)
+        s = resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError):
+        return None
+    past = 0
+    for key in ("past_len", "past_length", "cache_len", "kv_len"):
+        if key in dims:
+            try:
+                past = resolve_dim(dims[key], dims)
+                break
+            except DimResolutionError:
+                pass
+    ctx = past + s
+    h_q = _RT.attn_heads
+    h_kv = _RT.attn_kv_heads or h_q
+    d_h = _RT.attn_head_dim
+    n_layers = _RT.n_layers or 1
+    if _RT.n_local_layers is not None:
+        n_local = _RT.n_local_layers
+    else:
+        n_local = n_layers if _RT.sliding_window else 0
+    n_global = max(n_layers - n_local, 0)
+    kv_local = min(ctx, _RT.sliding_window) if _RT.sliding_window else ctx
+    eff_n_kv = (n_local * kv_local + n_global * ctx) / n_layers if n_layers else ctx
+    causal = False  # decode / windowed cross-attention: N_Q != N_KV
+    flops = SDPA.flops_func(b, s, h_q, eff_n_kv, h_kv, d_h, d_h, causal)
+    bytes_moved = (
+        SDPA.bytes_func(b, s, h_q, eff_n_kv, h_kv, d_h, d_h, causal, bpe)
+        if bpe is not None
+        else None
+    )
+    return "Attention", "matrix", flops, bytes_moved
+
+
 def _moe_cost(
     dims: dict[str, Any],
     top_k: int | None,
@@ -636,12 +774,13 @@ def _moe_cost(
     gate_up_flops = GEMM.flops_func(
         active_tokens, 2 * intermediate_size, hidden, bias=False
     )
+    wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
     gate_up_bytes = GEMM.bytes_func(
-        active_tokens, 2 * intermediate_size, hidden, False, bpe, bpe, bpe, bpe
+        active_tokens, 2 * intermediate_size, hidden, False, wbpe, wbpe, bpe, bpe
     )
     down_flops = GEMM.flops_func(active_tokens, hidden, intermediate_size, bias=False)
     down_bytes = GEMM.bytes_func(
-        active_tokens, hidden, intermediate_size, False, bpe, bpe, bpe, bpe
+        active_tokens, hidden, intermediate_size, False, wbpe, wbpe, bpe, bpe
     )
     flops = gate_up_flops + down_flops
     bytes_moved = None if bpe is None else gate_up_bytes + down_bytes
