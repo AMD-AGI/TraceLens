@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -520,6 +521,55 @@ def harvest_meta_tensors(checkpoint: str | Path) -> MetaTensorIndex | None:
     return MetaTensorIndex(by_qualified=by_qualified, by_class_attr=by_class_attr)
 
 
+def _tensor_shape_from_output(output: Any) -> tuple[int, ...] | None:
+    """Return the first tensor shape in the result's declared output order.
+
+    Meta hooks see the value a module *actually returned*, which can be a
+    tensor, a positional tuple, a mapping, or a Transformers ``ModelOutput``.
+    ``ModelOutput.to_tuple()`` defines its positional-output contract, so use
+    it rather than guessing that a field called ``logits`` or
+    ``last_hidden_state`` is primary. Generic mappings have no stronger output
+    contract; their insertion order is the only order they declare.
+    """
+
+    def first_shape(value: Any, seen: set[int]) -> tuple[int, ...] | None:
+        if isinstance(value, (str, bytes)) or id(value) in seen:
+            return None
+        seen.add(id(value))
+
+        shape = getattr(value, "shape", None)
+        if isinstance(shape, tuple):
+            return tuple(shape)
+
+        if isinstance(value, (tuple, list)):
+            values = value
+        elif isinstance(value, Mapping):
+            to_tuple = getattr(value, "to_tuple", None)
+            values = to_tuple() if callable(to_tuple) else value.values()
+        else:
+            to_tuple = getattr(value, "to_tuple", None)
+            values = None
+            if callable(to_tuple):
+                try:
+                    values = to_tuple()
+                except Exception:  # noqa: BLE001 - its stored fields remain visible
+                    values = None
+            if values is None:
+                if is_dataclass(value) and not isinstance(value, type):
+                    values = (getattr(value, field.name) for field in fields(value))
+                else:
+                    attrs = getattr(value, "__dict__", None)
+                    values = attrs.values() if isinstance(attrs, dict) else ()
+
+        for item in values:
+            found = first_shape(item, seen)
+            if found is not None:
+                return found
+        return None
+
+    return first_shape(output, set())
+
+
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,
@@ -579,13 +629,9 @@ def trace_meta_shapes(
     def _make_hook(name: str):
         def hook(_module, _input, output):
             try:
-                if isinstance(output, torch.Tensor):
-                    shapes[name] = tuple(output.shape)
-                elif isinstance(output, (tuple, list)):
-                    for item in output:
-                        if isinstance(item, torch.Tensor):
-                            shapes[name] = tuple(item.shape)
-                            break
+                shape = _tensor_shape_from_output(output)
+                if shape is not None:
+                    shapes[name] = shape
             except Exception:
                 pass
 

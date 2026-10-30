@@ -12,7 +12,11 @@ import pytest
 
 from TraceLens.ModelUtils.extract import load_architecture
 from TraceLens.ModelUtils.github import parse_github_url
-from TraceLens.ModelUtils.source import resolve_github_files, resolve_source_files
+from TraceLens.ModelUtils.source import (
+    resolve_engine_modeling_files,
+    resolve_github_files,
+    resolve_source_files,
+)
 from TraceLens.ModelUtils.source_policy import SourcePolicy, set_source_policy
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -282,3 +286,264 @@ def test_resolve_source_files_orders_modeling_before_config_helpers(
     )
 
     assert [path.name for path in files][0] == "modeling_minimax_m3_vl.py"
+
+
+def _fake_repo(tmp_path: Path, files: dict[str, str]):
+    """A ``fetch_github_file`` stand-in serving ``files`` by repo-relative subpath."""
+
+    def fake_fetch(ref, subpath, cache_root=None, **kwargs):
+        content = files.get(subpath)
+        if content is None:
+            return None
+        path = tmp_path / Path(subpath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    return fake_fetch
+
+
+# vLLM's registry keys architectures to (module, class_name); "minimax_m3" is a
+# package whose __init__ only re-exports the real implementation, the way
+# vllm.models.minimax_m3 does from its nvidia/ subpackage.
+_VLLM_REGISTRY = """
+_TEXT_GENERATION_MODELS = {
+    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "MiniMaxM3SparseForCausalLM": ("vllm.models.minimax_m3", "MiniMaxM3SparseForCausalLM"),
+}
+"""
+
+
+def test_resolve_engine_modeling_files_reads_the_vllm_registry(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path,
+            {
+                "vllm/model_executor/models/registry.py": _VLLM_REGISTRY,
+                "vllm/model_executor/models/llama.py": "class LlamaForCausalLM: pass\n",
+            },
+        ),
+    )
+    files, labels, module = resolve_engine_modeling_files(
+        "vllm", {"architectures": ["LlamaForCausalLM"], "model_type": "llama"}
+    )
+    assert [path.name for path in files] == ["llama.py"]
+    assert labels == ["github://vllm-project/vllm@v0.32.0"]
+    assert module == "vllm.model_executor.models.llama"
+
+
+def test_resolve_engine_modeling_files_follows_vllm_package_reexport(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path,
+            {
+                "vllm/model_executor/models/registry.py": _VLLM_REGISTRY,
+                "vllm/models/minimax_m3/__init__.py": (
+                    "from .nvidia.model import MiniMaxM3SparseForCausalLM\n"
+                ),
+                "vllm/models/minimax_m3/nvidia/model.py": (
+                    "class MiniMaxM3SparseForCausalLM: pass\n"
+                ),
+            },
+        ),
+    )
+    files, _labels, module = resolve_engine_modeling_files(
+        "vllm",
+        {
+            "architectures": ["MiniMaxM3SparseForCausalLM"],
+            "model_type": "minimax_m3_text",
+        },
+    )
+    assert [path.name for path in files] == ["model.py"]
+    # The module name follows the re-export's real file, not the package stub
+    # requested -- that is what lets a sibling import under it resolve too.
+    assert module == "vllm.models.minimax_m3.nvidia.model"
+
+
+def test_resolve_engine_modeling_files_names_a_package_init_module(
+    tmp_path, monkeypatch
+):
+    """A registry entry whose package ``__init__.py`` defines the class
+    directly (no further re-export to follow) still names a real, importable
+    dotted module -- not the file's own ``__init__`` segment, which Python's
+    import system never spells out."""
+    registry = _VLLM_REGISTRY.replace(
+        '"LlamaForCausalLM": ("llama", "LlamaForCausalLM"),',
+        '"LlamaForCausalLM": ("llama", "LlamaForCausalLM"),\n'
+        '    "SimpleForCausalLM": ("vllm.models.simple", "SimpleForCausalLM"),',
+    )
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path,
+            {
+                "vllm/model_executor/models/registry.py": registry,
+                "vllm/models/simple/__init__.py": "class SimpleForCausalLM: pass\n",
+            },
+        ),
+    )
+    files, _labels, module = resolve_engine_modeling_files(
+        "vllm", {"architectures": ["SimpleForCausalLM"], "model_type": "simple"}
+    )
+    assert [path.name for path in files] == ["__init__.py"]
+    assert module == "vllm.models.simple"
+
+
+def test_resolve_engine_modeling_files_guesses_sglangs_flat_filename(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path,
+            {
+                "python/sglang/srt/models/llama.py": "class LlamaForCausalLM: pass\n",
+            },
+        ),
+    )
+    files, labels, module = resolve_engine_modeling_files(
+        "sglang", {"architectures": ["LlamaForCausalLM"], "model_type": "llama"}
+    )
+    assert [path.name for path in files] == ["llama.py"]
+    assert labels == ["github://sgl-project/sglang@v0.5.22"]
+    # sglang's importable package sits under python/, stripped from the module.
+    assert module == "sglang.srt.models.llama"
+
+
+def test_resolve_engine_modeling_files_strips_sglangs_text_suffix(
+    tmp_path, monkeypatch
+):
+    """sglang names the file after the family (``minimax_m3.py``), not the
+    transformers-internal ``_text`` backbone model_type."""
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path,
+            {
+                "python/sglang/srt/models/minimax_m3.py": (
+                    "class MiniMaxM3SparseForCausalLM: pass\n"
+                ),
+            },
+        ),
+    )
+    files, _labels, module = resolve_engine_modeling_files(
+        "sglang",
+        {
+            "architectures": ["MiniMaxM3SparseForCausalLM"],
+            "model_type": "minimax_m3_text",
+        },
+    )
+    assert [path.name for path in files] == ["minimax_m3.py"]
+    assert module == "sglang.srt.models.minimax_m3"
+
+
+def test_resolve_engine_modeling_files_sglang_skips_a_file_missing_the_class(
+    tmp_path, monkeypatch
+):
+    """The first filename guess can exist without defining the architecture
+    (a differently-named sibling model happens to live there); the search
+    must move on to the next candidate rather than stop at the first hit."""
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path,
+            {
+                "python/sglang/srt/models/minimax_m3_text.py": (
+                    "class SomeUnrelatedClass: pass\n"
+                ),
+                "python/sglang/srt/models/minimax_m3.py": (
+                    "class MiniMaxM3SparseForCausalLM: pass\n"
+                ),
+            },
+        ),
+    )
+    files, _labels, module = resolve_engine_modeling_files(
+        "sglang",
+        {
+            "architectures": ["MiniMaxM3SparseForCausalLM"],
+            "model_type": "minimax_m3_text",
+        },
+    )
+    assert [path.name for path in files] == ["minimax_m3.py"]
+    assert module == "sglang.srt.models.minimax_m3"
+
+
+def test_resolve_engine_modeling_files_misses_cleanly(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(tmp_path, {}),
+    )
+    files, labels, module = resolve_engine_modeling_files(
+        "sglang", {"architectures": ["NoSuchForCausalLM"], "model_type": "no_such"}
+    )
+    assert files == []
+    assert labels == []
+    assert module is None
+
+
+def test_resolve_engine_modeling_files_vllm_misses_cleanly(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path, {"vllm/model_executor/models/registry.py": _VLLM_REGISTRY}
+        ),
+    )
+    files, labels, module = resolve_engine_modeling_files(
+        "vllm", {"architectures": ["NoSuchForCausalLM"], "model_type": "no_such"}
+    )
+    assert files == []
+    assert labels == []
+    assert module is None
+
+
+def test_fetch_github_file_rejects_a_repo_outside_the_policy():
+    from TraceLens.ModelUtils.github import GitHubRef, fetch_github_file
+
+    with pytest.raises(PermissionError):
+        fetch_github_file(GitHubRef(owner="not-allowed", repo="secret"), "model.py")
+
+
+def test_load_architecture_with_engine_uses_the_pinned_source_and_module(
+    tmp_path, monkeypatch
+):
+    """``engine=`` (and no ``code_path``/``github``) resolves against that
+    engine's own pinned modeling source, and threads the resolved module back
+    in as ``ANALYZED_MODULE_KEY`` so the analysed file's own imports resolve
+    against its real package rather than transformers' layout."""
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.source.fetch_github_file",
+        _fake_repo(
+            tmp_path,
+            {
+                "vllm/model_executor/models/registry.py": _VLLM_REGISTRY,
+                "vllm/model_executor/models/llama.py": "class LlamaForCausalLM: pass\n",
+            },
+        ),
+    )
+    import TraceLens.ModelUtils.extract as extract_module
+
+    captured: dict = {}
+    real_analyze_sources = extract_module.analyze_sources
+
+    def spy_analyze_sources(sources, *, config, **kwargs):
+        captured["config"] = config
+        return real_analyze_sources(sources, config=config, **kwargs)
+
+    monkeypatch.setattr(extract_module, "analyze_sources", spy_analyze_sources)
+
+    spec = extract_module.load_architecture(
+        checkpoint=FIXTURES / "llama_like" / "config.json",
+        engine="vllm",
+        name="Engine-pinned source",
+    )
+
+    assert spec.github_source == "github://vllm-project/vllm@v0.32.0"
+    assert spec.code_sources == ["github://vllm-project/vllm@v0.32.0"]
+    assert (
+        captured["config"][extract_module.ANALYZED_MODULE_KEY]
+        == "vllm.model_executor.models.llama"
+    )

@@ -6,6 +6,10 @@
 
 """A frame's forward parameter is whatever its CALLER passed for it.
 
+An ``@op_l`` id in this file is a node id this test builds. It is not a lookup
+into an upstream modeling file.
+
+
 DeepSeek's compressor reshapes by its own first parameter::
 
     batch, _, _ = hidden_states.shape

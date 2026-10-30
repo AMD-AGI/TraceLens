@@ -38,6 +38,23 @@ from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
 
+# Constants
+# Base group-by columns of the per-unique-args summaries (ops_unique_args and
+# unified_perf_summary). Optional columns are inserted per flag at build time.
+UNIQUE_ARGS_GROUPING_COLS = (
+    "name",
+    "op category",
+    "process_name",
+    "process_label",
+    "thread_name",
+    "Input Dims",
+    "Input type",
+    "Input Strides",
+    "Concrete Inputs",
+)
+# Prefix of the perf-model parameter columns that roofline sheets group by.
+PERF_PARAM_PREFIX = "param: "
+
 
 def normalize_dtype_to_precision(dtype_str):
     """
@@ -130,6 +147,41 @@ def get_max_achievable_tflops(perf_model, arch):
     return maf_specs.get(compute_spec)
 
 
+def compute_roofline_time_and_bound(gflops, bytes_moved, peak_tflops, mem_bw_gbps):
+    """Roofline-bounded time (µs) and bound type from FLOPs, bytes, and arch peaks.
+
+    The lower bound an op could achieve: whichever of compute time (flops /
+    peak TFLOPS) or memory time (bytes / peak bandwidth) is larger. Returns
+    ``(None, None)`` when any input is missing or there is no work to bound.
+
+    Args:
+        gflops: GFLOPs performed by the op.
+        bytes_moved: Bytes read + written by the op.
+        peak_tflops: Max achievable TFLOPS for the op's compute spec.
+        mem_bw_gbps: Peak HBM bandwidth in GB/s.
+
+    Returns:
+        ``(roofline_time_us, roofline_bound)`` where ``roofline_bound`` is
+        ``"COMPUTE_BOUND"`` or ``"MEMORY_BOUND"``.
+    """
+    if (
+        peak_tflops is None
+        or mem_bw_gbps is None
+        or bytes_moved is None
+        or not gflops
+        or gflops <= 0
+    ):
+        return None, None
+    # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
+    compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
+    # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
+    memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
+    roofline_bound = (
+        "COMPUTE_BOUND" if compute_time_us >= memory_time_us else "MEMORY_BOUND"
+    )
+    return max(compute_time_us, memory_time_us), roofline_bound
+
+
 def _perf_model_init_kwargs(
     perf_model_class, event, arch, python_path, enable_origami, inductor_cache_dir=None
 ):
@@ -154,6 +206,16 @@ def _perf_model_init_kwargs(
     if "inductor_cache_dir" in sig.parameters or has_var_keyword:
         kwargs["inductor_cache_dir"] = inductor_cache_dir
     return kwargs
+
+
+def event_process_thread_names(tree, event):
+    """The unified perf table's ``process_name`` / ``process_label`` / ``thread_name`` of ``event``."""
+    meta = tree.metadata.get(event.get("pid"), {})
+    return {
+        "process_name": meta.get(0, {}).get("process_name", "Unknown"),
+        "process_label": meta.get(0, {}).get("process_labels", "Unknown"),
+        "thread_name": meta.get(event.get("tid"), {}).get("thread_name", "Unknown"),
+    }
 
 
 class TreePerfAnalyzer:
@@ -460,22 +522,10 @@ class TreePerfAnalyzer:
         if self.arch is not None:
             peak_tflops = get_max_achievable_tflops(perf_model, self.arch)
             mem_bw_gbps = self.arch.get("mem_bw_gbps")
-
-            if (
-                peak_tflops is not None
-                and mem_bw_gbps is not None
-                and bytes_moved is not None
-                and gflops > 0
-            ):
-                # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
-                compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
-                # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
-                memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
-                roofline_time_us = max(compute_time_us, memory_time_us)
-                if compute_time_us >= memory_time_us:
-                    roofline_bound = "COMPUTE_BOUND"
-                else:
-                    roofline_bound = "MEMORY_BOUND"
+            roofline_time_us, roofline_bound = compute_roofline_time_and_bound(
+                gflops, bytes_moved, peak_tflops, mem_bw_gbps
+            )
+            if roofline_time_us is not None:
                 dict_metrics["Roofline Time (µs)"] = roofline_time_us
                 dict_metrics["Roofline Bound"] = roofline_bound
                 dict_metrics["Pct Roofline"] = (
@@ -716,7 +766,7 @@ class TreePerfAnalyzer:
 
         # Identify parameter columns for grouping
         param_cols = [
-            col for col in df_perf_metrics.columns if col.startswith("param: ")
+            col for col in df_perf_metrics.columns if col.startswith(PERF_PARAM_PREFIX)
         ]
         if group_by_num_kernels and "num_kernels" in df_perf_metrics.columns:
             param_cols.append("num_kernels")
@@ -1424,17 +1474,7 @@ class TreePerfAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with unique arguments for each operation.
         """
-        grouping_cols_original = [
-            "name",
-            "op category",
-            "process_name",
-            "process_label",
-            "thread_name",
-            "Input Dims",
-            "Input type",
-            "Input Strides",
-            "Concrete Inputs",
-        ]
+        grouping_cols_original = list(UNIQUE_ARGS_GROUPING_COLS)
         if group_by_parent_module:
             idx = grouping_cols_original.index("op category") + 1
             grouping_cols_original.insert(idx, "parent_module")
@@ -2025,15 +2065,7 @@ class TreePerfAnalyzer:
                 "UID": event.get("UID"),
                 "pid": event.get("pid"),
                 "tid": event.get("tid"),
-                "process_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_name", "Unknown"),
-                "process_label": self.tree.metadata.get(event.get("pid"), {})
-                .get(0, {})
-                .get("process_labels", "Unknown"),
-                "thread_name": self.tree.metadata.get(event.get("pid"), {})
-                .get(event.get("tid"), {})
-                .get("thread_name", "Unknown"),
+                **event_process_thread_names(self.tree, event),
                 "External id": args.get("External id"),
                 "duration_us": event.get("dur"),
                 "has_perf_model": has_own_perf_model or is_sole_bwd,
@@ -2261,17 +2293,7 @@ class TreePerfAnalyzer:
             return pd.DataFrame()
 
         df_temp = df_unified_perf.copy()
-        grouping_cols = [
-            "name",
-            "op category",
-            "process_name",
-            "process_label",
-            "thread_name",
-            "Input Dims",
-            "Input type",
-            "Input Strides",
-            "Concrete Inputs",
-        ]
+        grouping_cols = list(UNIQUE_ARGS_GROUPING_COLS)
         if (
             include_overlapping_kernels
             and "overlapping_kernel_names" in df_temp.columns

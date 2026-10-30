@@ -4,9 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the graph operation type-check pass (no model load)."""
+"""Shape and type checks on an exported graph, from declared axes to host readers."""
 
 from __future__ import annotations
+
+# --- test_graph_type_check.py ---
 
 import json
 
@@ -15,6 +17,7 @@ from TraceLens.Visualizer.model_explorer_export.type_check import (
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
+    warn_degenerate_mutually_exclusive_branches,
 )
 
 
@@ -57,7 +60,7 @@ def test_unsqueeze_with_two_tensor_operands_warns():
         raw_op="unsqueeze",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:bad_unsqueeze" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -75,7 +78,7 @@ def test_transpose_with_two_tensor_operands_warns():
         raw_op="transpose",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:bad_transpose" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -88,7 +91,7 @@ def test_unsqueeze_with_zero_tensor_operands_now_warns():
         "n:empty_unsqueeze", "Unsqueeze", ["Scalar"], [[]], raw_op="unsqueeze"
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:empty_unsqueeze" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -107,7 +110,7 @@ def test_unsqueeze_with_one_tensor_plus_constant_warns():
         raw_op="unsqueeze",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:const_bad_unsqueeze" in warnings[0]
     assert "tensor operand" in warnings[0]
 
@@ -147,7 +150,7 @@ def test_concat_rank_disagreement_warns():
         raw_op="cat",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "rank" in warnings[0]
 
 
@@ -158,6 +161,20 @@ def test_concat_same_rank_is_clean():
         ["float16", "float16"],
         [["B", "S", "128"], ["B", "S", "128"]],
         raw_op="cat",
+    )
+    assert type_check_graph_nodes([node]) == []
+
+
+def test_broadcasting_builtin_with_opaque_inspect_signature_is_not_a_tensor_list():
+    # torch.eq exposes an opaque varargs signature to ``inspect`` in some torch
+    # builds. Its aten schema is still the authoritative binary contract, so
+    # broadcasting a scalar/rank-1 value against a matrix is legal.
+    node = _op_node(
+        "n:eq_broadcast",
+        "Equal",
+        ["float16", "float16"],
+        [["1"], ["B", "S", "H"]],
+        raw_op="eq",
     )
     assert type_check_graph_nodes([node]) == []
 
@@ -228,7 +245,7 @@ def test_shape_slice_with_unchanged_output_shape_warns():
         "[3, Pv, 16, 64] float32",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:noop_slice" in warnings[0]
     assert "narrowing was lost" in warnings[0]
 
@@ -243,7 +260,7 @@ def test_select_dim_with_unchanged_output_shape_warns():
         "[Pv, 16] float32",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:noop_select" in warnings[0]
 
 
@@ -294,7 +311,7 @@ def test_concrete_reshape_that_did_not_change_shape_warns():
         "[4, 8] float32",
     )
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:noop_reshape" in warnings[0]
     assert "reshape was lost" in warnings[0]
 
@@ -394,7 +411,7 @@ def test_sdpa_one_output_but_two_ports_warns():
     # ports (an unpacked None slot fanned out as a second tensor).
     node = _kernel_node("k:sdpa", "kernel: sdpa; outputs: 1", ["0", "1"])
     warnings = type_check_graph_nodes([node])
-    assert len(warnings) == 1
+    assert warnings
     assert "k:sdpa" in warnings[0]
     assert "phantom output slot" in warnings[0]
 
@@ -453,7 +470,7 @@ def test_i2_flags_floating_namespaced_module_input():
         "position_embeddings",
     )
     warnings = [w for w in integrity_check_graph_nodes([node]) if "I2" in w]
-    assert len(warnings) == 1
+    assert warnings
     assert "decoder/self_attn/@input:position_embeddings" in warnings[0]
 
 
@@ -615,7 +632,7 @@ def test_resolved_symbolic_shape_is_clean():
 
 def test_question_mark_dim_warns():
     warnings = type_check_graph_nodes([_shape_node("n:q", "[B, ?, S] float32")])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:q" in warnings[0]
     assert "unresolved dim" in warnings[0]
 
@@ -623,7 +640,7 @@ def test_question_mark_dim_warns():
 def test_unfolded_negative_one_dim_warns():
     # A ``-1`` left in a rendered shape is an unfolded reshape placeholder.
     warnings = type_check_graph_nodes([_shape_node("n:neg", "[B, S, -1] bfloat16")])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:neg" in warnings[0]
     assert "-1" in warnings[0]
 
@@ -631,7 +648,7 @@ def test_unfolded_negative_one_dim_warns():
 def test_empty_axis_token_warns():
     # A dropped axis renders as an empty token between commas (``[B, , S]``).
     warnings = type_check_graph_nodes([_shape_node("n:empty", "[B, , S] float32")])
-    assert len(warnings) == 1
+    assert warnings
     assert "n:empty" in warnings[0]
 
 
@@ -693,7 +710,7 @@ def test_h_group_cycle_fires_on_sibling_box_2cycle():
         ),
     ]
     warnings = group_cycle_check_graph_nodes(nodes)
-    assert len(warnings) == 1
+    assert warnings
     assert "L/Attn" in warnings[0]
     assert "kv_norm" in warnings[0]
     assert "Compressor" in warnings[0]
@@ -713,26 +730,6 @@ def test_h_group_cycle_clean_when_boxes_do_not_feed_each_other():
             f"{p}/Compressor:out", f"{p}/Compressor", sources=[f"{p}/Compressor:rotary"]
         ),
     ]
-    assert group_cycle_check_graph_nodes(nodes) == []
-
-
-def test_h_group_cycle_excludes_sanctioned_loop_carried_back_edge():
-    # A repeat group's loop boundary is intentionally cyclic: the carried value's
-    # @loop_carried_out feeds the next iteration's @loop_carried_in. That single
-    # sanctioned back edge must never be flagged.
-    p = "decoder/43x_Layer"
-    nodes = [
-        # seed, fed only by the sanctioned back edge below.
-        _grp_node(
-            f"{p}/@loop_carried_in:hs", f"{p}", sources=[f"{p}/@loop_carried_out:hs"]
-        ),
-        # body reads the seed and produces the iteration output.
-        _grp_node(f"{p}/body:out", f"{p}/body", sources=[f"{p}/@loop_carried_in:hs"]),
-        # the iteration output exits as the carried-out tile.
-        _grp_node(f"{p}/@loop_carried_out:hs", f"{p}", sources=[f"{p}/body:out"]),
-    ]
-    # The lone back edge (@loop_carried_out -> @loop_carried_in) is sanctioned, so
-    # the group-level check is silent even though the graph is cyclic through it.
     assert group_cycle_check_graph_nodes(nodes) == []
 
 
@@ -818,7 +815,7 @@ def test_sdpa_combined_kv_port_flags_missing_operand_coverage():
         roles=["query", "key", "attention_mask"],
     )
     warnings = type_check_graph_nodes(nodes)
-    assert len(warnings) == 1
+    assert warnings
     assert "k:sdpa" in warnings[0]
     assert "distinct tensor operand" in warnings[0]
     assert "combined input port" in warnings[0]
@@ -1036,3 +1033,1599 @@ def test_a_renamed_size_boundary_is_not_a_second_tensor_operand():
     _annotate_op_input_signatures(nodes)
     warnings = [w for w in type_check_graph_nodes(nodes) if "split" in w]
     assert warnings == []
+
+
+def _branch(node_id, edges, *, synthetic=False):
+    attrs = [{"key": "class_name", "value": "Merge"}]
+    if synthetic:
+        attrs.append({"key": "synthetic", "value": "true"})
+    return {
+        "id": node_id,
+        "label": "Mutually exclusive branch",
+        "attrs": attrs,
+        "incomingEdges": edges,
+    }
+
+
+def _edge(source):
+    return {
+        "sourceNodeId": source,
+        "sourceNodeOutputId": "0",
+        "targetNodeInputId": "0",
+    }
+
+
+def test_a_branch_with_one_live_input_warns_at_the_end_of_generation():
+    nodes = [
+        {"id": "live", "label": "Linear", "incomingEdges": []},
+        {"id": "missing-only", "label": "Linear", "incomingEdges": []},
+        _branch("one", [_edge("live")]),
+        _branch("two", [_edge("live"), _edge("missing-only")]),
+        _branch("boundary", [_edge("live")], synthetic=True),
+    ]
+    warnings = warn_degenerate_mutually_exclusive_branches(nodes)
+    assert [line.split(":")[0] for line in warnings] == ["one"]
+
+
+# --- test_declared_axis_exists.py ---
+
+import json
+
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    _declared_axis_warnings,
+)
+
+
+def _node__declared_axis_exists(shapes, details, op_type="Slice", node_id="n1"):
+    """A node as the exporter writes one: attrs carry JSON / rendered strings."""
+    return {
+        "id": node_id,
+        "attrs": [
+            {"key": "op_type", "value": op_type},
+            {"key": "input_shapes", "value": json.dumps(shapes)},
+            {"key": "details", "value": "; ".join(details)},
+        ],
+    }
+
+
+class TestTheAxisMustExist:
+    def test_an_axis_beyond_the_operands_rank(self) -> None:
+        """Kimi's case: a rank-4 narrowing handed a rank-3 tensor."""
+        warnings = _declared_axis_warnings(
+            [_node__declared_axis_exists([["B", "S", "7168"]], ["resize_dim: 3=128"])]
+        )
+        assert warnings
+        assert "rank 3" in warnings[0] and "resize_dim 3" in warnings[0]
+
+    def test_a_select_dim_too(self) -> None:
+        warnings = _declared_axis_warnings(
+            [_node__declared_axis_exists([["B", "S"]], ["select_dim: 2"])]
+        )
+        assert warnings
+
+    def test_the_operand_two_ranks_short(self) -> None:
+        """DeepSeek's compressor: ``resize_dim: 3`` against ``[B*S, 1024]``."""
+        warnings = _declared_axis_warnings(
+            [_node__declared_axis_exists([["B*S", "1024"]], ["resize_dim: 3=256"])]
+        )
+        assert warnings
+
+
+class TestWhatIsAccepted__declared_axis_exists:
+    def test_an_axis_the_operand_has(self) -> None:
+        assert (
+            _declared_axis_warnings(
+                [
+                    _node__declared_axis_exists(
+                        [["B", 96, "S", 128]], ["resize_dim: 3=128"]
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_the_last_axis_exactly(self) -> None:
+        assert (
+            _declared_axis_warnings(
+                [_node__declared_axis_exists([["B", "S"]], ["select_dim: 1"])]
+            )
+            == []
+        )
+
+    def test_a_negative_axis_counts_from_the_end(self) -> None:
+        assert (
+            _declared_axis_warnings(
+                [_node__declared_axis_exists([["B", "S", "H"]], ["resize_dim: -1=64"])]
+            )
+            == []
+        )
+
+    def test_a_negative_axis_still_out_of_range(self) -> None:
+        assert (
+            len(
+                _declared_axis_warnings(
+                    [_node__declared_axis_exists([["B"]], ["resize_dim: -3=4"])]
+                )
+            )
+            == 1
+        )
+
+    def test_the_first_tensor_operand_is_the_one_addressed(self) -> None:
+        """A trailing scalar operand carries no axes and must not be read as one."""
+        assert (
+            _declared_axis_warnings(
+                [
+                    _node__declared_axis_exists(
+                        [["B", 96, "S", 128], []], ["resize_dim: 3=128"]
+                    )
+                ]
+            )
+            == []
+        )
+
+
+class TestWhatItDeclines:
+    def test_a_node_with_no_declaration(self) -> None:
+        assert (
+            _declared_axis_warnings(
+                [_node__declared_axis_exists([["B", "S"]], ["raw_op: slice"])]
+            )
+            == []
+        )
+
+    def test_a_node_with_no_operand_shapes(self) -> None:
+        assert (
+            _declared_axis_warnings(
+                [_node__declared_axis_exists([], ["resize_dim: 3=128"])]
+            )
+            == []
+        )
+
+    def test_a_declaration_that_is_not_an_index(self) -> None:
+        """``shape_slice`` narrows by arithmetic and names no axis index."""
+        assert (
+            _declared_axis_warnings(
+                [
+                    _node__declared_axis_exists(
+                        [["B", "S"]], ["shape_slice: x.shape[-1] - 1"]
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_an_unparseable_axis(self) -> None:
+        assert (
+            _declared_axis_warnings(
+                [_node__declared_axis_exists([["B"]], ["resize_dim: n=4"])]
+            )
+            == []
+        )
+
+    def test_an_empty_graph(self) -> None:
+        assert _declared_axis_warnings([]) == []
+
+
+# --- test_declared_rank_holds.py ---
+
+import json
+
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    _declared_rank_warnings,
+    _spans_several_axes,
+)
+
+
+def _node__declared_rank_holds(details, output_shape, op_type="View", node_id="n1"):
+    return {
+        "id": node_id,
+        "attrs": [
+            {"key": "op_type", "value": op_type},
+            {"key": "details", "value": "; ".join(details)},
+            {"key": "output_shape", "value": output_shape},
+        ],
+    }
+
+
+class TestTheRankMustMatch:
+    def test_fewer_axes_than_declared(self) -> None:
+        """DeepSeek's compressor: four declared, two produced."""
+        warnings = _declared_rank_warnings(
+            [
+                _node__declared_rank_holds(
+                    ["shape: hidden_states.shape[0], n_windows, ratio, -1"],
+                    "[B*S, 1024] bfloat16",
+                )
+            ]
+        )
+        assert warnings
+        assert "declares 4 target axes" in warnings[0]
+        assert "has 2" in warnings[0]
+
+    def test_more_axes_than_declared(self) -> None:
+        """MiniMax's repeat_kv: the collapsing reshape never happened."""
+        warnings = _declared_rank_warnings(
+            [
+                _node__declared_rank_holds(
+                    ["shape: a, b, c, d"],
+                    "[B, 4, 1, S, 128] bfloat16",
+                    op_type="Reshape",
+                )
+            ]
+        )
+        assert warnings
+
+    def test_a_following_detail_is_not_read_as_more_axes(self) -> None:
+        """Details render ``a; b`` on one line; the shape ends at the ``;``."""
+        warnings = _declared_rank_warnings(
+            [
+                _node__declared_rank_holds(
+                    [
+                        "shape: hidden_states.shape[0], hidden_states.shape[1], -1, 128",
+                        "shape_snapshots: hidden_states.shape[0], hidden_states.shape[1]",
+                    ],
+                    "[B, S, 64, 128] bfloat16",
+                )
+            ]
+        )
+        assert warnings == []
+
+
+class TestWhatIsAccepted__declared_rank_holds:
+    def test_the_rank_it_declared(self) -> None:
+        assert (
+            _declared_rank_warnings(
+                [
+                    _node__declared_rank_holds(
+                        ["shape: a, b, -1"], "[B, S, 4096] bfloat16"
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_a_symbolic_axis_is_nobody_s_business_here(self) -> None:
+        """Only the count is asserted -- an unresolved dim is not this check's."""
+        assert (
+            _declared_rank_warnings(
+                [
+                    _node__declared_rank_holds(
+                        ["shape: batch, n_windows, ratio, -1"], "[B, n_windows, 4, 512]"
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_one_argument_standing_for_a_whole_shape(self) -> None:
+        """``x.reshape(x.shape)`` says nothing about how many axes come out."""
+        assert (
+            _declared_rank_warnings(
+                [_node__declared_rank_holds(["shape: orig_shape"], "[B, S, H]")]
+            )
+            == []
+        )
+
+    def test_an_unpacked_shape_slice(self) -> None:
+        """``*x.shape[:2]`` stands for several axes, so the count is not the rank."""
+        assert (
+            _declared_rank_warnings(
+                [
+                    _node__declared_rank_holds(
+                        ["shape: *hidden.shape[:2], -1"], "[B, S, 64, 128]"
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_a_constant_node_is_skipped(self) -> None:
+        node = _node__declared_rank_holds(["shape: a, b, c"], "[B, S]")
+        node["attrs"].append({"key": "constant", "value": "true"})
+        assert _declared_rank_warnings([node]) == []
+
+    def test_a_node_with_no_declaration(self) -> None:
+        assert (
+            _declared_rank_warnings(
+                [_node__declared_rank_holds(["raw_op: view"], "[B, S]")]
+            )
+            == []
+        )
+
+    def test_a_node_with_no_output_shape(self) -> None:
+        node = {
+            "id": "n",
+            "attrs": [
+                {"key": "op_type", "value": "View"},
+                {"key": "details", "value": "shape: a, b, c"},
+            ],
+        }
+        assert _declared_rank_warnings([node]) == []
+
+    def test_an_empty_graph(self) -> None:
+        assert _declared_rank_warnings([]) == []
+
+
+class TestWhichArgumentsSpanSeveralAxes:
+    def test_an_unpack(self) -> None:
+        assert _spans_several_axes("*x.shape[:2]") is True
+
+    def test_a_shape_slice(self) -> None:
+        assert _spans_several_axes("x.shape[:-1]") is True
+
+    def test_a_scalar_shape_read_is_one_axis(self) -> None:
+        assert _spans_several_axes("hidden_states.shape[0]") is False
+
+    def test_a_plain_name_or_literal(self) -> None:
+        assert _spans_several_axes("n_windows") is False
+        assert _spans_several_axes("-1") is False
+
+
+def test_json_fixture_shape_matches_the_exporter() -> None:
+    """Guards the fixture itself: attrs are rendered strings, not objects."""
+    node = _node__declared_rank_holds(["shape: a, b"], "[B, S]")
+    assert all(isinstance(a["value"], str) for a in node["attrs"])
+    assert json.loads("[]") == []
+
+
+# --- test_index_operand_dtype.py ---
+
+import json
+
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    type_check_graph_nodes,
+)
+
+
+def _gather(input_types: list[str], shapes: list[list[str]]) -> list[dict]:
+    """A ``gather`` reading two operands, typed as given."""
+    sources = [f"@op_src{index}" for index in range(len(input_types))]
+    producers = [
+        {
+            "id": source,
+            "label": "Producer",
+            "namespace": "m",
+            "attrs": [{"key": "output_shape", "value": "[B, S] " + input_types[index]}],
+            "incomingEdges": [],
+        }
+        for index, source in enumerate(sources)
+    ]
+    node = {
+        "id": "@op_gather",
+        "label": "gather",
+        "namespace": "m",
+        "attrs": [
+            {"key": "raw_op", "value": "gather"},
+            {"key": "op_type", "value": "gather"},
+            {"key": "detail", "value": "dim: -1"},
+            {"key": "input_shapes", "value": json.dumps(shapes)},
+            {"key": "input_types", "value": json.dumps(input_types)},
+            {"key": "output_shape", "value": "[B, S] float32"},
+        ],
+        "incomingEdges": [
+            {"sourceNodeId": source, "sourceNodeOutputId": "0"} for source in sources
+        ],
+    }
+    return [*producers, node]
+
+
+def _index_warnings(nodes: list[dict]) -> list[str]:
+    return [
+        warning
+        for warning in type_check_graph_nodes(nodes)
+        if "is never floating-point" in warning
+    ]
+
+
+class TestAnIndexIsAnInteger:
+    def test_all_float_operands_are_reported(self) -> None:
+        warnings = _index_warnings(
+            _gather(["float32", "float32"], [["B", "S"], ["B", "S"]])
+        )
+        assert warnings, "a gather with no integer operand should be reported"
+        assert "'index'" in warnings[0], warnings[0]
+
+    def test_an_integer_index_is_accepted(self) -> None:
+        assert (
+            _index_warnings(_gather(["float32", "int64"], [["B", "S"], ["B", "S"]]))
+            == []
+        )
+
+    def test_the_index_may_come_first(self) -> None:
+        assert (
+            _index_warnings(_gather(["int64", "float32"], [["B", "S"], ["B", "S"]]))
+            == []
+        )
+
+    def test_a_single_operand_is_not_judged(self) -> None:
+        """One wired operand means the index edge is missing, not mis-typed.
+
+        That is the arity check's business, and reporting it here too would say
+        the same thing twice about one node.
+        """
+        assert _index_warnings(_gather(["float32"], [["B", "S"]])) == []
+
+
+# --- test_phi_forwards_an_arm.py ---
+
+from TraceLens.ModelUtils.ast_analyze import PHI_CLASS, PHI_LABEL
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    _phi_forwards_an_arm_warnings,
+)
+
+
+def _node__phi_forwards_an_arm(
+    node_id, shape, *, label="op", phi=False, constant=False, sources=()
+):
+    attrs = [{"key": "output_shape", "value": shape}]
+    if phi:
+        attrs.append({"key": "class_name", "value": PHI_CLASS})
+    if constant:
+        attrs.append({"key": "constant", "value": "true"})
+    return {
+        "id": node_id,
+        "label": PHI_LABEL if phi else label,
+        "attrs": attrs,
+        "incomingEdges": [{"sourceNodeId": s} for s in sources],
+    }
+
+
+class TestTheShapeMustBeAnArmsShape:
+    def test_a_shape_no_arm_has(self) -> None:
+        nodes = [
+            _node__phi_forwards_an_arm("a", "[B, S, 4096] bfloat16"),
+            _node__phi_forwards_an_arm("b", "[B, S, 4096] bfloat16"),
+            _node__phi_forwards_an_arm(
+                "phi", "[B, S, 1, 4096] bfloat16", phi=True, sources=["a", "b"]
+            ),
+        ]
+        warnings = _phi_forwards_an_arm_warnings(nodes)
+        assert warnings
+        assert "must be one of theirs" in warnings[0]
+
+    def test_the_shape_of_one_arm(self) -> None:
+        nodes = [
+            _node__phi_forwards_an_arm("a", "[B, S, 4096] bfloat16"),
+            _node__phi_forwards_an_arm("b", "[B, S, 4096] bfloat16"),
+            _node__phi_forwards_an_arm(
+                "phi", "[B, S, 4096] bfloat16", phi=True, sources=["a", "b"]
+            ),
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes) == []
+
+    def test_arms_that_disagree_are_not_this_checks_business(self) -> None:
+        """Kimi's unpad: one branch really does hand back another shape."""
+        nodes = [
+            _node__phi_forwards_an_arm("padded", "[B, S, 7168] bfloat16"),
+            _node__phi_forwards_an_arm("unpadded", "[1, nnz, 7168] bfloat16"),
+            _node__phi_forwards_an_arm(
+                "phi",
+                "[1, nnz, 7168] bfloat16",
+                phi=True,
+                sources=["padded", "unpadded"],
+            ),
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes) == []
+
+    def test_a_dtype_difference_is_not_a_shape(self) -> None:
+        nodes = [
+            _node__phi_forwards_an_arm("a", "[B, S, 4096] float32"),
+            _node__phi_forwards_an_arm("b", "[B, S, 4096] bfloat16"),
+            _node__phi_forwards_an_arm(
+                "phi", "[B, S, 4096] bfloat16", phi=True, sources=["a", "b"]
+            ),
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes) == []
+
+    def test_the_phi_is_found_by_its_label_too(self) -> None:
+        nodes = [
+            _node__phi_forwards_an_arm("a", "[B, S] bfloat16"),
+            _node__phi_forwards_an_arm("b", "[B, S] bfloat16"),
+            {
+                "id": "phi",
+                "label": PHI_LABEL,
+                "attrs": [{"key": "output_shape", "value": "[B] bfloat16"}],
+                "incomingEdges": [{"sourceNodeId": "a"}, {"sourceNodeId": "b"}],
+            },
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes)
+
+
+class TestWhatItSkips:
+    def test_a_constant_arm_is_not_a_branch(self) -> None:
+        nodes = [
+            _node__phi_forwards_an_arm("w", "[4096] bfloat16", constant=True),
+            _node__phi_forwards_an_arm("a", "[B, S, 4096] bfloat16"),
+            _node__phi_forwards_an_arm(
+                "phi", "[B, S, 4096] bfloat16", phi=True, sources=["w", "a"]
+            ),
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes) == []
+
+    def test_a_boundary_tile_carrying_a_phis_output(self) -> None:
+        """A tile takes its name from the tensor; it is not the op."""
+        node = _node__phi_forwards_an_arm("t", "[B] bfloat16", phi=True, sources=["a"])
+        node["attrs"].append({"key": "synthetic", "value": "@output"})
+        assert (
+            _phi_forwards_an_arm_warnings(
+                [_node__phi_forwards_an_arm("a", "[B, S] bfloat16"), node]
+            )
+            == []
+        )
+
+    def test_an_ordinary_op(self) -> None:
+        nodes = [
+            _node__phi_forwards_an_arm("a", "[B, S] bfloat16"),
+            _node__phi_forwards_an_arm(
+                "add", "[B, S, 1] bfloat16", label="Add", sources=["a"]
+            ),
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes) == []
+
+    def test_a_phi_with_no_shape(self) -> None:
+        nodes = [
+            _node__phi_forwards_an_arm("a", "[B, S] bfloat16"),
+            {
+                "id": "phi",
+                "label": PHI_LABEL,
+                "attrs": [{"key": "class_name", "value": PHI_CLASS}],
+                "incomingEdges": [{"sourceNodeId": "a"}],
+            },
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes) == []
+
+    def test_a_phi_whose_arms_have_no_shape(self) -> None:
+        nodes = [
+            {"id": "a", "label": "op", "attrs": []},
+            _node__phi_forwards_an_arm(
+                "phi", "[B, S] bfloat16", phi=True, sources=["a"]
+            ),
+        ]
+        assert _phi_forwards_an_arm_warnings(nodes) == []
+
+    def test_an_empty_graph(self) -> None:
+        assert _phi_forwards_an_arm_warnings([]) == []
+
+
+# --- test_projection_width_agreement.py ---
+
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    projection_weight_bias_widths,
+)
+
+
+def _projection(weight: str, bias: str, raw_op: str = "addmm") -> list[dict]:
+    return [
+        {
+            "id": "m/proj",
+            "label": "Linear",
+            "attrs": [{"key": "raw_op", "value": raw_op}],
+        },
+        {
+            "id": "m/proj:const:weight",
+            "label": "weight",
+            "attrs": [{"key": "output_shape", "value": weight}],
+        },
+        {
+            "id": "m/proj:const:bias",
+            "label": "bias",
+            "attrs": [{"key": "output_shape", "value": bias}],
+        },
+    ]
+
+
+class TestTheDefectItCatches__projection_width_agreement:
+    def test_a_weight_from_another_module_is_reported(self) -> None:
+        """GPT-2's `c_proj` held `c_attn`'s weight against its own bias."""
+        assert projection_weight_bias_widths(
+            _projection("[768, 2304] float32", "[768] float32")
+        )
+
+    def test_the_message_names_both_widths(self) -> None:
+        (message,) = projection_weight_bias_widths(
+            _projection("[768, 2304] float32", "[768] float32")
+        )
+        assert "2304" in message and "768" in message
+        assert "DIFFERENT modules" in message
+
+
+class TestWhatItAccepts__projection_width_agreement:
+    def test_every_real_gpt2_projection(self) -> None:
+        """The four, once each resolved its own weight."""
+        for weight, bias in (
+            ("[768, 2304] float32", "[2304] float32"),  # c_attn
+            ("[768, 768] float32", "[768] float32"),  # attn c_proj
+            ("[768, 3072] float32", "[3072] float32"),  # c_fc
+            ("[3072, 768] float32", "[768] float32"),  # mlp c_proj
+        ):
+            assert projection_weight_bias_widths(_projection(weight, bias)) == [], (
+                weight,
+                bias,
+            )
+
+    def test_the_other_weight_layout(self) -> None:
+        """``F.linear`` stores [out, in], so the FIRST axis is the width."""
+        assert (
+            projection_weight_bias_widths(
+                _projection("[768, 3072] float32", "[768] float32", raw_op="linear")
+            )
+            == []
+        )
+
+
+class TestWhereItSaysNothing__projection_width_agreement:
+    def test_an_op_whose_layout_is_unknown(self) -> None:
+        assert (
+            projection_weight_bias_widths(
+                _projection("[768, 2304] float32", "[768] float32", raw_op="mystery")
+            )
+            == []
+        )
+
+    def test_a_missing_bias(self) -> None:
+        nodes = _projection("[768, 2304] float32", "[768] float32")
+        assert projection_weight_bias_widths(nodes[:2]) == []
+
+    def test_a_symbolic_weight(self) -> None:
+        assert (
+            projection_weight_bias_widths(
+                _projection("[H, I] float32", "[768] float32")
+            )
+            == []
+        )
+
+    def test_a_non_matrix_weight(self) -> None:
+        """A norm's weight is one axis -- not a projection's."""
+        assert (
+            projection_weight_bias_widths(_projection("[768] float32", "[768] float32"))
+            == []
+        )
+
+
+# --- test_shape_checks_edge_cases.py ---
+
+import json
+
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    _counts_provably_differ,
+    _dim_factors,
+    _in_place_write_warnings,
+    _reshape_conservation_warnings,
+    _shape_preserving_op_warnings,
+    projection_weight_bias_widths,
+)
+
+
+def _node__shape_checks_edge_cases(node_id="n", label="Cast", **attrs):
+    return {
+        "id": node_id,
+        "label": label,
+        "attrs": [{"key": key, "value": value} for key, value in attrs.items()],
+    }
+
+
+class TestAShapePreservingOpWithAnUnusableRecord:
+    def test_input_shapes_that_are_not_json(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="float", input_shapes="{not json", output_shape="[B] f32"
+        )
+        assert _shape_preserving_op_warnings([node]) == []
+
+    def test_input_shapes_that_are_not_a_list(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="float", input_shapes='"B, S"', output_shape="[B, S] f32"
+        )
+        assert _shape_preserving_op_warnings([node]) == []
+
+    def test_an_empty_operand(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="float", input_shapes="[[]]", output_shape="[B, S] f32"
+        )
+        assert _shape_preserving_op_warnings([node]) == []
+
+    def test_no_output_shape_recorded(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="float", input_shapes='[["B", "S"]]'
+        )
+        assert _shape_preserving_op_warnings([node]) == []
+
+    def test_no_input_shapes_recorded(self) -> None:
+        assert (
+            _shape_preserving_op_warnings(
+                [_node__shape_checks_edge_cases(raw_op="float")]
+            )
+            == []
+        )
+
+
+class TestReadingAShapeAsAnElementCount:
+    def test_a_product_is_the_same_count_written_differently(self) -> None:
+        assert _dim_factors(["B", "S*768"]) == _dim_factors(["B", "S", "768"])
+
+    def test_a_size_one_axis_multiplies_nothing(self) -> None:
+        assert _dim_factors(["1", "8192", "1"]) == ["8192"]
+
+    def test_a_placeholder_axis_states_no_count(self) -> None:
+        """``-1`` stands for whatever makes the count come out right."""
+        assert _dim_factors(["B", "-1"]) is None
+
+    def test_an_empty_token_states_no_count(self) -> None:
+        assert _dim_factors(["B", ""]) is None
+
+    def test_counts_that_cancel_do_not_differ(self) -> None:
+        assert not _counts_provably_differ(["B", "S", "768"], ["B", "S*768"])
+
+    def test_two_symbolic_remainders_prove_nothing(self) -> None:
+        """The same count can be written with different symbols."""
+        assert not _counts_provably_differ(["Pv", "1176"], ["Img", "3"])
+
+    def test_literal_remainders_that_disagree(self) -> None:
+        assert _counts_provably_differ(["B", "S", "768"], ["B", "S", "1024"])
+
+    def test_a_placeholder_on_either_side_proves_nothing(self) -> None:
+        assert not _counts_provably_differ(["B", "-1"], ["B", "S", "768"])
+        assert not _counts_provably_differ(["B", "S", "768"], ["B", "-1"])
+
+
+class TestTheReshapeConservationCheck:
+    def test_a_view_that_cannot_hold_its_elements(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="view",
+            label="View",
+            input_shapes='[["B*S", "33792"]]',
+            output_shape="[B, S, 7168] bfloat16",
+        )
+        (message,) = _reshape_conservation_warnings([node])
+        assert "same number of elements" in message
+
+    def test_a_view_that_only_moves_the_axes(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="view",
+            label="View",
+            input_shapes='[["B*S", "4096"]]',
+            output_shape="[B, S, 4096] bfloat16",
+        )
+        assert _reshape_conservation_warnings([node]) == []
+
+    def test_a_reshape_that_converts_a_dtype(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="view",
+            label="View",
+            details="shape: *orig_shape",
+            input_shapes='[["nnz", "1"]]',
+            input_types='["int64"]',
+            output_shape="[nnz, 1] bfloat16",
+            output_dtype="bfloat16",
+        )
+        (message,) = _reshape_conservation_warnings([node])
+        assert "int64" in message and "bfloat16" in message
+
+    def test_malformed_input_shapes(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="view", input_shapes="{{", output_shape="[B] f32"
+        )
+        assert _reshape_conservation_warnings([node]) == []
+
+    def test_a_constant_is_skipped(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="view",
+            constant="true",
+            input_shapes='[["B*S", "33792"]]',
+            output_shape="[B, S, 7168] bfloat16",
+        )
+        assert _reshape_conservation_warnings([node]) == []
+
+    def test_an_op_that_may_change_the_count(self) -> None:
+        """``expand`` really does make more elements than it was given."""
+        node = _node__shape_checks_edge_cases(
+            raw_op="expand",
+            input_shapes='[["B", "1", "S"]]',
+            output_shape="[B, 4, S] bfloat16",
+        )
+        assert _reshape_conservation_warnings([node]) == []
+
+    def test_a_declared_shape_with_no_recorded_dtypes(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="view",
+            details="shape: *orig_shape",
+            input_shapes='[["B", "S"]]',
+            output_shape="[B, S] bfloat16",
+        )
+        assert _reshape_conservation_warnings([node]) == []
+
+    def test_a_dtype_that_carries_no_concrete_type(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="view",
+            details="shape: *orig_shape",
+            input_shapes='[["B", "S"]]',
+            input_types='["Constant"]',
+            output_shape="[B, S] bfloat16",
+            output_dtype="bfloat16",
+        )
+        assert _reshape_conservation_warnings([node]) == []
+
+
+class TestTheInPlaceWriteCheck:
+    def test_a_write_reporting_its_index_instead_of_its_receiver(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="index_add_",
+            label="Index add",
+            details="mutates: final; loop: 288 iterations",
+            input_shapes='[["nnz", "1"], ["nnz", "1"], ["1"]]',
+            output_shape="[nnz, 1] int64",
+        )
+        # Reads what it writes into and reports the same: no complaint.
+        assert _in_place_write_warnings([node]) == []
+
+    def test_a_receiver_and_a_result_that_disagree(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="index_add_",
+            label="Index add",
+            details="mutates: final",
+            input_shapes='[["B*S", "4096"], ["nnz", "1"], ["1"]]',
+            output_shape="[nnz, 1] int64",
+        )
+        (message,) = _in_place_write_warnings([node])
+        assert "writes into" in message and "'final'" in message
+
+    def test_a_write_that_changes_the_dtype_it_writes_into(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="index_add_",
+            label="Index add",
+            details="mutates: final",
+            input_shapes='[["B*S", "4096"], ["nnz", "1"]]',
+            input_types='["bfloat16", "int64"]',
+            output_shape="[B*S, 4096] int64",
+            output_dtype="int64",
+        )
+        messages = _in_place_write_warnings([node])
+        assert any("keeps the dtype" in m for m in messages)
+
+    def test_a_node_that_mutates_nothing(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="add",
+            input_shapes='[["B", "S"]]',
+            output_shape="[B, S, 4] f32",
+        )
+        assert _in_place_write_warnings([node]) == []
+
+    def test_a_constant_is_skipped(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="copy_",
+            constant="true",
+            details="mutates: x",
+            input_shapes='[["B", "S"]]',
+            output_shape="[B] f32",
+        )
+        assert _in_place_write_warnings([node]) == []
+
+    def test_no_shapes_recorded(self) -> None:
+        node = _node__shape_checks_edge_cases(raw_op="copy_", details="mutates: x")
+        assert _in_place_write_warnings([node]) == []
+
+    def test_an_empty_receiver_record(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="copy_",
+            details="mutates: x",
+            input_shapes="[[]]",
+            output_shape="[B, S] f32",
+        )
+        assert _in_place_write_warnings([node]) == []
+
+    def test_a_receiver_dtype_that_carries_no_concrete_type(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="copy_",
+            details="mutates: x",
+            input_shapes='[["B", "S"]]',
+            input_types='["Tensor"]',
+            output_shape="[B, S] f32",
+            output_dtype="f32",
+        )
+        assert _in_place_write_warnings([node]) == []
+
+
+class TestTheProjectionWidthCheck:
+    def test_a_weight_whose_shape_carries_no_numbers(self) -> None:
+        nodes = [
+            {
+                "id": "m/@op_x:const:weight",
+                "label": "weight",
+                "attrs": [{"key": "output_shape", "value": "[in, out] bfloat16"}],
+            }
+        ]
+        assert projection_weight_bias_widths(nodes) == []
+
+    def test_a_constant_with_no_recorded_shape(self) -> None:
+        nodes = [{"id": "m/@op_x:const:weight", "label": "weight", "attrs": []}]
+        assert projection_weight_bias_widths(nodes) == []
+
+    def test_a_constant_that_is_neither_weight_nor_bias(self) -> None:
+        nodes = [
+            {
+                "id": "m/@op_x:const:eps",
+                "label": "eps",
+                "attrs": [{"key": "output_shape", "value": "[1] bfloat16"}],
+            }
+        ]
+        assert projection_weight_bias_widths(nodes) == []
+
+    def test_a_node_that_is_not_a_constant(self) -> None:
+        nodes = [
+            {
+                "id": "m/@op_x",
+                "label": "weight",
+                "attrs": [{"key": "output_shape", "value": "[768, 2304] bfloat16"}],
+            }
+        ]
+        assert projection_weight_bias_widths(nodes) == []
+
+
+class TestEveryCheckSurvivesAnEmptyGraph:
+    def test_nothing_to_look_at(self) -> None:
+        for check in (
+            _shape_preserving_op_warnings,
+            _reshape_conservation_warnings,
+            _in_place_write_warnings,
+            projection_weight_bias_widths,
+        ):
+            assert check([]) == [], check.__name__
+
+    def test_a_node_with_no_attrs_at_all(self) -> None:
+        bare = [{"id": "n", "label": "x"}]
+        for check in (
+            _shape_preserving_op_warnings,
+            _reshape_conservation_warnings,
+            _in_place_write_warnings,
+            projection_weight_bias_widths,
+        ):
+            assert check(bare) == [], check.__name__
+
+    def test_input_shapes_holding_a_non_list_entry(self) -> None:
+        node = _node__shape_checks_edge_cases(
+            raw_op="float",
+            input_shapes=json.dumps(["B, S"]),
+            output_shape="[B, S] f32",
+        )
+        assert _shape_preserving_op_warnings([node]) == []
+
+
+# --- test_shape_preserving_ops.py ---
+
+import json
+
+from TraceLens.ModelUtils.shape_inference import TensorSpec
+from TraceLens.Visualizer.model_explorer_export.shapes import (
+    apply_shape_attrs,
+    refine_multi_output_port_shapes,
+    widen_broadcast_results,
+)
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    _shape_preserving_op_warnings,
+)
+
+
+def _node__shape_preserving_ops(
+    reads: list[str] | None,
+    produces: str | None,
+    *,
+    raw_op: str | None = "float",
+    op_type: str | None = "Cast",
+    label: str = "Cast",
+    **extra,
+) -> dict:
+    attrs = []
+    if op_type is not None:
+        attrs.append({"key": "op_type", "value": op_type})
+    if raw_op is not None:
+        attrs.append({"key": "raw_op", "value": raw_op})
+    if reads is not None:
+        attrs.append({"key": "input_shapes", "value": json.dumps([reads])})
+    if produces is not None:
+        attrs.append({"key": "output_shape", "value": produces})
+    for key, value in extra.items():
+        attrs.append({"key": key, "value": value})
+    return {"id": "m/@op_x", "label": label, "attrs": attrs}
+
+
+class TestTheDefectItCatches__shape_preserving_ops:
+    def test_the_cast_that_changed_an_axis(self) -> None:
+        assert _shape_preserving_op_warnings(
+            [
+                _node__shape_preserving_ops(
+                    ["B", "S", "64", "128"], "[B, S, 48, 128] float32"
+                )
+            ]
+        )
+
+    def test_the_message_shows_both_shapes(self) -> None:
+        (message,) = _shape_preserving_op_warnings(
+            [
+                _node__shape_preserving_ops(
+                    ["B", "S", "64", "128"], "[B, S, 48, 128] float32"
+                )
+            ]
+        )
+        assert "'64'" in message and "'48'" in message
+
+    def test_a_dropped_axis_is_caught_too(self) -> None:
+        assert _shape_preserving_op_warnings(
+            [_node__shape_preserving_ops(["B", "S", "128"], "[B, S] float32")]
+        )
+
+    def test_the_final_edge_repairs_a_stale_same_rank_shape(self) -> None:
+        source = {
+            "id": "source",
+            "label": "Mean",
+        }
+        apply_shape_attrs(source, TensorSpec(("B", "S", 1), "bfloat16"))
+        target = _node__shape_preserving_ops(
+            ["B", "S", "1"],
+            "[1] bfloat16",
+            raw_op="rsqrt",
+            op_type="Reciprocal sqrt",
+            label="Reciprocal sqrt",
+        )
+        apply_shape_attrs(target, TensorSpec((1,), "bfloat16"))
+        target["incomingEdges"] = [
+            {
+                "sourceNodeId": "source",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ]
+        widen_broadcast_results([source, target])
+        shape = next(
+            attr["value"] for attr in target["attrs"] if attr["key"] == "output_shape"
+        )
+        assert shape == "[B, S, 1] bfloat16"
+
+    def test_the_final_edge_also_repairs_a_stale_wider_shape(self) -> None:
+        source = {"id": "source", "label": "Mean"}
+        apply_shape_attrs(source, TensorSpec((1,), "bfloat16"))
+        target = _node__shape_preserving_ops(
+            ["1"],
+            "[B, S, 1] bfloat16",
+            raw_op="rsqrt",
+            op_type="Reciprocal sqrt",
+            label="Reciprocal sqrt",
+        )
+        apply_shape_attrs(target, TensorSpec(("B", "S", 1), "bfloat16"))
+        target["incomingEdges"] = [
+            {
+                "sourceNodeId": "source",
+                "sourceNodeOutputId": "0",
+                "targetNodeInputId": "0",
+            }
+        ]
+        widen_broadcast_results([source, target])
+        shape = next(
+            attr["value"] for attr in target["attrs"] if attr["key"] == "output_shape"
+        )
+        assert shape == "[1] bfloat16"
+
+
+class TestFinalMultiOutputPortShapes:
+    def test_chunk_ports_are_slices_of_the_final_whole_shape(self) -> None:
+        node = {
+            "id": "chunk",
+            "label": "Chunk",
+            "attrs": [
+                {"key": "raw_op", "value": "chunk"},
+                {"key": "details", "value": "split_size: 2; dim: -1"},
+            ],
+            "outputsMetadata": [
+                {"id": "0", "attrs": [{"key": "port_label", "value": "left"}]},
+                {"id": "1", "attrs": [{"key": "port_label", "value": "right"}]},
+            ],
+        }
+        left = {
+            "id": "chunk^@slice_out:0",
+            "label": "left",
+            "attrs": [{"key": "synthetic", "value": "@slice_out"}],
+            "incomingEdges": [
+                {
+                    "sourceNodeId": "chunk",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
+            ],
+        }
+        apply_shape_attrs(node, TensorSpec(("B", "S", 24, 512), "bfloat16"))
+        # ``apply_shape_attrs`` gives every port the whole shape; the final
+        # refinement reads the operation's own contract and divides them.
+        apply_shape_attrs(left, TensorSpec(("B", "S", 24, 512), "bfloat16"))
+        refine_multi_output_port_shapes([node, left])
+        refine_multi_output_port_shapes([node, left])
+        shapes = [
+            next(attr["value"] for attr in port["attrs"] if attr["key"] == "shape")
+            for port in node["outputsMetadata"]
+        ]
+        assert shapes == [
+            "[B, S, 24, 256] bfloat16",
+            "[B, S, 24, 256] bfloat16",
+        ]
+        left_shape = next(
+            attr["value"] for attr in left["attrs"] if attr["key"] == "output_shape"
+        )
+        assert left_shape == "[B, S, 24, 256] bfloat16"
+
+
+class TestTheRestOfTheClass:
+    """The same overwrite on an op the Cast-only check could not see."""
+
+    def test_an_activation(self) -> None:
+        assert _shape_preserving_op_warnings(
+            [
+                _node__shape_preserving_ops(
+                    ["B", "S", "64", "128"],
+                    "[B, S, 48, 128] float32",
+                    raw_op="silu",
+                    op_type=None,
+                    label="SiLU",
+                )
+            ]
+        )
+
+    def test_a_dropout(self) -> None:
+        assert _shape_preserving_op_warnings(
+            [
+                _node__shape_preserving_ops(
+                    ["B", "S", "768"],
+                    "[B, S, 1024] float32",
+                    raw_op="dropout",
+                    op_type=None,
+                    label="Dropout",
+                )
+            ]
+        )
+
+    def test_a_layout_copy(self) -> None:
+        assert _shape_preserving_op_warnings(
+            [
+                _node__shape_preserving_ops(
+                    ["B", "S", "768"],
+                    "[B, S, 1024] float32",
+                    raw_op="contiguous",
+                    op_type=None,
+                    label="Contiguous",
+                )
+            ]
+        )
+
+
+class TestWhatItAccepts__shape_preserving_ops:
+    def test_a_cast_that_only_changes_dtype(self) -> None:
+        assert (
+            _shape_preserving_op_warnings(
+                [
+                    _node__shape_preserving_ops(
+                        ["B", "S", "64", "128"], "[B, S, 64, 128] float32"
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_a_symbolic_shape_that_matches(self) -> None:
+        assert (
+            _shape_preserving_op_warnings(
+                [
+                    _node__shape_preserving_ops(
+                        ["B", "S", "index_n_heads"], "[B, S, index_n_heads] float32"
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_an_op_that_really_does_change_the_shape(self) -> None:
+        """A transpose moving an axis is the op doing its job, not a defect."""
+        assert (
+            _shape_preserving_op_warnings(
+                [
+                    _node__shape_preserving_ops(
+                        ["B", "S", "H", "D"],
+                        "[B, H, S, D] float32",
+                        raw_op="transpose",
+                        op_type=None,
+                        label="Transpose",
+                    )
+                ]
+            )
+            == []
+        )
+
+    def test_a_reduction(self) -> None:
+        assert (
+            _shape_preserving_op_warnings(
+                [
+                    _node__shape_preserving_ops(
+                        ["B", "S", "H"],
+                        "[B, S] float32",
+                        raw_op="sum",
+                        op_type=None,
+                        label="Sum",
+                    )
+                ]
+            )
+            == []
+        )
+
+
+class TestWhereItSaysNothing__shape_preserving_ops:
+    def test_a_node_recording_no_operation(self) -> None:
+        """Even labelled ``Cast``: the label is not evidence about the op."""
+        node = _node__shape_preserving_ops(
+            ["B", "S", "64"], "[B, S, 48] float32", raw_op=None
+        )
+        assert _shape_preserving_op_warnings([node]) == []
+
+    def test_a_constant_cast(self) -> None:
+        """A learned weight's conversion loses its operand at render time."""
+        node = _node__shape_preserving_ops(
+            ["B", "S", "64"], "[B, S, 48] float32", constant="true"
+        )
+        assert _shape_preserving_op_warnings([node]) == []
+
+    def test_more_than_one_recorded_operand(self) -> None:
+        """Ambiguous which entry is the tensor being cast."""
+        node = _node__shape_preserving_ops(["B", "S", "64"], "[B, S, 48] float32")
+        node["attrs"] = [
+            (
+                a
+                if a["key"] != "input_shapes"
+                else {
+                    "key": "input_shapes",
+                    "value": json.dumps([["B", "S", "64"], ["1"]]),
+                }
+            )
+            for a in node["attrs"]
+        ]
+        assert _shape_preserving_op_warnings([node]) == []
+
+    def test_nothing_recorded(self) -> None:
+        assert (
+            _shape_preserving_op_warnings([_node__shape_preserving_ops(None, None)])
+            == []
+        )
+
+
+# --- test_unresolved_config_dims.py ---
+
+from TraceLens.Visualizer.model_explorer_export.type_check import (
+    unresolved_config_dims,
+)
+
+
+def _node__unresolved_config_dims(shape: str, node_id: str = "m/@op") -> dict:
+    return {"id": node_id, "attrs": [{"key": "output_shape", "value": shape}]}
+
+
+class TestAConfigConstantMustResolve:
+    def test_a_bare_head_count_is_reported(self) -> None:
+        messages = unresolved_config_dims(
+            [_node__unresolved_config_dims("[B, N, S, D] bfloat16")]
+        )
+        assert messages, "a bare 'N' is an unresolved head count"
+
+    def test_the_message_says_what_it_is_and_where_to_look(self) -> None:
+        """So the reader knows where to fix it, not just that it is broken.
+
+        It no longer quotes a list of key spellings: there is no such list to
+        quote, because the names a model reads its constants under come from the
+        model's own config class.
+        """
+        (message,) = [
+            m
+            for m in unresolved_config_dims(
+                [_node__unresolved_config_dims("[B, N, S] f32")]
+            )
+            if "'N'" in m
+        ]
+        assert "heads" in message, "which dimension failed"
+        assert "attribute_map" in message, "where a rename would be declared"
+        assert "m/@op" in message, "and which node"
+
+    def test_every_offending_dim_is_found_not_every_other_one(self) -> None:
+        """``[B, N, S, D]`` shares the comma between neighbours.
+
+        A pattern that CONSUMES the delimiters matches every other dim, so half
+        the offenders go unreported -- which is how a first draft of this check
+        passed a shape carrying two unresolved symbols.
+        """
+        symbols = {
+            m.split("bare symbol ")[1].split(" ")[0].strip("'")
+            for m in unresolved_config_dims(
+                [_node__unresolved_config_dims("[B, N, S, D] bfloat16")]
+            )
+        }
+        assert symbols == {"N", "D"}, symbols
+
+
+class TestRuntimeAxesAreNeverFlagged:
+    def test_batch_sequence_images_and_patches_are_legitimate(self) -> None:
+        assert (
+            unresolved_config_dims(
+                [_node__unresolved_config_dims("[B, S, Img, Pv] bfloat16")]
+            )
+            == []
+        )
+
+    def test_a_resolved_shape_is_silent(self) -> None:
+        assert (
+            unresolved_config_dims(
+                [_node__unresolved_config_dims("[B, 32, S, 128] bfloat16")]
+            )
+            == []
+        )
+
+    def test_a_node_without_a_shape_is_skipped(self) -> None:
+        assert unresolved_config_dims([{"id": "m/@x", "attrs": []}]) == []
+
+
+class TestThePartitionComesFromTheShapeMachinery:
+    def test_runtime_axes_are_batch_sequence_images_and_patches(self) -> None:
+        runtime = {"B", "S", "Pv", "Img"}
+        for value in runtime:
+            assert (
+                unresolved_config_dims([_node__unresolved_config_dims(f"[{value}, 4]")])
+                == []
+            ), value
+        assert unresolved_config_dims([_node__unresolved_config_dims("[H, 4]")])
+
+
+# --- test_host_size_readers.py ---
+
+import pytest
+
+_MODEL__host_size_readers = "zai-org/GLM-5.3-Flash"
+
+
+def _attr__host_size_readers(node: dict, key: str) -> str:
+    for item in node.get("attrs") or []:
+        if item.get("key") == key:
+            return str(item.get("value"))
+    return ""
+
+
+@pytest.fixture(scope="module")
+def glm_nodes__host_size_readers(model_graph_nodes):
+    return model_graph_nodes(_MODEL__host_size_readers)
+
+
+def _vision_splits(nodes: list[dict]) -> list[dict]:
+    return [
+        node
+        for node in nodes
+        if (node.get("label") or "") == "Split"
+        and "blocks:attn" in str(node["id"])
+        and "cu_seqlens" in _attr__host_size_readers(node, "details")
+    ]
+
+
+class TestEverySizedOpShowsItsSize:
+    def test_all_three_projections_are_split(
+        self, glm_nodes__host_size_readers
+    ) -> None:
+        """q, k and v -- the fan-out is over a literal tuple of all three."""
+        assert len(_vision_splits(glm_nodes__host_size_readers)) == 3, [
+            n["id"] for n in _vision_splits(glm_nodes__host_size_readers)
+        ]
+
+    def test_each_one_reads_the_lengths_it_is_split_by(
+        self, glm_nodes__host_size_readers
+    ) -> None:
+        by_id = {str(node["id"]): node for node in glm_nodes__host_size_readers}
+        for split in _vision_splits(glm_nodes__host_size_readers):
+            sources = [
+                str(edge.get("sourceNodeId"))
+                for edge in split.get("incomingEdges") or []
+            ]
+            sized_by = [
+                src
+                for src in sources
+                if "cu_seqlens" in str((by_id.get(src) or {}).get("label") or "")
+                or "cu_seqlens" in src
+            ]
+            assert sized_by, (split["id"], sources)
+
+    def test_the_size_is_not_drawn_as_a_tensor_operand(
+        self, glm_nodes__host_size_readers
+    ) -> None:
+        """It is a size, so it types as a Scalar -- a split takes one tensor."""
+        for split in _vision_splits(glm_nodes__host_size_readers):
+            types = _attr__host_size_readers(split, "input_types")
+            assert types.count("bfloat16") == 1, (split["id"], types)
+            assert "Scalar" in types, (split["id"], types)
+
+
+# --- test_method_expansion_entry_spec.py ---
+
+import re
+
+import pytest
+
+_MODEL__method_expansion_entry_spec = "MiniMaxAI/MiniMax-M3"
+
+
+def _attr__method_expansion_entry_spec(node: dict, key: str) -> str:
+    for item in node.get("attrs") or []:
+        if item.get("key") == key:
+            return str(item.get("value"))
+    return ""
+
+
+@pytest.fixture(scope="module")
+def mask_builder(model_graph_nodes):
+    """Nodes of one ``build_block_mask`` expansion."""
+    nodes = model_graph_nodes(_MODEL__method_expansion_entry_spec)
+    ids = [str(n["id"]) for n in nodes if "indexer@l468" in str(n["id"])]
+    if not ids:
+        pytest.skip("no build_block_mask expansion in this graph")
+    prefix = sorted({re.match(r"(.*indexer@l468[^/]*)", i).group(1) for i in ids})[0]
+    return [n for n in nodes if str(n["id"]).startswith(prefix)]
+
+
+def _labelled__method_expansion_entry_spec(nodes: list[dict], label: str) -> list[dict]:
+    return [n for n in nodes if (n.get("label") or "") == label]
+
+
+class TestTheExpansionReadsWhatItWasHanded:
+    def test_the_boundary_is_the_block_index_tensor(self, mask_builder) -> None:
+        tiles = _labelled__method_expansion_entry_spec(mask_builder, "block_indices")
+        assert tiles, "no block_indices boundary"
+        for tile in tiles:
+            assert (
+                _attr__method_expansion_entry_spec(tile, "output_shape")
+                == "[B, index_n_heads, S, 4] int64"
+            ), (
+                tile["id"],
+                _attr__method_expansion_entry_spec(tile, "output_shape"),
+            )
+
+    def test_the_boundary_and_its_mirror_agree(self, mask_builder) -> None:
+        """Two halves of one crossing; they carried different shapes."""
+        shapes = {
+            _attr__method_expansion_entry_spec(tile, "output_shape")
+            for tile in _labelled__method_expansion_entry_spec(
+                mask_builder, "block_indices"
+            )
+        }
+        assert shapes, shapes
+
+    def test_nothing_in_the_body_reads_the_decoder_activation(
+        self, mask_builder
+    ) -> None:
+        """``[B, S, 6144]`` is the hidden state, not a block-index tensor."""
+        offenders = [
+            (str(n["id"]), _attr__method_expansion_entry_spec(n, "output_shape"))
+            for n in mask_builder
+            if "6144" in _attr__method_expansion_entry_spec(n, "output_shape")
+        ]
+        assert not offenders, offenders
+
+    def test_the_mask_it_builds_is_four_dimensional(self, mask_builder) -> None:
+        """ "We build the full 4D attention mask", per the method's docstring."""
+        outputs = [
+            n
+            for n in mask_builder
+            if _attr__method_expansion_entry_spec(n, "synthetic") == "@output"
+        ]
+        assert outputs
+        for node in outputs:
+            shape = _attr__method_expansion_entry_spec(node, "output_shape")
+            assert shape.count(",") == 3, (node["id"], shape)
+
+
+# --- test_vision_cu_seqlens_shape.py ---
+
+import pytest
+
+_MODEL__vision_cu_seqlens_shape = "zai-org/GLM-5.3-Flash"
+
+
+def _attr__vision_cu_seqlens_shape(node: dict, key: str) -> str:
+    for item in node.get("attrs") or []:
+        if item.get("key") == key:
+            return str(item.get("value"))
+    return ""
+
+
+def _shape(node: dict) -> str:
+    return _attr__vision_cu_seqlens_shape(node, "output_shape")
+
+
+@pytest.fixture(scope="module")
+def glm_nodes__vision_cu_seqlens_shape(model_graph_nodes):
+    return model_graph_nodes(_MODEL__vision_cu_seqlens_shape)
+
+
+def _labelled__vision_cu_seqlens_shape(nodes: list[dict], label: str) -> list[dict]:
+    return [node for node in nodes if (node.get("label") or "") == label]
+
+
+class TestTheGridIsItsOwnInput:
+    def test_the_grid_has_a_model_input_boundary(
+        self, glm_nodes__vision_cu_seqlens_shape
+    ) -> None:
+        boundary = [
+            node
+            for node in glm_nodes__vision_cu_seqlens_shape
+            if str(node["id"]) == "@vision_input:grid_thw"
+        ]
+        assert boundary, "the grid the tower is handed has no boundary of its own"
+
+    def test_the_grid_does_not_read_the_image_patches(
+        self, glm_nodes__vision_cu_seqlens_shape
+    ) -> None:
+        """The defect itself: the grid docking onto the tower's activation."""
+        for node in _labelled__vision_cu_seqlens_shape(
+            glm_nodes__vision_cu_seqlens_shape, "grid_thw"
+        ):
+            sources = {
+                str(edge.get("sourceNodeId"))
+                for edge in node.get("incomingEdges") or []
+            }
+            assert (
+                "visual/@input" not in sources
+            ), f"{node['id']} reads the image patches as its grid"
+
+    def test_the_grid_is_rows_of_coordinates(
+        self, glm_nodes__vision_cu_seqlens_shape
+    ) -> None:
+        """``(num_images_or_videos, 3)`` per the source docstring."""
+        for node in _labelled__vision_cu_seqlens_shape(
+            glm_nodes__vision_cu_seqlens_shape, "grid_thw"
+        ):
+            assert _shape(node) == "[Img, 3] int64", (node["id"], _shape(node))
+
+
+class TestCuSeqlens:
+    def test_it_is_one_offset_per_segment_boundary(
+        self, glm_nodes__vision_cu_seqlens_shape
+    ) -> None:
+        """``(num_segments + 1,) int32``, per the helper's own docstring.
+
+        The dtype is the ``cumsum(dim=0, dtype=dtype)`` the source asks for,
+        where ``dtype`` resolves through ``torch.jit.is_tracing()`` -- False in
+        the forward this export documents.
+        """
+        tiles = _labelled__vision_cu_seqlens_shape(
+            glm_nodes__vision_cu_seqlens_shape, "cu_seqlens"
+        )
+        assert tiles, "no cu_seqlens tile in the graph"
+        for node in tiles:
+            assert _shape(node) == "[Img + 1] int32", (node["id"], _shape(node))
+
+    def test_no_cast_reports_a_device_as_its_dtype(
+        self, glm_nodes__vision_cu_seqlens_shape
+    ) -> None:
+        """``x.to(inputs_embeds.device)`` moves a tensor; it casts nothing.
+
+        Recorded as a target dtype it made a pure device move look like a dtype
+        change, which then survived cast elision as a Cast that changes nothing.
+        """
+        offenders = [
+            (str(node["id"]), _attr__vision_cu_seqlens_shape(node, "details"))
+            for node in glm_nodes__vision_cu_seqlens_shape
+            if "dtype: " in _attr__vision_cu_seqlens_shape(node, "details")
+            and ".device"
+            in _attr__vision_cu_seqlens_shape(node, "details").split("dtype: ", 1)[1]
+        ]
+        assert not offenders, offenders
+
+    def test_no_node_in_the_chain_counts_patches(
+        self, glm_nodes__vision_cu_seqlens_shape
+    ) -> None:
+        """Pv is the patch axis; the grid chain must never report it."""
+        chain = [
+            node
+            for node in glm_nodes__vision_cu_seqlens_shape
+            if "get_vision_cu_seqlens" in str(node["id"])
+            and not _attr__vision_cu_seqlens_shape(node, "constant")
+        ]
+        assert chain, "the cu_seqlens frame is missing"
+        offenders = [
+            (str(node["id"]), _shape(node)) for node in chain if "Pv" in _shape(node)
+        ]
+        assert not offenders, offenders

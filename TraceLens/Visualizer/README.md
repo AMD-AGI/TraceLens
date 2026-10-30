@@ -17,7 +17,7 @@ For example, this is the top-level visualization of GLM 5.3 Flash
 
 ## Features
 
-- **Single-page HTML export** — self-contained `.html` file (graph payload, viewer, and layout worker embedded); open directly in a browser, no local server or sidecar files
+- **Single-page HTML export** — self-contained `.html` file (graph payload, viewer, and the Apache-2.0 layout worker embedded, with its license); open directly in a browser, no local server or sidecar files
 - **Model Explorer export** — interactive layered graph with fact sheet, kernel styling, and collapsible pipelines
 - **Shape inference** — symbolic tensor shapes (`B x S x H`) on every exported node, shown on graph edges (disable with `--no-shapes`)
 - **Operator JSON export** — flat per-op shape lists for tooling (`--operators-json`)
@@ -25,6 +25,10 @@ For example, this is the top-level visualization of GLM 5.3 Flash
 - **Flexible sources** — Hugging Face Hub checkpoints, local checkpoint directories, or GitHub modeling repos
 
 
+
+## Agent
+
+A skill drives this exporter from an agent chat: it installs the extra if needed, runs one `visualize_model_in_explorer` command, and checks the HTML or JSON file. See [TraceLens/Agent/Visualizer/README.md](../Agent/Visualizer/README.md).
 
 ## Installation
 
@@ -40,61 +44,42 @@ For local development and tests, also install the dev extra:
 pip install -e ".[Visualizer,dev]"
 ```
 
-Or install from the repo root with `pip install -e ".[Visualizer]"`.
-
-Legacy standalone setup:
-
-```bash
-cd ~/tracelens/TraceLens/Visualizer
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-For development and tests:
-
-```bash
-pip install -r requirements-dev.txt
-```
-
-
-
 ## Quick start
 
 Serve an interactive Model Explorer viewer for a Hugging Face model:
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 --serve --open
+visualize_model_in_explorer moonshotai/Kimi-K3 --serve --open
 ```
 
 Export a self-contained HTML file (default when not using `--serve`):
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3
+visualize_model_in_explorer moonshotai/Kimi-K3
 # writes moonshotai_Kimi-K3.html — one file, open directly in a browser
 
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 -o
+visualize_model_in_explorer moonshotai/Kimi-K3 -o
 # same default HTML path
 ```
 
-The HTML export embeds the graph payload, TraceLens viewer, and Model Explorer layout worker inline. You can double-click the file or open it via `file://`; no `worker.js` or other companion files are written beside it. The bundled Model Explorer library is still loaded from unpkg on first open (network required unless cached by the browser).
+The HTML export embeds the graph payload, TraceLens viewer, and Model Explorer layout worker inline, including the Apache-2.0 license and the copyright notice for that worker. You can double-click the file or open it via `file://`; no `worker.js` or other companion files are written beside it. The `<model-explorer-visualizer>` element and its font textures still load from unpkg on first open (network required unless cached by the browser). `--serve` follows the package README: it serves the pinned `dist/worker.js` at `./worker.js` on the same origin, and points `assetFilesBaseUrl` at that package's `dist/static_files`.
 
 Export raw Model Explorer JSON:
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 -o kimi.json
+visualize_model_in_explorer moonshotai/Kimi-K3 -o kimi.json
 ```
 
 Skip symbolic shape annotations on graph nodes (they are on by default):
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 --serve --open --no-shapes
+visualize_model_in_explorer moonshotai/Kimi-K3 --serve --open --no-shapes
 ```
 
 Write a flat operator export with inferred shapes (also embeds `operatorExport` in the payload when used with `-o`):
 
 ```bash
-python visualize_model_in_explorer.py moonshotai/Kimi-K3 --operators-json kimi_operators.json
+visualize_model_in_explorer moonshotai/Kimi-K3 --operators-json kimi_operators.json
 ```
 
 
@@ -146,6 +131,10 @@ python -m TraceLens.Visualizer.model_explorer_export.cli --from-payload kimi.jso
 | `--config-override KEY=VALUE`   | Override one config key, repeatable. Applied last, over the checkpoint, the config-class defaults, and the model's own constructor writes. A dotted key reaches a nested config (`vision_config.hidden_size=1024`). The value is JSON when it parses as JSON (`8`, `true`, `null`, `[1, 2]`) and text otherwise. Stating one key twice keeps the last value |
 | `--config-path`                 | Explicit `config.json` path inside a checkpoint                                                         |
 | `--code-path`                   | Explicit path to `modeling_*.py` when auto-discovery fails                                              |
+| `--engine {vllm,sglang}`        | Draw the architecture from vLLM's or SGLang's own pinned modeling source instead of transformers', and read `--tp`/`--pp`/`--ep` from that engine's sharding classes instead of a declared `base_model_tp_plan` |
+| `--tp N`                        | Tensor-parallel partitions (default: `1`)                                                               |
+| `--pp N`                        | Pipeline-parallel partitions (default: `1`)                                                             |
+| `--ep N`                        | Expert-parallel partitions (default: `1`)                                                               |
 | `--dump-ast`                    | Write parsed modeling-file AST dump to a path                                                           |
 | `--basic-op-add REGEX`          | Treat matching block names as leaf/basic ops (repeatable)                                               |
 | `--basic-op-remove REGEX`       | Remove a default basic-op pattern (repeatable)                                                          |
@@ -175,6 +164,30 @@ python -m TraceLens.Visualizer.model_explorer_export.cli moonshotai/Kimi-K3 \
   --config-override num_hidden_layers=2 \
   -o kimi-decode.html
 ```
+
+### Device partitioning (`--tp`/`--pp`/`--ep`/`--engine`)
+
+`--tp`, `--pp`, and `--ep` split the graph across GPUs and annotate each node with its
+partition style and the collectives (all-reduce, send/recv) that cross a device boundary.
+The split comes from the checkpoint's declared `base_model_tp_plan` / `base_model_pp_plan`
+/ `base_model_ep_plan`, by default.
+
+`--engine {vllm,sglang}` draws the architecture from that inference engine's own pinned
+modeling source instead — vLLM's or SGLang's `ColumnParallelLinear`, `RowParallelLinear`,
+`QKVParallelLinear`, `VocabParallelEmbedding`, `make_layers`/`make_pp_layers`, and
+`FusedMoE`-style experts — and reads `--tp`/`--pp`/`--ep` from those sharding idioms instead
+of a declared plan. It is ignored once `--code-path` or `--github` already name the source
+(it still selects the engine-aware plan parser in that case).
+
+```bash
+python -m TraceLens.Visualizer.model_explorer_export.cli meta-llama/Llama-3.1-70B \
+  --engine vllm --tp 8 --pp 2 -o llama3-70b.html
+
+python -m TraceLens.Visualizer.model_explorer_export.cli MiniMaxAI/MiniMax-M3.1-flash \
+  --engine sglang --tp 2 --ep 4 -o minimax-m3-sglang.html
+```
+
+A GPU count that does not divide evenly into partitions is still exported, with a warning.
 
 ### Debugging: standalone `nn.Module` introspection (`--torch-module`)
 
@@ -245,11 +258,12 @@ Generic AST introspection reads Python from:
 - your local `--code-path`
 - `**huggingface/transformers**` (installed package or GitHub fallback)
 - `**fla-org/flash-linear-attention**` (kernel dependency introspection)
+- `**vllm-project/vllm**` and `**sgl-project/sglang**`, pinned (`--engine vllm` / `--engine sglang`)
 
 Other GitHub repositories are blocked unless you explicitly allow them:
 
 ```bash
-python visualize_model_in_explorer.py acme/custom-model \
+visualize_model_in_explorer acme/custom-model \
   --github github:acme/custom-model@main \
   --allow-repo acme/custom-model
 ```
@@ -262,13 +276,19 @@ on GitHub — for a multimodal wrapper, the nested text backbone's `model_type` 
 too. The file is cached under `~/.cache/tracelens`, and if the fetch fails the export
 falls back to config heuristics.
 
+`--engine vllm` / `--engine sglang` read from a fixed tag of each engine instead
+(`vllm-project/vllm@v0.32.0`, `sgl-project/sglang@v0.5.22`), resolved the same way: vLLM's
+static model registry, or SGLang's filename convention under `srt/models/`, following
+out-of-tree package re-exports (e.g. vLLM's `minimax_m3` package) to the file that
+actually defines the architecture class.
+
 ## How it works
 
 1. **Config parsing** — reads `hidden_size`, layer counts, attention type, MoE settings, etc. from `config.json`
 2. **AST analysis** — parses `modeling_*.py` to discover module structure, `forward()` call order, norms, gates, and custom kernels
 3. **Block trees** — builds recursive block diagrams from the parsed structure
 4. **Computation graph** — converts block trees to a directed graph for Model Explorer export
-5. **Single-page HTML** — embeds payload, viewer script, and layout worker into one `.html` file for offline-friendly sharing (Model Explorer assets load from unpkg)
+5. **Single-page HTML** — embeds payload, viewer script, and layout worker into one `.html` file for offline-friendly sharing (the visualizer element and its static files load from unpkg; the worker is the pinned Apache-2.0 `ai-edge-model-explorer-visualizer` build)
 6. **Shape inference** — propagates symbolic dimensions (`B`, `S`, `H`, …) through the model graph and annotates exported nodes
 
 Composite GPU kernels (e.g. fused attention, MoE dispatch) remain opaque leaf nodes unless expanded by custom kernel pipeline parsing.
@@ -280,7 +300,6 @@ is shared with the rest of TraceLens and lives in `TraceLens/ModelUtils`.
 
 ```
 TraceLens/Visualizer/
-├── visualize_model_in_explorer.py   # CLI entry point
 └── model_explorer_export/           # Model Explorer payload, viewer, and server
     ├── cli.py                       # Argument parsing and the two-stage pipeline
     ├── ast_build.py                 # Payload built from the static analysis
@@ -293,8 +312,9 @@ TraceLens/Visualizer/
     ├── fact_sheet.py                # Model fact sheet panel
     ├── labels.py, styles.py         # Display labels and kernel styling
     ├── viewer_page.py               # Single-page HTML assembly
+    ├── viewer_assets.py             # Pinned same-origin layout worker
     ├── serve.py                     # Local server for --serve
-    └── viewer/                      # Bundled viewer shell (app.js, index.html, worker.js)
+    └── viewer/                      # Viewer shell, Apache-2.0 LICENSE, and NOTICE
 
 TraceLens/ModelUtils/                # Shared model analysis
 ├── loader.py                        # High-level model spec loading

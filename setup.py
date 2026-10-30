@@ -6,11 +6,9 @@
 
 import subprocess
 from datetime import datetime
-from pathlib import Path
 from setuptools import setup, find_packages
 
 _BASE_VERSION = "0.1.0"
-_ROOT = Path(__file__).resolve().parent
 
 
 def _wheel_version():
@@ -30,16 +28,6 @@ def _wheel_version():
         return _BASE_VERSION
 
 
-def _read_requirements(path: Path) -> list[str]:
-    if not path.is_file():
-        return []
-    return [
-        line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-
-
 with open("README.md", encoding="utf-8") as _readme:
     _LONG_DESCRIPTION = _readme.read()
 
@@ -53,9 +41,14 @@ def _extras_require():
         "comparative": [
             "slodels[openai,anthropic,google-genai]",
         ],
-        "Visualizer": _read_requirements(
-            _ROOT / "TraceLens" / "Visualizer" / "requirements.txt"
-        ),
+        "Visualizer": [
+            "torch",
+            "transformers",
+            "huggingface_hub>=0.20",
+            # fla-core imports Triton at package import. The visualizer never
+            # launches a kernel; it only needs that import to succeed.
+            'triton; platform_system == "Linux" and platform_machine == "x86_64"',
+        ],
         "kernel_source": [
             "itanium-demangler>=1.0",
         ],
@@ -83,11 +76,17 @@ setup(
         ],
         "TraceLens.Visualizer.model_explorer_export": [
             "viewer/*.html",
-            "viewer/*.js",
+            "viewer/app.js",
+            "viewer/NOTICE",
+            "viewer/ai-edge-model-explorer-visualizer.LICENSE",
         ],
     },
     exclude_package_data={
-        "TraceLens": ["Agent/Analysis/skills/analysis-orchestrator/evals/*"],
+        "TraceLens": [
+            "Agent/Analysis/skills/analysis-orchestrator/evals/*",
+            "Agent/Visualizer/skills/model-visualizer/evals/*",
+            "Agent/Visualizer/skills/model-roofline-projection/evals/*",
+        ],
     },
     install_requires=[
         "pandas",
@@ -121,6 +120,7 @@ setup(
             "TraceLens_generate_perf_report_jax = TraceLens.Reporting.generate_perf_report_jax:main",
             "TraceLens_generate_perf_report_pytorch = TraceLens.Reporting.generate_perf_report_pytorch:main",
             "TraceLens_generate_perf_report_pytorch_inference = TraceLens.Reporting.generate_perf_report_pytorch_inference:main",
+            "TraceLens_generate_perf_report_from_config = TraceLens.Reporting.generate_perf_report_from_config:main",
             "TraceLens_generate_perf_report_rocprof = TraceLens.Reporting.generate_perf_report_rocprof:main",
             "TraceLens_compare_perf_reports_pytorch = TraceLens.Reporting.compare_perf_reports_pytorch:main",
             "TraceLens_generate_multi_rank_collective_report_pytorch = TraceLens.Reporting.generate_multi_rank_collective_report_pytorch:main",
@@ -130,6 +130,7 @@ setup(
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
             "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
             "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
+            "TraceLens_model_roofline_projection = TraceLens.Visualizer.model_explorer_export.roofline_cli:main",
             "TraceLens_split_trace = TraceLens.TraceUtils.split_trace.main:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",

@@ -1,0 +1,348 @@
+diff --git a/vllm/profiler/graph_capture.py b/vllm/profiler/graph_capture.py
+new file mode 100644
+index 0000000..e9c6e67
+--- /dev/null
++++ b/vllm/profiler/graph_capture.py
+@@ -0,0 +1,127 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Torch profiler helpers for CUDA/HIP graph capture tracing.
++
++Graph capture is driven by three subsystems (encoder, decoder and speculator)
++that reach the same handful of capture loops by different routes.
++``graph_capture_profiler`` binds one profiler around a subsystem's capture,
++and ``graph_capture_step`` picks that binding up inside whichever capture loop
++ends up running. Capture loops therefore carry no profiler plumbing, and a new
++speculator built on an existing capture loop is traced without further changes.
++"""
++
++from __future__ import annotations
++
++import contextvars
++from collections.abc import Iterator
++from contextlib import AbstractContextManager, contextmanager, nullcontext
++from dataclasses import dataclass
++from typing import Any
++
++import torch
++
++from vllm.config import VllmConfig
++from vllm.distributed.parallel_state import get_world_group
++from vllm.logger import init_logger
++
++logger = init_logger(__name__)
++
++
++@dataclass(frozen=True)
++class _CaptureBinding:
++    profiler: AbstractContextManager[Any]
++    label_prefix: str | None
++
++
++_active_binding: contextvars.ContextVar[_CaptureBinding | None] = (
++    contextvars.ContextVar("vllm_graph_capture_binding", default=None)
++)
++
++
++def _make_profiler(
++    vllm_config: VllmConfig,
++    subsystem: str | None,
++) -> AbstractContextManager[Any]:
++    profiler_config = vllm_config.profiler_config
++    local_rank = get_world_group().local_rank
++    if local_rank != 0 or not profiler_config.capture_torch_profiler:
++        logger.info_once(
++            "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
++        )
++        return nullcontext()
++
++    trace_dir = profiler_config.torch_profiler_dir + "/capture_traces"
++    worker_name = f"graph_capture_rank_{local_rank}"
++    if subsystem:
++        worker_name += f"_{subsystem}"
++    logger.info_once(
++        "Rank %d: Torch profiler enabled for %s CUDA graph capture, "
++        "traces will be saved to: %s",
++        local_rank,
++        subsystem or "decoder",
++        trace_dir,
++    )
++    return torch.profiler.profile(
++        activities=[
++            torch.profiler.ProfilerActivity.CPU,
++            torch.profiler.ProfilerActivity.CUDA,
++        ],
++        record_shapes=True,
++        profile_memory=True,
++        with_stack=True,
++        on_trace_ready=torch.profiler.tensorboard_trace_handler(
++            trace_dir,
++            worker_name=worker_name,
++            use_gzip=True,
++        ),
++    )
++
++
++@contextmanager
++def graph_capture_profiler(
++    vllm_config: VllmConfig,
++    subsystem: str | None = None,
++    label_prefix: str | None = None,
++) -> Iterator[None]:
++    """Bind a graph-capture profiler for one subsystem's capture.
++
++    Args:
++        subsystem: Suffix for the trace file name. ``"encoder"`` writes
++            ``graph_capture_rank_0_encoder.<timestamp>.pt.trace.json.gz``;
++            the main decoder passes ``None`` and keeps the unsuffixed name.
++        label_prefix: Inserted into every annotation recorded inside the
++            block, so that e.g. speculator graphs are labelled
++            ``capture_32_draft_FULL`` rather than reusing the decoder's
++            ``capture_32_FULL``.
++    """
++    binding = _CaptureBinding(
++        profiler=_make_profiler(vllm_config, subsystem),
++        label_prefix=label_prefix,
++    )
++    token = _active_binding.set(binding)
++    try:
++        yield
++    finally:
++        _active_binding.reset(token)
++
++
++@contextmanager
++def graph_capture_step(num_tokens: int, mode: str) -> Iterator[None]:
++    """Profile the capture of a single graph shape.
++
++    Records a ``capture_{num_tokens}_{mode}`` annotation, or
++    ``capture_{num_tokens}_{label_prefix}_{mode}`` when the active binding
++    sets a prefix. Does nothing outside a ``graph_capture_profiler`` block, so
++    capture loops can call this unconditionally.
++    """
++    binding = _active_binding.get()
++    if binding is None:
++        yield
++        return
++
++    if binding.label_prefix:
++        label = f"capture_{num_tokens}_{binding.label_prefix}_{mode}"
++    else:
++        label = f"capture_{num_tokens}_{mode}"
++    with binding.profiler, torch.profiler.record_function(label):
++        yield
+diff --git a/a/vllm/v1/worker/encoder_cudagraph.py b/vllm/v1/worker/encoder_cudagraph.py
+index 51c8320..ba17226 100644
+--- a/a/vllm/v1/worker/encoder_cudagraph.py
++++ b/vllm/v1/worker/encoder_cudagraph.py
+@@ -22,6 +22,7 @@ from vllm.model_executor.models.interfaces import (
+ )
+ from vllm.model_executor.models.utils import scatter_output_slices
+ from vllm.model_executor.models.vision import get_load_balance_assignment
++from vllm.profiler.graph_capture import graph_capture_step
+ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+ from vllm.utils.math_utils import round_up_to
+ from vllm.utils.torch_utils import current_stream
+@@ -326,6 +327,7 @@ class EncoderCudaGraphManager:
+ 
+         graph = torch.cuda.CUDAGraph()
+         with (
++            graph_capture_step(token_budget, path),
+             torch.inference_mode(),
+             torch.cuda.graph(graph, pool=self.graph_pool, stream=current_stream()),
+         ):
+diff --git a/a/vllm/v1/worker/gpu/cudagraph_utils.py b/vllm/v1/worker/gpu/cudagraph_utils.py
+index 9956574..9b91e7b 100644
+--- a/a/vllm/v1/worker/gpu/cudagraph_utils.py
++++ b/vllm/v1/worker/gpu/cudagraph_utils.py
+@@ -36,6 +36,7 @@ from vllm.logger import init_logger
+ from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+ from vllm.model_executor.offloader.base import get_offloader
+ from vllm.platforms import current_platform
++from vllm.profiler.graph_capture import graph_capture_step
+ from vllm.sequence import IntermediateTensors
+ from vllm.utils.math_utils import round_up
+ from vllm.utils.torch_utils import current_stream
+@@ -482,12 +483,14 @@ class CudaGraphManager:
+                         desc.cg_mode == CUDAGraphMode.PIECEWISE
+                         and not self.use_breakable_cg
+                     ):
+-                        forward_fn(CUDAGraphMode.PIECEWISE)
++                        with graph_capture_step(desc.num_tokens, desc.cg_mode.name):
++                            forward_fn(CUDAGraphMode.PIECEWISE)
+                     else:
+                         # Capture with fresh attention state.
+                         forward_fn = create_forward_fn(desc, warmup=False)
+                         if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+-                            forward_fn(CUDAGraphMode.PIECEWISE)
++                            with graph_capture_step(desc.num_tokens, desc.cg_mode.name):
++                                forward_fn(CUDAGraphMode.PIECEWISE)
+                             continue
+                         assert desc not in self.graphs, (
+                             f"Graph already captured for {desc}"
+@@ -500,6 +503,7 @@ class CudaGraphManager:
+                             torch.accelerator.synchronize()
+                             free_before = torch.accelerator.get_memory_info()[0]
+                         with (
++                            graph_capture_step(desc.num_tokens, desc.cg_mode.name),
+                             capture_pool(self.pool, self.vllm_config) as pool,
+                             torch.cuda.graph(
+                                 graph, pool, stream=self._capture_stream(desc)
+diff --git a/a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index eea9cbe..4891668 100644
+--- a/a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -69,6 +69,7 @@ from vllm.sampling_params import SamplingParams
+ from vllm.sequence import IntermediateTensors
+ from vllm.tasks import SupportedTask
+ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
++from vllm.profiler.graph_capture import graph_capture_profiler
+ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+@@ -1135,36 +1136,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+ 
+             with self.maybe_setup_dummy_loras(self.lora_config):
+                 if capture_encoder:
+-                    self.model_state.encoder_runner.capture()
++                    with graph_capture_profiler(
++                        self.vllm_config, subsystem="encoder", label_prefix="encoder"
++                    ):
++                        self.model_state.encoder_runner.capture()
+ 
+                 if capture_decoder:
+                     input_buffers = self.input_buffers
+                     if self.pcp_manager is not None:
+                         input_buffers = self.pcp_manager.input_buffers
+-                    self.cudagraph_manager.capture(
+-                        self.model,
+-                        self.model_state,
+-                        input_buffers,
+-                        self.intermediate_tensors,
+-                        self.block_tables,
+-                        self.attn_groups,
+-                        self.kv_cache_config,
+-                        pcp_manager=self.pcp_manager,
+-                        has_lora=self.lora_config is not None,
+-                        use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+-                        lora_capture_hook=create_lora_capture_hook(
+-                            self.lora_config, self
+-                        ),
+-                    )
+-                    self.model_state.capture_inner_cudagraphs(
+-                        input_buffers,
+-                        self.block_tables,
+-                        self.attn_groups,
+-                        self.kv_cache_config,
+-                        self.cudagraph_manager.capture_stream,
+-                    )
++                    with graph_capture_profiler(self.vllm_config):
++                        self.cudagraph_manager.capture(
++                            self.model,
++                            self.model_state,
++                            input_buffers,
++                            self.intermediate_tensors,
++                            self.block_tables,
++                            self.attn_groups,
++                            self.kv_cache_config,
++                            pcp_manager=self.pcp_manager,
++                            has_lora=self.lora_config is not None,
++                            use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
++                            lora_capture_hook=create_lora_capture_hook(
++                                self.lora_config, self
++                            ),
++                        )
++                        self.model_state.capture_inner_cudagraphs(
++                            input_buffers,
++                            self.block_tables,
++                            self.attn_groups,
++                            self.kv_cache_config,
++                            self.cudagraph_manager.capture_stream,
++                        )
+                     if self.speculator is not None:
+-                        with use_workspace_lane(self._draft_workspace_lane):
++                        with (
++                            use_workspace_lane(self._draft_workspace_lane),
++                            graph_capture_profiler(
++                                self.vllm_config,
++                                subsystem="speculator",
++                                label_prefix="draft",
++                            ),
++                        ):
+                             self.speculator.capture()
+                     if self.adaptive_verification is not None and not profile_only:
+                         with self.step_timing.collect() as timings:
+diff --git a/a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index ac3ff3b..36d880d 100644
+--- a/a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -105,6 +105,7 @@ from vllm.multimodal.utils import (
+ )
+ from vllm.platforms import current_platform
+ from vllm.pooling_params import PoolingParams
++from vllm.profiler.graph_capture import graph_capture_profiler
+ from vllm.sampling_params import SamplingType
+ from vllm.sequence import IntermediateTensors
+ from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+@@ -6490,7 +6491,12 @@ class GPUModelRunner(
+             # Capture encoder CUDA graphs if enabled
+             if self.encoder_cudagraph_manager is not None:
+                 encoder_graph_pool = current_platform.graph_pool_handle()
+-                self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
++                with graph_capture_profiler(
++                    self.vllm_config, subsystem="encoder", label_prefix="encoder"
++                ):
++                    self.encoder_cudagraph_manager.capture(
++                        graph_pool=encoder_graph_pool
++                    )
+ 
+             torch.accelerator.synchronize()
+             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+diff --git a/a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 147e3b4..362ae74 100644
+--- a/a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -240,6 +240,7 @@ class Worker(WorkerBase):
+         # Profiler wrapper is created lazily in profile() when start is called,
+         # so we have all the information needed for proper trace naming.
+         self.profiler: Any | None = None
++        self._sample_annotation: str | None = None
+         self.profiler_config = vllm_config.profiler_config
+         validate_worker_profiler_config(self.profiler_config)
+ 
+@@ -1219,6 +1220,7 @@ class Worker(WorkerBase):
+         if not self.profiler:
+             return nullcontext()
+ 
++        self._sample_annotation = None
+         self.profiler.step()
+         if not self.profiler.should_annotate:
+             return nullcontext()
+@@ -1323,14 +1325,26 @@ class Worker(WorkerBase):
+                     ")",
+                 ]
+             )
++        if (
++            self.vllm_config.profiler_config.detailed_trace_annotation
++            and self.vllm_config.speculative_config is not None
++        ):
++            self._sample_annotation = "sample_" + annotation.removeprefix("execute_")
+         return self.profiler.annotate_context_manager(annotation)
+ 
++    def annotate_sample_tokens(self):
++        # Drafter forwards run in sample_tokens, outside the execute_* span.
++        if self.profiler is None or self._sample_annotation is None:
++            return nullcontext()
++        return self.profiler.annotate_context_manager(self._sample_annotation)
++
+     @torch.inference_mode()
+     @with_gpu_sync_check
+     def sample_tokens(
+         self, grammar_output: "GrammarOutput | None"
+     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+-        return self.model_runner.sample_tokens(grammar_output)
++        with self.annotate_sample_tokens():
++            return self.model_runner.sample_tokens(grammar_output)
+ 
+     @torch.inference_mode()
+     @with_gpu_sync_check

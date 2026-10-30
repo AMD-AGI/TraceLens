@@ -46,6 +46,7 @@ venv.bak/
 .coverage
 .coverage.*
 coverage.xml
+coverage.json
 htmlcov/
 *.cover
 *.py.cover

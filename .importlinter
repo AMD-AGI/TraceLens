@@ -14,8 +14,16 @@ ignore_imports =
     TraceLens.ModelUtils.block_tree -> TraceLens.ModelUtils.computation_graph
     TraceLens.ModelUtils.ast_analyze -> TraceLens.ModelUtils.kernel_pipeline
     TraceLens.ModelUtils.model_graph -> TraceLens.ModelUtils.computation_graph
-    TraceLens.ModelUtils.torch_introspect -> TraceLens.Visualizer.model_explorer_export.adapter
-    TraceLens.ModelUtils.torch_introspect -> TraceLens.Visualizer.model_explorer_export.shapes
     TraceLens.Trace2Tree.trace_capture_merge_experimental -> TraceLens.TraceUtils.utils.annotation_utils
     TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.trace_to_tree
     TraceLens.TraceUtils.split_trace.root_detection -> TraceLens.Trace2Tree.util
+    TraceLens.Reporting.generate_perf_report_from_config -> TraceLens.Agent.Analysis.utils.arch_utils
+    TraceLens.Reporting.reporting_utils -> TraceLens.Agent.Analysis.utils.arch_utils
+
+[importlinter:contract:modelutils-does-not-import-visualizer]
+name = ModelUtils does not import the Visualizer
+type = forbidden
+source_modules =
+    TraceLens.ModelUtils
+forbidden_modules =
+    TraceLens.Visualizer

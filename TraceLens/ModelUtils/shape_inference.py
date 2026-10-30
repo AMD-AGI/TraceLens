@@ -34,6 +34,9 @@ from TraceLens.ModelUtils.extract import (
 from TraceLens.ModelUtils.ast_analyze import (
     PHI_CLASS,
     PHI_LABEL,
+    _PARALLEL_GROUP_GETTER_NAMES,
+    _PARALLEL_RANK_FUNCS,
+    _PARALLEL_WORLD_SIZE_FUNCS,
     analyze_source,
     base_submodule_attr,
     is_forward_operation,
@@ -72,6 +75,24 @@ _PASS_THROUGH_PORTS = frozenset(
     {"@kernel_port_in", "@kernel_port_out", "@input_mirror", "@output_mirror"}
 )
 PORT_SPEC_SEP = "\x00port\x00"
+
+# vLLM/SGLang's gated-activation family (``SiluAndMul``, ``GeluAndMul``,
+# ``SiluAndMulWithClamp``, ``SwigluOAIAndMul``, SGLang's ``SituAndMul``,
+# ``MulAndSilu``, ...): every one takes ``gate, up = x.chunk(2, dim=-1)`` (or
+# the equivalent slice) and returns one gated half, so the name always pairs
+# "And"/"Mul" regardless of which comes first or what suffix follows
+# (``WithClamp``, ``Sparse``, ...). These reach the graph as a bare call
+# (``ACT2FN``-style dispatch), not an ``NN_MODULE`` with its own constructor,
+# so there is no AST to read a width from -- the shape rule is the halving
+# contract every one of these classes documents, not a per-class constant.
+_ENGINE_GATED_ACTIVATION_RE = re.compile(r"(?i)(AndMul|MulAnd)")
+
+# vLLM's ``FusedMoEFactory`` (a factory FUNCTION building the real MoE
+# submodule, reached here via ``node.label`` the same way the activations
+# above are) and SGLang's ``FusedMoE`` module both run every routed/shared
+# expert over ``hidden_states`` and hand back a tensor the same shape --
+# token count and hidden width both pass through unchanged.
+_ENGINE_MOE_CLASS_RE = re.compile(r"(?i)FusedMoE")
 
 
 class Symbol(str, Enum):
@@ -229,7 +250,7 @@ class ShapeContext:
         at full precision (in ``modules_to_not_convert``)."""
         if not self.quant_dtype:
             return self.dtype
-        segments = _module_path_segments(node_id)
+        segments = module_path_segments(node_id)
         for pattern in self.not_convert:
             if _module_path_matches(segments, pattern):
                 return self.dtype
@@ -1559,9 +1580,17 @@ def _ceiling_via_aten_schema(name: str) -> tuple[int | None, bool]:
             any_variadic = True
         else:
             counts.append(count)
+    # Some operator names have both a fixed tensor overload and unrelated
+    # Python-list overloads (``eq.Tensor`` beside ``eq.Tensor_list``). A tensor
+    # operation node can use the fixed contract; treating the mere existence of
+    # another list overload as proof this call is a tensor-list join turns every
+    # broadcasting equality into a concat-style rank check. A genuine
+    # tensor-list primitive such as ``cat`` has no fixed tensor overload.
+    if counts:
+        return max(counts), False
     if any_variadic:
         return None, True
-    return (max(counts) if counts else None), False
+    return None, False
 
 
 @functools.lru_cache(maxsize=None)
@@ -1574,6 +1603,17 @@ def _operand_ceiling(raw_op: str) -> tuple[int | None, bool]:
         return None, False
     via_inspect = _ceiling_via_inspect(name)
     if via_inspect is not None:
+        # Several torch builtins expose only ``(*args, **kwargs)`` to inspect
+        # even though their aten schema has a fixed tensor signature
+        # (``eq(self, other)`` is binary). Treating inspect's opaque varargs as
+        # a tensor-list contract makes the type-check apply concat/stack rank
+        # rules to ordinary broadcasting ops. Prefer the concrete schema when
+        # it can refine that opaque answer; a genuine tensor-list op remains
+        # variadic in both sources.
+        if via_inspect == (None, True):
+            via_schema = _ceiling_via_aten_schema(name)
+            if via_schema != (None, False):
+                return via_schema
         return via_inspect
     return _ceiling_via_aten_schema(name)
 
@@ -1823,6 +1863,34 @@ def _param_is_rank2_matrix(function: ast.FunctionDef, name: str) -> bool:
         return False, ranked
 
     return walk(function.body, False)[0]
+
+
+def _param_is_unpacked_as_tokens_and_hidden(
+    function: ast.FunctionDef, name: str
+) -> bool:
+    """True when the forward's own body destructures ``name.shape`` into two.
+
+    ``num_tokens, hidden_dim = hidden_states.shape`` (vLLM's MoE blocks, among
+    others) unpacks a tensor's ``.shape`` directly into exactly two names --
+    unpacking a 3-tuple into two names raises at runtime, so the parameter
+    this body actually receives is rank 2. Only an unconditional, top-level
+    unpack counts: one guarded by a branch does not rank the parameter on
+    every path.
+    """
+    for statement in function.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Tuple)
+            and len(statement.targets[0].elts) == 2
+            and all(isinstance(elt, ast.Name) for elt in statement.targets[0].elts)
+            and isinstance(statement.value, ast.Attribute)
+            and statement.value.attr == "shape"
+            and isinstance(statement.value.value, ast.Name)
+            and statement.value.value.id == name
+        ):
+            return True
+    return False
 
 
 def _source_if_rank_matches(source: TensorSpec, tokens: list[str]) -> TensorSpec | None:
@@ -2180,12 +2248,15 @@ class ShapeInferencer:
     def _rank_constrained_param(
         self, root: BlockNode | None, label: str | None
     ) -> TensorSpec | None:
-        """``[B, S]`` for a parameter the forward itself has ranked as a matrix.
+        """A parameter shape the forward itself has ranked, read off its own body.
 
         A raising ``attention_mask.dim() != 2`` followed by
         ``attention_mask[:, -q_len:]`` says the mask that reaches that slice is
-        rank 2, with a batch axis and a sequence window. That shape is the
-        guard and the slice, not the hidden activation.
+        rank 2, with a batch axis and a sequence window: ``[B, S]``. A direct
+        ``num_tokens, hidden_dim = hidden_states.shape`` unpack is an even more
+        definite rank-2 declaration (a 3-tuple unpacked into two names raises):
+        vLLM/SGLang's continuous-batching convention packs every activation as
+        ``[total_tokens, hidden]``, never ``[B, S, hidden]`` -- ``[B*S, H]``.
         """
         if root is None or not label:
             return None
@@ -2201,12 +2272,19 @@ class ShapeInferencer:
             ),
             None,
         )
-        if forward is None or not _param_is_rank2_matrix(forward, label):
+        if forward is None:
             return None
-        return TensorSpec(
-            shape=(Symbol.BATCH.value, Symbol.SEQ.value),
-            dtype=self.context.dtype,
-        )
+        if _param_is_rank2_matrix(forward, label):
+            return TensorSpec(
+                shape=(Symbol.BATCH.value, Symbol.SEQ.value),
+                dtype=self.context.dtype,
+            )
+        if _param_is_unpacked_as_tokens_and_hidden(forward, label):
+            return TensorSpec(
+                shape=(self._active_flattened_seq(), self._active_hidden),
+                dtype=self.context.dtype,
+            )
+        return None
 
     def _vision_position_ids_seed(self) -> tuple[int, int, int] | None:
         """Resolve the vision rotary ``position_ids`` shape ``[Pv, N]`` from source.
@@ -2737,21 +2815,59 @@ class ShapeInferencer:
                 shape=(Symbol.VISION_PATCH.value, self._vision_patch_flat),
                 dtype=self.context.dtype,
             )
-        # Meta-device ground truth for a forward parameter. Lowest precedence: it
-        # only resolves a boundary the explicit override and vision seed both
-        # declined, replacing the generic ``(B, S, hidden)`` default with the real
-        # observed shape. The class-scoped map is consulted first — it resolves a
-        # parameter whose name is globally ambiguous but locally definite (e.g.
-        # ``attention_mask`` is ``[B, S]`` on the sparse-attention indexer but a
-        # 4-D causal mask on the decoder attention). The global map only carries
-        # parameters with no cross-module disagreement, so it never fires on an
-        # ambiguous name (``hidden_states`` etc.).
-        meta_input = self._meta_input_specs_for(node.label, root)
-        if meta_input is not None:
-            return meta_input
-        # Nothing authoritative named this boundary; fall back to what the caller
-        # hands this section, when that is known.
-        return self._caller_entry_spec
+        # Meta-device ground truth for a forward parameter, class-scoped first — it
+        # resolves a parameter whose name is globally ambiguous but locally
+        # definite (e.g. ``attention_mask`` is ``[B, S]`` on the sparse-attention
+        # indexer but a 4-D causal mask on the decoder attention). This is traced
+        # off the ``transformers`` reference implementation, so a class that only
+        # exists in an inference engine's own source (vLLM/SGLang native modules
+        # with no ``transformers`` counterpart) never matches here.
+        self._ensure_meta_input_specs()
+        if root is not None and root.class_name:
+            scoped = self._meta_input_specs_by_class.get(
+                (root.class_name, node.label or "")
+            )
+            if scoped is not None:
+                return scoped
+        # A rank the forward body asserted of its own parameter (a raising
+        # ``dim() != 2`` guard, or a ``num_tokens, hidden_dim = x.shape`` unpack
+        # vLLM/SGLang's packed-token convention favours) is read off the SAME
+        # class the boundary belongs to, so it outranks the global meta map
+        # below: that map is a cross-module guess from a different (reference)
+        # implementation, while this is this exact class's own declared
+        # contract.
+        ranked = self._rank_constrained_param(root, node.label)
+        if ranked is not None:
+            return ranked
+        # The global map only carries parameters with no cross-module
+        # disagreement observed on the reference implementation, so it never
+        # fires on an ambiguous name (``hidden_states`` etc.) there — but it
+        # cannot see an inference engine's own packed-token convention at all,
+        # which is why the rank check above runs first.
+        meta_global = self._meta_input_specs.get(node.label or "")
+        if meta_global is not None:
+            return meta_global
+        # Nothing authoritative named this boundary. The caller entry is the
+        # section's PRIMARY parameter only; assigning it to every unresolved
+        # secondary boundary makes a descriptor/mask/grid claim the activation's
+        # shape and dtype. A secondary parameter with no observed spec remains
+        # unknown until its real producer supplies one.
+        if (
+            root is not None
+            and node.label
+            and node.label == (root.input_label or "hidden_states")
+        ):
+            if self._caller_entry_spec is not None:
+                return self._caller_entry_spec
+            # A method expansion inferred on its own (a representative warm-up
+            # pass, or a section whose spine predecessor could not be resolved)
+            # has no caller to read a real shape from. The generic activation
+            # default is still a better answer than ``None``: it is what lets
+            # downstream ops in this same section resolve at all, rather than
+            # firing "no shape inference rule" for every op that reads this
+            # boundary, with nothing (not even a guess) to pass through.
+            return self._activation_spec()
+        return None
 
     def _meta_input_specs_for(
         self, label: str | None, root: BlockNode | None
@@ -3049,7 +3165,7 @@ class ShapeInferencer:
             # can only fall back to the undivided tensor. That is how a
             # ``cat((q_pass, q_rot))`` of a [..., 128] and a [..., 64] slice came
             # out [..., 384] -- it was handed the [..., 192] parent twice.
-            self._publish_output_port_specs(node, self._tensor_specs, root)
+            self._publish_output_port_specs(node, self._tensor_specs, root, graph)
             if node.metadata.get("synthetic") == "@input":
                 self._forward_input_specs.add(id(output))
                 self._forward_input_spec_refs.append(output)
@@ -3084,7 +3200,7 @@ class ShapeInferencer:
                 output = self._resolve_extent_dims(node, output, input_specs)
                 output = _with_explicit_dtype(node, output)
                 self._tensor_specs[node_id] = output
-                self._publish_output_port_specs(node, self._tensor_specs, root)
+                self._publish_output_port_specs(node, self._tensor_specs, root, graph)
                 widened = True
             if not widened:
                 break
@@ -3185,7 +3301,7 @@ class ShapeInferencer:
         # exporter can label each output port with its slice shape ([B, S, 16] for
         # ``comb_w``) instead of the undivided tensor.
         for node in graph.nodes:
-            self._publish_output_port_specs(node, merged, root)
+            self._publish_output_port_specs(node, merged, root, graph)
 
         self._tensor_specs = merged
         self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
@@ -3529,19 +3645,49 @@ class ShapeInferencer:
         node: ModelGraphNode,
         specs: dict[str, TensorSpec],
         root: BlockNode | None = None,
+        graph: ModelGraph | None = None,
     ) -> None:
-        """Record one spec per ordinal for a tuple-unpacked split/chunk/unbind.
+        """Record one spec per ordinal for a tuple-unpacked split/chunk/unbind,
+        or for a ``Pack`` that bundles several independently-shaped tensors.
 
-        The node's own spec is the whole (pre-split) tensor; each consumer edge
-        selects an ordinal. Publishing each slice under a reserved key lets both
-        the exporter label the output port with its slice shape and a consumer
-        read the slot it actually takes.
+        For split/chunk/unbind the node's own spec is the whole (pre-split)
+        tensor; each consumer edge selects an ordinal, sliced out of that whole
+        below. A ``Pack`` has no such whole -- its elements are genuinely
+        different tensors -- so each port is simply the shape already inferred
+        for the predecessor wired to that port. Publishing each slice/element
+        under a reserved key lets both the exporter label the output port with
+        its real shape and a consumer read the slot it actually takes.
         """
         output_names = node.metadata.get("output_names")
         if not output_names or len(output_names) < 2:
             return
         class_name = (node.metadata.get("class_name") or node.label or "").strip()
         op_label = (node.label or class_name).strip().lower()
+        if op_label == "pack":
+            if graph is None:
+                return
+            input_specs, _labels = self._gather_input_specs(graph, node.id)
+            for ordinal, spec in enumerate(input_specs[: len(output_names)]):
+                specs[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = spec
+            return
+        if class_name.lower() == "merge":
+            # Both arms built their own whole bundle with the same slot names
+            # (a ``Pack`` on each side of an ``if``) -- there is no single
+            # producer to slice, so ordinal K's shape is whichever arm's own
+            # port K already resolved (the same "take the first predecessor
+            # that answers" rule the merge's own whole-value rule uses).
+            if graph is None:
+                return
+            predecessor_ids = [
+                edge.source for edge in graph.edges if edge.target == node.id
+            ]
+            for ordinal in range(len(output_names)):
+                for predecessor_id in predecessor_ids:
+                    sliced = specs.get(f"{predecessor_id}{PORT_SPEC_SEP}{ordinal}")
+                    if sliced is not None:
+                        specs[f"{node.id}{PORT_SPEC_SEP}{ordinal}"] = sliced
+                        break
+            return
         if op_label not in {"split", "chunk", "unbind"}:
             return
         whole = specs.get(node.id)
@@ -3735,6 +3881,20 @@ class ShapeInferencer:
         class_name = (node.metadata.get("class_name") or node.label or "").strip()
         block_class = class_name or node.label
 
+        output_names = node.metadata.get("output_names")
+        if (
+            (node.label or "").strip() == "Pack"
+            and output_names
+            and len(output_names) >= 2
+        ):
+            # A real tensor per port (``_publish_output_port_specs`` already
+            # records each one from its own predecessor), not one whole value --
+            # there is no single shape a bundling ``Pack`` could honestly report
+            # for itself. Returning early here skips the generic rules below,
+            # which would otherwise trip the "no shape inference rule" warning
+            # and publish a bogus passthrough of ``inputs[0]``.
+            return None
+
         # A module drawn as a subgraph reports what its own graph returns. It is
         # sized here before that graph is walked, so the fallback passes its input
         # through -- which is how the indexer, handed hidden states and returning
@@ -3753,9 +3913,6 @@ class ShapeInferencer:
             entry = self._entry_spec_for(node, root)
             if entry is not None:
                 return entry
-            ranked = self._rank_constrained_param(root, node.label)
-            if ranked is not None:
-                return ranked
             return None
 
         if synthetic in {"@output", "@loop_carried"}:
@@ -5281,6 +5438,37 @@ class ShapeInferencer:
                 dtype=dtype,
             )
 
+        if (
+            _ENGINE_GATED_ACTIVATION_RE.search(class_name)
+            and inputs
+            and inputs[0].shape
+        ):
+            in_shape = inputs[0].shape
+            halved = _divide_dim(in_shape[-1], 2)
+            if halved is not None:
+                return TensorSpec(
+                    shape=_replace_last_dim(in_shape, halved), dtype=inputs[0].dtype
+                )
+
+        if _ENGINE_MOE_CLASS_RE.search(class_name):
+            # The operand whose last axis is actually ``hidden`` -- the same
+            # test the ``Linear`` branch above uses to find ITS activation
+            # operand -- rather than a fixed call position, so this stays
+            # right regardless of which of ``hidden_states``/``router_logits``
+            # (whose own last axis is ``num_experts``, not ``hidden``) the
+            # merged graph happened to wire first.
+            hidden_dim = self.context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
+            hidden_operand = next(
+                (
+                    item
+                    for item in inputs
+                    if item.shape and item.shape[-1] == hidden_dim
+                ),
+                inputs[0] if inputs else None,
+            )
+            if hidden_operand is not None and hidden_operand.shape:
+                return hidden_operand
+
         if _is_norm(block_class, node):
             if inputs:
                 return inputs[0]
@@ -5389,6 +5577,15 @@ class ShapeInferencer:
         torch_op_spec = self._torch_op_shape(node, inputs)
         if torch_op_spec is not None:
             return torch_op_spec
+
+        # An unresolved module (``AutoModel.from_config`` leaves the class
+        # unnamed) still has the output the meta-device forward recorded for
+        # that attribute. Passing the first wired tensor through would publish
+        # whatever happened to be plugged into the call, which is not the
+        # module's result.
+        meta_module_spec = self._lookup_meta_module_shape(node)
+        if meta_module_spec is not None:
+            return meta_module_spec
 
         if inputs:
             _log.warning(
@@ -5958,7 +6155,30 @@ class ShapeInferencer:
                 extractor.var_producer[input_name] = input_name
             extractor.statements(method_func.body)
             if not extractor.operations:
-                return None
+                # ``return self.other(...)`` has no op of its own. The shape is
+                # the other method's shape; the caller's inputs are that
+                # method's inputs, in the same order.
+                from TraceLens.ModelUtils.ast_analyze import (
+                    _direct_self_method_call,
+                )
+
+                found = _direct_self_method_call(method_func)
+                if found is None:
+                    return None
+                target_name = found[0]
+                target_guard = f"method:{target_name}"
+                if target_name == method_name or target_guard in self._introspecting:
+                    return None
+                self._introspecting.add(guard)
+                try:
+                    followed = self._introspect_method_shape(
+                        target_name, inputs, root=root
+                    )
+                finally:
+                    self._introspecting.discard(guard)
+                if followed is not None:
+                    return followed
+                continue
             fwd_ops = {op.attr_name: op for op in extractor.operations}
             _slots, _order, primary = _extract_forward_return_metadata(
                 method_func, extractor.var_producer
@@ -8214,6 +8434,14 @@ def _quant_storage_dtype(quant: dict[str, Any]) -> str | None:
     bits = quant.get("bits")
     if method in {"gptq", "awq"} or bits in {4, 8}:
         return "int8" if bits == 8 else "int4"
+    # Quark (AMD) nests the scheme under global_quant_config.weight.dtype
+    # (e.g. MXFP4 -> "fp4" with per-group e8m0 scales).
+    if method == "quark" or "global_quant_config" in quant:
+        gqc = quant.get("global_quant_config") or {}
+        weight = gqc.get("weight") if isinstance(gqc.get("weight"), dict) else None
+        wd = weight.get("dtype") if weight else None
+        if isinstance(wd, str) and wd:
+            return _clean_dtype(wd)
     return None
 
 
@@ -8224,13 +8452,14 @@ _STRUCTURAL_ID_TOKENS: frozenset[str] = frozenset(
 )
 
 
-def _module_path_segments(node_id: str) -> list[str]:
+def module_path_segments(node_id: str) -> list[str]:
     """Reconstruct a node's local module-attribute path from its graph id.
 
     Node ids look like ``decoder/11x_.../self_attn/seq:0:q_proj:q_proj:0`` — the
     module attributes (``self_attn``, ``q_proj``) are interleaved with structural
     tokens, repeat-group titles, op markers (``@op_*``) and indices, which are all
-    dropped here so the result can be matched against ``modules_to_not_convert``.
+    dropped here so the result can be matched against ``modules_to_not_convert``
+    or a :class:`TraceLens.ModelUtils.parallel_plan.ParallelRule` pattern.
     """
     segments: list[str] = []
     for token in re.split(r"[/:]", str(node_id)):
@@ -8747,6 +8976,34 @@ def _optional_argument_guard(node: ast.IfExp) -> str | None:
     return None
 
 
+def _distributed_degree_dim(node: ast.AST) -> int | None:
+    """World size (1) or rank (0) for a distributed-parallelism accessor, else ``None``.
+
+    Same two call shapes ``_distributed_degree_value`` in ``ast_analyze.py``
+    resolves (see that function's docstring for why 1/0, not the real degree) --
+    duplicated here only because this module's expression resolver returns a
+    plain ``int`` where that one returns ``Any``; the recognized names
+    (``_PARALLEL_GROUP_GETTER_NAMES`` and friends) are the single, shared source.
+    """
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id in _PARALLEL_GROUP_GETTER_NAMES
+    ):
+        if node.attr.endswith("_size"):
+            return 1
+        if node.attr.endswith("_rank"):
+            return 0
+        return None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in _PARALLEL_WORLD_SIZE_FUNCS:
+            return 1
+        if node.func.id in _PARALLEL_RANK_FUNCS:
+            return 0
+    return None
+
+
 def _resolve_dim_expr(
     node: ast.AST,
     *,
@@ -8754,6 +9011,9 @@ def _resolve_dim_expr(
     local_vars: dict[str, DimExpr],
     context: ShapeContext,
 ) -> DimExpr | None:
+    degree = _distributed_degree_dim(node)
+    if degree is not None:
+        return degree
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return int(node.value)
     if isinstance(node, ast.Name):
@@ -8848,6 +9108,25 @@ def _resolve_dim_expr(
             return _resolve_dim_expr(
                 node.args[0], config=config, local_vars=local_vars, context=context
             )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("min", "max")
+        and node.args
+        and not node.keywords
+    ):
+        # ``self.idx_head_tp_size = min(attn_tp_size, self.total_idx_heads)``
+        # -- a distributed degree capped at a head count, a common idiom once
+        # the parallelism accessors above resolve to a concrete int.
+        args = [
+            _resolve_dim_expr(
+                arg, config=config, local_vars=local_vars, context=context
+            )
+            for arg in node.args
+        ]
+        if all(isinstance(arg, int) for arg in args):
+            return min(args) if node.func.id == "min" else max(args)
+        return None
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -9288,6 +9567,179 @@ def _parse_module_ctor(
                 stride=stride,
                 padding=padding,
             )
+    if class_name == "ParallelLMHead":
+        # vLLM/SGLang's LM head: ``(num_embeddings, embedding_dim, ...)``, the
+        # same constructor signature as ``VocabParallelEmbedding`` it
+        # subclasses -- but the forward direction is the opposite of an
+        # embedding LOOKUP: it PROJECTS an activation of width ``embedding_dim``
+        # onto ``num_embeddings`` vocab logits (its own ``forward`` even raises
+        # rather than being called directly; the real matmul happens through
+        # its pluggable ``quant_method``). Read as a ``Linear(embedding_dim ->
+        # num_embeddings)`` rather than falling through to the ``Embedding$``
+        # rule below, which would read this constructor's SAME two positional
+        # args backwards (dictionary size first, output width second).
+        num_embeddings = (
+            _resolve_dim_expr(
+                args[0], config=config, local_vars=local_vars, context=context
+            )
+            if args
+            else None
+        )
+        embedding_dim = (
+            _resolve_dim_expr(
+                args[1], config=config, local_vars=local_vars, context=context
+            )
+            if len(args) >= 2
+            else None
+        )
+        for keyword in node.keywords:
+            if keyword.arg == "num_embeddings" and num_embeddings is None:
+                num_embeddings = _resolve_dim_expr(
+                    keyword.value, config=config, local_vars=local_vars, context=context
+                )
+            if keyword.arg == "embedding_dim" and embedding_dim is None:
+                embedding_dim = _resolve_dim_expr(
+                    keyword.value, config=config, local_vars=local_vars, context=context
+                )
+        if num_embeddings is not None and embedding_dim is not None:
+            return ModuleLinearSpec(
+                in_features=embedding_dim, out_features=num_embeddings
+            )
+        return None
+    if class_name == "QKVParallelLinear" or class_name.endswith(
+        "QKVParallelLinearWithIndexer"
+    ):
+        # vLLM/SGLang's fused QKV projection: ``(hidden_size, head_size,
+        # total_num_heads, total_num_kv_heads=None, ...)``. Unlike a plain
+        # ``nn.Linear``, the second positional argument is a PER-HEAD width,
+        # not the whole layer's ``out_features`` -- the combined output packs
+        # Q, K and V side by side, V's own head width (``v_head_size``)
+        # defaulting to ``head_size`` but overridable (SGLang's sparse
+        # index-attention QKV projection sizes V independently, down to 0 when
+        # that arm is disabled). Matched before the generic ``Linear$`` rule
+        # below, which would otherwise read ``head_size`` alone as the whole
+        # output and leave the split that follows -- ``qkv.split([q_size,
+        # kv_size, kv_size])`` -- unable to tile a parent far narrower than
+        # its own slices.
+        #
+        # A ``...QKVParallelLinearWithIndexer`` subclass (MiniMax-M3's own,
+        # sitting beside the base class purely to reuse its sharding /
+        # weight-loading) fuses a lightning-indexer's ``index_q``/``index_k``
+        # into the SAME GEMM: ``[q | k | v | index_q | index_k]``. ``index_q``
+        # shards like a KV head (one extra group of ``total_num_index_heads``
+        # at ``index_head_size`` width); ``index_k`` is always a single
+        # replicated head, contributing its width once regardless of head
+        # count. Both are keyword-or-positional args 4/5, right after the
+        # base class's own four.
+        keywords = {
+            keyword.arg: keyword.value for keyword in node.keywords if keyword.arg
+        }
+        head_size_node = args[1] if len(args) >= 2 else keywords.get("head_size")
+        total_num_heads_node = (
+            args[2] if len(args) >= 3 else keywords.get("total_num_heads")
+        )
+        total_num_kv_heads_node = (
+            args[3] if len(args) >= 4 else keywords.get("total_num_kv_heads")
+        )
+        in_features = (
+            _resolve_dim_expr(
+                args[0], config=config, local_vars=local_vars, context=context
+            )
+            if args
+            else None
+        )
+        head_size = (
+            _resolve_dim_expr(
+                head_size_node, config=config, local_vars=local_vars, context=context
+            )
+            if head_size_node is not None
+            else None
+        )
+        total_num_heads = (
+            _resolve_dim_expr(
+                total_num_heads_node,
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if total_num_heads_node is not None
+            else None
+        )
+        total_num_kv_heads = (
+            _resolve_dim_expr(
+                total_num_kv_heads_node,
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if total_num_kv_heads_node is not None
+            else total_num_heads
+        )
+        # ``v_head_size`` is as often set from a runtime flag the caller computed
+        # (MiniMax's ``0 if self.disable_index_value else self.idx_head_dim``,
+        # itself derived from a per-layer frequency list this module cannot
+        # evaluate) as from config. Falling back to the override keyword's own
+        # API default (``head_size``) rather than giving up the whole spec means
+        # a width still comes out -- and it is the width that one of the arms a
+        # Merge combines (the split sizes two branches disagree on) actually
+        # tiles, instead of every arm falling through to an unrelated default.
+        v_head_size = head_size
+        if "v_head_size" in keywords:
+            resolved_v_head_size = _resolve_dim_expr(
+                keywords["v_head_size"],
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if resolved_v_head_size is not None:
+                v_head_size = resolved_v_head_size
+        total_num_index_heads_node = (
+            args[4] if len(args) >= 5 else keywords.get("total_num_index_heads")
+        )
+        index_head_size_node = (
+            args[5] if len(args) >= 6 else keywords.get("index_head_size")
+        )
+        total_num_index_heads = (
+            _resolve_dim_expr(
+                total_num_index_heads_node,
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if total_num_index_heads_node is not None
+            else 0
+        )
+        index_head_size = (
+            _resolve_dim_expr(
+                index_head_size_node,
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            if index_head_size_node is not None
+            else 0
+        )
+        if all(
+            isinstance(value, int)
+            for value in (
+                in_features,
+                head_size,
+                total_num_heads,
+                total_num_kv_heads,
+                v_head_size,
+                total_num_index_heads,
+                index_head_size,
+            )
+        ):
+            out_features = (
+                head_size * total_num_heads
+                + total_num_kv_heads * head_size
+                + total_num_kv_heads * v_head_size
+                + total_num_index_heads * index_head_size
+                + (index_head_size if total_num_index_heads else 0)
+            )
+            return ModuleLinearSpec(in_features=in_features, out_features=out_features)
+        return None
     if re.search(r"Linear$", class_name):
         in_features = (
             _resolve_dim_expr(
