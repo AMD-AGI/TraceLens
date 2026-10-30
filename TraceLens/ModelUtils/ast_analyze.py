@@ -1476,6 +1476,103 @@ def _module_dict_registry_class_refs(tree: ast.AST) -> dict[str, list[str]]:
 #: so this module stays free of that import.
 INSTANCE_SUBMODULE_ABSENT = "@absent"
 
+#: Constructor parameter names a per-layer block uses for its own layer index.
+#: The caller supplies the index under ``"layer_idx"``; a block that names the
+#: same argument differently (``layer_id``, ``layer_num``, ...) still needs it
+#: bound so a ``layer_id < config.first_k_dense`` style branch resolves.
+_LAYER_INDEX_PARAM_NAMES = frozenset(
+    {"layer_idx", "layer_id", "layer_index", "layer_num", "layer_no", "idx", "index"}
+)
+
+
+def _augmented_param_values(
+    init: ast.FunctionDef, param_values: dict[str, Any] | None
+) -> dict[str, Any]:
+    """``param_values`` plus the block's own layer-index parameter name and any
+    literal parameter defaults.
+
+    The caller passes the concrete layer index under ``"layer_idx"``; bind it to
+    whatever the block actually calls that argument (``layer_id``, ...), and bind
+    each parameter's literal default (``force_dense_mlp: bool = False``) so a
+    branch over it folds instead of stalling on an unknown name."""
+    params = dict(param_values or {})
+    idx_val = next(
+        (params[k] for k in _LAYER_INDEX_PARAM_NAMES if k in params), None
+    )
+    args = getattr(init, "args", None)
+    if args is None:
+        return params
+    positional = list(getattr(args, "args", []) or []) + list(
+        getattr(args, "posonlyargs", []) or []
+    )
+    if idx_val is not None:
+        for arg in positional:
+            if arg.arg not in params and arg.arg in _LAYER_INDEX_PARAM_NAMES:
+                params[arg.arg] = idx_val
+    defaults = list(getattr(args, "defaults", []) or [])
+    if defaults:
+        for arg, default in zip(positional[len(positional) - len(defaults) :], defaults):
+            if arg.arg not in params and isinstance(default, ast.Constant):
+                params[arg.arg] = default.value
+    for arg, default in zip(
+        getattr(args, "kwonlyargs", []) or [], getattr(args, "kw_defaults", []) or []
+    ):
+        if (
+            default is not None
+            and arg.arg not in params
+            and isinstance(default, ast.Constant)
+        ):
+            params[arg.arg] = default.value
+    return params
+
+
+def _assigned_value_for_attr(
+    body: list[ast.stmt],
+    attr: str,
+    config: dict[str, Any],
+    self_values: dict[str, Any],
+    param_values: dict[str, Any] | None,
+) -> ast.expr | None:
+    """RHS assigned to ``self.<attr>`` in *body*, honoring ``if/else`` whose test
+    resolves (later assignments win, as Python runs them).
+
+    Unlike a flat ``ast.walk`` first-match, this follows only the taken branch of
+    a resolvable ``if``: ``if layer_id < config.dense_mlp_idx: self.mlp = Dense
+    else: self.mlp = MoE`` gives Dense for the early layers and MoE for the rest.
+    Returns ``None`` when no assignment to the attr is found down a resolvable
+    path (the caller then falls back to the structural first-match)."""
+    def _targets_self_attr(target: ast.expr) -> bool:
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == attr
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        )
+
+    result: ast.expr | None = None
+    for stmt in body:
+        if isinstance(stmt, ast.Assign):
+            if any(_targets_self_attr(target) for target in stmt.targets):
+                result = stmt.value
+        elif isinstance(stmt, ast.AnnAssign):
+            # ``self.mlp: nn.Module = InklingDenseMLP(...)`` -- an annotated
+            # assignment, as common as a bare one in typed modeling source.
+            if stmt.value is not None and _targets_self_attr(stmt.target):
+                result = stmt.value
+        elif isinstance(stmt, ast.If):
+            taken = _config_value(stmt.test, config, self_values, param_values)
+            if isinstance(taken, bool):
+                branch = _assigned_value_for_attr(
+                    stmt.body if taken else stmt.orelse,
+                    attr,
+                    config,
+                    self_values,
+                    param_values,
+                )
+                if branch is not None:
+                    result = branch
+    return result
+
 
 def instance_submodule_class(
     cls: "ClassStructure",
@@ -1513,25 +1610,29 @@ def instance_submodule_class(
     )
     if init is None:
         return None
-    self_values = _self_config_values(init, config, param_values)
-    assigned = next(
-        (
-            stmt.value
-            for stmt in ast.walk(init)
-            if isinstance(stmt, ast.Assign)
-            for target in stmt.targets
-            if isinstance(target, ast.Attribute)
-            and target.attr == attr
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "self"
-        ),
-        None,
-    )
+    params = _augmented_param_values(init, param_values)
+    self_values = _self_config_values(init, config, params)
+    # Honor if/else whose test resolves (dense-vs-MoE threshold on the layer
+    # index); fall back to the structural first-match for the unconditional and
+    # ternary (IfExp) cases _instance_constructed_class already handles.
+    assigned = _assigned_value_for_attr(init.body, attr, config, self_values, params)
+    if assigned is None:
+        assigned = next(
+            (
+                stmt.value
+                for stmt in ast.walk(init)
+                if isinstance(stmt, ast.Assign)
+                for target in stmt.targets
+                if isinstance(target, ast.Attribute)
+                and target.attr == attr
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ),
+            None,
+        )
     if assigned is None:
         return None
-    return _instance_constructed_class(
-        assigned, cls, attr, config, self_values, param_values
-    )
+    return _instance_constructed_class(assigned, cls, attr, config, self_values, params)
 
 
 def _instance_constructed_class(

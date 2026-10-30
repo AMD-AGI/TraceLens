@@ -419,23 +419,35 @@ def project_roofline(
             parsed
         )
         instances = _repeat_count(str(node.get("namespace") or ""))
-        result.ops.append(
-            _project_op(
-                str(node.get("id")),
-                section,
-                computation,
-                class_name,
-                operation,
-                output_text,
-                input_texts,
-                dims,
-                instances,
-                gpu_arch,
-                moe_top_k,
-                moe_intermediate_size,
-                role,
-            )
+        node_id = str(node.get("id"))
+        op = _project_op(
+            node_id,
+            section,
+            computation,
+            class_name,
+            operation,
+            output_text,
+            input_texts,
+            dims,
+            instances,
+            gpu_arch,
+            moe_top_k,
+            moe_intermediate_size,
+            role,
         )
+        result.ops.append(op)
+        # A fused attention leaf is costed by _attention_boundary_cost at only its
+        # SDPA core; its packed Q/K/V/O(/R) projections live inside the opaque
+        # block as no separate Linear nodes. Add them (and any relative-attention
+        # term) as their own rows so the projection GEMMs are not silently dropped.
+        if role == "attention" and op.modeled and op.category == "Attention":
+            _dims_only, dtype = _split_shape_text(output_text)
+            bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+            result.ops.extend(
+                _attention_extra_ops(
+                    section, node_id, instances, dims, bpe, dtype, gpu_arch
+                )
+            )
     return result
 
 
@@ -636,6 +648,7 @@ def _engine_head_cost(
         hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
     except (KeyError, DimResolutionError):
         return None
+    vocab = _shard(vocab, _RT.tp)  # ParallelLMHead column-shards the vocab across TP
     flops = GEMM.flops_func(tokens, vocab, hidden, bias=False)
     bytes_moved = GEMM.bytes_func(tokens, vocab, hidden, False, bpe, bpe, bpe, bpe)
     return "GEMM", "matrix", flops, bytes_moved, tokens * vocab
@@ -653,9 +666,14 @@ class _RuntimeIntrospection:
         "attn_heads",
         "attn_kv_heads",
         "attn_head_dim",
+        "hidden_size",
+        "d_rel",
+        "rel_extent",
         "sliding_window",
         "n_local_layers",
         "n_layers",
+        "tp",
+        "ep",
     )
 
     def __init__(self):
@@ -668,9 +686,14 @@ class _RuntimeIntrospection:
         self.attn_heads = None
         self.attn_kv_heads = None
         self.attn_head_dim = None
+        self.hidden_size = None
+        self.d_rel = None
+        self.rel_extent = None
         self.sliding_window = None
         self.n_local_layers = None
         self.n_layers = None
+        self.tp = 1
+        self.ep = 1
 
 
 _RT = _RuntimeIntrospection()
@@ -712,11 +735,34 @@ def _populate_introspection(spec):
         _RT.attn_head_dim = spec.head_dim
     elif spec.hidden_size and spec.num_attention_heads:
         _RT.attn_head_dim = spec.hidden_size // spec.num_attention_heads
+    _RT.hidden_size = spec.hidden_size
+    # Relative-attention dims (models that add a learned per-position "r" stream
+    # on top of SDPA, e.g. a d_rel-wide r-projection + a relative bias over a
+    # bounded extent). Read generically from config; absent -> no rel term.
+    d_rel = tcfg.get("d_rel")
+    _RT.d_rel = d_rel if isinstance(d_rel, int) and d_rel > 0 else None
+    rel_extent = tcfg.get("rel_extent")
+    _RT.rel_extent = rel_extent if isinstance(rel_extent, int) and rel_extent > 0 else None
     sw = tcfg.get("sliding_window_size") or tcfg.get("sliding_window")
     _RT.sliding_window = sw if isinstance(sw, int) and sw > 0 else None
     lli = tcfg.get("local_layer_ids")
     _RT.n_local_layers = len(lli) if isinstance(lli, list) else None
     _RT.n_layers = spec.num_hidden_layers
+    # Per-GPU share under a tensor-/expert-parallel split. The role-based
+    # analytical costs (attention, projections, MoE) read config dims directly,
+    # so they must divide the sharded dims themselves -- the localized node
+    # shapes a GEMM leaf would carry do not reach these config-driven formulas.
+    layout = getattr(spec, "parallel_layout", None)
+    degree = getattr(layout, "degree", None)
+    tp = getattr(degree, "tp", 1)
+    ep = getattr(degree, "ep", 1)
+    _RT.tp = tp if isinstance(tp, int) and tp > 0 else 1
+    _RT.ep = ep if isinstance(ep, int) and ep > 0 else 1
+
+
+def _shard(n: int, degree: int) -> int:
+    """One GPU's share of *n* under a *degree*-way split (never below 1)."""
+    return max(1, n // degree) if degree and degree > 1 else n
 
 
 def _attention_boundary_cost(dims, bpe):
@@ -740,8 +786,10 @@ def _attention_boundary_cost(dims, bpe):
             except DimResolutionError:
                 pass
     ctx = past + s
-    h_q = _RT.attn_heads
-    h_kv = _RT.attn_kv_heads or h_q
+    # Attention heads are column-sharded across TP; one GPU owns its share (KV
+    # heads too, the way vLLM replicates/shards GQA by the TP degree).
+    h_q = _shard(_RT.attn_heads, _RT.tp)
+    h_kv = _shard(_RT.attn_kv_heads or _RT.attn_heads, _RT.tp)
     d_h = _RT.attn_head_dim
     n_layers = _RT.n_layers or 1
     if _RT.n_local_layers is not None:
@@ -759,6 +807,120 @@ def _attention_boundary_cost(dims, bpe):
         else None
     )
     return "Attention", "matrix", flops, bytes_moved
+
+
+def _resolve_past(dims: dict[str, Any]) -> int:
+    for key in ("past_len", "past_length", "cache_len", "kv_len"):
+        if key in dims:
+            try:
+                return resolve_dim(dims[key], dims)
+            except DimResolutionError:
+                pass
+    return 0
+
+
+def _attention_extra_ops(
+    section: str,
+    node_id: str,
+    instances: int,
+    dims: dict[str, Any],
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+) -> list[RooflineOp]:
+    """The projection GEMMs (packed QKV + O) and, when the arch declares one, the
+    relative-attention term (``r``-projection + relative-bias add) for a FUSED
+    attention leaf.
+
+    :func:`_attention_boundary_cost` costs only the SDPA core (QK^T + PV); a
+    fused attention module (custom packed ``*ParallelLinear`` QKVR, e.g.
+    vLLM/SGLang model-specific attention) packs its projections inside one opaque
+    block, so they appear as NO separate ``Linear`` nodes and would otherwise be
+    uncosted. This path runs ONLY for that fused boundary (a transformers-native
+    attention expands into its own q_proj/k_proj/... Linear leaves, which the
+    GEMM path already costs -- so there is no double count). General: every width
+    comes from the arch spec's own dims + quantized weight bpe, mirroring
+    :func:`_moe_cost`; returns ``[]`` when those dims are unknown."""
+    if not (_RT.attn_heads and _RT.attn_head_dim and _RT.hidden_size):
+        return []
+    try:
+        tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError):
+        return []
+    hidden = _RT.hidden_size
+    # Column-sharded projections: one GPU owns hidden/TP of the fused QKV output
+    # and the O-proj input (the ``o_proj`` row below keeps the full hidden on its
+    # other axis -- a RowParallel reduce).
+    h_q = _shard(_RT.attn_heads, _RT.tp)
+    h_kv = _shard(_RT.attn_kv_heads or _RT.attn_heads, _RT.tp)
+    d_h = _RT.attn_head_dim
+    wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
+    q_out = h_q * d_h
+    kv_out = h_kv * d_h
+    ops: list[RooflineOp] = []
+
+    def _gemm_row(suffix: str, n: int, k: int, out_elems: int) -> RooflineOp:
+        op = RooflineOp(
+            name=f"{node_id}.{suffix}",
+            section=section,
+            computation=suffix,
+            operation="",
+            category=None,
+            modeled=False,
+            reason=None,
+            output_elements=out_elems,
+            instances=instances,
+        )
+        flops = GEMM.flops_func(tokens, n, k, bias=False)
+        byt = (
+            GEMM.bytes_func(tokens, n, k, False, wbpe, wbpe, bpe, bpe)
+            if bpe is not None
+            else None
+        )
+        return _finish_op(op, "GEMM", "matrix", flops, byt, dtype, gpu_arch)
+
+    # vLLM/SGLang pack Q, K, V into one column-parallel projection; O is separate.
+    ops.append(
+        _gemm_row("qkv_proj", q_out + 2 * kv_out, hidden, tokens * (q_out + 2 * kv_out))
+    )
+    ops.append(_gemm_row("o_proj", hidden, q_out, tokens * hidden))
+
+    # Relative-attention: a d_rel-wide r-projection GEMM plus a relative-bias add
+    # over the attended span (bounded by rel_extent). Costed as its own rows so it
+    # is visible rather than folded into the SDPA core.
+    if _RT.d_rel:
+        r_out = h_q * _RT.d_rel
+        ops.append(_gemm_row("rel_r_proj", r_out, hidden, tokens * r_out))
+        try:
+            ctx = _resolve_past(dims) + resolve_dim(dims["S"], dims)
+        except (KeyError, DimResolutionError):
+            ctx = 0
+        span = min(ctx, _RT.rel_extent) if _RT.rel_extent else ctx
+        if span:
+            bias_elems = tokens * h_q * span
+            bias = RooflineOp(
+                name=f"{node_id}.rel_bias",
+                section=section,
+                computation="rel_bias",
+                operation="",
+                category=None,
+                modeled=False,
+                reason=None,
+                output_elements=bias_elems,
+                instances=instances,
+            )
+            flops = BinaryElementwise.flops_func(bias_elems)
+            byt = (
+                BinaryElementwise.bytes_func(
+                    bias_elems, bias_elems, bias_elems, bpe, bpe, bpe
+                )
+                if bpe is not None
+                else None
+            )
+            ops.append(
+                _finish_op(bias, "BinaryElementwise", "vector", flops, byt, dtype, gpu_arch)
+            )
+    return ops
 
 
 def _moe_cost(
@@ -782,7 +944,11 @@ def _moe_cost(
         hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
     except (KeyError, DimResolutionError):
         return None
-    active_tokens = tokens * top_k
+    # Per-GPU share: expert-parallel splits the routed experts across EP GPUs
+    # (each sees tokens*top_k/EP expert rows); tensor-parallel column-shards each
+    # expert's intermediate width across TP.
+    intermediate_size = _shard(intermediate_size, _RT.tp)
+    active_tokens = _shard(tokens * top_k, _RT.ep)
     gate_up_flops = GEMM.flops_func(
         active_tokens, 2 * intermediate_size, hidden, bias=False
     )
