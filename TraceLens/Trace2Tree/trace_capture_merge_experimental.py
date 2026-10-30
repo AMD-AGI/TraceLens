@@ -15,7 +15,7 @@ information (optimized execution paths), producing a complete execution
 model suitable for performance analysis.
 """
 
-from collections import OrderedDict, deque, defaultdict
+from collections import Counter, OrderedDict, deque, defaultdict
 from typing import Dict, List, Optional, Tuple
 import json
 import os
@@ -667,7 +667,7 @@ def _load_all_capture_sources(capture_map, role, batch_sizes):
     *batch_sizes* is an iterable of batch sizes to try (e.g. the resolved
     spec-decode batch size and the tensor batch size from the annotation).
 
-    Returns a list of ``(capture_tree, capture_roots, capture_root_data)``
+    Returns a list of ``(capture_tree, capture_roots, capture_root_data, mode)``
     tuples — one per distinct capture file.
     """
     sources = []
@@ -679,7 +679,7 @@ def _load_all_capture_sources(capture_map, role, batch_sizes):
             for filepath in capture_map.get(key, []):
                 cache_key = (key, os.path.abspath(filepath))
                 tree, roots, root_data = _get_cached_capture_tree(cache_key, filepath)
-                sources.append((tree, roots, root_data))
+                sources.append((tree, roots, root_data, mode))
     return sources
 
 
@@ -705,43 +705,61 @@ def _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources):
     """Match graph roots to capture roots from multiple capture sources by count.
 
     Each graph root is matched to the capture root whose dispatch count is
-    closest to the graph root's kernel count.  Identical graph roots (same
-    kernel count) share the same capture root.
+    closest to the graph root's kernel count.  Graph roots are classified as
+    PIECEWISE (kernel count below the dominant count) or FULL (at or above),
+    and matching is constrained to capture roots of the same mode.  Falls back
+    to unconstrained matching when the constrained pool is empty.
 
     Returns ``(pairs, data, trees)`` — lists of ``(capture_root, graph_root)``,
     corresponding ``capture_root_data`` entries, and the ``capture_tree`` each
     root came from — or ``None`` when no captures are available.
     """
-    # candidate capture roots
     pool = []
-    for src_tree, cap_roots, cap_root_data in all_sources:
+    for src_tree, cap_roots, cap_root_data, mode in all_sources:
         for capture_root, (events, filtered_uids) in zip(cap_roots, cap_root_data):
             dispatch_count = len(filtered_uids)
             pool.append(
-                (src_tree, capture_root, (events, filtered_uids), dispatch_count)
+                (src_tree, capture_root, (events, filtered_uids), dispatch_count, mode)
             )
 
     if not pool:
         return None
 
-    # dispatch_count -> list of pool indices with that count
-    all_counts: Dict[int, List[int]] = defaultdict(list)
-    for idx, (_, _, _, dispatch_count) in enumerate(pool):
-        all_counts[dispatch_count].append(idx)
-
-    match_cache: Dict[int, int] = {}
-    pairs = []
-    data = []
-    trees = []
+    kernel_counts = []
     for gr in graph_roots:
         _, filtered = get_subtree_events(
             graph_tree, gr, cat_filter=list(GPU_KERNEL_CATEGORIES)
         )
-        kernel_count = len(filtered)
-        if kernel_count not in match_cache:
-            match_cache[kernel_count] = _find_closest_capture(kernel_count, all_counts)
-        pool_idx = match_cache[kernel_count]
-        src_tree, capture_root, crd, _ = pool[pool_idx]
+        kernel_counts.append(len(filtered))
+
+    freq = Counter(kernel_counts)
+    dominant = max(freq, key=lambda c: (freq[c], c))
+
+    def _build_counts_index(entries):
+        counts: Dict[int, List[int]] = defaultdict(list)
+        for idx, (_, _, _, dc, _) in enumerate(entries):
+            counts[dc].append(idx)
+        return counts
+
+    full_pool = [e for e in pool if e[4] == "FULL"]
+    pw_pool = [e for e in pool if e[4] == "PIECEWISE"]
+    full_counts = _build_counts_index(full_pool)
+    pw_counts = _build_counts_index(pw_pool)
+    all_counts = _build_counts_index(pool)
+
+    pairs = []
+    data = []
+    trees = []
+    for gr, kc in zip(graph_roots, kernel_counts):
+        is_piecewise = kc < dominant
+        if is_piecewise and pw_counts:
+            target_pool, target_counts = pw_pool, pw_counts
+        elif not is_piecewise and full_counts:
+            target_pool, target_counts = full_pool, full_counts
+        else:
+            target_pool, target_counts = pool, all_counts
+        pool_idx = _find_closest_capture(kc, target_counts)
+        src_tree, capture_root, crd, _, _ = target_pool[pool_idx]
         pairs.append((capture_root, gr))
         data.append(crd)
         trees.append(src_tree)
@@ -870,7 +888,7 @@ def merge_capture_trace_into_graph(
         # (preserves the old 1:1 and 1:N behaviour and avoids mis-pairing
         # roots that share the same dispatch count).
         result = None
-        for src_tree, cap_roots, cap_root_data in all_sources:
+        for src_tree, cap_roots, cap_root_data, _mode in all_sources:
             if len(cap_roots) == 1:
                 result = (
                     [(cap_roots[0], g) for g in graph_roots],
