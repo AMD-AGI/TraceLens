@@ -19,16 +19,14 @@ from collections import Counter, OrderedDict, deque, defaultdict
 from typing import Dict, List, Optional, Tuple
 import json
 import os
-import re
 import warnings
 import TraceLens
-
-_SGLANG_CAPTURE_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_\d+_")
 
 UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 from ..util import GPU_KERNEL_CATEGORIES, extract_rank
 from ..TraceUtils.utils.annotation_utils import (
+    SGLANG_RUNNER_BS_PATTERN,
     SPEC_ROLE_TARGET,
     find_known_annotations,
     find_spec_decode_annotations,
@@ -641,7 +639,7 @@ def load_capture_folder(
         key = "{}_{}_{}".format(role, batch_size, mode)
         batch_sizes[role].append(int(batch_size))
         rbs = entry.get("request_bs")
-        if rbs is not None and rbs > 0 and _SGLANG_CAPTURE_PATTERN.match(filename):
+        if rbs is not None and rbs > 0 and SGLANG_RUNNER_BS_PATTERN.match(filename):
             request_bs_multiplier.setdefault(role, int(batch_size) // int(rbs))
         filepath = os.path.join(capture_folder, filename)
         if not os.path.isfile(filepath):

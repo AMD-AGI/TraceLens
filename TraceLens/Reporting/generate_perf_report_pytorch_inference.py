@@ -32,41 +32,16 @@ from TraceLens.Reporting.reporting_utils import (
 from TraceLens.util import TraceEventUtils
 from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
+    CAPTURE_ROLE_PATTERNS,
     SPEC_ROLE_DRAFTER,
     SPEC_ROLE_DRAFTER_EXTEND,
     SPEC_ROLE_TARGET,
     CaptureAnnotation,
+    filename_request_bs,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
-
-# Capture role from the file name: SGLang runner classes (EAGLEDraftExtend*,
-# EAGLEDraft*, DraftDecode*), the vLLM speculator
-# (graph_capture_rank_0_speculator.*), and ATOM's drafter step
-# (draft_step_forward_bs_*).
-CAPTURE_ROLE_PATTERNS = [
-    (re.compile(r"DraftExtend"), SPEC_ROLE_DRAFTER_EXTEND),
-    (re.compile(r"Draft|_speculator|draft_step_forward"), SPEC_ROLE_DRAFTER),
-]
-
-# Here the most common first dim counts tokens (bs x draft tokens), where bs in in the file name.
-SGLANG_RUNNER_BS_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_(\d+)_")
-ATOM_TARGET_BS_PATTERN = re.compile(r"^bs_(\d+)(?:_q_\d+)?_rank_?\d+")
-ATOM_DRAFT_BS_PATTERN = re.compile(r"^draft_step_forward_bs_(\d+)_rank_?\d+")
-
-
-def _filename_request_bs(basename: str):
-    """Request count from a capture filename, or None when the name has none."""
-    for pattern in (
-        ATOM_DRAFT_BS_PATTERN,
-        ATOM_TARGET_BS_PATTERN,
-        SGLANG_RUNNER_BS_PATTERN,
-    ):
-        match = pattern.match(basename)
-        if match:
-            return int(match.group(1))
-    return None
 
 
 def perf_report_sanity_check(
@@ -299,7 +274,7 @@ def classify_graph_capture_trace(input_folder: str):
             (r for p, r in CAPTURE_ROLE_PATTERNS if p.search(basename)),
             SPEC_ROLE_TARGET,
         )
-        request_bs = _filename_request_bs(basename)
+        request_bs = filename_request_bs(basename)
         token = most_common_first_dim(events)
         num_captures = count_stream_begin_captures(events)
 

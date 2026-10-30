@@ -93,6 +93,29 @@ SPEC_DRAFT_PATTERNS = [
     (ATOM_PROPOSE_DECODE_PATTERN, SPEC_ROLE_DRAFTER),
 ]
 
+CAPTURE_ROLE_PATTERNS = [
+    (re.compile(r"DraftExtend"), SPEC_ROLE_DRAFTER_EXTEND),
+    (re.compile(r"Draft|_speculator|draft_step_forward"), SPEC_ROLE_DRAFTER),
+]
+
+SGLANG_RUNNER_BS_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_(\d+)_")
+ATOM_TARGET_BS_PATTERN = re.compile(r"^bs_(\d+)(?:_q_\d+)?_rank_?\d+")
+ATOM_DRAFT_BS_PATTERN = re.compile(r"^draft_step_forward_bs_(\d+)_rank_?\d+")
+
+
+def filename_request_bs(basename: str):
+    """Request count from a capture filename, or None when the name has none."""
+    for pattern in (
+        ATOM_DRAFT_BS_PATTERN,
+        ATOM_TARGET_BS_PATTERN,
+        SGLANG_RUNNER_BS_PATTERN,
+    ):
+        match = pattern.match(basename)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 # prefill[bs=2 tok=14721 ctx=[7803, 6918]]
 # prefill[bs=6 tok=17408 ctx=[4096, 4096, 4096]...+3]  <- ctx truncated past 5
 # decode[bs=64 tok=64 d=64]
