@@ -33,8 +33,6 @@ from TraceLens.util import TraceEventUtils
 from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
     CAPTURE_ROLE_PATTERNS,
-    SPEC_ROLE_DRAFTER,
-    SPEC_ROLE_DRAFTER_EXTEND,
     SPEC_ROLE_TARGET,
     CaptureAnnotation,
     filename_request_bs,
