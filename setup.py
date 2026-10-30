@@ -85,6 +85,7 @@ setup(
         "TraceLens": [
             "Agent/Analysis/skills/analysis-orchestrator/evals/*",
             "Agent/Visualizer/skills/model-visualizer/evals/*",
+            "Agent/Visualizer/skills/model-roofline-projection/evals/*",
         ],
     },
     install_requires=[

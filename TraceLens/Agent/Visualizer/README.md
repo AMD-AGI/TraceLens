@@ -10,6 +10,8 @@ The model visualizer agent exports a Hugging Face checkpoint, a local checkpoint
 
 The tool itself is documented in [TraceLens/Visualizer/README.md](../../Visualizer/README.md).
 
+This package also ships the [model-roofline-projection](skills/model-roofline-projection/SKILL.md) skill, which drives `TraceLens_model_roofline_projection` to project a kernel-by-kernel roofline from the same checkpoint and modeling source, with no trace and no GPU run. See [docs/how-to/generate-model-roofline-projection.md](../../../docs/how-to/generate-model-roofline-projection.md) for that tool.
+
 ---
 
 ## Prerequisites
