@@ -1,6 +1,9 @@
+###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
+###############################################################################
+
 """Augment the analysis-orchestrator's compute findings with an analytical,
 config-derived roofline for kernels the trace could not model.
 
@@ -28,7 +31,7 @@ does not compute or interpret the roofline. Must run after Step 8.5
 
 CLI::
 
-    python -m TraceLens.Agent.Analysis.utils.roofline_augment \\
+    python -m TraceLens.Visualizer.model_explorer_export.roofline_augment \\
       --output-dir <orchestrator_output_dir> \\
       <checkpoint> --code-path <modeling.py> --engine vllm --tp 8 \\
       --phase decode --batch-size 32 --seq-len 1 --dim past_len=65536 \\
@@ -100,10 +103,9 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
         acc["bytes"] += op.total_bytes or 0.0
         acc["roofline_time_us"] += op.total_roofline_time_us or 0.0
         if op.roofline_bound:
-            acc["bound_time"][op.roofline_bound] = (
-                acc["bound_time"].get(op.roofline_bound, 0.0)
-                + (op.total_roofline_time_us or 0.0)
-            )
+            acc["bound_time"][op.roofline_bound] = acc["bound_time"].get(
+                op.roofline_bound, 0.0
+            ) + (op.total_roofline_time_us or 0.0)
         if (op.total_flops or 0.0) > acc["_dominant_flops"]:
             acc["_dominant_flops"] = op.total_flops or 0.0
             acc["flops_per_invocation"] = op.flops or 0.0
@@ -121,13 +123,17 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
             "bound": bound,
             "arithmetic_intensity": ai,
             "roofline_time_us": acc["roofline_time_us"],
-            "roofline_us_per_gpu": acc["roofline_time_us"] / tp if tp else acc["roofline_time_us"],
+            "roofline_us_per_gpu": (
+                acc["roofline_time_us"] / tp if tp else acc["roofline_time_us"]
+            ),
             "flops": acc["flops"],
             "bytes": acc["bytes"],
             "flops_per_invocation": acc["flops_per_invocation"],
             "bytes_per_invocation": acc["bytes_per_invocation"],
             "vs_ridge": (
-                None if ai is None or ridge is None else ("below" if ai < ridge else "above")
+                None
+                if ai is None or ridge is None
+                else ("below" if ai < ridge else "above")
             ),
         }
     return out
@@ -180,7 +186,9 @@ def _dominant_ops(output_dir: Path) -> list[dict]:
     """Every op across the orchestrator's per-category metrics, tagged with its
     finding category, newest-first by GPU time."""
     ops: list[dict] = []
-    for metrics_path in sorted(glob.glob(str(output_dir / "category_data" / "*_metrics.json"))):
+    for metrics_path in sorted(
+        glob.glob(str(output_dir / "category_data" / "*_metrics.json"))
+    ):
         category = Path(metrics_path).name.removesuffix("_metrics.json")
         try:
             data = json.loads(Path(metrics_path).read_text(encoding="utf-8"))
@@ -212,10 +220,13 @@ def _note(
     if achieved and achieved.get("pct_of_peak") is not None:
         thr = (
             f"{achieved['achieved_gbps']:.0f} GB/s"
-            if achieved.get("ceiling") == "memory bandwidth" and achieved.get("achieved_gbps")
-            else f"{achieved['achieved_tflops']:.1f} TFLOP/s"
-            if achieved.get("achieved_tflops")
-            else "n/a"
+            if achieved.get("ceiling") == "memory bandwidth"
+            and achieved.get("achieved_gbps")
+            else (
+                f"{achieved['achieved_tflops']:.1f} TFLOP/s"
+                if achieved.get("achieved_tflops")
+                else "n/a"
+            )
         )
         achieved_txt = (
             f" Measured throughput ≈ {thr} = **{achieved['pct_of_peak']:.1f}% of "
@@ -232,7 +243,9 @@ def _note(
     )
 
 
-def _entry(op: dict, kernel: str, roofline_cat: str, facts: dict, ridge, arch, regime) -> dict:
+def _entry(
+    op: dict, kernel: str, roofline_cat: str, facts: dict, ridge, arch, regime
+) -> dict:
     achieved = achieved_from_measurement(
         facts, op.get("time_ms"), op.get("count"), arch
     )
@@ -274,7 +287,11 @@ def augment(
             continue  # already roofline-modeled from the trace; nothing to add
         kernel = op.get("kernel_name") or op.get("name") or ""
         roofline_cat = classify_kernel(kernel)
-        if roofline_cat is None or roofline_cat not in summary or roofline_cat in picked:
+        if (
+            roofline_cat is None
+            or roofline_cat not in summary
+            or roofline_cat in picked
+        ):
             continue
         picked[roofline_cat] = _entry(
             op, kernel, roofline_cat, summary[roofline_cat], ridge, arch, regime
@@ -384,9 +401,11 @@ def main(argv: list[str] | None = None) -> int:
 
     ridge = _ridge(gpu_arch)
     arch = {
-        "peak_tflops": (gpu_arch.get("max_achievable_tflops") or {}).get("matrix_bf16")
-        if gpu_arch
-        else None,
+        "peak_tflops": (
+            (gpu_arch.get("max_achievable_tflops") or {}).get("matrix_bf16")
+            if gpu_arch
+            else None
+        ),
         "mem_bw_gbps": gpu_arch.get("mem_bw_gbps") if gpu_arch else None,
     }
     summary = summarize_projection(projection, proj_args.tp, ridge)

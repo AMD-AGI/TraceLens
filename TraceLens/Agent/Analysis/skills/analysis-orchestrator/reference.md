@@ -560,7 +560,7 @@ A kernel is roofline-modeled from the trace only when the trace carries its Inpu
 This is a deterministic script, not an agent task. It writes its results into the structured findings data and the report simply renders them — the orchestrator does **not** compute or interpret the roofline. Run it only when `<Model>` resolves to a real checkpoint / HF id and you know the trace's runtime regime (decode/prefill, batch, context); skip it otherwise. It **must run after Step 8.5** (`generate_priority_data`), because it merges into `priority_data.json`, which Step 8.5 regenerates from scratch.
 
 ```bash
-<prefix> python3 -m TraceLens.Agent.Analysis.utils.roofline_augment \
+<prefix> python3 -m TraceLens.Visualizer.model_explorer_export.roofline_augment \
   --output-dir <output_dir> \
   <checkpoint-or-hf-id> [--code-path <modeling.py>] [--engine vllm|sglang] \
   --tp <N> [--pp <N>] [--ep <N>] \

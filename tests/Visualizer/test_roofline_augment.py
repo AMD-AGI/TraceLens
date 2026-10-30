@@ -1,13 +1,16 @@
+###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
+###############################################################################
+
 """Tests for the orchestrator roofline-augmentation utility."""
 
 from __future__ import annotations
 
 import json
 
-from TraceLens.Agent.Analysis.utils.roofline_augment import (
+from TraceLens.Visualizer.model_explorer_export.roofline_augment import (
     achieved_from_measurement,
     augment,
     classify_kernel,
@@ -76,7 +79,11 @@ def test_achieved_from_measurement_uses_ceiling_of_bound():
     arch = {"peak_tflops": 1000.0, "mem_bw_gbps": 1000.0}
     # Memory-bound: 1e11 bytes/invocation * 10 invocations / 1s = 1000 GB/s = 100% BW.
     mem = achieved_from_measurement(
-        {"bound": "MEMORY_BOUND", "flops_per_invocation": 0.0, "bytes_per_invocation": 1.0e11},
+        {
+            "bound": "MEMORY_BOUND",
+            "flops_per_invocation": 0.0,
+            "bytes_per_invocation": 1.0e11,
+        },
         time_ms=1000.0,
         count=10,
         arch=arch,
@@ -86,7 +93,11 @@ def test_achieved_from_measurement_uses_ceiling_of_bound():
     assert round(mem["pct_of_peak"]) == 100
     # Compute-bound: 1e14 FLOPs/invocation * 10 / 1s = 1000 TFLOP/s = 100% peak.
     comp = achieved_from_measurement(
-        {"bound": "COMPUTE_BOUND", "flops_per_invocation": 1.0e14, "bytes_per_invocation": 0.0},
+        {
+            "bound": "COMPUTE_BOUND",
+            "flops_per_invocation": 1.0e14,
+            "bytes_per_invocation": 0.0,
+        },
         time_ms=1000.0,
         count=10,
         arch=arch,
