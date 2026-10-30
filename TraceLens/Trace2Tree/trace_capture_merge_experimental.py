@@ -64,7 +64,6 @@ def _capture_kernel_name(event):
     return event.get("args", {}).get("kernel", event["name"])
 
 
-
 def _align_capture_to_graph(capture_events, graph_events):
     """
     Robust greedy alignment of capture dispatch events to graph kernel

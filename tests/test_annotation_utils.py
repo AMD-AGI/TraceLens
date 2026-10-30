@@ -1000,7 +1000,7 @@ def test_vllm_sample_batch_is_generation_requests():
             _span(execute, ts=10),
             _span(VLLM_SAMPLE_PARTIAL, ts=20),
         ]
-    ) == [32, None, 31]
+    ) == [(32, 128), None, (31, 124)]
 
 
 def test_spec_decode_batch_sizes_borrow_from_nearest_verify():
@@ -1014,7 +1014,16 @@ def test_spec_decode_batch_sizes_borrow_from_nearest_verify():
         _span("draft", ts=3000),
         _span(DETAILED_VERIFY, ts=3020),  # requests, not its 128 tokens
     ]
-    assert spec_decode_batch_sizes(roots) == [32, 32, 32, 7, 7, None, 32, 32]
+    assert spec_decode_batch_sizes(roots) == [
+        (32,),
+        (32,),
+        (32,),
+        (7,),
+        (7,),
+        None,
+        (32,),
+        (32,),
+    ]
     assert spec_decode_batch_sizes([_span("draft", ts=0)]) == [None]
 
 
@@ -1082,7 +1091,7 @@ def test_atom_spec_decode_batch_sizes_borrow_from_nearest_verify():
         _span("prefill[bs=2 tok=14721 ctx=[7803, 6918]]", ts=2000),
     ]
     sizes = spec_decode_batch_sizes(roots)
-    assert sizes == [32, 32, 32, 64, 64, None]
+    assert sizes == [(32,), (32,), (32,), (64,), (64,), None]
 
 
 # --------------------------------------------------------------------------- #
