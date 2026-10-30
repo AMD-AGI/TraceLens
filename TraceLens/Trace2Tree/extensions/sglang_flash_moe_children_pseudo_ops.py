@@ -41,7 +41,9 @@ def _walk_inject(trace_tree, root, fused_moe_evt):
         if evt is None:
             continue
         name = evt.get("name") or ""
-        if name in (PSEUDO_GEMM2, PSEUDO_REDUCE) or name.startswith("pseudo_op::moe_flydsl"):
+        if name in (PSEUDO_GEMM2, PSEUDO_REDUCE) or name.startswith(
+            "pseudo_op::moe_flydsl"
+        ):
             continue
         if GEMM2_MARK in name and "Synthetic Op" in name:
             inject_pseudo_op_above_event(

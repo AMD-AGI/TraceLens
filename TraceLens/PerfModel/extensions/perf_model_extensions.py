@@ -2328,7 +2328,11 @@ class hc_boundary(_MHCBase):
             if dims and len(dims) > 1 and dims[1] and len(dims[1]) >= 2:
                 # mhc_post-like: out(M,n,C), x(M,C), residual(M,n,C), ...
                 M, C = dims[1][0], dims[1][1]
-                n = dims[0][1] if dims[0] and len(dims[0]) > 1 else int(args.get("n") or 4)
+                n = (
+                    dims[0][1]
+                    if dims[0] and len(dims[0]) > 1
+                    else int(args.get("n") or 4)
+                )
                 dtype_in = types[1] if len(types) > 1 else "c10::BFloat16"
             else:
                 M = int(args.get("M") or args.get("num_tokens") or 0)
@@ -2339,7 +2343,14 @@ class hc_boundary(_MHCBase):
                     raise ValueError("missing M")
             return {"M": M, "n": n, "C": C, "hc3": None, "dtype_in": dtype_in}
         except (ValueError, IndexError, KeyError, TypeError):
-            return {"M": 0, "n": 1, "C": 0, "hc3": None, "dtype_in": None, "_no_perf": True}
+            return {
+                "M": 0,
+                "n": 1,
+                "C": 0,
+                "hc3": None,
+                "dtype_in": None,
+                "_no_perf": True,
+            }
 
     def flops(self):
         if self.param_details.get("_no_perf") or self.M <= 0:
@@ -2381,7 +2392,14 @@ class hc_mix_reduce_sinkhorn(_MHCBase):
             dtype_in = types[0] if types else args.get("dtype_in") or "float"
             return {"M": M, "n": n, "C": C, "hc3": None, "dtype_in": dtype_in}
         except (ValueError, IndexError, KeyError, TypeError):
-            return {"M": 0, "n": 1, "C": 0, "hc3": None, "dtype_in": None, "_no_perf": True}
+            return {
+                "M": 0,
+                "n": 1,
+                "C": 0,
+                "hc3": None,
+                "dtype_in": None,
+                "_no_perf": True,
+            }
 
     def flops(self):
         if self.param_details.get("_no_perf") or self.M <= 0:

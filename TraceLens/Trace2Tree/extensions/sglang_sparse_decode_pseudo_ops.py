@@ -28,7 +28,9 @@ REDUCE_OWNER_RE = re.compile(
     r"aiter_sparse_decode_reduce\.py\(\d+\):\s*aiter_sparse_split_reduce\b"
 )
 # Also accept hip_flash_mla owners that wrap the decode forward.
-FLASH_MLA_OWNER_RE = re.compile(r"hip_flash_mla\.py\(\d+\):\s*aiter_sparse_decode_fwd\b")
+FLASH_MLA_OWNER_RE = re.compile(
+    r"hip_flash_mla\.py\(\d+\):\s*aiter_sparse_decode_fwd\b"
+)
 
 PARTIAL_KERNEL = "_pa_decode_sparse_"
 REDUCE_KERNEL = "_aiter_sparse_decode_reduce"

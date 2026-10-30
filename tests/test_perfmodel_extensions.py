@@ -6977,6 +6977,7 @@ class TestFlashDSv41PerfModels:
             "gpu_events": [],
         }
         events = [owner, launcher, kernel]
+
         # Build via TraceToTree-like minimal stub if full ctor is heavy: call helpers directly.
         class _Tree:
             def __init__(self, events):
@@ -7010,8 +7011,108 @@ class TestFlashDSv41PerfModels:
         tree = _Tree([owner, launcher, kernel])
         create_pseudo_ops_sglang_sparse_decode(tree)
         pseudos = [
-            e for e in tree.events if str(e.get("name", "")).startswith("pseudo_v4_paged_decode_")
+            e
+            for e in tree.events
+            if str(e.get("name", "")).startswith("pseudo_v4_paged_decode_")
         ]
         assert len(pseudos) == 1
         assert pseudos[0]["name"] == "pseudo_v4_paged_decode_swa"
 
+    def test_sglang_flash_misc_and_moe_injectors(self):
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+            set_bookkeeping_attr,
+        )
+        from TraceLens.Trace2Tree.extensions.sglang_flash_misc_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_misc,
+        )
+        from TraceLens.Trace2Tree.extensions.sglang_flash_moe_children_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_moe_children,
+        )
+        from TraceLens.Trace2Tree.extensions.sglang_flash_indexer_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_indexer,
+        )
+
+        class _Tree:
+            def __init__(self, events):
+                self.events = []
+                self.events_by_uid = {}
+                self.name2event_uids = {}
+                self.cpu_root_nodes = []
+                self.seq_num2event_uids_map = {}
+                for e in events:
+                    set_bookkeeping_attr(self, e)
+                    self.name2event_uids.setdefault(e["name"], []).append(e["UID"])
+                self.cpu_root_nodes = [events[0]["UID"]]
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid[uid]
+
+            def get_parent_event(self, evt):
+                pid = evt.get("parent")
+                return self.events_by_uid.get(pid) if pid is not None else None
+
+        def _evt(name, cat="python_function", **extra):
+            base = {
+                "ph": "X",
+                "name": name,
+                "cat": cat,
+                "pid": 1,
+                "tid": 1,
+                "ts": 0,
+                "dur": 1,
+                "args": {},
+                "children": [],
+                "gpu_events": [],
+            }
+            base.update(extra)
+            return base
+
+        # mHC boundary owner
+        owner = _evt(
+            "/sgl-workspace/sglang/python/sglang/kernels/ops/layernorm/mhc_boundary_hip.py(403): hc_boundary_fused",
+            annotation=self._ANN,
+        )
+        child = _evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        tree = _Tree([owner, child])
+        owner["children"] = [child["UID"]]
+        child["parent"] = owner["UID"]
+        create_pseudo_ops_sglang_flash_misc(tree)
+        assert any(e.get("name") == "pseudo_hc_boundary" for e in tree.events)
+
+        # MoE gemm2 child under fused_moe_
+        fused = _evt(
+            "aiter::fused_moe_",
+            cat="cpu_op",
+            args={
+                "Input Dims": [[1, 5120], [96, 4608, 2560], [96, 5120, 1152], [1, 6]],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float4_e2m1fn_x2",
+                    "c10::Float4_e2m1fn_x2",
+                    "float",
+                ],
+            },
+        )
+        gemm2 = _evt(
+            "aiter::fused_moe_->gemm2_a4w4_port_hmax8192 (Synthetic Op)",
+            cat="cpu_op",
+        )
+        tree2 = _Tree([fused, gemm2])
+        fused["children"] = [gemm2["UID"]]
+        gemm2["parent"] = fused["UID"]
+        create_pseudo_ops_sglang_flash_moe_children(tree2)
+        assert any(
+            e.get("name") == "pseudo_op::moe_flydsl_gemm2_a4w4" for e in tree2.events
+        )
+
+        # Indexer MQA owner
+        mqa = _evt(
+            "aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4.py(638): flydsl_pa_mqa_logits_fp4",
+            annotation=self._ANN,
+        )
+        launch = _evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        tree3 = _Tree([mqa, launch])
+        mqa["children"] = [launch["UID"]]
+        launch["parent"] = mqa["UID"]
+        create_pseudo_ops_sglang_flash_indexer(tree3)
+        assert any(e.get("name") == "pseudo_pa_mqa_logits_fp4" for e in tree3.events)
