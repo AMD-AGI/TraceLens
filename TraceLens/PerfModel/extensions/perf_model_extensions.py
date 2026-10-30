@@ -787,18 +787,39 @@ class gemm_a16w16_asm(gemm_a16w16_atomic_):
 
     @staticmethod
     def get_param_details(event):
+        dims = event["args"]["Input Dims"]
         itype = event["args"]["Input type"]
+        a_shape = dims[0]
+        b_shape = dims[1]
+        if len(a_shape) == 3:
+            batch, m, k = a_shape
+            n = b_shape[1]
+        else:
+            batch, m, k = 1, a_shape[0], a_shape[1]
+            n = b_shape[0]
         out_dtype = (
             itype[2] if len(itype) > 2 and name2bpe(itype[2]) is not None else itype[0]
         )
         return {
-            "B": 1,
-            "M": event["args"]["Input Dims"][0][0],
-            "N": event["args"]["Input Dims"][1][0],
-            "K": event["args"]["Input Dims"][0][1],
+            "B": batch,
+            "M": m,
+            "N": n,
+            "K": k,
             "bias": False,
             "dtype_A_B": (itype[0], itype[1], out_dtype),
         }
+
+    def flops(self):
+        return self.B * super().flops()
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        total = super().bytes(
+            bpe_mat1=bpe_mat1,
+            bpe_mat2=bpe_mat2,
+            bpe_bias=bpe_bias,
+            bpe_output=bpe_output,
+        )
+        return None if total is None else self.B * total
 
 
 class GroupQuant(BinaryElementwise):
