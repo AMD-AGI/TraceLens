@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
 
 from TraceLens.ModelUtils.ast_analyze import (
+    ANALYZED_MODULE_KEY,
     RUNTIME_REGIME_KEY,
     RuntimeRegime,
     analyze_sources,
@@ -137,6 +138,11 @@ class ArchitectureSpec:
     export_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
     class_registry: dict = field(default_factory=dict, repr=False)
     basic_ops: BasicOpFilter | None = None
+    # The already-parsed modeling source, kept so a second ArchitectureSpec for
+    # the same checkpoint (a locally-sharded config variant, say) can be built
+    # from it directly -- see rebuild_architecture_with_overrides -- without
+    # re-fetching or re-parsing the source.
+    code_analysis: CodeAnalysis | None = field(default=None, repr=False)
     # Which run this spec was built for, and the config keys the caller
     # overrode. Both are recorded so a reader of the graph can see WHICH run it
     # depicts -- a decided branch leaves no trace in the drawing otherwise.
@@ -972,12 +978,24 @@ def _infer_layer_variants(
         if _classify_role(attr, cls) in {"ffn", "moe"}
     ]
     decoder_options: list[str] = []
+    # Which of the two FFN-ish attrs actually builds a given class -- a dense/MoE
+    # choice as common as MiniMax's is not always one attr with a config-chosen
+    # class (what every resolver below assumes and defaults to "mlp" for); it can
+    # be two DIFFERENT attrs, each built unconditionally but only one per layer
+    # (``self.block_sparse_moe = MoE(...)`` xor ``self.mlp = MLP(...)``). Reversing
+    # ``init_assignment_options`` the same way the attr union above was built
+    # gives the real attr back once the class is known.
+    ffn_attr_for_class: dict[str, str] = {}
     if class_registry and decoder_class:
         decoder = class_registry.get(decoder_class)
         if isinstance(decoder, ClassStructure):
             for attr in ("mlp", "block_sparse_moe"):
-                decoder_options.extend(decoder.init_assignment_options.get(attr, []))
+                options = decoder.init_assignment_options.get(attr, [])
+                decoder_options.extend(options)
+                for class_name in options:
+                    ffn_attr_for_class.setdefault(class_name, attr)
     decoder_options = list(dict.fromkeys(decoder_options))
+    ffn_attr_candidates = frozenset(ffn_attr_for_class.values())
     moe_option = next(
         (
             class_name
@@ -1039,6 +1057,10 @@ def _infer_layer_variants(
                 ffn_attr, ffn_class = "mlp", moe_option
             else:
                 ffn_attr, ffn_class = "mlp", dense_option
+        # Every resolver above defaults an unresolved attr to the literal "mlp";
+        # the reverse map knows better when the class came from the two-attr union.
+        if ffn_class is not None and ffn_class in ffn_attr_for_class:
+            ffn_attr = ffn_attr_for_class[ffn_class]
 
         attn_label = _label_for("attention", attn_class or "Attention", "self_attn")
         ffn_role = ffn_role_for_class(ffn_attr or "mlp", ffn_class or "MLP")
@@ -1065,6 +1087,15 @@ def _infer_layer_variants(
         key=lambda item: (-item[1], item[0][0], item[0][2]),
     ):
         attn_label, attn_class, ffn_display, ffn_class, ffn_attr = key
+        # A sibling FFN attr this variant did not pick (``mlp`` when this layer
+        # built ``block_sparse_moe``, or vice versa) does not exist on the live
+        # layer; the renderer skips it instead of drawing a module that is not
+        # there (see ``LayerVariant.omitted_components``).
+        omitted = (
+            ffn_attr_candidates - {ffn_attr}
+            if ffn_attr and len(ffn_attr_candidates) > 1
+            else frozenset()
+        )
         variants.append(
             LayerVariant(
                 label=f"{attn_label} + {ffn_display}",
@@ -1075,6 +1106,7 @@ def _infer_layer_variants(
                 ffn_class=ffn_class,
                 ffn_attr=ffn_attr,
                 layer_indices=list(indices_by_key[key]),
+                omitted_components=omitted,
             )
         )
 
@@ -2492,11 +2524,14 @@ def load_architecture(
     code_analysis: CodeAnalysis | None = None
     code_labels: list[str] = []
 
+    analyzed_module: str | None = None
     if analyze_code:
         if engine and not code_path and not github:
             from TraceLens.ModelUtils.source import resolve_engine_modeling_files
 
-            source_files, code_labels = resolve_engine_modeling_files(engine, config)
+            source_files, code_labels, analyzed_module = resolve_engine_modeling_files(
+                engine, config
+            )
         else:
             source_files, code_labels = resolve_source_files(
                 resolved_checkpoint,
@@ -2535,9 +2570,12 @@ def load_architecture(
             # overrules the checkpoint, but not the person asking for this
             # drawing.
             config = _with_config_overrides(config, overrides)
+            analyzed_config = {**config, RUNTIME_REGIME_KEY: resolved_regime}
+            if analyzed_module:
+                analyzed_config[ANALYZED_MODULE_KEY] = analyzed_module
             code_analysis = analyze_sources(
                 read_sources(source_files),
-                config={**config, RUNTIME_REGIME_KEY: resolved_regime},
+                config=analyzed_config,
                 all_tensor_ops=all_tensor_ops,
                 # The model's configuration module sits beside its modeling one
                 # rather than being analysed, so its renames are read from there.
@@ -2547,6 +2585,7 @@ def load_architecture(
     spec = parse_architecture(
         config, config_label, name=name, code_analysis=code_analysis
     )
+    spec.code_analysis = code_analysis
     spec.runtime_regime = resolved_regime
     spec.config_overrides = overrides
     spec.engine = engine
@@ -2571,6 +2610,43 @@ def load_architecture(
         spec.basic_ops = resolved_basic_ops
         _build_export_block_trees(spec, resolved_basic_ops)
     return spec
+
+
+def rebuild_architecture_with_overrides(
+    spec: ArchitectureSpec, overrides: dict[str, Any]
+) -> ArchitectureSpec:
+    """A second :class:`ArchitectureSpec` for the same checkpoint, *overrides* applied.
+
+    Reuses *spec*'s already-parsed ``code_analysis`` -- no re-fetch or re-parse of
+    the modeling source, just a second, cheap, in-memory pass of config
+    normalization and block-tree construction. This is the right tool for "what
+    would this checkpoint's graph look like under a different config" (a
+    locally-sharded ``num_attention_heads``, say): the expensive half of loading
+    (finding and parsing the modeling source) does not change with the config,
+    only the normalization downstream of it does.
+
+    What this does NOT give you for free: real tensor shapes that come from a
+    meta-device forward pass (:meth:`ShapeInferencer.load_meta_shapes`) depend on
+    actually instantiating the module tree with the overridden config, so that
+    pass still has to run again against the returned spec.
+    """
+    merged = {**spec.config_overrides, **overrides}
+    config = _with_config_overrides(spec.raw_config, merged)
+    local = parse_architecture(
+        config, spec.source_path, name=spec.name, code_analysis=spec.code_analysis
+    )
+    local.code_analysis = spec.code_analysis
+    local.runtime_regime = spec.runtime_regime
+    local.config_overrides = merged
+    local.engine = spec.engine
+    local.checkpoint_source = spec.checkpoint_source
+    local.source_path = spec.source_path
+    local.github_source = spec.github_source
+    local.code_sources = spec.code_sources
+    if spec.basic_ops is not None:
+        local.basic_ops = spec.basic_ops
+        _build_export_block_trees(local, spec.basic_ops)
+    return local
 
 
 def dump_model_ast(
