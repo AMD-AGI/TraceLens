@@ -415,7 +415,9 @@ def project_roofline(
         parsed = _parse_op_node(node)
         if parsed is None:
             continue
-        section, computation, class_name, operation, output_text, input_texts, role = parsed
+        section, computation, class_name, operation, output_text, input_texts, role = (
+            parsed
+        )
         instances = _repeat_count(str(node.get("namespace") or ""))
         result.ops.append(
             _project_op(
@@ -531,13 +533,17 @@ def _project_op(
                 base.output_elements = prod(oshape) if oshape else 1
             except DimResolutionError:
                 base.output_elements = None
-            return _finish_op(base, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+            return _finish_op(
+                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
+            )
     if role == "ffn" and _RT.moe_top_k and "moe" in class_name.lower():
         moe = _moe_cost(dims, _RT.moe_top_k, _RT.moe_intermediate, bpe)
         if moe is not None:
             category, maf_type, flops, bytes_moved, output_elements = moe
             base.output_elements = output_elements
-            return _finish_op(base, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+            return _finish_op(
+                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
+            )
 
     engine_cost = _engine_boundary_cost(
         class_name, dims, moe_top_k, moe_intermediate_size, bpe
@@ -635,15 +641,20 @@ def _engine_head_cost(
     return "GEMM", "matrix", flops, bytes_moved, tokens * vocab
 
 
-
 class _RuntimeIntrospection:
     """Per-run values introspected from the ArchitectureSpec (config.json +
     modeling source) so MoE / attention / quantization costs need no hardcoded
     model names. Populated by :func:`project_roofline`."""
 
     __slots__ = (
-        "weight_bpe", "moe_top_k", "moe_intermediate", "attn_heads",
-        "attn_kv_heads", "attn_head_dim", "sliding_window", "n_local_layers",
+        "weight_bpe",
+        "moe_top_k",
+        "moe_intermediate",
+        "attn_heads",
+        "attn_kv_heads",
+        "attn_head_dim",
+        "sliding_window",
+        "n_local_layers",
         "n_layers",
     )
 
@@ -672,6 +683,7 @@ def _introspect_weight_bpe(quant):
         return None
     try:
         from TraceLens.ModelUtils.shape_inference import _quant_storage_dtype
+
         wd = _quant_storage_dtype(quant)
     except Exception:
         wd = None

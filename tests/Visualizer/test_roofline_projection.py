@@ -389,14 +389,21 @@ def test_introspect_weight_bpe_reads_quant_config():
     # MXFP4 (quark) -> 4-bit element + e8m0 scale per 32.
     assert (
         _introspect_weight_bpe(
-            {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "fp4"}}}
+            {
+                "quant_method": "quark",
+                "global_quant_config": {"weight": {"dtype": "fp4"}},
+            }
         )
         == 0.53125
     )
     assert _introspect_weight_bpe({"quant_method": "fp8", "fmt": "e4m3"}) == 1.0
     assert (
         _introspect_weight_bpe(
-            {"quant_method": "bitsandbytes", "load_in_4bit": True, "bnb_4bit_quant_type": "nf4"}
+            {
+                "quant_method": "bitsandbytes",
+                "load_in_4bit": True,
+                "bnb_4bit_quant_type": "nf4",
+            }
         )
         == 0.5
     )
