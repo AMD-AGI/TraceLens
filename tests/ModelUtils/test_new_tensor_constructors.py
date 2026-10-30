@@ -113,6 +113,30 @@ def _sizes_of(label: str) -> list[str]:
     return [d for d in (operation.details or []) if d.startswith("size")]
 
 
+_EMPTY_LIKE = textwrap.dedent("""
+    class M(nn.Module):
+        def forward(self, q):
+            output = torch.empty_like(q)
+            return output
+    """)
+
+
+def test_torch_empty_like_is_a_real_allocation_node():
+    """``torch.empty_like(q)`` needs a node for the same reason ``new_empty``
+    does above: ``zeros_like``/``ones_like``/``full_like`` were already
+    recognised function labels, but ``empty_like`` was missing from that
+    family. With no node for it, a later call reading the allocated buffer
+    (vLLM's ``_run_attention(query, query_fp8, index_query, output)``) had no
+    producer for ``output`` and fell back to a differently-shaped sibling
+    argument (``index_query``) instead.
+    """
+    analysis = analyze_source(_EMPTY_LIKE, config={})
+    labels = [
+        op.label for op in analysis.class_registry["M"].forward_operations.values()
+    ]
+    assert "Empty like" in labels
+
+
 class TestWhatCountsAsASize:
     def test_a_fill_value_is_not_an_axis(self) -> None:
         """``new_full(size, value)`` takes ONE size argument, then a value.

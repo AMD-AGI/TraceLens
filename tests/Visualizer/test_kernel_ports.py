@@ -27,6 +27,7 @@ def _node__kernel_interface_tiles(
     operation=None,
     details=None,
     constant=False,
+    raw_op=None,
     namespace="box",
     sources=(),
 ):
@@ -39,6 +40,8 @@ def _node__kernel_interface_tiles(
         attrs.append({"key": "details", "value": details})
     if constant:
         attrs.append({"key": "constant", "value": "true"})
+    if raw_op:
+        attrs.append({"key": "raw_op", "value": raw_op})
     attrs.append({"key": "output_shape", "value": "[B, S] bfloat16"})
     return {
         "id": node_id,
@@ -109,6 +112,23 @@ class TestTheCheck:
             ),
             _node__kernel_interface_tiles(
                 "o2", "out2", synthetic="@output", sources=["kern"]
+            ),
+        ]
+        assert _kernel_interface_tile_warnings(nodes) == []
+
+    def test_an_allocation_reader_is_not_a_published_value(self) -> None:
+        """``qkv.new_empty(...)`` borrows a kernel's dtype/device as a buffer
+        template for a later kernel to fill in; it never reads the kernel's
+        value, so two such allocations off one kernel are not two of its
+        outputs competing to be told apart."""
+        nodes = [
+            _port("p:q", "query"),
+            _kernel(["p:q"]),
+            _node__kernel_interface_tiles(
+                "q_buf", "New empty", raw_op="new_empty", sources=["kern"]
+            ),
+            _node__kernel_interface_tiles(
+                "idx_buf", "New empty", raw_op="new_empty", sources=["kern"]
             ),
         ]
         assert _kernel_interface_tile_warnings(nodes) == []
