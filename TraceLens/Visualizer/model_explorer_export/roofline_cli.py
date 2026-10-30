@@ -249,42 +249,34 @@ def write_csv(ops: list[RooflineOp], path: Path) -> None:
         writer.writerows(rows)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def run_projection(args):
+    """Resolve the model and project its roofline from parsed CLI ``args``.
 
+    Shared by the ``TraceLens_model_roofline_projection`` CLI and the
+    orchestrator roofline-augmentation utility (``roofline_augment``). Raises
+    ``ValueError`` for an invalid model source or ``--dim`` override, ``KeyError``
+    for an unknown ``--gpu-arch-name``, and ``RuntimeError`` when the architecture
+    fails to load. Returns ``(projection, gpu_arch, layout_warnings)``.
+    """
     checkpoint = resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
     if checkpoint is None and args.github is None:
-        parser.error(
+        raise ValueError(
             "Provide a Hugging Face checkpoint (SOURCE or --checkpoint) and/or --github"
         )
-
-    try:
-        extra_dims = parse_dim_overrides(args.dim)
-    except ValueError as exc:
-        parser.error(str(exc))
-
+    extra_dims = parse_dim_overrides(args.dim)
     gpu_arch = None
     if args.gpu_arch_json_path is not None:
         gpu_arch = json.loads(args.gpu_arch_json_path.read_text(encoding="utf-8"))
     elif args.gpu_arch_name is not None:
-        try:
-            gpu_arch = load_arch(args.gpu_arch_name)
-        except KeyError:
-            parser.error(
-                f"Unknown --gpu-arch-name {args.gpu_arch_name!r}; "
-                f"available: {', '.join(list_platforms())}"
-            )
-
+        gpu_arch = load_arch(args.gpu_arch_name)
     try:
         spec = load_architecture_spec_from_args(
             checkpoint, args, title=args.title, stop_at_roofline_ops=True
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"Error loading architecture: {exc}", file=sys.stderr)
-        return 1
-
+        raise RuntimeError(f"Error loading architecture: {exc}") from exc
     degree = ParallelDegree(tp=args.tp, pp=args.pp, ep=args.ep)
+    layout_warnings: list[str] = []
     if degree.requested():
         spec.parallel_layout = build_parallel_layout(spec, degree)
         for line in spec.parallel_layout.fact_lines():
@@ -294,8 +286,7 @@ def main(argv: list[str] | None = None) -> int:
                 or text.startswith("The model declares")
                 or text.startswith("No Hugging Face")
             ):
-                print(f"Warning: {text}", file=sys.stderr)
-
+                layout_warnings.append(text)
     projection = project_roofline(
         spec,
         batch_size=args.batch_size,
@@ -303,6 +294,28 @@ def main(argv: list[str] | None = None) -> int:
         extra_dims=extra_dims,
         gpu_arch=gpu_arch,
     )
+    return projection, gpu_arch, layout_warnings
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        projection, gpu_arch, layout_warnings = run_projection(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    except KeyError:
+        parser.error(
+            f"Unknown --gpu-arch-name {args.gpu_arch_name!r}; "
+            f"available: {', '.join(list_platforms())}"
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    for text in layout_warnings:
+        print(f"Warning: {text}", file=sys.stderr)
 
     print(format_table(projection.ops, top_n=args.top_n))
     print()

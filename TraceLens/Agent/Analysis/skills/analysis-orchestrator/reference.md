@@ -553,6 +553,27 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ---
 
+## Step 10.5: Analytical Roofline Augmentation (optional)
+
+A kernel is roofline-modeled from the trace only when the trace carries its Input Dims (`record_shapes=True`) **and** PerfModel has a formula for it. A model's custom kernels (bespoke attention, fused-MoE) otherwise surface as `estimate_method: "heuristic"` — ranked by E2E GPU-time share with no bound classification. When a resolvable model source is available, you can fill that gap with the **analytical** roofline, which derives op shapes from the model config and so needs no trace shapes.
+
+Run it only when `<Model>` resolves to a real checkpoint / HF id and you know the trace's runtime regime (decode/prefill, batch, context). Skip it otherwise.
+
+```bash
+<prefix> python3 -m TraceLens.Agent.Analysis.utils.roofline_augment \
+  --output-dir <output_dir> \
+  <checkpoint-or-hf-id> [--code-path <modeling.py>] [--engine vllm|sglang] \
+  --tp <N> [--pp <N>] [--ep <N>] \
+  --phase <decode|prefill> --batch-size <B> --seq-len <S> [--dim past_len=<K>] \
+  --gpu-arch-json-path <platform_file>
+```
+
+This writes `<output_dir>/metadata/roofline_augmentation.json` with, for the dominant unmodeled kernel of each roofline category (Attention, MoE, ...), its `bound` (memory/compute), `arithmetic_intensity`, per-GPU `roofline_us_per_gpu`, and a ready-to-embed Markdown `note`. It modifies no finding files.
+
+**Step 12 integration:** in Step 12(e) Detailed Analysis, after loading `report_notes(<output_dir>)` from `TraceLens.Agent.Analysis.utils.roofline_augment`, append each kernel's `note` as a blockquote immediately under the `**Identification:**` line of the matching compute finding (match by `kernel` substring). Label it analytical so it is not read as a trace measurement. If `roofline_augmentation.json` is absent, skip — the report is unchanged.
+
+---
+
 ## Step 11: Render Plot (conditional)
 
 **Important:** Plot data is sourced from `priority_data.json` (written in Step 8.5). This step only renders the PNG when `agent_extension.py` is absent.
