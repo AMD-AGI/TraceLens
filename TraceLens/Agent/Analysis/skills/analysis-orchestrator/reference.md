@@ -553,6 +553,29 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ---
 
+## Step 10.5: Analytical Roofline Augmentation (optional, deterministic)
+
+A kernel is roofline-modeled from the trace only when the trace carries its Input Dims (`record_shapes=True`) **and** PerfModel has a formula for it. A model's custom kernels (bespoke attention, fused-MoE) otherwise surface as `estimate_method: "heuristic"` — ranked by E2E GPU-time share with no bound classification. When a resolvable model source is available, this gap is filled **deterministically** with the analytical roofline, which derives op shapes from the model config and so needs no trace shapes.
+
+This is a deterministic script, not an agent task. It writes its results into the structured findings data and the report simply renders them — the orchestrator does **not** compute or interpret the roofline. Run it only when `<Model>` resolves to a real checkpoint / HF id and you know the trace's runtime regime (decode/prefill, batch, context); skip it otherwise. It **must run after Step 8.5** (`generate_priority_data`), because it merges into `priority_data.json`, which Step 8.5 regenerates from scratch.
+
+```bash
+<prefix> python3 -m TraceLens.Visualizer.model_explorer_export.roofline_augment \
+  --output-dir <output_dir> \
+  <checkpoint-or-hf-id> [--code-path <modeling.py>] [--engine vllm|sglang] \
+  --tp <N> [--pp <N>] [--ep <N>] \
+  --phase <decode|prefill> --batch-size <B> --seq-len <S> [--dim past_len=<K>] \
+  --gpu-arch-json-path <platform_file>
+```
+
+For the dominant unmodeled kernel of each roofline category (Attention, MoE, ...), the script:
+- writes `<output_dir>/metadata/roofline_augmentation.json` (full record: `bound`, `arithmetic_intensity`, per-GPU `roofline_us_per_gpu`, an `achieved` block — measured kernel time vs config-derived FLOPs/bytes → TFLOP/s · GB/s · % of the bound's ceiling — and a pre-rendered Markdown `note`); and
+- **deterministically merges** an additive `roofline` block onto the matching `priority_data.json::findings[]` entry (matched by kernel name in a member's `operation`). It leaves every existing field untouched — `bound_type`, `efficiency_pct`, `estimate_method` — so nothing reclassifies the finding or trips the efficiency-anomaly check. The achieved % assumes each invocation runs the projected phase shape (reliable for a single-phase capture, skewed for a mixed-regime one; the note says so). No findings files are modified.
+
+**Step 12 rendering (data-driven, no interpretation):** when a `priority_data.json` finding carries a `roofline` block, render `finding.roofline.note` verbatim as a blockquote immediately under that finding's `**Identification:**` line in Step 12(e), and, because the kernel is now modeled analytically, qualify any residual "no performance model" / "cannot compute a roofline" wording in that finding (Executive-Summary line, card Insight, Reasoning) to "no *trace-based* perf model (analytical roofline below)" so the report is not self-contradictory. Findings without a `roofline` block are unchanged.
+
+---
+
 ## Step 11: Render Plot (conditional)
 
 **Important:** Plot data is sourced from `priority_data.json` (written in Step 8.5). This step only renders the PNG when `agent_extension.py` is absent.
