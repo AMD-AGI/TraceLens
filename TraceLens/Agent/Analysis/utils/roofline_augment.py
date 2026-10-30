@@ -76,7 +76,18 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
             continue
         acc = by_cat.setdefault(
             op.category,
-            {"flops": 0.0, "bytes": 0.0, "roofline_time_us": 0.0, "bound_time": {}},
+            {
+                "flops": 0.0,
+                "bytes": 0.0,
+                "roofline_time_us": 0.0,
+                "bound_time": {},
+                # Per-invocation (one layer, one forward) FLOPs/bytes of the
+                # category's dominant op, used to scale against a trace kernel's
+                # measured per-invocation cost.
+                "flops_per_invocation": 0.0,
+                "bytes_per_invocation": 0.0,
+                "_dominant_flops": -1.0,
+            },
         )
         acc["flops"] += op.total_flops or 0.0
         acc["bytes"] += op.total_bytes or 0.0
@@ -86,6 +97,10 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
                 acc["bound_time"].get(op.roofline_bound, 0.0)
                 + (op.total_roofline_time_us or 0.0)
             )
+        if (op.total_flops or 0.0) > acc["_dominant_flops"]:
+            acc["_dominant_flops"] = op.total_flops or 0.0
+            acc["flops_per_invocation"] = op.flops or 0.0
+            acc["bytes_per_invocation"] = op.bytes or 0.0
     out: dict[str, dict] = {}
     for cat, acc in by_cat.items():
         ai = acc["flops"] / acc["bytes"] if acc["bytes"] else None
@@ -102,11 +117,56 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
             "roofline_us_per_gpu": acc["roofline_time_us"] / tp if tp else acc["roofline_time_us"],
             "flops": acc["flops"],
             "bytes": acc["bytes"],
+            "flops_per_invocation": acc["flops_per_invocation"],
+            "bytes_per_invocation": acc["bytes_per_invocation"],
             "vs_ridge": (
                 None if ai is None or ridge is None else ("below" if ai < ridge else "above")
             ),
         }
     return out
+
+
+def achieved_from_measurement(
+    facts: dict, time_ms: float | None, count: int | None, arch: dict | None
+) -> dict | None:
+    """Combine a kernel's measured time with the analytical per-invocation
+    FLOPs/bytes to report achieved throughput vs peak -- the measured side of a
+    roofline that the main report would compute from trace Input Dims.
+
+    Each of ``count`` invocations is assumed to run the projected per-invocation
+    (one-layer) shape. That holds for a single-regime capture; a mixed-regime
+    one (e.g. an agentic prefill+decode replay) will skew it, which the caller
+    must flag."""
+    if not time_ms or not count:
+        return None
+    fpi = facts.get("flops_per_invocation") or 0.0
+    bpi = facts.get("bytes_per_invocation") or 0.0
+    seconds = time_ms / 1000.0
+    achieved_tflops = (fpi * count) / seconds / 1e12 if fpi else None
+    achieved_gbps = (bpi * count) / seconds / 1e9 if bpi else None
+    peak_tflops = (arch or {}).get("peak_tflops")
+    mem_bw_gbps = (arch or {}).get("mem_bw_gbps")
+    # Report utilisation against whichever ceiling the roofline bound selects.
+    if facts.get("bound") == "MEMORY_BOUND":
+        pct_of_peak = (
+            100.0 * achieved_gbps / mem_bw_gbps
+            if achieved_gbps and mem_bw_gbps
+            else None
+        )
+        ceiling = "memory bandwidth"
+    else:
+        pct_of_peak = (
+            100.0 * achieved_tflops / peak_tflops
+            if achieved_tflops and peak_tflops
+            else None
+        )
+        ceiling = "compute peak"
+    return {
+        "achieved_tflops": achieved_tflops,
+        "achieved_gbps": achieved_gbps,
+        "pct_of_peak": pct_of_peak,
+        "ceiling": ceiling,
+    }
 
 
 def _dominant_ops(output_dir: Path) -> list[dict]:
@@ -126,30 +186,81 @@ def _dominant_ops(output_dir: Path) -> list[dict]:
     return ops
 
 
-def _note(kernel: str, roofline_category: str, facts: dict, ridge: float | None) -> str:
+def _note(
+    kernel: str,
+    roofline_category: str,
+    facts: dict,
+    ridge: float | None,
+    achieved: dict | None,
+    regime: dict,
+) -> str:
     ai = facts.get("arithmetic_intensity")
     bound = (facts.get("bound") or "").replace("_", "-").lower() or "unclassified"
     us = facts.get("roofline_us_per_gpu")
     ridge_txt = f" vs the BF16 ridge of {ridge:.0f}" if ridge else ""
     ai_txt = f"{ai:.1f} FLOP/byte{ridge_txt}" if ai is not None else "n/a"
     us_txt = f"; ~{us/1000:.2f} ms/GPU roofline floor" if us else ""
+    phase = regime.get("phase") or "the captured"
+    achieved_txt = ""
+    if achieved and achieved.get("pct_of_peak") is not None:
+        thr = (
+            f"{achieved['achieved_gbps']:.0f} GB/s"
+            if achieved.get("ceiling") == "memory bandwidth" and achieved.get("achieved_gbps")
+            else f"{achieved['achieved_tflops']:.1f} TFLOP/s"
+            if achieved.get("achieved_tflops")
+            else "n/a"
+        )
+        achieved_txt = (
+            f" Measured throughput ≈ {thr} = **{achieved['pct_of_peak']:.1f}% of "
+            f"{achieved['ceiling']}** (from the kernel's trace time against the "
+            f"config-derived FLOPs/bytes; assumes every invocation runs the "
+            f"projected {phase}-phase shape, so a mixed-regime capture skews it)."
+        )
     return (
-        f"> **Analytical roofline (model-explorer, config-derived — not a trace "
-        f"measurement):** modeled as **{roofline_category}**, this op is "
-        f"**{bound}** at the captured regime (arithmetic intensity ≈ {ai_txt}{us_txt}). "
-        f"Shapes are derived from the model config, so this covers the kernel the "
-        f"trace left unmodeled."
+        f"> **Analytical roofline (model-explorer, config-derived):** the trace "
+        f"carried no Input Dims for this kernel, so its shapes are taken from the "
+        f"model config and costed with the same PerfModel roofline used elsewhere. "
+        f"Modeled as **{roofline_category}**, it is **{bound}** at the {phase} regime "
+        f"(arithmetic intensity ≈ {ai_txt}{us_txt}).{achieved_txt}"
     )
 
 
-def augment(output_dir: Path, summary: dict[str, dict], regime: dict, ridge: float | None) -> dict:
+def _entry(op: dict, kernel: str, roofline_cat: str, facts: dict, ridge, arch, regime) -> dict:
+    achieved = achieved_from_measurement(
+        facts, op.get("time_ms"), op.get("count"), arch
+    )
+    return {
+        "kernel": kernel,
+        "finding_category": op.get("_finding_category"),
+        "roofline_category": roofline_cat,
+        "bound": facts["bound"],
+        "arithmetic_intensity": facts["arithmetic_intensity"],
+        "roofline_us_per_gpu": facts["roofline_us_per_gpu"],
+        "flops": facts["flops"],
+        "bytes": facts["bytes"],
+        "measured_time_ms": op.get("time_ms"),
+        "measured_count": op.get("count"),
+        "achieved": achieved,
+        "note": _note(kernel, roofline_cat, facts, ridge, achieved, regime),
+    }
+
+
+def augment(
+    output_dir: Path,
+    summary: dict[str, dict],
+    regime: dict,
+    ridge: float | None,
+    arch: dict | None = None,
+) -> dict:
     """Attach roofline facts to the dominant unmodeled trace kernel of each
     roofline category.
 
     Only the single highest-GPU-time heuristic/unmodeled kernel per category is
     augmented -- that is the one the orchestrator surfaces as a top finding and
     the one the analytical roofline most directly explains. Trace-modeled ops
-    already carry a roofline and are skipped."""
+    already carry a roofline and are skipped. When ``arch`` carries
+    ``peak_tflops``/``mem_bw_gbps``, each entry also reports the achieved
+    throughput (measured kernel time vs the config-derived FLOPs/bytes)."""
     picked: dict[str, dict] = {}
     for op in _dominant_ops(output_dir):  # already sorted by GPU time, desc
         if (op.get("impact_estimate_method") or op.get("estimate_method")) == "modeled":
@@ -158,18 +269,9 @@ def augment(output_dir: Path, summary: dict[str, dict], regime: dict, ridge: flo
         roofline_cat = classify_kernel(kernel)
         if roofline_cat is None or roofline_cat not in summary or roofline_cat in picked:
             continue
-        facts = summary[roofline_cat]
-        picked[roofline_cat] = {
-            "kernel": kernel,
-            "finding_category": op.get("_finding_category"),
-            "roofline_category": roofline_cat,
-            "bound": facts["bound"],
-            "arithmetic_intensity": facts["arithmetic_intensity"],
-            "roofline_us_per_gpu": facts["roofline_us_per_gpu"],
-            "flops": facts["flops"],
-            "bytes": facts["bytes"],
-            "note": _note(kernel, roofline_cat, facts, ridge),
-        }
+        picked[roofline_cat] = _entry(
+            op, kernel, roofline_cat, summary[roofline_cat], ridge, arch, regime
+        )
     entries = list(picked.values())
     payload = {
         "regime": regime,
@@ -232,6 +334,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Warning: {text}", file=sys.stderr)
 
     ridge = _ridge(gpu_arch)
+    arch = {
+        "peak_tflops": (gpu_arch.get("max_achievable_tflops") or {}).get("matrix_bf16")
+        if gpu_arch
+        else None,
+        "mem_bw_gbps": gpu_arch.get("mem_bw_gbps") if gpu_arch else None,
+    }
     summary = summarize_projection(projection, proj_args.tp, ridge)
     regime = {
         "phase": proj_args.phase,
@@ -241,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         "tp": proj_args.tp,
         "engine": proj_args.engine,
     }
-    payload = augment(Path(ns.output_dir), summary, regime, ridge)
+    payload = augment(Path(ns.output_dir), summary, regime, ridge, arch)
 
     n = len(payload["entries"])
     print(

@@ -568,9 +568,9 @@ Run it only when `<Model>` resolves to a real checkpoint / HF id and you know th
   --gpu-arch-json-path <platform_file>
 ```
 
-This writes `<output_dir>/metadata/roofline_augmentation.json` with, for the dominant unmodeled kernel of each roofline category (Attention, MoE, ...), its `bound` (memory/compute), `arithmetic_intensity`, per-GPU `roofline_us_per_gpu`, and a ready-to-embed Markdown `note`. It modifies no finding files.
+This writes `<output_dir>/metadata/roofline_augmentation.json` with, for the dominant unmodeled kernel of each roofline category (Attention, MoE, ...): its `bound` (memory/compute), `arithmetic_intensity`, per-GPU `roofline_us_per_gpu`, an `achieved` block (measured kernel time vs the config-derived FLOPs/bytes → achieved TFLOP/s · GB/s · % of the bound's ceiling), and a ready-to-embed Markdown `note`. The achieved % assumes every invocation runs the projected phase shape, so it is reliable for a single-phase capture and skewed for a mixed-regime (e.g. agentic) one — the note states this. It modifies no finding files.
 
-**Step 12 integration:** in Step 12(e) Detailed Analysis, after loading `report_notes(<output_dir>)` from `TraceLens.Agent.Analysis.utils.roofline_augment`, append each kernel's `note` as a blockquote immediately under the `**Identification:**` line of the matching compute finding (match by `kernel` substring). Label it analytical so it is not read as a trace measurement. If `roofline_augmentation.json` is absent, skip — the report is unchanged.
+**Step 12 integration:** in Step 12(e) Detailed Analysis, after loading `report_notes(<output_dir>)` from `TraceLens.Agent.Analysis.utils.roofline_augment`, append each kernel's `note` as a blockquote immediately under the `**Identification:**` line of the matching compute finding (match by `kernel` substring). Because the kernel is now modeled analytically, **reconcile any wording that still calls it wholly unmodeled**: where the finding's Executive-Summary line, card Insight, or "Reasoning" text says "no performance model" / "cannot compute a roofline", qualify it to "no *trace-based* perf model (analytical roofline below)" so the report is not self-contradictory. If `roofline_augmentation.json` is absent, skip — the report is unchanged.
 
 ---
 
