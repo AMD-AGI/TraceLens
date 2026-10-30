@@ -131,6 +131,7 @@ setup(
             "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
             "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
             "TraceLens_model_roofline_projection = TraceLens.Visualizer.model_explorer_export.roofline_cli:main",
+            "TraceLens_loom_port_cfg = TraceLens.ModelUtils.loom_port_cfg_cli:main",
             "TraceLens_split_trace = TraceLens.TraceUtils.split_trace.main:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",
