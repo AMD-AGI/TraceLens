@@ -132,6 +132,20 @@ Known approximations:
   `num_experts` passes. The router's own softmax/top-k selection and any
   shared-expert add are not separately costed.
 
+## Run from a chat
+
+A portable skill drives this CLI for agentic runners that support skill-file
+discovery (Claude Code, Cursor, Codex). In a chat with a capable model,
+invoke:
+
+```text
+Follow the model roofline projection skill installed with TraceLens and
+project <model> at batch size <N> and sequence length <N> on <GPU arch>.
+```
+
+See [TraceLens/Agent/Visualizer/skills/model-roofline-projection/](../../TraceLens/Agent/Visualizer/skills/model-roofline-projection/SKILL.md)
+for the skill's full procedure.
+
 ## Related topics
 
 - [Model op performance without a trace](./perf-model-without-trace.md)
