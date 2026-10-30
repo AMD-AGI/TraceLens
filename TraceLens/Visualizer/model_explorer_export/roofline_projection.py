@@ -15,15 +15,17 @@ operator export means a ``--tp``/``--pp``/``--ep`` split, and the merged
 per-GPU local shapes it produces, is the same split and the same shapes the
 visualizer draws -- not a second, independently-matched approximation of it.
 
-Op coverage is intentionally narrow: GEMM (``Linear``/``matmul``/``bmm``), SDPA,
-the Normalization family, Softmax, generic elementwise/reduction ops, and MoE
-expert routing -- exactly the leaf granularity
+Op coverage is intentionally narrow: GEMM (``Linear``/``matmul``/``bmm``), CONV,
+SDPA, the Normalization family, Softmax, generic elementwise/reduction ops, and
+MoE expert routing -- exactly the leaf granularity
 :func:`TraceLens.ModelUtils.build_roofline_basic_ops` stops AST expansion at,
 plus the vLLM/SGLang engine boundaries (``ParallelLMHead``, ``FusedMoEFactory``)
-that never expand at all (see "Known approximations" below). Anything else
-(embeddings, convolutions -- CONV needs kernel/stride geometry the graph does
-not carry) is reported as "unmodeled" rather than silently dropped, so the
-projection's coverage is always visible instead of assumed.
+that never expand at all (see "Known approximations" below). Convolutions are
+costed only when the meta-device pass threaded the kernel geometry onto the
+node's ``details`` attr (``conv_weight=[...]``); the input/output shapes alone
+cannot recover the weight's kernel size or groups. Anything else (embeddings, a
+conv with no threaded geometry) is reported as "unmodeled" rather than silently
+dropped, so the projection's coverage is always visible instead of assumed.
 
 Known approximations, stated once here rather than scattered in comments:
   - GEMM bias is assumed absent (bias FLOPs are O(M*N), negligible next to the
@@ -67,6 +69,7 @@ from TraceLens.ModelUtils.extract import ArchitectureSpec
 from TraceLens.ModelUtils.loader import build_roofline_basic_ops
 from TraceLens.ModelUtils.shape_inference import ShapeContext, Symbol
 from TraceLens.PerfModel.perf_model import (
+    CONV,
     GEMM,
     SDPA,
     BinaryElementwise,
@@ -102,6 +105,22 @@ _BYTES_PER_ELEMENT: dict[str, float] = {
 # nn.Module (operation == "nn_module") vs. a bare functional call.
 _GEMM_NN_MODULE_COMPUTATIONS = frozenset({"Linear"})
 _GEMM_FUNCTIONAL_LABELS = frozenset({"matmul", "batchmatmul", "mm", "bmm"})
+
+# Convolution module computations. The input/output shapes are on the node; the
+# weight shape (kernel geometry + groups) and the bias/transposed flags are not
+# derivable from them, so they are threaded on the node's ``details`` attr by the
+# meta-device pass (``conv_weight=[...]``, ``conv_bias=0|1``, ``conv_transposed=0|1``)
+# and parsed by ``_parse_conv_details``.
+_CONV_COMPUTATIONS = frozenset(
+    {
+        "Conv1d",
+        "Conv2d",
+        "Conv3d",
+        "ConvTranspose1d",
+        "ConvTranspose2d",
+        "ConvTranspose3d",
+    }
+)
 
 # A vLLM/SGLang ``--engine`` draw labels a sharded linear by its own class
 # (``RowParallelLinear``) or, for a model-specific subclass TraceLens'
@@ -415,9 +434,16 @@ def project_roofline(
         parsed = _parse_op_node(node)
         if parsed is None:
             continue
-        section, computation, class_name, operation, output_text, input_texts, role = (
-            parsed
-        )
+        (
+            section,
+            computation,
+            class_name,
+            operation,
+            output_text,
+            input_texts,
+            role,
+            details,
+        ) = parsed
         instances = _repeat_count(str(node.get("namespace") or ""))
         result.ops.append(
             _project_op(
@@ -434,6 +460,7 @@ def project_roofline(
                 moe_top_k,
                 moe_intermediate_size,
                 role,
+                details,
             )
         )
     return result
@@ -489,7 +516,17 @@ def _parse_op_node(
     namespace = str(node.get("namespace") or "")
     section = namespace.split("/")[-1] if namespace else node_id
     role = _attr_text(attrs, "role") or ""
-    return section, computation, class_name, operation, output_text, input_texts, role
+    details = _attr_text(attrs, "details") or ""
+    return (
+        section,
+        computation,
+        class_name,
+        operation,
+        output_text,
+        input_texts,
+        role,
+        details,
+    )
 
 
 def _project_op(
@@ -506,6 +543,7 @@ def _project_op(
     moe_top_k: int | None,
     moe_intermediate_size: int | None,
     role: str = "",
+    details: str = "",
 ) -> RooflineOp:
     base = RooflineOp(
         name=node_id,
@@ -564,7 +602,7 @@ def _project_op(
         input_shapes = [
             resolve_shape(shape, dims) if shape else None for shape in input_texts
         ]
-        cost = _dispatch_op_cost(computation, input_shapes, output_shape, bpe)
+        cost = _dispatch_op_cost(computation, input_shapes, output_shape, bpe, details)
     except DimResolutionError as exc:
         base.reason = f"unresolved input dim {exc}"
         return base
@@ -818,12 +856,15 @@ def _dispatch_op_cost(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
+    details: str = "",
 ) -> tuple[str, str, float, float | None] | None:
     """Return ``(category, maf_type, flops, bytes)`` for an op, or ``None`` if unmodeled."""
     if computation in _GEMM_NN_MODULE_COMPUTATIONS:
         return _gemm_cost_linear(input_shapes, output_shape, bpe)
     if computation.lower() in _GEMM_FUNCTIONAL_LABELS:
         return _gemm_cost_matmul(input_shapes, output_shape, bpe)
+    if computation in _CONV_COMPUTATIONS:
+        return _conv_cost(details, input_shapes, output_shape, bpe)
     if computation == _SDPA_COMPUTATION:
         return _sdpa_cost(input_shapes, bpe)
     normalization_family = _classify_normalization(computation)
@@ -876,6 +917,57 @@ def _gemm_cost_matmul(
     flops = GEMM.flops_func(m, n, k, bias=False)
     bytes_moved = GEMM.bytes_func(m, n, k, False, bpe, bpe, bpe, bpe)
     return "GEMM", "matrix", flops, bytes_moved
+
+
+_CONV_WEIGHT_RE = re.compile(r"conv_weight=\[([0-9,\s]+)\]")
+_CONV_FLAG_RE = re.compile(r"conv_(bias|transposed)=([01])")
+
+
+def _parse_conv_details(details: str) -> tuple[tuple[int, ...], bool, bool] | None:
+    """``(weight_shape, bias, transposed)`` from a node's ``details`` attr, or
+    ``None`` when the convolution geometry was not threaded onto the node.
+
+    The meta-device pass stamps ``conv_weight=[C_out, C_in/groups, *kernel]``,
+    ``conv_bias=0|1``, and ``conv_transposed=0|1`` (see ``meta_trace`` /
+    ``_CONV_COMPUTATIONS``)."""
+    if not details:
+        return None
+    match = _CONV_WEIGHT_RE.search(details)
+    if not match:
+        return None
+    try:
+        weight = tuple(int(tok) for tok in match.group(1).split(",") if tok.strip())
+    except ValueError:
+        return None
+    if not weight:
+        return None
+    flags = {k: v == "1" for k, v in _CONV_FLAG_RE.findall(details)}
+    return weight, flags.get("bias", False), flags.get("transposed", False)
+
+
+def _conv_cost(
+    details: str,
+    input_shapes: list[tuple[int, ...] | None],
+    output_shape: tuple[int, ...],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """CONV FLOPs/bytes from the input/output shapes plus the weight geometry on
+    the node's ``details`` attr. The strides/padding/dilation that `nn.Conv*`
+    uses only determine the output shape, which is already resolved here, so the
+    static ``CONV.flops_func``/``bytes_func`` need only the three shapes plus the
+    bias/transposed flags."""
+    parsed = _parse_conv_details(details)
+    if parsed is None or not input_shapes or not input_shapes[0] or not output_shape:
+        return None
+    weight_shape, bias, transposed = parsed
+    input_shape = input_shapes[0]
+    flops = CONV.flops_func(input_shape, weight_shape, output_shape, bias, transposed)
+    bytes_moved = (
+        CONV.bytes_func(input_shape, weight_shape, output_shape, bias, bpe)
+        if bpe is not None
+        else None
+    )
+    return "CONV", "matrix", flops, bytes_moved
 
 
 def _sdpa_cost(

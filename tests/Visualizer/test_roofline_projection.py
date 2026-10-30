@@ -24,7 +24,9 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _attention_boundary_cost,
     _attr_text,
     _classify_normalization,
+    _conv_cost,
     _dispatch_op_cost,
+    _parse_conv_details,
     _engine_boundary_cost,
     _engine_head_cost,
     _introspect_weight_bpe,
@@ -154,6 +156,7 @@ def test_parse_op_node_classifies_an_engine_parallel_linear_as_linear():
         _output_text,
         _input_texts,
         _role,
+        _details,
     ) = parsed
     assert computation == "Linear"
     assert class_name == "QKVParallelLinear"
@@ -232,6 +235,44 @@ def test_dispatch_sdpa():
     assert maf_type == "matrix"
     assert flops > 0
     assert bytes_moved is not None
+
+
+# CONV: geometry is threaded on the node's ``details`` attr by the meta pass.
+
+
+def test_parse_conv_details():
+    assert _parse_conv_details(
+        "conv_weight=[64, 3, 7, 7]; conv_bias=1; conv_transposed=0"
+    ) == ((64, 3, 7, 7), True, False)
+    # Flags default to False when absent; weight is required.
+    assert _parse_conv_details("conv_weight=[32, 32, 3, 3]") == (
+        (32, 32, 3, 3),
+        False,
+        False,
+    )
+    assert _parse_conv_details("conv_transposed=1") is None
+    assert _parse_conv_details("") is None
+
+
+def test_conv_cost_matches_perf_model():
+    # 3->64, 7x7, stride-2 conv on 224x224 -> 112x112 output, with bias.
+    x, out = (1, 3, 224, 224), (1, 64, 112, 112)
+    details = "conv_weight=[64, 3, 7, 7]; conv_bias=1; conv_transposed=0"
+    category, maf_type, flops, bytes_moved = _conv_cost(details, [x], out, 2)
+    assert category == "CONV"
+    assert maf_type == "matrix"
+    # prod(out) * 2 * prod(weight[1:]) + bias term.
+    assert flops == 112 * 112 * 64 * 2 * (3 * 7 * 7) + (112 * 112 * 64)
+    assert bytes_moved is not None
+
+
+def test_dispatch_conv_routes_and_needs_geometry():
+    x, out = (1, 3, 224, 224), (1, 64, 112, 112)
+    details = "conv_weight=[64, 3, 7, 7]; conv_bias=0; conv_transposed=0"
+    cost = _dispatch_op_cost("Conv2d", [x], out, 2, details)
+    assert cost is not None and cost[0] == "CONV"
+    # Without threaded geometry a conv stays unmodeled (not silently costed).
+    assert _dispatch_op_cost("Conv2d", [x], out, 2, "") is None
 
 
 def test_dispatch_sdpa_insufficient_operands_is_unmodeled():

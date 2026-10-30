@@ -1123,3 +1123,24 @@ def test_trace_meta_op_shapes_drops_conflicting_shapes(monkeypatch):
     # is dropped. A later add that only one class produces is kept.
     assert (1, "add", 0) not in result
     assert result[(1, "add", 1)] == ("B", 1)
+
+
+def test_conv_geometry_detail_reads_live_module():
+    # A standard conv: weight is [C_out, C_in/groups, kH, kW], bias present.
+    conv = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=True)
+    assert (
+        mt.conv_geometry_detail(conv)
+        == "conv_weight=[64, 3, 7, 7]; conv_bias=1; conv_transposed=0"
+    )
+    # Grouped, bias-free conv: C_in/groups is reflected in the weight shape.
+    grouped = nn.Conv2d(32, 32, kernel_size=3, groups=32, bias=False)
+    assert (
+        mt.conv_geometry_detail(grouped)
+        == "conv_weight=[32, 1, 3, 3]; conv_bias=0; conv_transposed=0"
+    )
+    # Transposed conv sets the flag.
+    deconv = nn.ConvTranspose2d(16, 8, kernel_size=2, stride=2, bias=False)
+    assert "conv_transposed=1" in mt.conv_geometry_detail(deconv)
+    # Not a convolution -> None.
+    assert mt.conv_geometry_detail(nn.Linear(8, 8)) is None
+    assert mt.conv_geometry_detail(object()) is None

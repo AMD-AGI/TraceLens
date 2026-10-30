@@ -570,6 +570,35 @@ def _tensor_shape_from_output(output: Any) -> tuple[int, ...] | None:
     return first_shape(output, set())
 
 
+def conv_geometry_detail(module: Any) -> str | None:
+    """A ``details`` string recording a convolution's weight geometry, or ``None``
+    when *module* is not a convolution.
+
+    The static roofline projection
+    (:func:`TraceLens.Visualizer.model_explorer_export.roofline_projection._parse_conv_details`)
+    reads ``conv_weight`` / ``conv_bias`` / ``conv_transposed`` off a node's
+    ``details`` attr to cost a ``CONV`` with no trace. A conv's input/output
+    shapes alone cannot recover its weight kernel size or group count, but during
+    the meta-device pass the live ``torch.nn.modules.conv._ConvNd`` instance
+    carries them for free -- ``weight.shape`` is ``[C_out, C_in/groups, *kernel]``
+    and ``transposed`` / ``bias`` are plain attributes, read without a forward
+    pass. Stamp the returned string onto the module's :class:`BlockNode.details`
+    so it survives into the exported node's ``details`` attr."""
+    try:
+        from torch.nn.modules.conv import _ConvNd
+    except ImportError:
+        return None
+    if not isinstance(module, _ConvNd):
+        return None
+    weight = getattr(module, "weight", None)
+    if weight is None or getattr(weight, "shape", None) is None:
+        return None
+    shape = ", ".join(str(int(d)) for d in tuple(weight.shape))
+    bias = 1 if getattr(module, "bias", None) is not None else 0
+    transposed = 1 if getattr(module, "transposed", False) else 0
+    return f"conv_weight=[{shape}]; conv_bias={bias}; conv_transposed={transposed}"
+
+
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,
