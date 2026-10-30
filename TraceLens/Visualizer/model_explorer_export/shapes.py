@@ -19,13 +19,10 @@ from TraceLens.ModelUtils.shape_inference import (
     ShapeInferencer,
     Symbol,
     TensorSpec,
-    _divide_dim,
-    _ENGINE_GATED_ACTIVATION_RE,
     _multi_output_slice_shape,
     _permute_shape,
     _reduce_conv_spatial,
     _reduction_axes,
-    _replace_last_dim,
     _resolve_cast_dtype,
     _resolve_expand_shape,
     _resolve_view_shape,
@@ -614,27 +611,6 @@ def _fallback_node_spec(
         for attr in attrs
         if attr.get("key") == "detail" or attr.get("key") == "details"
     ]
-
-    class_name = next(
-        (str(a.get("value")) for a in attrs if a.get("key") == "class_name"), ""
-    )
-    label = str(node.get("label") or "")
-    if (
-        specs
-        and specs[0].shape
-        and _ENGINE_GATED_ACTIVATION_RE.search(class_name or label)
-    ):
-        # vLLM/SGLang's gated-activation family (``SiluAndMul``,
-        # ``SiluAndMulWithClamp``, ``GeluAndMul``, SGLang's ``SituAndMul``, ...):
-        # every one halves its last axis (``gate, up = x.chunk(2, dim=-1)``).
-        # These are bare calls with no block-tree module to size them, so this
-        # fallback -- not a constructor-driven rule -- is where the shape has
-        # to come from. See ``shape_inference._ENGINE_GATED_ACTIVATION_RE``.
-        halved = _divide_dim(specs[0].shape[-1], 2)
-        if halved is not None:
-            return TensorSpec(
-                shape=_replace_last_dim(specs[0].shape, halved), dtype=specs[0].dtype
-            )
 
     attr_name_for_module = next(
         (str(a.get("value")) for a in attrs if a.get("key") == "attr_name"), ""

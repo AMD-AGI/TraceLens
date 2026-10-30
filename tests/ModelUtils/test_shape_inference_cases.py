@@ -56,7 +56,7 @@ from TraceLens.ModelUtils.shape_inference import (
     _default_hidden_shape,
     _merge_flatten_dim,
     _module_path_matches,
-    module_path_segments,
+    _module_path_segments,
     _normalize_module_patterns,
     _quant_storage_dtype,
     _resolve_cast_dtype,
@@ -2341,21 +2341,6 @@ def test_quant_storage_dtype_across_methods():
     )
     assert _quant_storage_dtype({"quant_method": "gptq", "bits": 4}) == "int4"
     assert _quant_storage_dtype({"quant_method": "awq", "bits": 8}) == "int8"
-    # Quark (AMD) nests the scheme under global_quant_config.weight.dtype.
-    assert (
-        _quant_storage_dtype(
-            {
-                "quant_method": "quark",
-                "global_quant_config": {"weight": {"dtype": "fp4"}},
-            }
-        )
-        == "fp4"
-    )
-    assert (
-        _quant_storage_dtype({"global_quant_config": {"weight": {"dtype": "fp8_e4m3"}}})
-        == "fp8_e4m3"
-    )
-    assert _quant_storage_dtype({"quant_method": "quark"}) is None
     assert _quant_storage_dtype({"quant_method": "unknown"}) is None
 
 
@@ -2377,7 +2362,7 @@ def test_normalize_module_patterns_strips_prefix_and_indices():
 
 
 def test_module_path_segments_and_matches():
-    segs = module_path_segments("decoder/45x_Layer/self_attn/seq:0:q_proj:q_proj:0")
+    segs = _module_path_segments("decoder/45x_Layer/self_attn/seq:0:q_proj:q_proj:0")
     assert segs == ["decoder", "self_attn", "q_proj"]
     assert _module_path_matches(segs, ("self_attn", "q_proj"))
     assert not _module_path_matches(segs, ("mlp", "gate"))

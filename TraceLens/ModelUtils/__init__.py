@@ -37,7 +37,6 @@ from TraceLens.ModelUtils.model_graph import (
 )
 from TraceLens.ModelUtils.loader import (
     build_detailed_basic_ops,
-    build_roofline_basic_ops,
     load_model_spec,
     resolve_checkpoint_arg,
 )
@@ -64,7 +63,6 @@ __all__ = [
     "build_detailed_basic_ops",
     "build_model_graph",
     "build_operator_export",
-    "build_roofline_basic_ops",
     "dump_ast",
     "dump_model_ast",
     "fetch_github_source",

@@ -35,7 +35,6 @@ from TraceLens.TreePerf import (
     TreePerfAnalyzer,
 )
 from TraceLens.TreePerf.tree_perf import (
-    compute_roofline_time_and_bound,
     get_compute_spec,
     get_max_achievable_tflops,
     normalize_dtype_to_precision,
@@ -120,50 +119,6 @@ class TestTreePerfModuleHelpers:
         assert get_max_achievable_tflops(perf_model, None) is None
         assert get_max_achievable_tflops(perf_model, {}) is None
         assert get_max_achievable_tflops(SimpleNamespace(), arch) is None
-
-    def test_compute_roofline_time_and_bound_compute_bound(self):
-        # 200 GFLOP at 100 TFLOPS peak = 2000us compute; 1GB at 2000GB/s = 500us
-        # memory -- compute is the larger (binding) term.
-        roofline_time_us, roofline_bound = compute_roofline_time_and_bound(
-            gflops=200, bytes_moved=1e9, peak_tflops=100, mem_bw_gbps=2000
-        )
-        assert roofline_time_us == pytest.approx(2000)
-        assert roofline_bound == "COMPUTE_BOUND"
-
-    def test_compute_roofline_time_and_bound_memory_bound(self):
-        # 50 GFLOP at 100 TFLOPS peak = 500us compute; 2GB at 1000GB/s = 2000us
-        # memory -- memory is the larger (binding) term.
-        roofline_time_us, roofline_bound = compute_roofline_time_and_bound(
-            gflops=50, bytes_moved=2e9, peak_tflops=100, mem_bw_gbps=1000
-        )
-        assert roofline_time_us == pytest.approx(2000)
-        assert roofline_bound == "MEMORY_BOUND"
-
-    def test_compute_roofline_time_and_bound_tie_favors_compute(self):
-        # Compute and memory time land on the same 1000us -- the ">=" tie-break
-        # reports COMPUTE_BOUND rather than an arbitrary pick.
-        roofline_time_us, roofline_bound = compute_roofline_time_and_bound(
-            gflops=100, bytes_moved=1e9, peak_tflops=100, mem_bw_gbps=1000
-        )
-        assert roofline_time_us == pytest.approx(1000)
-        assert roofline_bound == "COMPUTE_BOUND"
-
-    @pytest.mark.parametrize(
-        ("gflops", "bytes_moved", "peak_tflops", "mem_bw_gbps"),
-        [
-            (100, 1e9, None, 1000),  # no peak TFLOPS for this compute spec
-            (100, 1e9, 100, None),  # no arch memory bandwidth
-            (100, None, 100, 1000),  # perf model reported no bytes
-            (0, 1e9, 100, 1000),  # no work performed
-            (-1, 1e9, 100, 1000),  # a malformed negative FLOPs count
-        ],
-    )
-    def test_compute_roofline_time_and_bound_missing_input_is_unbounded(
-        self, gflops, bytes_moved, peak_tflops, mem_bw_gbps
-    ):
-        assert compute_roofline_time_and_bound(
-            gflops, bytes_moved, peak_tflops, mem_bw_gbps
-        ) == (None, None)
 
 
 class TestGPUEventAnalyserStatic:

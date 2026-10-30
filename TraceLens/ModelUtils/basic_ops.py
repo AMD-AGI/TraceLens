@@ -27,24 +27,6 @@ COMMON_LEAF_PATTERNS: tuple[str, ...] = (
     r"(?i)^Parameter$",
 )
 
-# Module classes with a direct, shape-only TraceLens.PerfModel formula (GEMM, CONV,
-# Normalization, Softmax). Used to stop expansion exactly at the granularity a
-# roofline projection can cost -- see BasicOpFilter.for_roofline().
-ROOFLINE_LEAF_PATTERNS: tuple[str, ...] = (
-    r"(?i)^Linear$",
-    r"(?i)^Embedding$",
-    r"(?i)^Dropout$",
-    r"(?i)^Identity$",
-    r"(?i)^Parameter$",
-    r"(?i)^Conv\d*d$",
-    r"(?i)^RMSNorm$",
-    r"(?i)^LayerNorm$",
-    r"(?i)^GroupNorm$",
-    r"(?i)^BatchNorm\d*d$",
-    r"(?i)^InstanceNorm\d*d$",
-    r"(?i)^Softmax$",
-)
-
 
 # Submodule attribute names observed in modeling forwards (conv paths, etc.).
 _MODELING_ATTR_PATTERNS: tuple[str, ...] = (
@@ -110,20 +92,6 @@ class BasicOpFilter:
         # Detailed diagrams show only leaf/basic module tiles, not modeled ops.
         norm_patterns = (r"(?i)^RMSNorm$", r"(?i)^LayerNorm$")
         for pattern in norm_patterns:
-            if pattern not in patterns:
-                patterns.append(pattern)
-        return cls(patterns, basic_only=True)
-
-    @classmethod
-    def for_roofline(cls) -> BasicOpFilter:
-        """Leaf patterns that stop expansion at ops with a TraceLens.PerfModel formula.
-
-        A roofline projection costs a GEMM, a norm, a softmax, ... as one analytical
-        op; expanding further (into the mean/rsqrt/mul chain behind an RMSNorm, say)
-        only adds primitives the projection has no better formula for anyway.
-        """
-        patterns = list(DEFAULT_BASIC_OP_PATTERNS)
-        for pattern in ROOFLINE_LEAF_PATTERNS:
             if pattern not in patterns:
                 patterns.append(pattern)
         return cls(patterns, basic_only=True)

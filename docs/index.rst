@@ -44,11 +44,9 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
       * :doc:`Analyze traces with the SDK <how-to/sdk-analysis>`
       * :doc:`Index a corpus of traces <how-to/trace-index>`
       * :doc:`Model op performance without a trace <how-to/perf-model-without-trace>`
-      * :doc:`Project a model's roofline from its checkpoint <how-to/generate-model-roofline-projection>`
       * :doc:`Analyze collective communication <how-to/nccl-analysis>`
       * :doc:`Estimate kernel times with Origami <how-to/origami-integration>`
       * :doc:`Agentic performance analysis with the TraceLens Agent <how-to/agent>`
-      * :doc:`Visualize a model with the TraceLens Agent <how-to/visualize-model>`
 
    .. grid-item-card:: Concepts
 

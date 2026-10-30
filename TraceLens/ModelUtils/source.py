@@ -453,14 +453,9 @@ def _resolve_defining_file(
 
 def _fetch_engine_file(
     ref: GitHubRef, subpath: str, architectures: set[str]
-) -> tuple[Path, str] | None:
+) -> Path | None:
     """One engine source file -- or the real one it re-exports from -- plus its
-    own-package neighbours, all read at the same pinned commit.
-
-    Returns the resolved file WITH its own subpath (not the one requested),
-    since a re-export redirects to a sibling and the caller needs that path,
-    not the stub's, to register where the repo's packages start.
-    """
+    own-package neighbours, all read at the same pinned commit."""
     path = fetch_github_file(ref, subpath)
     if path is None:
         return None
@@ -470,27 +465,7 @@ def _fetch_engine_file(
     )
     if resolved != path:
         _fetch_own_package(ref, resolved_subpath, resolved)
-    return resolved, resolved_subpath
-
-
-def _engine_module_name(engine: str, subpath: str) -> str:
-    """Dotted module name matching *subpath*'s place in the pinned repo.
-
-    Paired with *subpath* itself, this is what ``register_pinned_module_source``
-    needs to tell sibling imports (``vllm.model_executor.layers.linear``) apart
-    from the per-architecture file it was given -- the same pairing
-    ``_modeling_module_name`` supplies for transformers. sglang's importable
-    package sits under ``python/``, unlike vLLM's at the repo root, so that
-    prefix is stripped before the path becomes dots.
-    """
-    relative = subpath
-    if engine == "sglang" and relative.startswith("python/"):
-        relative = relative[len("python/") :]
-    if relative.endswith("/__init__.py"):
-        relative = relative[: -len("/__init__.py")]
-    elif relative.endswith(".py"):
-        relative = relative[: -len(".py")]
-    return relative.replace("/", ".")
+    return resolved
 
 
 def _sglang_filename_candidates(config: dict[str, Any]) -> list[str]:
@@ -516,18 +491,12 @@ def resolve_engine_modeling_files(
     config: dict[str, Any],
     *,
     source_policy: SourcePolicy | None = None,
-) -> tuple[list[Path], list[str], str | None]:
+) -> tuple[list[Path], list[str]]:
     """vLLM / SGLang's own modeling file for this checkpoint, at a pinned release.
 
     Resolves which file implements ``config``'s declared architecture inside
     the chosen inference engine, the same way ``_transformers_github_modeling_file``
     resolves one inside transformers -- a fixed tag, not the engine's main branch.
-
-    The third element is the resolved file's own dotted module name
-    (``ast_analyze._analyzed_base_module`` reads it to resolve the file's own
-    imports, and sibling library imports it makes, against this SAME pinned
-    commit instead of falling back to whatever is ``pip install``ed -- two
-    revisions of one engine describing one model). ``None`` on a miss.
     """
     source = ENGINE_GITHUB_SOURCES.get(engine)
     if source is None:
@@ -551,28 +520,18 @@ def resolve_engine_modeling_files(
                 continue
             module, _class_name = entry
             for subpath in _module_candidate_paths(module, VLLM_MODELS_SUBPATH):
-                found = _fetch_engine_file(ref, subpath, architectures)
-                if found is None:
-                    continue
-                path, resolved_subpath = found
-                module_name = _engine_module_name(engine, resolved_subpath)
-                register_pinned_module_source(ref, resolved_subpath, module_name)
-                return [path], [ref.display], module_name
-        return [], [], None
+                path = _fetch_engine_file(ref, subpath, architectures)
+                if path is not None:
+                    return [path], [ref.display]
+        return [], []
 
     if engine == "sglang":
         for candidate in _sglang_filename_candidates(config):
             subpath = SGLANG_MODELS_SUBPATH.format(candidate=candidate)
-            found = _fetch_engine_file(ref, subpath, architectures)
-            if found is None:
-                continue
-            path, resolved_subpath = found
-            if not _defines_any_class(path, architectures):
-                continue
-            module_name = _engine_module_name(engine, resolved_subpath)
-            register_pinned_module_source(ref, resolved_subpath, module_name)
-            return [path], [ref.display], module_name
-        return [], [], None
+            path = _fetch_engine_file(ref, subpath, architectures)
+            if path is not None and _defines_any_class(path, architectures):
+                return [path], [ref.display]
+        return [], []
 
     raise ValueError(
         f"Unknown engine {engine!r}; expected one of {sorted(ENGINE_GITHUB_SOURCES)}"

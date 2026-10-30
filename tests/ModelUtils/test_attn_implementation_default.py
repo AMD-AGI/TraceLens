@@ -19,8 +19,6 @@ flash path performs, and GLM kept an eager mask tail its early
 from __future__ import annotations
 
 from TraceLens.ModelUtils.ast_analyze import (
-    RUNTIME_REGIME_KEY,
-    RuntimeRegime,
     _with_resolved_attn_implementation,
     resolved_attn_implementation,
 )
@@ -62,45 +60,3 @@ class TestConfigCarriesTheAnswer:
 
     def test_none_stays_none(self) -> None:
         assert _with_resolved_attn_implementation(None) is None
-
-
-class TestTheCallerNamesTheImplementation:
-    """``--attention`` is the run's choice and outranks the checkpoint.
-
-    A config override can write ``_attn_implementation`` too, but the regime is
-    applied when the source is analysed, after that write. Leaving the flag
-    unset is what preserves a checkpoint that asked for something other than
-    ``sdpa``.
-    """
-
-    def test_a_named_implementation_replaces_the_checkpoint(self) -> None:
-        config = {
-            "_attn_implementation": "flash_attention_2",
-            RUNTIME_REGIME_KEY: RuntimeRegime(attention="eager"),
-        }
-        filled = _with_resolved_attn_implementation(config)
-        assert filled["_attn_implementation"] == "eager"
-        assert config["_attn_implementation"] == "flash_attention_2"
-
-    def test_an_unset_attention_keeps_the_checkpoint(self) -> None:
-        config = {
-            "_attn_implementation": "flash_attention_3",
-            RUNTIME_REGIME_KEY: RuntimeRegime(),
-        }
-        assert _with_resolved_attn_implementation(config) is config
-
-    def test_blank_attention_does_not_count_as_a_choice(self) -> None:
-        config = {
-            "_attn_implementation": "sdpa",
-            RUNTIME_REGIME_KEY: RuntimeRegime(attention="   "),
-        }
-        assert _with_resolved_attn_implementation(config) is config
-
-    def test_a_named_implementation_is_stored_stripped(self) -> None:
-        filled = _with_resolved_attn_implementation(
-            {
-                "_attn_implementation": "sdpa",
-                RUNTIME_REGIME_KEY: RuntimeRegime(attention=" flash_attention_2 "),
-            }
-        )
-        assert filled["_attn_implementation"] == "flash_attention_2"

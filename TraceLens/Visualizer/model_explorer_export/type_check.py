@@ -29,7 +29,6 @@ import re
 from typing import Any
 
 from TraceLens.ModelUtils.ast_analyze import PHI_CLASS, PHI_LABEL
-from TraceLens.ModelUtils.kernel_pipeline import _ALLOCATION_CALLS
 from TraceLens.ModelUtils.shape_inference import (
     _normalize_op_name,
     _operand_ceiling,
@@ -635,16 +634,7 @@ def _kernel_interface_tile_warnings(nodes: list[dict[str, Any]]) -> list[str]:
                 f"no port of its own cannot be told from the others -- give it a "
                 f"kernel input port naming it."
             )
-        # An allocation call (``new_empty``, ``new_zeros``, ...) borrows the
-        # source's dtype/device as a template for a buffer a LATER kernel
-        # writes into; it never reads the source's value, so several such
-        # allocations off the one kernel are not several of its published
-        # values competing to be told apart.
-        readers = [
-            reader
-            for reader in consumers.get(str(node.get("id")), [])
-            if _node_attr_value(reader, "raw_op") not in _ALLOCATION_CALLS
-        ]
+        readers = consumers.get(str(node.get("id")), [])
         untiled = [
             reader
             for reader in readers

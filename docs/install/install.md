@@ -79,10 +79,7 @@ pip install -e ".[Visualizer]"
 
 This installs the `TraceLens.ModelUtils` and `TraceLens.Visualizer.model_explorer_export` packages and adds
 `TraceLens_visualize_model_in_explorer` (alias: `visualize_model_in_explorer`)
-to your `PATH`. See `TraceLens/Visualizer/README.md` for the CLI. The
-model visualizer agent that drives this command is
-`TraceLens/Agent/Visualizer/`; see
-[Visualize a model](../how-to/visualize-model.md).
+to your `PATH`. See `TraceLens/Visualizer/README.md` for usage.
 
 For development on the visualizer, combine extras:
 

@@ -676,13 +676,7 @@ def _communication_node(
             "value": "communication_sink" if sink else "communication",
         },
     ]
-    # A gather restores the full tensor; every other collective here leaves the
-    # producer's own shape unchanged (all-reduce sums a width rowwise sharding
-    # never shrank; dispatch/combine move tokens, not features). full_shape
-    # falls back to output_shape when a caller never set it (direct unit tests
-    # of this function, not the real build pipeline, where it always is).
-    shape = _attr(producer, _FULL_SHAPE_KEY if kind == "gather" else "output_shape")
-    shape = shape or _attr(producer, "output_shape")
+    shape = _attr(producer, "output_shape")
     if shape:
         attrs.append({"key": "output_shape", "value": shape})
     return {
@@ -802,10 +796,6 @@ def _hidden_producer(nodes: list[Any]) -> dict[str, Any] | None:
 def _payload_text(
     producer: dict[str, Any], kind: str, layout: ParallelLayout, partitions: int
 ) -> str | None:
-    # output_shape is already this rank's local shard (the graph carries the
-    # per-GPU shape by the time any collective is inserted), so the bytes a
-    # collective moves read straight off it -- no reverse-sharding a value
-    # that was never full here.
     dims, dtype = _parsed_shape(producer)
     if kind in {"dispatch", "combine"}:
         hidden = layout.hidden_size
@@ -816,20 +806,39 @@ def _payload_text(
                 dtype = None
         if dims and layout.experts_per_tok:
             dims = [*dims, str(layout.experts_per_tok)]
+        return _byte_text(dims, dtype)
+    if kind == "gather" and dims:
+        return _byte_text(_shard_last(dims, partitions), dtype)
     return _byte_text(dims, dtype)
+
+
+def _shard_last(dims: list[str], partitions: int) -> list[str]:
+    if partitions <= 1 or not dims:
+        return dims
+    last = dims[-1]
+    if last.isdigit() and int(last) % partitions == 0:
+        return [*dims[:-1], str(int(last) // partitions)]
+    return dims
 
 
 # Shown on the node and on the edge. ``full_shape`` keeps the unpartitioned
 # tensor beside it; the viewer filter does not draw that key.
 _FULL_SHAPE_KEY = "full_shape"
+_SHARD_OUTPUT_FEATURES = frozenset(
+    {"colwise", "packed_colwise", "colwise_gather_output", "colwise_rep"}
+)
+# A gather restores the full tensor on every rank, so the shard stops at the
+# module. Column-parallel output stays sharded for whoever reads it.
+_PROPAGATE_SHARD = frozenset({"colwise", "packed_colwise"})
 
 
 class _ShapeEdit:
     """Replacements applied to the unpartitioned dims of one node."""
 
-    __slots__ = ("experts", "sequence")
+    __slots__ = ("experts", "last", "sequence")
 
     def __init__(self) -> None:
+        self.last: tuple[int, int] | None = None
         self.sequence: tuple[int, int] | None = None
         self.experts: tuple[int, int] | None = None
 
@@ -838,17 +847,9 @@ def _localize_gpu_shapes(graph: dict[str, Any], layout: ParallelLayout) -> None:
     """Put one GPU's shape on the displayed keys.
 
     ``output_shape`` and port ``shape`` are what the HTML draws. ``full_shape``
-    stays the whole tensor, whether or not this graph is split.
-
-    Column/row-wise and vocab-parallel sharding are not decided here: by the
-    time this runs, the caller (``ast_build.build_model_explorer_payload``) has
-    already merged in a local-shape graph built from
-    :func:`TraceLens.ModelUtils.parallel_plan.local_config_overrides` run back
-    through the real shape-inference machinery, which is the only way to get
-    those sizes right through a reshape/transpose/attention chain without
-    guessing which axis is the sharded one. What is left here is what a config
-    override cannot express: sequence-parallel's runtime-dependent split, and
-    which specific experts a GPU group holds.
+    stays the whole tensor, whether or not this graph is split. Gather and
+    all-reduce outputs are already the tensor each GPU holds, so they are left
+    as they are.
     """
     nodes = graph.get("nodes")
     if not isinstance(nodes, list) or not layout.degree.requested():
@@ -864,7 +865,15 @@ def _localize_gpu_shapes(graph: dict[str, Any], layout: ParallelLayout) -> None:
         rule = _rule_for_module(node, layout.rules)
         if rule is None or rule.partitions <= 1 or rule.mesh != "tp":
             continue
-        if rule.style == "sequence_parallel":
+        if rule.style in _SHARD_OUTPUT_FEATURES:
+            extent = _full_last_extent(node)
+            if extent is None:
+                continue
+            local = _share(extent, rule.partitions, tp_rank)
+            _edit_for(edits, node).last = (extent, local)
+            if rule.style in _PROPAGATE_SHARD and local != extent:
+                _propagate_last_dim(nodes, layout, node, extent, local, edits)
+        elif rule.style == "sequence_parallel":
             _edit_for(edits, node).sequence = (rule.partitions, tp_rank)
     _note_local_experts(nodes, layout, ep_rank, edits)
     for node in nodes:
@@ -889,6 +898,43 @@ def _local_ranks(layout: ParallelLayout) -> tuple[int, int]:
         return 0, 0
     _pp, ep_rank, tp_rank = _gpu_coord(group.gpus[0], layout.degree)
     return tp_rank, ep_rank
+
+
+def _full_last_extent(node: dict[str, Any]) -> int | None:
+    dims, _dtype = _parsed_shape_text(_attr(node, _FULL_SHAPE_KEY))
+    if not dims or not dims[-1].isdigit():
+        return None
+    return int(dims[-1])
+
+
+def _propagate_last_dim(
+    nodes: list[Any],
+    layout: ParallelLayout,
+    origin: dict[str, Any],
+    extent: int,
+    local: int,
+    edits: dict[str, _ShapeEdit],
+) -> None:
+    seen = {str(origin.get("id"))}
+    queue = _consumers(nodes, str(origin.get("id")))
+    while queue:
+        node = queue.pop(0)
+        node_id = str(node.get("id"))
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        if _is_collective(node):
+            continue
+        rule = _rule_for_module(node, layout.rules)
+        if rule is not None and rule.style not in _PROPAGATE_SHARD:
+            continue
+        dims, _dtype = _parsed_shape_text(_attr(node, _FULL_SHAPE_KEY))
+        if not dims or str(extent) not in dims:
+            continue
+        edit = _edit_for(edits, node)
+        if edit.last is None:
+            edit.last = (extent, local)
+        queue.extend(_consumers(nodes, node_id))
 
 
 def _note_local_experts(
@@ -930,11 +976,16 @@ def _apply_shape_edit(node: dict[str, Any], edit: _ShapeEdit) -> None:
         parts, rank = edit.sequence
         dim = dims[1]
         if dim.isdigit():
-            local = share_of(int(dim), parts, rank)
+            local = _share(int(dim), parts, rank)
             if local != int(dim):
                 dims[1] = str(local)
         elif dim == "S" and parts > 1:
             dims[1] = f"S/{parts}"
+    if edit.last is not None:
+        extent, local = edit.last
+        if local != extent:
+            token = str(extent)
+            dims = [str(local) if dim == token else dim for dim in dims]
     if edit.experts is not None:
         count, local = edit.experts
         token = str(count)
@@ -1162,7 +1213,7 @@ def _make_gpu_group(
     if uneven:
         tp_rank = _gpu_coord(gpus[0], degree)[2]
         shards = tuple(
-            (check.name, share_of(check.size, degree.tp, tp_rank)) for check in uneven
+            (check.name, _share(check.size, degree.tp, tp_rank)) for check in uneven
         )
     return GpuGroup(
         index=index,
@@ -1185,7 +1236,7 @@ def _shape_signature(
     layout: ParallelLayout, tp_rank: int, ep_rank: int, expert_count: int | None
 ) -> tuple[Any, ...]:
     shards = tuple(
-        (check.name, share_of(check.size, layout.degree.tp, tp_rank))
+        (check.name, _share(check.size, layout.degree.tp, tp_rank))
         for check in layout.checks
         if check.mesh == "tp"
     )
@@ -1214,121 +1265,11 @@ def _gpu_coord(gpu: int, degree: ParallelDegree) -> tuple[int, int, int]:
     return pp_rank, rem // degree.tp, rem % degree.tp
 
 
-def share_of(size: int, parts: int, rank: int) -> int:
-    """This rank's slice of a width split ``parts`` ways (uneven splits land on rank 0)."""
+def _share(size: int, parts: int, rank: int) -> int:
     if parts <= 1:
         return size
     base, extra = divmod(size, parts)
     return base + (1 if rank < extra else 0)
-
-
-def local_config_overrides(layout: ParallelLayout, spec: Any) -> dict[str, Any]:
-    """Config overrides for one representative (rank 0) GPU under *layout*.
-
-    Walks ``layout.checks`` -- the declared widths (attention heads, MLP
-    intermediate size, vocab size, expert count, layer count)
-    :func:`build_parallel_layout` already validated for even division -- and
-    divides each by its mesh's partition count. Feeding this to
-    :func:`TraceLens.ModelUtils.extract.rebuild_architecture_with_overrides`
-    and re-running shape inference against the result is how a per-GPU local
-    shape is produced: by driving the real config a real rank would see through
-    the same symbolic/meta-shape machinery as the full model, not by editing
-    already-resolved shapes after the fact.
-
-    ``head_dim`` is pinned to its original value whenever an (unqualified,
-    top-level) attention-head check fires: a checkpoint that leaves ``head_dim``
-    unstated has it derived from ``hidden_size // num_attention_heads``, and
-    that derivation would silently inflate once ``num_attention_heads`` shrinks
-    -- ``hidden_size``, the residual stream width, is not itself sharded.
-    """
-    overrides: dict[str, Any] = {}
-    pin_head_dim = False
-    for check in layout.checks:
-        if check.mesh not in ("tp", "ep", "pp"):
-            continue
-        local = share_of(check.size, check.partitions, 0)
-        if local == check.size:
-            continue
-        overrides[check.name] = local
-        if check.name in ("num_attention_heads", "num_key_value_heads"):
-            pin_head_dim = True
-    if pin_head_dim:
-        # Mirrors ShapeContext.from_spec's own fallback derivation -- a stated
-        # head_dim is used as-is; an absent one is computed from the ORIGINAL,
-        # undivided num_attention_heads, before this function's own override
-        # shrinks it.
-        head_dim = getattr(spec, "head_dim", None) or (
-            spec.hidden_size // spec.num_attention_heads
-            if spec.hidden_size and spec.num_attention_heads
-            else None
-        )
-        if head_dim:
-            overrides.setdefault("head_dim", head_dim)
-    return overrides
-
-
-# Styles whose own output a local-config-override pass must not trust: the
-# router's logits, an untouched identity expert, a training-only gradient
-# sync. These hand their consumers the full tensor too, the same as a gather.
-_FULL_OUTPUT_COLLECTIVES = {
-    "replicated output",
-    "dispatch",
-    "gradient all-reduce",
-    "none",
-}
-
-
-def locally_sharded_node_ids(graph: dict[str, Any], layout: ParallelLayout) -> set[str]:
-    """Node ids whose shape under :func:`local_config_overrides` reflects this GPU's own state.
-
-    A node matching a plan rule whose collective is ``"gather"`` (e.g. a
-    column-parallel projection gathered back to the full tensor right after)
-    is locally sharded only up to that gather: everything it feeds is, on
-    every rank, the restored full tensor -- until another matched leaf's own
-    division starts a fresh locally-sharded region downstream. A caller
-    merging in a local-config-override shape pass should apply it only to the
-    ids this returns, keeping the full build's own shape everywhere else.
-    """
-    nodes = [node for node in graph.get("nodes") or [] if isinstance(node, dict)]
-    consumers: dict[str, list[str]] = {}
-    for node in nodes:
-        node_id = str(node.get("id"))
-        for edge in node.get("incomingEdges") or []:
-            if isinstance(edge, dict):
-                consumers.setdefault(str(edge.get("sourceNodeId")), []).append(node_id)
-
-    sharded_ids: set[str] = set()
-    restoring_ids: list[str] = []
-    excluded: set[str] = set()
-    for node in nodes:
-        rule = _rule_for_module(node, layout.rules)
-        if rule is None or rule.partitions <= 1:
-            continue
-        node_id = str(node.get("id"))
-        if rule.collective in _FULL_OUTPUT_COLLECTIVES:
-            # The module's own output is never divided (a replicated router's
-            # logits, an identity expert, a gradient-only all-reduce): nothing
-            # here is locally sharded, and what it feeds is the full tensor too.
-            excluded.add(node_id)
-            restoring_ids.append(node_id)
-            continue
-        sharded_ids.add(node_id)
-        if rule.collective == "gather":
-            restoring_ids.append(node_id)
-
-    seen = set(restoring_ids)
-    stack = list(restoring_ids)
-    while stack:
-        current = stack.pop()
-        for consumer_id in consumers.get(current, []):
-            if consumer_id in seen:
-                continue
-            seen.add(consumer_id)
-            if consumer_id in sharded_ids:
-                continue  # its own division starts a fresh locally-sharded region
-            excluded.add(consumer_id)
-            stack.append(consumer_id)
-    return {str(node.get("id")) for node in nodes} - excluded
 
 
 def _expert_ids(count: int, parts: int, rank: int) -> tuple[int, ...]:
@@ -2218,7 +2159,7 @@ def _rule_for_module(
     path = _module_path(node)
     if not leaf or not path or path[-1] != leaf:
         return None
-    return rule_for_path(path, rules)
+    return _matching_rule(path, rules)
 
 
 def _module_path(node: dict[str, Any]) -> list[str]:
@@ -2286,17 +2227,9 @@ def _node_segments(node: dict[str, Any]) -> list[str]:
     return segments
 
 
-def rule_for_path(
+def _matching_rule(
     segments: list[str], rules: list[ParallelRule]
 ) -> ParallelRule | None:
-    """The most specific rule whose pattern's tail matches the end of *segments*.
-
-    *segments* is a module-attribute path, most specific last (e.g.
-    ``["self_attn", "q_proj"]``, from :func:`TraceLens.ModelUtils.shape_inference.module_path_segments`
-    or a Model Explorer graph node's own path). Matching is on the trailing
-    segments only, since a pattern's own leading wildcard (``layers.*.q_proj``)
-    already discards everything before the part that actually varies.
-    """
     best: ParallelRule | None = None
     best_len = -1
     for rule in rules:
