@@ -26,14 +26,17 @@ columns and a ``diff_stats`` sheet to that job's report and writes nothing for
 the compared trace.
 
 One job writes ``perf_report.xlsx`` and ``perf_report_csvs/``. With more than
-one job, every job needs a ``name`` and writes ``perf_report_<name>.xlsx`` and
+one job, every job needs a ``name`` (except under ``combine_by_node``, where it
+defaults to the node id) and writes ``perf_report_<name>.xlsx`` and
 ``perf_report_<name>_csvs/``. Before the first job runs, the config is written
 back as ``run_config.resolved.yaml`` with every flag explicit and absolute
 paths. Jobs run in order, and the first failure stops the run.
 
-With ``aggregation: {policy: ...}``, every job needs a ``phase``. After the last
-job, the jobs' CSVs are combined into ``perf_report_aggregated_csvs/`` with
-``aggregate_perf_report_csvs``.
+With ``aggregation: {policy: ...}``, every job needs a ``phase``. Under
+``combine_by_node`` it also needs a ``node``, its index within the phase. The
+node id ``<phase>_<node>`` labels the aggregated rows and is the default
+``name``. After the last job, the jobs' CSVs are combined into
+``perf_report_aggregated_csvs/`` with ``aggregate_perf_report_csvs``.
 """
 
 import argparse
@@ -47,6 +50,8 @@ import yaml
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Reporting.aggregate_perf_reports import (
     POLICIES,
+    POLICY_BY_NODE,
+    ReportInput,
     aggregate_perf_report_csvs,
 )
 
@@ -57,6 +62,7 @@ _JOB_KEYS = frozenset(
     {
         "name",
         "phase",
+        "node",
         "trace_path",
         "platform",
         "gpu_arch_json_path",
@@ -104,6 +110,8 @@ class PlannedJob:
     analysis_mode: str
     name: Optional[str]
     phase: Optional[str]
+    node: Optional[int]
+    node_id: Optional[str]
     trace_path: str
     platform: Optional[str]
     gpu_arch_json_path: Optional[str]
@@ -154,15 +162,24 @@ def plan_reports(config: Mapping[str, Any]) -> List[PlannedJob]:
 
     accepted = _accepted_params(_report_targets()[mode])
     kwargs = _report_kwargs(config, accepted, _CLI_DEFAULTS[mode])
-    aggregate = _aggregation_policy(config) is not None
+    policy = _aggregation_policy(config)
 
     multi = len(jobs) > 1
     names = set()
     planned: List[PlannedJob] = []
     for index, job in enumerate(jobs):
         parsed = _validate_job(
-            job, index, mode, require_name=multi, require_phase=aggregate
+            job,
+            index,
+            mode,
+            require_name=multi and policy != POLICY_BY_NODE,
+            require_phase=policy is not None,
+            require_node=policy == POLICY_BY_NODE,
         )
+        node_id = None
+        if policy == POLICY_BY_NODE:
+            node_id = f"{parsed['phase']}_{parsed['node']}"
+            parsed["name"] = parsed["name"] or node_id
         name = parsed["name"]
         if name is not None:
             if name in names:
@@ -175,6 +192,7 @@ def plan_reports(config: Mapping[str, Any]) -> List[PlannedJob]:
                 output_xlsx_path=os.path.join(output_dir, stem + ".xlsx"),
                 output_csvs_dir=os.path.join(output_dir, stem + "_csvs"),
                 kwargs=dict(kwargs),
+                node_id=node_id,
                 **parsed,
             )
         )
@@ -234,7 +252,10 @@ def run_config(
         results.append(selected[plan.analysis_mode](**call))
     if policy is not None:
         aggregate_perf_report_csvs(
-            [(plan.phase, plan.output_csvs_dir) for plan in plans],
+            [
+                ReportInput(plan.phase, plan.node_id, plan.output_csvs_dir)
+                for plan in plans
+            ],
             policy,
             os.path.join(output_dir, AGGREGATED_CSVS_DIR),
         )
@@ -265,6 +286,8 @@ def _resolved_from_plans(plans: List[PlannedJob], policy: Optional[str]) -> dict
             job["name"] = plan.name
         if plan.phase is not None:
             job["phase"] = plan.phase
+        if plan.node is not None:
+            job["node"] = plan.node
         job["trace_path"] = plan.trace_path
         if plan.platform is not None:
             job["platform"] = plan.platform
@@ -381,7 +404,13 @@ def _aggregation_policy(config: Mapping[str, Any]) -> Optional[str]:
 
 
 def _validate_job(
-    job: Any, index: int, mode: str, *, require_name: bool, require_phase: bool
+    job: Any,
+    index: int,
+    mode: str,
+    *,
+    require_name: bool,
+    require_phase: bool,
+    require_node: bool,
 ) -> dict:
     where = f"jobs[{index}]"
     if not isinstance(job, dict):
@@ -399,11 +428,7 @@ def _validate_job(
             raise ConfigError(
                 f"{where}.name is required when there is more than one job."
             )
-    elif (
-        not isinstance(name, str)
-        or not name
-        or any(ch not in _NAME_CHARS for ch in name)
-    ):
+    elif not _is_name(name):
         raise ConfigError(
             f"{where}.name must contain only letters, digits, '_', '-' or '.'."
         )
@@ -412,8 +437,20 @@ def _validate_job(
     if phase is None:
         if require_phase:
             raise ConfigError(f"{where}.phase is required when aggregation is set.")
-    elif not isinstance(phase, str) or not phase.strip():
-        raise ConfigError(f"{where}.phase must be a non-empty string.")
+    elif not _is_name(phase):
+        raise ConfigError(
+            f"{where}.phase must be a non-empty string of letters, digits, "
+            "'_', '-' or '.'."
+        )
+
+    node = job.get("node")
+    if node is None:
+        if require_node:
+            raise ConfigError(
+                f"{where}.node is required when aggregation.policy is {POLICY_BY_NODE}."
+            )
+    elif not isinstance(node, int) or isinstance(node, bool) or node < 0:
+        raise ConfigError(f"{where}.node must be a non-negative integer.")
 
     trace_path = _existing_file(job.get("trace_path"), f"{where}.trace_path")
 
@@ -472,6 +509,7 @@ def _validate_job(
     return {
         "name": name,
         "phase": phase,
+        "node": node,
         "trace_path": trace_path,
         "platform": platform,
         "gpu_arch_json_path": arch_path,
@@ -480,6 +518,10 @@ def _validate_job(
         "compare_capture_folder": compare_capture,
         "precomputed_diff_stats": diff_stats,
     }
+
+
+def _is_name(value: Any) -> bool:
+    return isinstance(value, str) and bool(value) and set(value) <= _NAME_CHARS
 
 
 def _existing_file(value: Any, where: str) -> str:

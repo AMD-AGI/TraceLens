@@ -480,6 +480,7 @@ def _phase_jobs(tmp_path, phases):
         {
             "name": f"job{i}",
             "phase": phase,
+            "node": i,
             "trace_path": _touch(tmp_path, f"t{i}.json"),
             "platform": "MI300X",
         }
@@ -505,13 +506,41 @@ def test_bad_aggregation(tmp_path, aggregation):
         plan_reports(_config(tmp_path, jobs=jobs, aggregation=aggregation))
 
 
-def test_resolved_config_records_phase_and_aggregation(tmp_path):
+def test_by_node_requires_node_on_every_job(tmp_path):
+    jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
+    del jobs[1]["node"]
+    cfg = _config(tmp_path, jobs=jobs, aggregation={"policy": "combine_by_node"})
+    with pytest.raises(ConfigError, match=r"jobs\[1\]\.node is required"):
+        plan_reports(cfg)
+
+
+@pytest.mark.parametrize("node", [-1, "a", True])
+def test_bad_node_rejected(tmp_path, node):
+    jobs = _phase_jobs(tmp_path, ["decode"])
+    jobs[0]["node"] = node
+    with pytest.raises(ConfigError, match="node must be a non-negative integer"):
+        plan_reports(_config(tmp_path, jobs=jobs))
+
+
+def test_by_node_builds_node_id_and_defaults_name(tmp_path):
+    jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
+    for job in jobs:
+        del job["name"]
+    plans = plan_reports(
+        _config(tmp_path, jobs=jobs, aggregation={"policy": "combine_by_node"})
+    )
+    assert [plan.node_id for plan in plans] == ["prefill_0", "decode_1"]
+    assert [plan.name for plan in plans] == ["prefill_0", "decode_1"]
+
+
+def test_resolved_config_records_phase_node_and_aggregation(tmp_path):
     jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
     resolved = resolve_config(
-        _config(tmp_path, jobs=jobs, aggregation={"policy": "combine_only_same_phase"})
+        _config(tmp_path, jobs=jobs, aggregation={"policy": "combine_by_node"})
     )
-    assert resolved["aggregation"] == {"policy": "combine_only_same_phase"}
+    assert resolved["aggregation"] == {"policy": "combine_by_node"}
     assert [job["phase"] for job in resolved["jobs"]] == ["prefill", "decode"]
+    assert [job["node"] for job in resolved["jobs"]] == [0, 1]
 
 
 def test_aggregation_writes_combined_csvs(tmp_path):
@@ -526,13 +555,16 @@ def test_aggregation_writes_combined_csvs(tmp_path):
             handle.write("total_time,4.0,100.0\n")
 
     jobs = _phase_jobs(tmp_path, ["prefill", "decode"])
-    cfg = _config(tmp_path, jobs=jobs, aggregation={"policy": "combine"})
+    cfg = _config(tmp_path, jobs=jobs, aggregation={"policy": "combine_by_node"})
     run_config(cfg, runners={"default": runner})
     path = os.path.join(
         str(tmp_path), "out", "perf_report_aggregated_csvs", "gpu_timeline.csv"
     )
     with open(path, encoding="utf-8") as handle:
-        assert "busy_time,4.0,50.0" in handle.read()
+        text = handle.read()
+    assert "prefill_0,prefill,busy_time,2.0,50.0" in text
+    assert "decode_1,decode,busy_time,2.0,50.0" in text
+    assert "all,decode+prefill,busy_time,4.0,50.0" in text
 
 
 def test_main_exits_on_config_error(tmp_path):
@@ -585,8 +617,8 @@ def test_job_must_be_a_mapping(tmp_path):
         plan_reports(_config(tmp_path, jobs=["nope"]))
 
 
-@pytest.mark.parametrize("phase", ["", "   ", 1])
-def test_blank_phase_rejected(tmp_path, phase):
+@pytest.mark.parametrize("phase", ["", "   ", 1, "a/b"])
+def test_bad_phase_rejected(tmp_path, phase):
     jobs = _phase_jobs(tmp_path, [phase])
     with pytest.raises(ConfigError, match="phase must be a non-empty string"):
         plan_reports(_config(tmp_path, jobs=jobs, aggregation={"policy": "combine"}))

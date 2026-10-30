@@ -934,17 +934,16 @@ def _check_marker_top_ops(output_dir, comparison_scope=None):
         )
 
     errors = []
-    top_ops_begin = None
+    top_ops_begins = []
     for m in _MV_BEGIN_RE.finditer(content):
         inner = m.group(1)
         km = _MV_KIND_ATTR_RE.search(inner)
         if km and km.group(1) == "top_ops":
-            top_ops_begin = m
-            break
+            top_ops_begins.append(m)
 
-    if top_ops_begin is None:
+    if not top_ops_begins:
         errors.append("No <!-- impact-begin kind=top_ops --> marker found")
-    else:
+    for top_ops_begin in top_ops_begins:
         end_after = _MV_END_RE.search(content, top_ops_begin.end())
         if end_after is None:
             errors.append("kind=top_ops marker has no matching <!-- impact-end -->")

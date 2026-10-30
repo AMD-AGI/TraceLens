@@ -621,6 +621,20 @@ def test_price_gemm_epilogue_full_estimate():
     assert (est.fusion_kind, est.confidence) == ("gemm_epilogue", "medium")
 
 
+def test_price_rows_percent_uses_display_ms():
+    """Rows divide by the focus node's time; the impact score stays on the baseline."""
+    pricer = FusionPricer(
+        FusionForms(TAXONOMY),
+        (1.048576, {"matrix_bf16": 700.0, "vector_bf16": 1.0}),
+        _golden_lookup(),
+        1.0,
+        display_ms=0.4,
+    )
+    est = pricer.price(_golden_candidate())
+    assert est.impact_score_high == 10.0
+    assert [r["pct_e2e"] for r in est.rows] == ["25.00", "25.00"]
+
+
 def test_price_matrix_op_launch_is_not_epilogue():
     """A kernel launched by the GEMM's own op is matrix: only ew_add is saved."""
     kernels = [

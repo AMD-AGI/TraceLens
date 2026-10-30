@@ -66,7 +66,7 @@ class _TaskBase(TypedDict):
     resolution: Optional[str]
     prose_truncated: bool
     impact: Impact
-    phase: NotRequired[str]
+    node: Optional[str]
 
 
 class ComputeTask(_TaskBase):
@@ -108,6 +108,7 @@ class TopOperationRow(TypedDict):
     pct_of_compute: Optional[float]
     ops: Optional[int]
     potential_improvement_md: Optional[str]
+    node: NotRequired[str]
 
 
 class ExecutiveSummary(TypedDict):
@@ -115,6 +116,7 @@ class ExecutiveSummary(TypedDict):
 
     narrative: str
     metrics: dict
+    node_metrics: NotRequired[dict]
 
 
 class Appendix(TypedDict):

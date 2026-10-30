@@ -23,7 +23,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
     _arg_pairs,
     _kernel_name_list,
-    phase_field,
+    node_field,
 )
 from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
     ComputeTask,
@@ -32,13 +32,16 @@ from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
 from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
 from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms, _efficiency_parts
 from TraceLens.Agent.Analysis.utils.validation_utils import (
+    EXEC_TOTAL_COL,
+    PCT_OF_NODE_COL,
     TIER_COMPUTE,
     TIER_FUSION,
     MarkerValidator,
     _find_data_table,
     _iter_candidate_blocks,
+    _marker_attrs,
 )
-from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +63,14 @@ _LABEL_RE = re.compile(
 _KIND_RE = re.compile(r"surfaced as\s+`(\w+)`", re.IGNORECASE)
 _FUSION_KINDS = FusionForms(TAXONOMY).kinds
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
-_ANCHOR_LINK_RE = re.compile(r"#detailed-analysis-compute-p(\d+)")
 _LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _PRIORITY_PREFIX_RE = re.compile(r"^(?:[🔴🟡🟢]\s*)?(?:P\d+:\s*)?")
+_TOTAL_TIME_RE = re.compile(
+    r"^\|\s*Total Time\s*\|\s*(\d+(?:\.\d+)?) ms\s*\|", re.MULTILINE
+)
 _NULL_CELLS = {"", "-", "—", "–"}
+_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*$")
 
 # Data-table header labels, normalized (lowercased, stripped) -> logical field.
 _HEADER_ALIASES = {
@@ -74,11 +80,25 @@ _HEADER_ALIASES = {
     "kernel name": "kernel_name",
     "time (ms)": "time_ms",
     "%e2e": "pct_e2e",
+    PCT_OF_NODE_COL.lower(): "pct_of_node",
     "count": "count",
     "flops/byte": "flops_per_byte",
     "efficiency": "efficiency",
     "bound": "bound",
 }
+
+# Top Operations header labels, normalized -> emitted JSON field. The comparative
+# table's Trace 2 Time and Difference columns are deliberately unmapped.
+_TOP_OPS_HEADERS = {
+    "rank": "rank",
+    "category": "category",
+    "time (ms)": "time_ms",
+    "trace 1 time (ms)": "time_ms",
+    "% of compute time": "pct_of_compute",
+    "ops": "ops",
+}
+# The improvement column's unit suffix varies by report, so it matches by prefix.
+_IMPROVEMENT_HEADER_PREFIX = "potential improvement"
 
 # Executive-summary metric label (lowercased, stripped) -> emitted JSON field.
 _METRIC_FIELDS = {
@@ -169,7 +189,7 @@ def _op_finding(op: dict) -> dict:
         "members": [member],
         "impacts": [op["impact_score"]],
         "prose": {},
-        "phase": op.get(PHASE_COL),
+        "node": op.get(NODE_COL),
     }
 
 
@@ -224,14 +244,19 @@ class AnalysisMdParser:
             return None
         narrative_parts = []
         metrics: dict = {}
+        node_metrics: dict = {}
         for ln in section.splitlines():
             stripped = ln.strip()
             if stripped.startswith("|"):
                 cells = self._split_row(stripped)
-                if len(cells) >= 2:
+                if cells[:2] == ["Metric", EXEC_TOTAL_COL]:
+                    node_metrics = {name: {} for name in cells[2:]}
+                elif len(cells) >= 2:
                     field = _METRIC_FIELDS.get(cells[0].strip().lower())
                     if field:
                         metrics[field] = self._first_float(cells[1])
+                        for name, cell in zip(node_metrics, cells[2:]):
+                            node_metrics[name][field] = self._first_float(cell)
             elif (
                 stripped
                 and not stripped.startswith("!")
@@ -241,31 +266,54 @@ class AnalysisMdParser:
         narrative = " ".join(narrative_parts).strip()
         if not narrative and not metrics:
             return None
-        return {"narrative": narrative, "metrics": metrics}
+        summary = {"narrative": narrative, "metrics": metrics}
+        if node_metrics:
+            summary["node_metrics"] = node_metrics
+        return summary
+
+    def _total_time_ms(self) -> float:
+        """The Executive Summary's Total Time, the ``% of Node`` tables' T_all."""
+        found = _TOTAL_TIME_RE.search(self.text)
+        if not found:
+            raise ValueError(
+                "A '% of Node' table needs the Executive Summary row "
+                "'| Total Time | <N> ms |' with a plain number "
+                "(no thousands separator)"
+            )
+        return float(found.group(1))
 
     def top_operations(self) -> "list[dict] | None":
-        block = self._marker_block("top_ops")
-        if block is None:
-            return None
         rows = []
-        for cells in self._iter_table_rows(block):
-            if len(cells) < 6:
-                continue
-            rows.append(
-                {
-                    "rank": int(self._first_float(cells[0]) or 0),
-                    "category": self._cell_or_null(cells[1]),
-                    "time_ms": self._first_float(cells[2]),
-                    "pct_of_compute": self._first_float(cells[3]),
-                    "ops": self._int_or_null(cells[4]),
-                    "potential_improvement_md": self._cell_or_null(cells[5]),
+        for attrs, block in self._marker_blocks("top_ops"):
+            for row in self._iter_table_rows(block):
+                fields = {
+                    (
+                        "potential_improvement_md"
+                        if h.startswith(_IMPROVEMENT_HEADER_PREFIX)
+                        else _TOP_OPS_HEADERS.get(h)
+                    ): c
+                    for h, c in row.items()
                 }
-            )
+                rows.append(
+                    {
+                        "rank": int(self._first_float(fields.get("rank")) or 0),
+                        "category": self._cell_or_null(fields.get("category")),
+                        "time_ms": self._first_float(fields.get("time_ms")),
+                        "pct_of_compute": self._first_float(
+                            fields.get("pct_of_compute")
+                        ),
+                        "ops": self._int_or_null(fields.get("ops")),
+                        "potential_improvement_md": self._cell_or_null(
+                            fields.get("potential_improvement_md")
+                        ),
+                        **node_field(attrs.get(NODE_COL)),
+                    }
+                )
         return rows if rows else None
 
     def findings(self, tier: str) -> list:
         """Parse every ``tier`` reasoning-candidate block into finding dicts."""
-        attrs_by_rank = self._card_attrs() if tier == TIER_COMPUTE else {}
+        attrs_by_rank = self._card_attrs(tier)
         return [
             self._parse_finding(start, end, rank, tier, attrs_by_rank)
             for start, end, rank in _iter_candidate_blocks(self.text, tier)
@@ -290,9 +338,9 @@ class AnalysisMdParser:
     ) -> dict:
         """Parse one ``tier`` reasoning-candidate block into a finding dict.
 
-        ``attrs_by_rank`` joins each compute finding to its card ``p_item``
-        marker attrs via the compute rank; the category is per-finding and is
-        stamped on every member, the phase on the finding.
+        ``attrs_by_rank`` joins each finding to its card ``p_item``
+        marker attrs via the tier's rank; the category is per-finding and is
+        stamped on every member, the node on the finding.
         """
         lines = self.lines
         block = "\n".join(lines[start:end])
@@ -300,7 +348,7 @@ class AnalysisMdParser:
         md_rank = f"P{rank}"
         attrs = attrs_by_rank.get(rank, {})
         category = attrs.get("category")
-        phase = attrs.get("phase") or self._parse_block_phase(block)
+        node = attrs.get(NODE_COL) or self._parse_block_node(block)
 
         heading = next((ln for ln in lines[start:end] if ln.startswith("####")), None)
         library = None
@@ -343,7 +391,7 @@ class AnalysisMdParser:
             "low": low,
             "mid": mid,
             "high": high,
-            "phase": phase,
+            "node": node,
         }
 
     def _parse_data_table(self, start: int, end: int) -> list:
@@ -358,6 +406,7 @@ class AnalysisMdParser:
             if h.strip().lower() in _HEADER_ALIASES
         }
 
+        total_ms = self._total_time_ms() if "pct_of_node" in col else None
         members = []
         for _, cells in row_iter:
 
@@ -368,6 +417,12 @@ class AnalysisMdParser:
             operation_cell = get("operation")
             eff_pct, eff_peak, eff_unit = self._parse_efficiency(get("efficiency"))
             args_shapes, args_datatypes = self._split_args(get("args"))
+            time_ms = self._first_float(get("time_ms"))
+            pct_e2e = (
+                round(time_ms / total_ms * 100, 2)
+                if total_ms and time_ms is not None
+                else self._first_float(get("pct_e2e"))
+            )
             members.append(
                 {
                     "operation_cell": operation_cell,
@@ -378,9 +433,9 @@ class AnalysisMdParser:
                     "analysis_md_rank": None,
                     "args_shapes": args_shapes,
                     "args_datatypes": args_datatypes,
-                    "time_ms": self._first_float(get("time_ms")),
+                    "time_ms": time_ms,
                     "count": self._int_or_null(get("count")),
-                    "pct_e2e": self._first_float(get("pct_e2e")),
+                    "pct_e2e": pct_e2e,
                     "flops_per_byte": self._first_float(get("flops_per_byte")),
                     "efficiency_percent": eff_pct,
                     "efficiency_peak_value": eff_peak,
@@ -390,28 +445,25 @@ class AnalysisMdParser:
             )
         return members
 
-    @staticmethod
-    def _marker_attrs(text: str, kind: str):
-        """Yield (match, attrs) for each ``kind`` marker in ``text``."""
-        for m in MarkerValidator.BEGIN_RE.finditer(text):
-            attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
-            if attrs.get("kind") == kind:
-                yield m, attrs
+    def _card_attrs(self, tier: str) -> dict:
+        """Map ``tier`` rank -> card ``p_item`` marker attrs via the detailed anchor.
 
-    def _card_attrs(self) -> dict:
-        """Map compute rank -> card ``p_item`` marker attrs via the detailed anchor.
-
-        Each compute card carries a ``kind=p_item category=<cat>`` marker followed
-        by a ``#detailed-analysis-compute-p{N}`` link; the anchor's N is the rank
+        Each card carries a ``kind=p_item`` marker followed by a
+        ``#detailed-analysis-<tier>-p{N}`` link; the anchor's N is the rank
         the detailed block is keyed on. Cards without an anchor are skipped, so
         findings with no matching card (e.g. fallback reports) keep
-        ``category=null`` and take ``phase`` from their own p_item marker.
+        ``category=null`` and take ``node`` from their own p_item marker.
         """
+        anchor_re = re.compile(rf"#detailed-analysis-{tier}-[pP](\d+)")
         mapping: dict = {}
-        for m, attrs in self._marker_attrs(self.text, "p_item"):
+        for m, attrs in _marker_attrs(self.text, "p_item"):
             end = MarkerValidator.END_RE.search(self.text, m.end())
-            tail = self.text[end.end() : end.end() + 400] if end else ""
-            link_m = _ANCHOR_LINK_RE.search(tail)
+            if not end:
+                continue
+            nxt = MarkerValidator.BEGIN_RE.search(self.text, end.end())
+            link_m = anchor_re.search(
+                self.text[end.end() : nxt.start() if nxt else None]
+            )
             if link_m:
                 mapping[int(link_m.group(1))] = attrs
         return mapping
@@ -436,14 +488,14 @@ class AnalysisMdParser:
             ]
         return None
 
-    def _parse_block_phase(self, block: str) -> "str | None":
-        """Return ``phase=`` from the block's own ``kind=p_item`` marker, if any.
+    def _parse_block_node(self, block: str) -> "str | None":
+        """Return ``node=`` from the block's own ``kind=p_item`` marker, if any.
 
-        Fallback reports carry no card anchors, so the phase rides on the p_item
+        Fallback reports carry no card anchors, so the node rides on the p_item
         marker inside the reasoning-candidate block instead.
         """
-        for _, attrs in self._marker_attrs(block, "p_item"):
-            return attrs.get("phase")
+        for _, attrs in _marker_attrs(block, "p_item"):
+            return attrs.get(NODE_COL)
         return None
 
     def _parse_finding_range(self, block: str) -> tuple:
@@ -503,33 +555,30 @@ class AnalysisMdParser:
         nxt = re.search(rf"^{hashes}\s+", rest, re.MULTILINE)
         return rest[: nxt.start()] if nxt else rest
 
-    def _marker_block(self, kind: str) -> "str | None":
-        """Return the text between an ``impact-begin kind=<kind>`` and its end."""
+    def _marker_blocks(self, kind: str):
+        """Yield (attrs, text) between each ``impact-begin kind=<kind>`` and its end."""
         text = self.text
-        for m in MarkerValidator.BEGIN_RE.finditer(text):
-            km = MarkerValidator.KIND_ATTR_RE.search(m.group(1))
-            if not km or km.group(1) != kind:
-                continue
+        for m, attrs in _marker_attrs(text, kind):
             end = MarkerValidator.END_RE.search(text, m.end())
-            return text[m.end() : end.start()] if end else text[m.end() :]
-        return None
+            yield attrs, text[m.end() : end.start()] if end else text[m.end() :]
 
     def _iter_table_rows(self, block: str):
-        """Yield body-row cell lists from the first markdown table in ``block``."""
-        seen_header = False
+        """Yield body rows of the first markdown table in ``block`` as
+        ``{lowercased header: cell}`` dicts, trailing HTML comments stripped."""
+        header = None
         for ln in block.splitlines():
             stripped = ln.strip()
             if not stripped.startswith("|"):
-                if seen_header:
+                if header is not None:
                     break
                 continue
-            cells = self._split_row(stripped)
-            if not seen_header:
-                seen_header = True
+            cells = self._split_row(_TRAILING_COMMENT_RE.sub("", stripped))
+            if header is None:
+                header = [c.lower() for c in cells]
                 continue
             if all(set(c) <= {"-", ":", " "} for c in cells):
                 continue
-            yield cells
+            yield dict(zip(header, cells))
 
     @staticmethod
     def _split_row(row: str) -> list:
@@ -658,10 +707,10 @@ class TaskGrouper:
                     key = operation or ""
 
                 bucket = buckets.setdefault(
-                    (finding["phase"], key),
+                    (finding["node"], key),
                     {
                         "operation": operation,
-                        "phase": finding["phase"],
+                        "node": finding["node"],
                         "members": [],
                         "findings": {},
                     },
@@ -702,7 +751,7 @@ class TaskGrouper:
 
         prose = self._accumulate_prose(ordered_fi, bucket["findings"])
 
-        task = {"operation": bucket["operation"], **phase_field(bucket["phase"])}
+        task = {"operation": bucket["operation"], NODE_COL: bucket["node"]}
         if self.tier == TIER_FUSION:
             task["kind"] = bucket["findings"][ordered_fi[0]]["kind"]
         return {**task, "members": members, "impact": {"mid": mid}, **prose}
@@ -731,7 +780,7 @@ class TaskGrouper:
         return (
             neg_mid,
             task["operation"] or "",
-            task.get("phase") or "",
+            task["node"] or "",
             "".join(task["members"][0]["kernel_name"]) if task["members"] else "",
         )
 

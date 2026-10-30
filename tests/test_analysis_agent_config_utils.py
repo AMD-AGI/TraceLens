@@ -163,10 +163,10 @@ jobs:
         """
 analysis_mode: inference
 output_dir: ROOT/out
-aggregation: {policy: combine_only_same_phase}
+aggregation: {policy: combine_by_node}
 jobs:
-  - {name: prefill, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
-  - {name: decode, phase: decode, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
+  - {name: prefill, phase: prefill, node: 0, trace_path: ROOT/t1.json.gz, platform: MI300X}
+  - {name: decode, phase: decode, node: 0, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
 """,
         """
 analysis_mode: inference
@@ -175,10 +175,10 @@ enable_pseudo_ops: true
 group_by_num_kernels: true
 include_call_stack: true
 group_by_parent_module: true
-aggregation: {policy: combine_only_same_phase}
+aggregation: {policy: combine_by_node}
 jobs:
-  - {name: prefill, phase: prefill, trace_path: ROOT/t1.json.gz, platform: MI300X}
-  - {name: decode, phase: decode, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
+  - {name: prefill, phase: prefill, node: 0, trace_path: ROOT/t1.json.gz, platform: MI300X}
+  - {name: decode, phase: decode, node: 0, trace_path: ROOT/t2.json.gz, platform: MI300X, capture_folder: ROOT/c2}
 """,
         [
             "added   enable_pseudo_ops: true",
@@ -235,7 +235,15 @@ def test_check_config_completes_each_scope(root, case):
 
 def test_multi_trace_scope_derived_from_aggregation(root):
     result = check_config(_load(CASES["multi_trace"][1], root))
-    assert result.variables["focus_job"] == "prefill"
+    assert result.variables["focus_job"] == "prefill_0"
+
+
+def test_multi_trace_repeated_node_rejected(root):
+    config = _load(CASES["multi_trace"][1], root)
+    config["jobs"][1]["phase"] = "prefill"
+    config["jobs"][1]["name"] = "prefill_b"
+    with pytest.raises(ConfigError, match="one job per node; repeated: prefill_0"):
+        check_config(config)
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -310,7 +318,7 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
         pytest.param(
             "multi_trace",
             "{analysis_mode: default, output_dir: ROOT/out,"
-            " aggregation: {policy: combine_only_same_phase}, jobs: ["
+            " aggregation: {policy: combine_by_node}, jobs: ["
             "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
             "{name: b, phase: x, trace_path: ROOT/t2.json.gz, platform: MI325X,"
             " compare_to: {trace_path: ROOT/t1.json.gz}}]}",
@@ -327,7 +335,7 @@ def test_build_matches_yaml(root, tmp_path, capsys, case):
             "{name: a, phase: x, trace_path: ROOT/t1.json.gz, platform: MI300X},"
             "{name: b, phase: y, trace_path: ROOT/t2.json.gz, platform: MI300X}]}",
             [
-                "aggregation.policy must be combine_only_same_phase",
+                "aggregation.policy must be combine_by_node",
                 "include_call_stack must be true, got false",
             ],
             id="multi_trace_aggregation_and_flags",
@@ -448,7 +456,7 @@ def test_add_diff_stats(root, tmp_path, monkeypatch, capsys):
                 "trace_path=ROOT/t1.json.gz",
                 "platform=MI300X",
                 "output_dir=ROOT/out",
-                "focus_job=prefill",
+                "focus_job=prefill_0",
                 "wrote   ROOT/out/cache/run_config.yaml",
             ],
             id="multi_trace",

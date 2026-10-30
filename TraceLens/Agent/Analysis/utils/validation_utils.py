@@ -30,11 +30,16 @@ from dataclasses import fields
 
 from .kernel_fusion import FusionEstimate
 from .report_utils import load_manifest, _scan_findings_dir
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 # Constants
 
 TIER_COMPUTE = "compute"
 TIER_FUSION = "fusion"
+# multi_trace report vocabulary: the Executive Summary's all-nodes column and the
+# per-node percent column that replaces %E2E.
+EXEC_TOTAL_COL = "Total"
+PCT_OF_NODE_COL = "% of Node"
 _FUSION_ROW_KEYS = tuple(
     f.name for f in fields(FusionEstimate) if f.name.startswith("rows")
 )
@@ -68,6 +73,10 @@ _COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
     "Efficiency",
     "Bound",
 )
+_COMPUTE_DATA_REQUIRED_COLS_BY_NODE = tuple(
+    PCT_OF_NODE_COL if col == "%E2E" else col
+    for col in _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+)
 # Mandatory columns for comparative-mode **Data:** tables (sub_agent_spec.md
 # § Operations Table Schema — Comparative).
 _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
@@ -86,6 +95,8 @@ _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
 _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
+_TOTAL_TIME_TOL_MS = 0.01  # Total Time cells are rendered at 2 decimals
+_LEADING_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _KF_IMPACT_STANDALONE_RE = re.compile(
     r"impact_score:\s*[\d.]+\s*\(perf-model coverage \d+/\d+ kernels\)"
 )
@@ -147,6 +158,14 @@ def _fusion_estimates_empty(filepath):
             return not json.load(f).get("impact_estimates")
     except (OSError, json.JSONDecodeError):
         return False
+
+
+def _load_manifest_if_present(output_dir):
+    """The category manifest, or {} before prepare has written one."""
+    try:
+        return load_manifest(output_dir)
+    except FileNotFoundError:
+        return {}
 
 
 def validate_findings_file(filepath, tier, comparison_scope=None):
@@ -253,13 +272,22 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
     # scoped to <!-- reasoning-candidate tier=compute --> blocks.
-    if tier == "compute":
+    standalone_cols = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+    if tier in (TIER_COMPUTE, TIER_FUSION):
+        gpu_util = _load_manifest_if_present(
+            os.path.dirname(os.path.dirname(filepath))
+        ).get("gpu_utilization", {})
+        if "nodes" in gpu_util:
+            standalone_cols = _COMPUTE_DATA_REQUIRED_COLS_BY_NODE
+    if tier == TIER_COMPUTE:
         errors.extend(
-            _validate_compute_data_tables(content, filepath, comparison_scope)
+            _validate_compute_data_tables(
+                content, filepath, comparison_scope, standalone_cols
+            )
         )
 
     if tier == TIER_FUSION:
-        errors.extend(_validate_fusion_data_tables(content))
+        errors.extend(_validate_fusion_data_tables(content, standalone_cols))
 
     # Marker structure validation.
     file_class = "category_findings" if tier == "compute" else "system_findings"
@@ -401,7 +429,12 @@ def _find_data_table(lines, start, end):
     return header_idx + 1, header_cols, rows()
 
 
-def _validate_compute_data_tables(content, findings_path, comparison_scope=None):
+def _validate_compute_data_tables(
+    content,
+    findings_path,
+    comparison_scope=None,
+    standalone_cols=_COMPUTE_DATA_REQUIRED_COLS_STANDALONE,
+):
     """For each <!-- reasoning-candidate tier=compute --> block: shape check
     (Args column required for standalone; comparative schema for comparative),
     Args cells verbatim vs operations[].args, Kernel Path cells verbatim
@@ -413,9 +446,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     cat_metrics_basename = os.path.basename(metrics_path)
     is_comparative = comparison_scope == "comparative"
     required_cols = (
-        _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE
-        if is_comparative
-        else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+        _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE if is_comparative else standalone_cols
     )
     valid_args, valid_paths, valid_kernel_names = _load_compute_data_metrics(
         metrics_path
@@ -439,15 +470,10 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                 f"(sub_agent_spec.md § Operations Table Schema)"
             )
             continue
-        active_cols = (
-            _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE
-            if is_comparative
-            else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
-        )
         args_col = "Args (T1)" if is_comparative else "Args"
-        args_idx = active_cols.index(args_col)
-        kp_idx = active_cols.index("Kernel Path")
-        kn_idx = active_cols.index("Kernel Name")
+        args_idx = required_cols.index(args_col)
+        kp_idx = required_cols.index("Kernel Path")
+        kn_idx = required_cols.index("Kernel Name")
         for row_line, cells in row_iter:
             if valid_args and args_idx < len(cells) and cells[args_idx]:
                 if cells[args_idx] not in valid_args:
@@ -478,11 +504,14 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     return errors
 
 
-def _validate_fusion_data_tables(content):
+def _validate_fusion_data_tables(
+    content, standalone_cols=_COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+):
     """For each <!-- reasoning-candidate tier=fusion --> block: the first
     **Data:** table must start with the canonical fusion columns, in order.
     """
     lines = content.splitlines()
+    required_cols = standalone_cols
     errors = []
     for start, end, _ in _iter_candidate_blocks(content, TIER_FUSION):
         table = _find_data_table(lines, start, end)
@@ -493,12 +522,12 @@ def _validate_fusion_data_tables(content):
             )
             continue
         header_line, header_cols, _ = table
-        n_cols = len(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)
-        if tuple(header_cols[:n_cols]) != _COMPUTE_DATA_REQUIRED_COLS_STANDALONE:
+        n_cols = len(required_cols)
+        if tuple(header_cols[:n_cols]) != required_cols:
             errors.append(
                 f"fusion Data table at line {header_line}: header must start "
                 f"with the {n_cols} canonical columns in order "
-                f"{list(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)}; got {header_cols}"
+                f"{list(required_cols)}; got {header_cols}"
             )
     return errors
 
@@ -588,7 +617,7 @@ def _check_coverage(output_dir, manifest):
 
 def _check_priority_consistency(output_dir, manifest):
     """Verify priority_data.json invariants: findings sort, rank contiguity,
-    and per-category rollup of priorities[].impact_score vs findings[] sum.
+    and per-(node, category) rollup of priorities[].impact_score vs findings[] sum.
 
     Non-blocking: returns WARN on any violation (preserves Step 9 semantics
     matching _check_time_sanity / _check_coverage). manifest is accepted for
@@ -639,19 +668,22 @@ def _check_priority_consistency(output_dir, manifest):
         if p.get("source") != "findings_rollup":
             continue
         cat = p.get("category")
+        node = p.get(NODE_COL)
         # Mirror generate_priority_data: the findings_rollup excludes
         # heuristic findings, so the consistency sum must too.
         expected = sum(
             f.get("impact_score", 0)
             for f in findings
             if f.get("category") == cat
+            and f.get(NODE_COL) == node
             and f.get("impact_score") is not None
             and f.get("estimate_method") != "heuristic"
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
+            where = f"node={node}, " if node is not None else ""
             messages.append(
-                f"INV7': priorities[category={cat}].impact_score={actual:.4f} "
+                f"INV7': priorities[{where}category={cat}].impact_score={actual:.4f} "
                 f"!= sum(findings[].impact_score)={expected:.4f}"
             )
 
@@ -726,6 +758,9 @@ def validate_report(output_dir, comparison_scope=None):
                     missing.append(
                         f"Placeholder value '{placeholder}' in Executive Summary table"
                     )
+            gpu_util = _load_manifest_if_present(output_dir).get("gpu_utilization", {})
+            if "nodes" in gpu_util:
+                missing.extend(_validate_exec_summary_nodes(exec_block, gpu_util))
 
     found = [
         p
@@ -749,6 +784,39 @@ def validate_report(output_dir, comparison_scope=None):
     missing.extend(MarkerValidator.check_report(report_path))
 
     return len(missing) == 0, missing
+
+
+def _validate_exec_summary_nodes(exec_block, gpu_util):
+    """multi_trace Executive Summary: the header is Metric, Total, then the nodes
+    in job order, and each Total Time cell matches the manifest."""
+    nodes = gpu_util["nodes"]
+    header = ["Metric", EXEC_TOTAL_COL, *nodes]
+    totals = [gpu_util["total_time_ms"], *(n["total_time_ms"] for n in nodes.values())]
+    rows = [
+        [c.strip() for c in ln.strip().strip("|").split("|")]
+        for ln in exec_block.splitlines()
+        if ln.lstrip().startswith("|")
+    ]
+    errors = []
+    if rows[:1] != [header]:
+        errors.append(
+            f"Executive Summary header {rows[:1]} must be {header} "
+            f"(Total, then each node in job order)"
+        )
+    total_row = next((r for r in rows if r[0] == "Total Time"), None)
+    if total_row is None or len(total_row) != len(header):
+        errors.append(
+            f"Executive Summary needs a Total Time row with one cell per column {header}"
+        )
+        return errors
+    for column, cell, expected in zip(header[1:], total_row[1:], totals):
+        found = _LEADING_NUMBER_RE.match(cell)
+        if not found or abs(float(found.group()) - expected) > _TOTAL_TIME_TOL_MS:
+            errors.append(
+                f"Executive Summary Total Time for {column} is {cell!r}, "
+                f"manifest has {expected} ms"
+            )
+    return errors
 
 
 def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scope=None):
@@ -833,9 +901,11 @@ def _validate_report_priority_consistency(content, output_dir):
     R1: Compute Kernel Optimizations P-item heading count == len(findings).
     R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
-    R4: Top Operations marker rows == len(priorities).
-    R6: Each kind=p_item marker's phase attr == findings[N-1].phase (both absent
-    outside multi_trace).
+    R4: Each Top Operations table's rows == len(priorities), or the priorities of
+    its ``node=`` when the marker carries one.
+    R6: Each compute kind=p_item and detail_estimate marker's node attr ==
+    findings[N-1].node, and each fusion kind=p_item marker's node attr == the
+    manifest's focus_job (all absent outside multi_trace).
 
     Silently skips when priority_data.json is absent (Step 9 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
@@ -868,13 +938,7 @@ def _validate_report_priority_consistency(content, output_dir):
             f"priority_data.json has {len(findings)} findings"
         )
 
-    p_markers = []
-    for m in MarkerValidator.BEGIN_RE.finditer(section):
-        inner = m.group(1)
-        km = MarkerValidator.KIND_ATTR_RE.search(inner)
-        if not km or km.group(1) != "p_item":
-            continue
-        p_markers.append(dict(MarkerValidator.ATTR_RE.findall(inner)))
+    p_markers = [attrs for _, attrs in _marker_attrs(section, "p_item")]
 
     for idx, attrs in enumerate(p_markers):
         if idx >= len(findings):
@@ -890,10 +954,10 @@ def _validate_report_priority_consistency(content, output_dir):
                 f"R2: P-item marker #{idx + 1} category={cat_attr!r} != "
                 f"findings[{idx}].category={f.get('category')!r}"
             )
-        if attrs.get("phase") != f.get("phase"):
+        if attrs.get(NODE_COL) != f.get(NODE_COL):
             errors.append(
-                f"R6: P-item marker #{idx + 1} phase={attrs.get('phase')!r} != "
-                f"findings[{idx}].phase={f.get('phase')!r}"
+                f"R6: P-item marker #{idx + 1} node={attrs.get(NODE_COL)!r} != "
+                f"findings[{idx}].node={f.get(NODE_COL)!r}"
             )
         for attr_name, json_key in (
             ("low", "impact_score_low"),
@@ -917,13 +981,42 @@ def _validate_report_priority_consistency(content, output_dir):
                         f"findings[{idx}].{json_key}={raw}"
                     )
 
-    top_match = re.search(
-        r"<!--\s*impact-begin[^>]*?\bkind=top_ops\b[^>]*?-->(.*?)<!--\s*impact-end\s*-->",
+    lines = content.splitlines()
+    node_checks = [
+        (f"detail_estimate of P{rank}", attrs, findings[rank - 1].get(NODE_COL))
+        for start, end, rank in _iter_candidate_blocks(content, TIER_COMPUTE)
+        if rank <= len(findings)
+        for _, attrs in _marker_attrs("\n".join(lines[start:end]), "detail_estimate")
+    ]
+    kf_start = content.find("## Kernel Fusion Opportunities")
+    if kf_start >= 0:
+        kf_end = content.find("\n## ", kf_start + 1)
+        focus_job = _load_manifest_if_present(output_dir).get("focus_job")
+        node_checks.extend(
+            (f"fusion P-item marker #{i + 1}", attrs, focus_job)
+            for i, (_, attrs) in enumerate(
+                _marker_attrs(
+                    content[kf_start:] if kf_end < 0 else content[kf_start:kf_end],
+                    "p_item",
+                )
+            )
+        )
+    for label, attrs, expected in node_checks:
+        if attrs.get(NODE_COL) != expected:
+            errors.append(f"R6: {label} node={attrs.get(NODE_COL)!r} != {expected!r}")
+
+    for top_match in re.finditer(
+        r"<!--\s*impact-begin([^>]*?\bkind=top_ops\b[^>]*?)-->(.*?)<!--\s*impact-end\s*-->",
         content,
         re.DOTALL,
-    )
-    if top_match:
-        body = top_match.group(1)
+    ):
+        node = dict(MarkerValidator.ATTR_RE.findall(top_match.group(1))).get(NODE_COL)
+        expected = (
+            len(priorities)
+            if node is None
+            else sum(1 for p in priorities if p.get(NODE_COL) == node)
+        )
+        body = top_match.group(2)
         n_rows = sum(
             1
             for ln in body.splitlines()
@@ -931,10 +1024,11 @@ def _validate_report_priority_consistency(content, output_dir):
             and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)
         )
         n_data_rows = max(0, n_rows - 1)
-        if n_data_rows != len(priorities):
+        if n_data_rows != expected:
+            scope = "" if node is None else f" for node {node!r}"
             errors.append(
                 f"R4: Top Operations table has {n_data_rows} data rows but "
-                f"priority_data.json::priorities has {len(priorities)} entries"
+                f"priority_data.json::priorities has {expected} entries{scope}"
             )
 
     return errors
@@ -1270,6 +1364,14 @@ class MarkerValidator:
 # (passed, errors) so the orchestrator can use it as a retry gate before the
 # corresponding apply step rewrites semantic_block.
 # ===========================================================================
+
+
+def _marker_attrs(text, kind):
+    """Yield (match, attrs) for each ``kind`` impact marker in ``text``."""
+    for m in MarkerValidator.BEGIN_RE.finditer(text):
+        attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
+        if attrs.get("kind") == kind:
+            yield m, attrs
 
 
 def _load_json_for_validation(path):
