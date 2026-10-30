@@ -44,6 +44,7 @@ jobs:
       skills: |
         TraceLens/Agent/Analysis/skills/analysis-orchestrator
         TraceLens/Agent/Visualizer/skills/model-visualizer
+        TraceLens/Agent/Visualizer/skills/model-roofline-projection
       # Each step can be set to `required`, `optional`, or `off`.
       structural: ${{ github.event_name != 'workflow_dispatch' && 'required' || inputs.structural && 'required' || 'off' }}
       routing: ${{ github.event_name == 'workflow_dispatch' && inputs.routing && 'required' || 'off' }}
@@ -63,4 +64,4 @@ jobs:
         with:
           command: structural
           args: --external
-          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator,TraceLens/Agent/Visualizer/skills/model-visualizer
+          skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator,TraceLens/Agent/Visualizer/skills/model-visualizer,TraceLens/Agent/Visualizer/skills/model-roofline-projection
