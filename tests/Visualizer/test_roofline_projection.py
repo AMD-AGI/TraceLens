@@ -465,6 +465,39 @@ def test_moe_cost_uses_introspected_weight_bpe():
     assert bytes_fp4 < bytes_bf16
 
 
+def test_moe_cost_grouped_gemm_scales_weight_bytes_by_experts_touched():
+    # active_tokens = B*S*top_k = 1*10*2 = 20.
+    dims = {"B": 1, "S": 10, "H": 4096}
+    _RT.reset()
+    try:
+        # No num_experts -> G falls back to 1 (prior single-weight cost).
+        _, _, flops_g1, bytes_g1, _ = _moe_cost(dims, 2, 1024, bpe=2)
+        # num_experts > active_tokens -> G = active_tokens (20) distinct weights read.
+        _RT.moe_num_experts = 256
+        _, _, flops_g, bytes_g, _ = _moe_cost(dims, 2, 1024, bpe=2)
+    finally:
+        _RT.reset()
+    # FLOPs are unchanged (only the selected token-expert pairs compute).
+    assert flops_g == flops_g1
+    # Reading G=20 expert weight matrices moves far more than a single one.
+    assert bytes_g > bytes_g1
+
+
+def test_moe_cost_adds_dispatch_combine_allreduce_only_when_ep():
+    dims = {"B": 1, "S": 10, "H": 4096}
+    _RT.reset()
+    try:
+        _RT.moe_num_experts = 256
+        _, _, _, bytes_ep1, _ = _moe_cost(dims, 2, 1024, bpe=2)
+        _RT.ep = 8
+        _, _, _, bytes_ep8, _ = _moe_cost(dims, 2, 1024, bpe=2)
+    finally:
+        _RT.reset()
+    # EP>1 adds the dispatch+combine all-to-all: 2 * active_tokens * hidden * bpe.
+    active_tokens = 10 * 2
+    assert bytes_ep8 - bytes_ep1 == 2 * active_tokens * 4096 * 2
+
+
 def test_attention_boundary_cost_honors_sliding_window_mix():
     dims = {"B": 1, "S": 1, "past_len": 4096}
     base = dict(attn_heads=8, attn_kv_heads=2, attn_head_dim=64, n_layers=4)

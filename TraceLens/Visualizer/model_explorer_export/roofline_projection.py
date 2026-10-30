@@ -47,14 +47,19 @@ Known approximations, stated once here rather than scattered in comments:
     hidden, experts-per-token, expert intermediate size) instead, the same
     numbers the model's own config declares, rather than from their (unusable)
     node shape.
-  - MoE routing is costed as ``experts_per_tok`` GEMM passes per token (the
-    gate_up_proj and down_proj of only the SELECTED experts), never
+  - MoE routing is costed as ``experts_per_tok`` grouped-GEMM passes per token
+    (the gate_up_proj and down_proj of only the SELECTED experts), never
     ``num_experts`` passes -- the router picks a subset per token, so costing
     every expert for every token would overstate FLOPs by
-    ``num_experts / experts_per_tok``. The router's own softmax/top-k
-    selection and the shared-expert add are not separately costed (both are
-    O(tokens), negligible next to the O(tokens*hidden*intermediate) expert
-    GEMMs).
+    ``num_experts / experts_per_tok``. The expert GEMMs use :class:`GroupedGemm`
+    over ``G = min(num_experts, active_tokens)`` distinct weight matrices, so the
+    weight-byte term reflects the experts actually streamed (``G`` falls back to
+    1, the prior single-weight cost, when ``num_experts`` is unknown). When
+    expert-parallel (``--ep > 1``) the dispatch/combine all-to-all that moves
+    token hidden states between EP ranks is added as FLOPs-free data movement
+    (:class:`MoEComm`). The router's own softmax/top-k selection and the
+    shared-expert add are not separately costed (both are O(tokens), negligible
+    next to the O(tokens*hidden*intermediate) expert GEMMs).
 """
 
 from __future__ import annotations
@@ -73,6 +78,7 @@ from TraceLens.PerfModel.perf_model import (
     GEMM,
     SDPA,
     BinaryElementwise,
+    GroupedGemm,
     Normalization,
     Reduce,
     Softmax,
@@ -688,6 +694,8 @@ class _RuntimeIntrospection:
         "weight_bpe",
         "moe_top_k",
         "moe_intermediate",
+        "moe_num_experts",
+        "ep",
         "attn_heads",
         "attn_kv_heads",
         "attn_head_dim",
@@ -703,6 +711,8 @@ class _RuntimeIntrospection:
         self.weight_bpe = None
         self.moe_top_k = None
         self.moe_intermediate = None
+        self.moe_num_experts = None
+        self.ep = 1
         self.attn_heads = None
         self.attn_kv_heads = None
         self.attn_head_dim = None
@@ -744,6 +754,9 @@ def _populate_introspection(spec):
     _RT.weight_bpe = _introspect_weight_bpe(cfg.get("quantization_config"))
     _RT.moe_top_k = spec.num_experts_per_tok
     _RT.moe_intermediate = spec.moe_intermediate_size or spec.intermediate_size
+    _RT.moe_num_experts = spec.num_experts
+    layout = getattr(spec, "parallel_layout", None)
+    _RT.ep = getattr(getattr(layout, "degree", None), "ep", 1) or 1
     _RT.attn_heads = spec.num_attention_heads
     _RT.attn_kv_heads = spec.num_key_value_heads or spec.num_attention_heads
     if spec.head_dim:
@@ -805,13 +818,30 @@ def _moe_cost(
     intermediate_size: int | None,
     bpe: float | None,
 ) -> tuple[str, str, float, float | None, int] | None:
-    """GEMM cost of the gate_up_proj + down_proj of the SELECTED experts only.
+    """GroupedGEMM cost of the gate_up_proj + down_proj of the SELECTED experts,
+    plus the EP dispatch/combine all-to-all when expert-parallel.
 
     ``top_k``/``intermediate_size`` come from the architecture's own MoE
     config (``spec.num_experts_per_tok``, ``spec.moe_intermediate_size``), not
     ``dims[Symbol.INTERMEDIATE]`` -- that key prefers a model's DENSE
     ``intermediate_size`` (shared-expert / non-MoE layers) when both are
     declared, which is the wrong width for the routed experts this costs.
+
+    The expert GEMMs are costed with :class:`GroupedGemm` over
+    ``G = min(num_experts, active_tokens)`` distinct expert weight matrices --
+    the weights actually streamed from HBM for this token count -- rather than a
+    single shared weight. FLOPs are unchanged (only the selected token-expert
+    pairs compute); the weight-byte term now scales with the experts touched, so
+    the memory-bound/compute-bound crossover tracks the real prefill-vs-decode
+    behaviour instead of understating decode weight traffic by ~``G``x. When
+    ``num_experts`` is unknown ``G`` falls back to 1 (the prior single-weight
+    cost).
+
+    When ``_RT.ep > 1`` the dispatch and combine all-to-all that move token
+    hidden states between expert-parallel ranks are added as pure data movement
+    (:class:`MoEComm`, FLOPs-free). This is the MoE op's own intrinsic
+    communication, distinct from the ``@comm:`` TP/PP collectives the projection
+    leaves to TreePerf.
     """
     if not top_k or not intermediate_size:
         return None
@@ -821,19 +851,27 @@ def _moe_cost(
     except (KeyError, DimResolutionError):
         return None
     active_tokens = tokens * top_k
-    gate_up_flops = GEMM.flops_func(
-        active_tokens, 2 * intermediate_size, hidden, bias=False
-    )
+    groups = min(_RT.moe_num_experts, active_tokens) if _RT.moe_num_experts else 1
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
-    gate_up_bytes = GEMM.bytes_func(
-        active_tokens, 2 * intermediate_size, hidden, False, wbpe, wbpe, bpe, bpe
-    )
-    down_flops = GEMM.flops_func(active_tokens, hidden, intermediate_size, bias=False)
-    down_bytes = GEMM.bytes_func(
-        active_tokens, hidden, intermediate_size, False, wbpe, wbpe, bpe, bpe
-    )
+    # gate_up_proj: [active_tokens, hidden] x per-expert [hidden, 2*intermediate].
+    gate_up_flops = GroupedGemm.flops_func(active_tokens, hidden, 2 * intermediate_size)
+    # down_proj: [active_tokens, intermediate] x per-expert [intermediate, hidden].
+    down_flops = GroupedGemm.flops_func(active_tokens, intermediate_size, hidden)
     flops = gate_up_flops + down_flops
-    bytes_moved = None if bpe is None else gate_up_bytes + down_bytes
+    bytes_moved: float | None = None
+    if bpe is not None:
+        gate_up_bytes = GroupedGemm.bytes_func(
+            active_tokens, hidden, 2 * intermediate_size, groups, wbpe, bpe
+        )
+        down_bytes = GroupedGemm.bytes_func(
+            active_tokens, intermediate_size, hidden, groups, wbpe, bpe
+        )
+        bytes_moved = gate_up_bytes + down_bytes
+        if _RT.ep > 1:
+            # Dispatch sends each token's hidden state to its top_k expert ranks;
+            # combine gathers the expert outputs back (MoEComm: num_tokens * hidden
+            # * bpe each). Token activations move at the activation dtype, not wbpe.
+            bytes_moved += 2 * active_tokens * hidden * bpe
     return "MoE", "matrix", flops, bytes_moved, tokens * hidden
 
 
