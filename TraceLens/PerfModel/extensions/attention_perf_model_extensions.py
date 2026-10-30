@@ -623,6 +623,38 @@ class pa_sparse_prefill_opus_fwd(InferenceAttention):
         return torch_dtype_map(dtype) if dtype else torch_dtype_map("c10::bfloat16")
 
 
+class mla_sparse_prefill_fp8_asm(pa_sparse_prefill_opus_fwd):
+    @staticmethod
+    def get_param_details(event):
+        try:
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            N_Q, H_Q, d_h_v = dims[0][0], dims[0][1], dims[0][2]
+            swa_pairs = int(dims[8][0])
+            if swa_pairs == 0:
+                return InferenceAttention.no_perf_param_details()
+            pairs = int(dims[4][0]) + swa_pairs
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H_Q,
+                "H_V": 1,
+                "H_K": 1,
+                "N_KV": pairs,
+                "H_KV": 1,
+                "d_h_qk": d_h_v + dims[1][2],
+                "d_h_v": d_h_v,
+                "dropout": 0.0,
+                "causal": False,
+                "flash_impl": True,
+                "prefill_pairs": pairs,
+                "dtype_Q": types[0],
+                "dtype_KV": types[2],
+            }
+        except (ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+
 class vllm_unified_attention_with_output(InferenceAttention):
     """Attention perf model for vLLM unified_attention_with_output events."""
 

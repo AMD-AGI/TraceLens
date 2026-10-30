@@ -6,6 +6,7 @@
 
 """Unit tests for TraceLens/PerfModel/extensions."""
 
+import ast, textwrap
 import pytest, inspect, sys
 from TraceLens.PerfModel.extensions import (
     FusedMoE,
@@ -125,6 +126,7 @@ from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
     aiter_paged_attention_ragged,
     mha_varlen_fwd,
     mla_decode_fwd,
+    mla_sparse_prefill_fp8_asm,
     mla_tilelang_sparse_fwd,
     pa_decode_gluon,
     pa_sparse_prefill_opus_fwd,
@@ -184,6 +186,26 @@ class TestPseudoOpsPerfUtils:
         assert mappings["vllm::gdn_attention_core"] is gdn_attention_core
         assert mappings["aiter::gemm_a8w8_blockscale_ck"] is gemm_a8w8_blockscale
         assert mappings["_C_custom_ar::all_reduce"] is custom_ar_all_reduce
+        assert mappings["aiter::gemm_a8w8_mxfp8"] is gemm_a8w8_blockscale
+        assert (
+            mappings["aiter::batched_gemm_a8w8_mxscale_bpreshuffle"]
+            is batched_gemm_a8w8
+        )
+        assert (
+            mappings["aiter::mla_sparse_prefill_fp8_asm"] is mla_sparse_prefill_fp8_asm
+        )
+
+    def test_pseudo_op_mapping_keys_are_unique_in_source(self):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(get_pseudo_op_mappings)))
+        keys = [
+            key.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        ]
+        duplicates = {key for key in keys if keys.count(key) > 1}
+        assert not duplicates
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -1928,6 +1950,63 @@ class TestPerfModelExtensions:
         )
 
     @pytest.mark.parametrize(
+        "dims,block_k,block_n",
+        [
+            ([[14336, 1536], [65536, 1536], [14336, 48], [65536, 48], [], []], 32, 1),
+        ],
+    )
+    def test_gemm_a8w8_blockscale_mx_scales(self, dims, block_k, block_n):
+        event = {
+            "args": {
+                "Input Dims": dims,
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e8m0fnu",
+                    "c10::Float8_e8m0fnu",
+                    "Scalar",
+                    "",
+                ],
+            }
+        }
+        model = gemm_a8w8_blockscale(event)
+        M, K = dims[0]
+        N = dims[1][0]
+        assert model.param_details["N"] == N
+        assert model.param_details["block_k"] == block_k
+        assert model.param_details["block_n"] == block_n
+        assert model.flops() == 2 * M * N * K
+        assert model.bytes() > 0
+
+    @pytest.mark.parametrize("M", [16, 128, 14336])
+    def test_batched_gemm_a8w8_mxscale(self, M):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [M, 16, 4096],
+                    [16, 1024, 4096],
+                    [M, 16, 32],
+                    [16, 8, 32],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "unsigned char",
+                    "unsigned char",
+                    "Scalar",
+                ],
+            }
+        }
+        model = batched_gemm_a8w8(event)
+        assert model.param_details["B"] == 16
+        assert model.param_details["M"] == M
+        assert model.param_details["N"] == 1024
+        assert model.param_details["K"] == 4096
+        assert model.flops() == 2 * 16 * M * 1024 * 4096
+        assert model.bytes() > 0
+
+    @pytest.mark.parametrize(
         "model_cls,flops_per_elem",
         [
             (aiter_silu_and_mul, 5),
@@ -3349,6 +3428,44 @@ class TestAttentionExtensionsCoverage:
         }
         model = pa_sparse_prefill_opus_fwd(event)
         assert model.flops() > 0
+
+    def test_mla_sparse_prefill_fp8_asm(self):
+        fp8 = "c10::Float8_e4m3fn"
+        bf16 = "c10::BFloat16"
+        dims = [
+            [14336, 128, 512],
+            [14336, 128, 64],
+            [188122880, 512],
+            [188122880, 64],
+            [50288],
+            [14337],
+            [14336, 512],
+            [14336, 64],
+            [1721216],
+            [14337],
+            [128],
+            [],
+            [],
+        ]
+        types = [fp8, bf16, fp8, bf16, "int", "int", fp8, bf16, "int", "int"]
+        event = {"args": {"Input Dims": dims, "Input type": types}}
+        model = mla_sparse_prefill_fp8_asm(event)
+        pairs = 50288 + 1721216
+        assert model.param_details["prefill_pairs"] == pairs
+        assert model.d_h_qk == 576
+        assert model.d_h_v == 512
+        assert model.flops() == pairs * 128 * 2 * (576 + 512)
+        assert model.bytes() == 2 * 14336 * 128 * 576 + pairs * 512
+        assert model.get_compute_precision() == "fp8"
+
+        decode_dims = [list(d) for d in dims]
+        decode_dims[4] = [4259840]
+        decode_dims[8] = [0]
+        decode = mla_sparse_prefill_fp8_asm(
+            {"args": {"Input Dims": decode_dims, "Input type": types}}
+        )
+        assert decode.flops() is None
+        assert decode.bytes() is None
 
     def test_v4_paged_decode_modes(self):
         base = {
