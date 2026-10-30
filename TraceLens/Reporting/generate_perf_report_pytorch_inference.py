@@ -38,6 +38,34 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
 
+_INFERENCE_ANNOTATION_OP_PREFIXES = [
+    "vllm::unified_attention_with_output",
+    "aiter::mha_varlen_fwd",
+    "pseudo_mla_decode_fwd",
+    "pseudo_mla_prefill_fwd",
+    "vllm::gdn_attention_core",
+    "aiter::fmha_v3_varlen_fwd",
+    "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
+    "sglang_profiler::attention_paged_attention_ragged",
+    "aiter::mha_batch_prefill",
+    "aiter::pa_decode_gluon",
+    "aiter::v4_attention_with_output",
+    "pseudo_v4_paged_decode_swa",
+    "pseudo_v4_paged_decode_csa",
+    "pseudo_v4_paged_decode_hca",
+    "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_preshuffle",
+    "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded",
+    "aiter::_opus_bmm_a8w8_mxscale_raw",
+    "aiter::topk_gating_fwd",
+    "aiter::mla_decode_v4_asm",
+    "sglang_profiler::moe_sorting_small__run_small_sort",
+    "aiter::gemm_a8w8_blockscale_bpreshuffle",
+    "aiter::_opus_moe_stage1_a8w4_fwd_raw",
+    "_moe_C::topk_softplus_sqrt",
+    "aiter::moe_sorting_opus_fwd",
+    "pseudo_vllm_sparse_attn_decode",
+]
+
 
 def perf_report_sanity_check(
     events,
@@ -591,24 +619,7 @@ def generate_perf_report_pytorch(
             )
 
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(
-        name_filters=[
-            "vllm::unified_attention_with_output",
-            "aiter::mha_varlen_fwd",
-            "pseudo_mla_decode_fwd",
-            "pseudo_mla_prefill_fwd",
-            "vllm::gdn_attention_core",
-            "aiter::fmha_v3_varlen_fwd",
-            "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
-            "sglang_profiler::attention_paged_attention_ragged",
-            "aiter::mha_batch_prefill",
-            "aiter::pa_decode_gluon",
-            "aiter::v4_attention_with_output",
-            "pseudo_v4_paged_decode_swa",
-            "pseudo_v4_paged_decode_csa",
-            "pseudo_v4_paged_decode_hca",
-        ]
-    )
+    perf_analyzer.tree.apply_annotation(name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES)
 
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
@@ -944,7 +955,7 @@ def generate_perf_report_pytorch(
                     add_python_func=perf_analyzer.add_python_func,
                 )
             perf_analyzer2.tree.apply_annotation(
-                name_filters=["vllm::unified_attention_with_output"]
+                name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES
             )
             td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
             td.generate_tracediff_report()
