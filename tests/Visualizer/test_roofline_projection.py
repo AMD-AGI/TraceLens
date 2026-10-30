@@ -24,7 +24,9 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _attention_boundary_cost,
     _attr_text,
     _classify_normalization,
+    _conv_cost,
     _dispatch_op_cost,
+    _parse_conv_details,
     _engine_boundary_cost,
     _engine_head_cost,
     _introspect_weight_bpe,
@@ -33,6 +35,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _project_op,
     _split_shape_text,
     build_projection_dims,
+    conv_ops_from_meta,
     project_roofline,
     resolve_dim,
     resolve_shape,
@@ -154,6 +157,7 @@ def test_parse_op_node_classifies_an_engine_parallel_linear_as_linear():
         _output_text,
         _input_texts,
         _role,
+        _details,
     ) = parsed
     assert computation == "Linear"
     assert class_name == "QKVParallelLinear"
@@ -232,6 +236,80 @@ def test_dispatch_sdpa():
     assert maf_type == "matrix"
     assert flops > 0
     assert bytes_moved is not None
+
+
+# CONV: geometry is threaded on the node's ``details`` attr by the meta pass.
+
+
+def test_parse_conv_details():
+    assert _parse_conv_details(
+        "conv_weight=[64, 3, 7, 7]; conv_bias=1; conv_transposed=0"
+    ) == ((64, 3, 7, 7), True, False)
+    # Flags default to False when absent; weight is required.
+    assert _parse_conv_details("conv_weight=[32, 32, 3, 3]") == (
+        (32, 32, 3, 3),
+        False,
+        False,
+    )
+    assert _parse_conv_details("conv_transposed=1") is None
+    assert _parse_conv_details("") is None
+
+
+def test_conv_cost_matches_perf_model():
+    # 3->64, 7x7, stride-2 conv on 224x224 -> 112x112 output, with bias.
+    x, out = (1, 3, 224, 224), (1, 64, 112, 112)
+    details = "conv_weight=[64, 3, 7, 7]; conv_bias=1; conv_transposed=0"
+    category, maf_type, flops, bytes_moved = _conv_cost(details, [x], out, 2)
+    assert category == "CONV"
+    assert maf_type == "matrix"
+    # prod(out) * 2 * prod(weight[1:]) + bias term.
+    assert flops == 112 * 112 * 64 * 2 * (3 * 7 * 7) + (112 * 112 * 64)
+    assert bytes_moved is not None
+
+
+def test_conv_ops_from_meta_costs_every_instance():
+    # Two live conv instances a meta forward would hand back: the ConvNeXt stem
+    # (regular, biased) and a depthwise 7x7 block conv (groups == channels).
+    meta_convs = [
+        {
+            "path": "convnext.embeddings.patch_embeddings",
+            "input_shape": [1, 3, 224, 224],
+            "output_shape": [1, 128, 56, 56],
+            "weight_shape": [128, 3, 4, 4],
+            "bias": True,
+            "transposed": False,
+        },
+        {
+            "path": "convnext.encoder.stages.0.layers.0.dwconv",
+            "input_shape": [1, 128, 56, 56],
+            "output_shape": [1, 128, 56, 56],
+            "weight_shape": [128, 1, 7, 7],
+            "bias": True,
+            "transposed": False,
+        },
+    ]
+    ops = conv_ops_from_meta(meta_convs, dtype="float32")
+    assert len(ops) == 2
+    assert all(op.modeled and op.category == "CONV" for op in ops)
+    stem, dwconv = ops
+    # prod(out) * 2 * prod(weight[1:]) + bias term, per CONV.flops_func.
+    assert stem.flops == 128 * 56 * 56 * 2 * (3 * 4 * 4) + (128 * 56 * 56)
+    assert dwconv.flops == 128 * 56 * 56 * 2 * (1 * 7 * 7) + (128 * 56 * 56)
+    assert stem.output_elements == 128 * 56 * 56
+    # The checkpoint's declared dtype drives the compute spec (fp32 here).
+    assert stem.compute_spec == "matrix_fp32"
+    # Entries missing geometry/shapes are skipped, not silently miscosted.
+    assert conv_ops_from_meta([{"path": "x", "output_shape": [1, 8, 4, 4]}]) == []
+    assert conv_ops_from_meta(None) == []
+
+
+def test_dispatch_conv_routes_and_needs_geometry():
+    x, out = (1, 3, 224, 224), (1, 64, 112, 112)
+    details = "conv_weight=[64, 3, 7, 7]; conv_bias=0; conv_transposed=0"
+    cost = _dispatch_op_cost("Conv2d", [x], out, 2, details)
+    assert cost is not None and cost[0] == "CONV"
+    # Without threaded geometry a conv stays unmodeled (not silently costed).
+    assert _dispatch_op_cost("Conv2d", [x], out, 2, "") is None
 
 
 def test_dispatch_sdpa_insufficient_operands_is_unmodeled():
@@ -422,6 +500,39 @@ def test_moe_cost_uses_introspected_weight_bpe():
         _RT.reset()
     # Weight reads dominate the GEMM, so a smaller weight dtype cuts total bytes.
     assert bytes_fp4 < bytes_bf16
+
+
+def test_moe_cost_grouped_gemm_scales_weight_bytes_by_experts_touched():
+    # active_tokens = B*S*top_k = 1*10*2 = 20.
+    dims = {"B": 1, "S": 10, "H": 4096}
+    _RT.reset()
+    try:
+        # No num_experts -> G falls back to 1 (prior single-weight cost).
+        _, _, flops_g1, bytes_g1, _ = _moe_cost(dims, 2, 1024, bpe=2)
+        # num_experts > active_tokens -> G = active_tokens (20) distinct weights read.
+        _RT.moe_num_experts = 256
+        _, _, flops_g, bytes_g, _ = _moe_cost(dims, 2, 1024, bpe=2)
+    finally:
+        _RT.reset()
+    # FLOPs are unchanged (only the selected token-expert pairs compute).
+    assert flops_g == flops_g1
+    # Reading G=20 expert weight matrices moves far more than a single one.
+    assert bytes_g > bytes_g1
+
+
+def test_moe_cost_adds_dispatch_combine_allreduce_only_when_ep():
+    dims = {"B": 1, "S": 10, "H": 4096}
+    _RT.reset()
+    try:
+        _RT.moe_num_experts = 256
+        _, _, _, bytes_ep1, _ = _moe_cost(dims, 2, 1024, bpe=2)
+        _RT.ep = 8
+        _, _, _, bytes_ep8, _ = _moe_cost(dims, 2, 1024, bpe=2)
+    finally:
+        _RT.reset()
+    # EP>1 adds the dispatch+combine all-to-all: 2 * active_tokens * hidden * bpe.
+    active_tokens = 10 * 2
+    assert bytes_ep8 - bytes_ep1 == 2 * active_tokens * 4096 * 2
 
 
 def test_attention_boundary_cost_honors_sliding_window_mix():

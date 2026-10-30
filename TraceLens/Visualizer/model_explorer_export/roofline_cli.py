@@ -31,7 +31,9 @@ from TraceLens.ModelUtils.cli_common import (
 from TraceLens.ModelUtils.loader import resolve_checkpoint_arg
 from TraceLens.ModelUtils.parallel_plan import ParallelDegree, build_parallel_layout
 from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
+    _CONV_COMPUTATIONS,
     RooflineOp,
+    conv_ops_from_meta,
     project_roofline,
 )
 
@@ -303,6 +305,23 @@ def main(argv: list[str] | None = None) -> int:
         extra_dims=extra_dims,
         gpu_arch=gpu_arch,
     )
+
+    # Convolutional models: their non-uniform stages (per-stage channels/depths)
+    # don't fit the single-repeated-decoder shape the graph expands, so their
+    # convolutions never become graph nodes. Cost each live conv instance from a
+    # meta-device forward instead and let it supersede any unmodeled conv node.
+    if checkpoint is not None:
+        from TraceLens.ModelUtils.meta_trace import trace_meta_conv_ops
+
+        conv_ops = conv_ops_from_meta(
+            trace_meta_conv_ops(checkpoint, batch_size=args.batch_size),
+            dtype=str((spec.raw_config or {}).get("torch_dtype") or "bfloat16"),
+            gpu_arch=gpu_arch,
+        )
+        if conv_ops:
+            projection.ops = [
+                op for op in projection.ops if op.computation not in _CONV_COMPUTATIONS
+            ] + conv_ops
 
     print(format_table(projection.ops, top_n=args.top_n))
     print()

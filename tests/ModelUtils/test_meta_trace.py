@@ -1123,3 +1123,72 @@ def test_trace_meta_op_shapes_drops_conflicting_shapes(monkeypatch):
     # is dropped. A later add that only one class produces is kept.
     assert (1, "add", 0) not in result
     assert result[(1, "add", 1)] == ("B", 1)
+
+
+def test_conv_geometry_detail_reads_live_module():
+    # A standard conv: weight is [C_out, C_in/groups, kH, kW], bias present.
+    conv = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=True)
+    assert (
+        mt.conv_geometry_detail(conv)
+        == "conv_weight=[64, 3, 7, 7]; conv_bias=1; conv_transposed=0"
+    )
+    # Grouped, bias-free conv: C_in/groups is reflected in the weight shape.
+    grouped = nn.Conv2d(32, 32, kernel_size=3, groups=32, bias=False)
+    assert (
+        mt.conv_geometry_detail(grouped)
+        == "conv_weight=[32, 1, 3, 3]; conv_bias=0; conv_transposed=0"
+    )
+    # Transposed conv sets the flag.
+    deconv = nn.ConvTranspose2d(16, 8, kernel_size=2, stride=2, bias=False)
+    assert "conv_transposed=1" in mt.conv_geometry_detail(deconv)
+    # Not a convolution -> None.
+    assert mt.conv_geometry_detail(nn.Linear(8, 8)) is None
+    assert mt.conv_geometry_detail(object()) is None
+
+
+def test_meta_main_input_feeds_pixel_values_for_a_vision_model():
+    # A vision model's main_input_name is pixel_values; it must get a
+    # [B, C, H, W] image, not the [B, S] token dummy its forward would reject.
+    vision_model = types.SimpleNamespace(main_input_name="pixel_values")
+    vision_cfg = types.SimpleNamespace(num_channels=3, image_size=224)
+    dummy = mt._meta_main_input(vision_model, vision_cfg, batch_size=2)
+    assert isinstance(dummy, dict)
+    assert tuple(dummy["pixel_values"].shape) == (2, 3, 224, 224)
+
+    # A text model stays on the [B, S] token dummy.
+    text_model = types.SimpleNamespace(main_input_name="input_ids")
+    text_dummy = mt._meta_main_input(text_model, types.SimpleNamespace(), batch_size=1)
+    assert isinstance(text_dummy, torch.Tensor)
+    assert text_dummy.dtype == torch.long and text_dummy.shape[0] == 1
+
+
+def test_trace_meta_conv_ops_captures_live_conv_instances(monkeypatch):
+    # A two-conv vision stub: instantiation is stubbed out so the test stays
+    # offline, but the hook/forward/capture path is the real one.
+    class TinyVision(nn.Module):
+        main_input_name = "pixel_values"
+
+        def __init__(self):
+            super().__init__()
+            self.stem = nn.Conv2d(3, 8, kernel_size=4, stride=4, bias=True)
+            self.dw = nn.Conv2d(8, 8, kernel_size=3, padding=1, groups=8, bias=False)
+
+        def forward(self, pixel_values):
+            return self.dw(self.stem(pixel_values))
+
+    cfg = types.SimpleNamespace(num_channels=3, image_size=16)
+    monkeypatch.setattr(
+        mt,
+        "_instantiate_meta_robust",
+        lambda checkpoint: (TinyVision().to("meta"), cfg),
+    )
+    convs = mt.trace_meta_conv_ops("ignored", batch_size=1)
+    assert convs is not None
+    by_path = {c["path"]: c for c in convs}
+    assert by_path["stem"]["output_shape"] == [1, 8, 4, 4]
+    assert by_path["stem"]["weight_shape"] == [8, 3, 4, 4]
+    assert by_path["stem"]["bias"] is True
+    # Depthwise block: groups == channels -> weight [C, 1, k, k], no bias.
+    assert by_path["dw"]["weight_shape"] == [8, 1, 3, 3]
+    assert by_path["dw"]["bias"] is False
+    assert by_path["dw"]["input_shape"] == [1, 8, 4, 4]

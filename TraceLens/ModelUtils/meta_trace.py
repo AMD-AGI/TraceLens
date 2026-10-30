@@ -570,6 +570,135 @@ def _tensor_shape_from_output(output: Any) -> tuple[int, ...] | None:
     return first_shape(output, set())
 
 
+def conv_geometry_detail(module: Any) -> str | None:
+    """A ``details`` string recording a convolution's weight geometry, or ``None``
+    when *module* is not a convolution.
+
+    The static roofline projection
+    (:func:`TraceLens.Visualizer.model_explorer_export.roofline_projection._parse_conv_details`)
+    reads ``conv_weight`` / ``conv_bias`` / ``conv_transposed`` off a node's
+    ``details`` attr to cost a ``CONV`` with no trace. A conv's input/output
+    shapes alone cannot recover its weight kernel size or group count, but during
+    the meta-device pass the live ``torch.nn.modules.conv._ConvNd`` instance
+    carries them for free -- ``weight.shape`` is ``[C_out, C_in/groups, *kernel]``
+    and ``transposed`` / ``bias`` are plain attributes, read without a forward
+    pass. Stamp the returned string onto the module's :class:`BlockNode.details`
+    so it survives into the exported node's ``details`` attr."""
+    try:
+        from torch.nn.modules.conv import _ConvNd
+    except ImportError:
+        return None
+    if not isinstance(module, _ConvNd):
+        return None
+    weight = getattr(module, "weight", None)
+    if weight is None or getattr(weight, "shape", None) is None:
+        return None
+    shape = ", ".join(str(int(d)) for d in tuple(weight.shape))
+    bias = 1 if getattr(module, "bias", None) is not None else 0
+    transposed = 1 if getattr(module, "transposed", False) else 0
+    return f"conv_weight=[{shape}]; conv_bias={bias}; conv_transposed={transposed}"
+
+
+def _meta_main_input(model: Any, config: Any, batch_size: int):
+    """Build the meta-device dummy for a model's ``main_input_name``.
+
+    A vision model's ``main_input_name`` is ``pixel_values`` and its forward
+    rejects the ``[B, S]`` token dummy that text models take; feed it a
+    ``[B, C, H, W]`` image instead so a CNN's spatial shapes actually resolve."""
+    import torch
+
+    name = getattr(model, "main_input_name", "input_ids")
+    if name in ("pixel_values", "pixel_values_videos"):
+        channels = getattr(config, "num_channels", None) or 3
+        size = getattr(config, "image_size", None) or 224
+        height, width = (
+            (size[0], size[-1]) if isinstance(size, (list, tuple)) else (size, size)
+        )
+        return {name: torch.zeros(batch_size, channels, height, width, device="meta")}
+    return torch.zeros(batch_size, 128, dtype=torch.long, device="meta")
+
+
+def trace_meta_conv_ops(
+    checkpoint: str | Path,
+    config: dict[str, Any] | None = None,
+    *,
+    batch_size: int = 1,
+) -> list[dict[str, Any]] | None:
+    """Per-convolution concrete shapes + weight geometry from a meta forward.
+
+    Returns a list of ``{path, input_shape, output_shape, weight_shape, bias,
+    transposed}`` -- one entry per live ``_ConvNd`` instance, each with the
+    CONCRETE ``[B, C, H, W]`` shapes the forward produced -- or ``None`` when
+    torch/transformers are unavailable or the model cannot run.
+
+    This exists because the static graph pipeline models a checkpoint as a single
+    uniform repeated decoder stack (``num_hidden_layers`` + one ``decoder_class``);
+    a CNN's non-uniform stages (per-stage channels/depths) don't fit that, so its
+    convolutions never become graph nodes. Walking the live conv instances with a
+    real forward sidesteps that entirely: every conv is captured directly, with
+    the exact shapes/geometry :class:`TraceLens.PerfModel.perf_model.CONV` needs,
+    and with no dependence on symbolic spatial shape inference."""
+    try:
+        import torch
+        from torch.nn.modules.conv import _ConvNd
+    except ImportError:
+        _log.info("torch not installed; skipping meta-device conv tracing")
+        return None
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
+        return None
+    model, cfg = result
+    try:
+        from TraceLens.ModelUtils.torch_trace import _patch_rotary_embeddings
+
+        _patch_rotary_embeddings(model)
+    except Exception:  # noqa: BLE001
+        pass
+
+    captured: list[dict[str, Any]] = []
+
+    def _make_hook(path: str, module: Any):
+        def hook(_module, inputs, output):
+            try:
+                out_shape = _tensor_shape_from_output(output)
+                weight = getattr(module, "weight", None)
+                if out_shape is None or weight is None:
+                    return
+                in_shape = _tensor_shape_from_output(inputs[0]) if inputs else None
+                captured.append(
+                    {
+                        "path": path,
+                        "input_shape": list(in_shape) if in_shape else None,
+                        "output_shape": list(out_shape),
+                        "weight_shape": [int(d) for d in tuple(weight.shape)],
+                        "bias": getattr(module, "bias", None) is not None,
+                        "transposed": bool(getattr(module, "transposed", False)),
+                    }
+                )
+            except Exception:
+                pass
+
+        return hook
+
+    handles = []
+    for name, mod in model.named_modules():
+        if isinstance(mod, _ConvNd):
+            handles.append(mod.register_forward_hook(_make_hook(name, mod)))
+    if not handles:
+        return None
+    try:
+        dummy = _meta_main_input(model, cfg, batch_size)
+        with torch.no_grad():
+            model(**dummy) if isinstance(dummy, dict) else model(dummy)
+    except Exception:
+        # Hooks fire before any failing op, so partial captures are kept.
+        pass
+    finally:
+        for handle in handles:
+            handle.remove()
+    return captured or None
+
+
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,
