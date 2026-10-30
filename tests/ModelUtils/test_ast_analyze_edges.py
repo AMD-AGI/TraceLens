@@ -2697,6 +2697,3 @@ def test_desugar_ternary_submodule_dispatch_leaves_a_two_alias_statement_intact(
     assert "ffn1 = self.a if self.c1 else self.b" in dumped
     assert "ffn2 = self.d if self.c2 else self.e" in dumped
     assert "out = ffn1(x) + ffn2(x)" in dumped
-
-
-# Keep ModelUtils suite on PerfModel mode=all PRs so Codecov fail-under has full TraceLens coverage.

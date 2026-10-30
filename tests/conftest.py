@@ -199,5 +199,5 @@ def format_diff_details(diff_details):
     return "\n".join(lines)
 
 
-# Shared path: keep Visualizer suite selected on PerfModel mode=all PRs so
-# Codecov fail-under=95 is not pulled down by untested TraceLens/Visualizer.
+# Shared path: keep ModelUtils + Visualizer suites selected on PerfModel
+# mode=all PRs so Codecov fail-under=95 is not pulled down by untested packages.
