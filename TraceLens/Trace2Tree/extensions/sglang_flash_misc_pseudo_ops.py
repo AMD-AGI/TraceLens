@@ -67,7 +67,11 @@ def create_pseudo_ops_sglang_flash_misc(trace_tree):
         trace_tree,
         RMSNORM_FQ_RE,
         "pseudo_rmsnorm_fake_quant_fp8",
-        {**base, "N": _FLASH_DEFAULTS["hidden_dim"], "hidden_dim": _FLASH_DEFAULTS["hidden_dim"]},
+        {
+            **base,
+            "N": _FLASH_DEFAULTS["hidden_dim"],
+            "hidden_dim": _FLASH_DEFAULTS["hidden_dim"],
+        },
     )
     _wrap(
         trace_tree,

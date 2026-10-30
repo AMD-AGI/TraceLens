@@ -686,8 +686,6 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         return bytes_read + bytes_write_out + bytes_write_res
 
 
-
-
 class rmsnorm_fake_quant_fp8:
     """
     Flash SGLang `_rmsnorm_fake_quant_fp8` — fused RMSNorm + FP8 fake-quant.
@@ -748,4 +746,3 @@ class rmsnorm_fake_quant_fp8:
 
     def get_maf_type(self):
         return "vector"
-

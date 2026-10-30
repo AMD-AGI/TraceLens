@@ -182,3 +182,6 @@ def kimi_packed_nodes(model_graph_nodes):
     return model_graph_nodes(
         "moonshotai/Kimi-K3", RuntimeRegime(sequence_layout="packed")
     )
+
+
+# Keep Visualizer suite on PerfModel mode=all PRs so Codecov fail-under has full TraceLens coverage.

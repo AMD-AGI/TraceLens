@@ -17,16 +17,15 @@ import os
 import re
 import logging
 
-from .pseudo_ops_utils import inject_pseudo_op_wrap_children, inject_pseudo_op_above_event
+from .pseudo_ops_utils import (
+    inject_pseudo_op_wrap_children,
+    inject_pseudo_op_above_event,
+)
 
 logger = logging.getLogger(__name__)
 
-MQA_OWNER_RE = re.compile(
-    r"pa_mqa_logits_fp4\.py\(\d+\):\s*flydsl_pa_mqa_logits_fp4\b"
-)
-QUANT_OWNER_RE = re.compile(
-    r"fp4_indexer\.py\(\d+\):\s*quantize_fp4_indexer_tensor\b"
-)
+MQA_OWNER_RE = re.compile(r"pa_mqa_logits_fp4\.py\(\d+\):\s*flydsl_pa_mqa_logits_fp4\b")
+QUANT_OWNER_RE = re.compile(r"fp4_indexer\.py\(\d+\):\s*quantize_fp4_indexer_tensor\b")
 FLASHMLA_OWNER_RE = re.compile(
     r"(?:elementwise(?:_hip)?\.py\(\d+\):\s*fused_k_norm_rope_flashmla"
     r"(?:_with_q)?\b)"
