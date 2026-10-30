@@ -496,26 +496,8 @@ jobs:
           python -m pip install --upgrade pip coverage
           python -m coverage combine coverage-data-*/.coverage
           # A skipped suite leaves its package at 0% and pulls the 95% gate
-          # down. Omit that package; a push still runs both suites.
-          python - << 'PY'
-          import os
-          from pathlib import Path
-          extra = []
-          if os.environ["MODELUTILS"] != "true":
-              extra.append("    TraceLens/ModelUtils/*")
-          if os.environ["VISUALIZER"] != "true":
-              extra.append("    TraceLens/Visualizer/*")
-          text = Path(".coveragerc").read_text()
-          if extra:
-              lines = text.splitlines()
-              out = []
-              for line in lines:
-                  out.append(line)
-                  if line.strip() == "omit =":
-                      out.extend(extra)
-              Path(".coveragerc").write_text("\n".join(out) + "\n")
-              print("omitting skipped packages:", ", ".join(item.strip() for item in extra))
-          PY
+          # down. Pass --omit so coverage report/xml exclude those files.
+          # A push still runs both suites so OMIT_FLAGS is empty.
           OMIT_FLAGS=""
           if [ "$MODELUTILS" != "true" ]; then
             OMIT_FLAGS="$OMIT_FLAGS --omit=TraceLens/ModelUtils/*"
