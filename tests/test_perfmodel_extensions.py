@@ -69,7 +69,12 @@ from TraceLens.PerfModel.extensions.perf_model_extensions import (
     gemm_a8w8_blockscale,
     gemm_afp4wfp4,
     mhc_fused_post_pre_gemm_sqrsum,
+    hc_boundary,
+    hc_mix_reduce_sinkhorn,
     mhc_post,
+    mxfp8_gemv,
+    router_gate,
+    router_gemv_split_k,
     mhc_pre_big_fuse_rmsnorm,
     mhc_pre_gemm_sqrsum,
     mixed_sample_outer_exponential,
@@ -83,6 +88,7 @@ from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
     get_pseudo_op_mappings as _mappings_from_utils,
 )
 from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
+    rmsnorm_fake_quant_fp8,
     RMSNorm,
     aiter_add_rmsnorm,
     aiter_rmsnorm,
@@ -123,15 +129,21 @@ from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
     aiter_fmha_v3_varlen_fwd,
     aiter_mha_batch_prefill,
     aiter_paged_attention_ragged,
+    fused_k_norm_rope_q_flashmla,
     mha_varlen_fwd,
     mla_decode_fwd,
     mla_tilelang_sparse_fwd,
     pa_decode_gluon,
     pa_sparse_prefill_opus_fwd,
+    pseudo_flash_indexer_topk,
     pseudo_mla_prefill_fwd,
+    pseudo_pa_mqa_logits_fp4,
+    pseudo_quantize_fp4_indexer,
     pseudo_v4_paged_decode_csa,
     pseudo_v4_paged_decode_hca,
     pseudo_v4_paged_decode_swa,
+    sgl_kernel_deepseek_v4_topk_transform_512,
+    sgl_kernel_fast_topk,
     vllm_unified_mla_attention_with_output,
 )
 from TraceLens.PerfModel.kernel_name_parser import parse_rocm_gemm
@@ -184,6 +196,13 @@ class TestPseudoOpsPerfUtils:
         assert mappings["vllm::gdn_attention_core"] is gdn_attention_core
         assert mappings["aiter::gemm_a8w8_blockscale_ck"] is gemm_a8w8_blockscale
         assert mappings["_C_custom_ar::all_reduce"] is custom_ar_all_reduce
+        assert (
+            mappings["sgl_kernel::deepseek_v4_topk_transform_512"]
+            is sgl_kernel_deepseek_v4_topk_transform_512
+        )
+        assert mappings["pseudo_pa_mqa_logits_fp4"] is pseudo_pa_mqa_logits_fp4
+        assert mappings["pseudo_hc_boundary"] is hc_boundary
+        assert mappings["aten::topk"] is pseudo_flash_indexer_topk
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -201,6 +220,12 @@ class TestPseudoOpsPerfUtils:
         )
         assert (
             category_only["sglang_profiler::topk_topk_transform_paged_v2"]
+            == "InferenceAttention"
+        )
+        assert (
+            category_only[
+                "hipModuleLaunchKernel->_aiter_sparse_decode_reduce_kernel (Synthetic Op)"
+            ]
             == "InferenceAttention"
         )
 
@@ -6787,3 +6812,305 @@ class TestPerfModelDeepCoverage2:
             }
         )
         assert ce.get_compute_precision() is not None
+
+
+class TestFlashDSv41PerfModels:
+    _ANN = (
+        "execute_8_context_0(sq0sk0sqsq0sqsk0)"
+        "_generation_8(sq8sk815046sqsq8sqsk815046)"
+    )
+
+    def test_deepseek_v4_topk_transform_512(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {
+                "Input Dims": [(8, 1048640), (8,), (8, 8194), (8, 512), (), ()],
+                "Input type": ["float", "int", "int", "int", "Scalar", ""],
+            },
+        }
+        model = sgl_kernel_deepseek_v4_topk_transform_512(event)
+        assert model.flops() == 815046
+        assert model.get_compute_precision() == "fp32"
+        assert model.bytes() > 0
+        no_ann = sgl_kernel_deepseek_v4_topk_transform_512(
+            {"annotation": "NA", "args": event["args"]}
+        )
+        assert no_ann.flops() is None
+
+    def test_sgl_kernel_fast_topk(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {
+                "Input Dims": [(8, 131584), (8, 2048), (8,), ()],
+                "Input type": ["float", "int", "int", ""],
+            },
+        }
+        model = sgl_kernel_fast_topk(event)
+        assert model.flops() == 815046
+        assert model.bytes() > 0
+
+    def test_pseudo_pa_mqa_logits_fp4(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {"v4_model_name": "DeepSeek-V4-Flash"},
+        }
+        model = pseudo_pa_mqa_logits_fp4(event)
+        assert model.flops() > 0
+        assert model.get_compute_precision() == "fp4"
+        assert model.bytes() > 0
+
+    def test_pseudo_quantize_fp4_indexer(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {"v4_model_name": "DeepSeek-V4-Flash"},
+        }
+        model = pseudo_quantize_fp4_indexer(event)
+        assert model.flops() > 0
+        assert model.get_compute_precision() == "fp4"
+
+    def test_pseudo_flash_indexer_topk(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {
+                "Input Dims": [(563, 47599), (), (), (), ()],
+                "Input type": ["float"],
+                "Concrete Inputs": ["512"],
+            },
+        }
+        model = pseudo_flash_indexer_topk(event)
+        assert model.flops() == 563 * 47599
+        assert model.bytes() > 0
+        small = pseudo_flash_indexer_topk(
+            {
+                "annotation": self._ANN,
+                "args": {"Input Dims": [(8, 64), ()], "Input type": ["float"]},
+            }
+        )
+        assert small.flops() is None
+
+    def test_hc_boundary_and_sinkhorn(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [1, 4, 5120],
+                    [1, 5120],
+                    [1, 4, 5120],
+                    [1, 4],
+                    [1, 4, 4],
+                    [],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "float",
+                    "float",
+                    "Scalar",
+                ],
+            }
+        }
+        postish = hc_boundary(event)
+        assert postish.flops() == 2 * 1 * 4 * 5120 * (4 + 1)
+        assert postish.bytes() > 0
+        stamped = hc_boundary({"args": {"M": 8, "n": 4, "C": 5120}})
+        assert stamped.flops() > 0
+        sink = hc_mix_reduce_sinkhorn({"args": {"M": 8, "n": 4, "C": 1}})
+        assert sink.flops() == 8 * 8 * 4 * 4
+
+    def test_mxfp8_router_rmsnorm_flashmla(self):
+        gemv = mxfp8_gemv({"args": {"M": 1, "N": 5120, "K": 5120}})
+        assert gemv.flops() == 2 * 1 * 5120 * 5120
+        assert gemv.get_compute_precision() == "fp8"
+        rg = router_gemv_split_k({"args": {"M": 1, "E": 384, "K": 5120}})
+        assert rg.flops() == 2 * 1 * 384 * 5120
+        gate = router_gate({"args": {"M": 4, "E": 384, "topk": 6}})
+        assert gate.flops() == 6 * 4 * 384
+        rn = rmsnorm_fake_quant_fp8({"args": {"M": 4, "N": 5120}})
+        assert rn.flops() > 0
+        assert rn.get_compute_precision() == "fp8"
+        rope = fused_k_norm_rope_q_flashmla(
+            {"annotation": self._ANN, "args": {"d_h": 512, "rope_dim": 64}}
+        )
+        assert rope.flops() > 0
+
+    def test_sglang_sparse_decode_single_owner(self):
+        from TraceLens.Trace2Tree.extensions.sglang_sparse_decode_pseudo_ops import (
+            create_pseudo_ops_sglang_sparse_decode,
+        )
+
+        # Minimal synthetic tree: python owner with launcher+kernel children.
+        owner = {
+            "ph": "X",
+            "name": "aiter/ops/triton/attention/pa_decode_sparse.py(458): _pa_decode_sparse_gfx950_gluon",
+            "cat": "python_function",
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": 10,
+            "args": {},
+            "children": [],
+            "gpu_events": [],
+        }
+        launcher = {
+            "ph": "X",
+            "name": "hipModuleLaunchKernel",
+            "cat": "cuda_runtime",
+            "pid": 1,
+            "tid": 1,
+            "ts": 1,
+            "dur": 1,
+            "args": {},
+            "children": [],
+            "gpu_events": [],
+        }
+        kernel = {
+            "ph": "X",
+            "name": "hipModuleLaunchKernel->_pa_decode_sparse_BLOCK_M_16_BLOCK_K_64_HEAD_SIZE_512_NUM_SPLITS_1_UNIFORM_0_MAIN_IS_FP8_1 (Synthetic Op)",
+            "cat": "kernel",
+            "pid": 1,
+            "tid": 1,
+            "ts": 2,
+            "dur": 5,
+            "args": {"correlation": 1},
+            "children": [],
+            "gpu_events": [],
+        }
+
+        # Build via TraceToTree-like minimal stub if full ctor is heavy: call helpers directly.
+        class _Tree:
+            def __init__(self, events):
+                self.events = []
+                self.events_by_uid = {}
+                self.name2event_uids = {}
+                self.cpu_root_nodes = []
+                self.seq_num2event_uids_map = {}
+                for e in events:
+                    from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+                        set_bookkeeping_attr,
+                    )
+
+                    set_bookkeeping_attr(self, e)
+                    self.name2event_uids.setdefault(e["name"], []).append(e["UID"])
+                # link
+                owner["children"] = [launcher["UID"]]
+                launcher["parent"] = owner["UID"]
+                launcher["children"] = [kernel["UID"]]
+                kernel["parent"] = launcher["UID"]
+                owner["gpu_events"] = [kernel["UID"]]
+                self.cpu_root_nodes = [owner["UID"]]
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid[uid]
+
+            def get_parent_event(self, evt):
+                pid = evt.get("parent")
+                return self.events_by_uid.get(pid) if pid is not None else None
+
+        tree = _Tree([owner, launcher, kernel])
+        create_pseudo_ops_sglang_sparse_decode(tree)
+        pseudos = [
+            e
+            for e in tree.events
+            if str(e.get("name", "")).startswith("pseudo_v4_paged_decode_")
+        ]
+        assert len(pseudos) == 1
+        assert pseudos[0]["name"] == "pseudo_v4_paged_decode_swa"
+
+    def test_sglang_flash_misc_and_moe_injectors(self):
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+            set_bookkeeping_attr,
+        )
+        from TraceLens.Trace2Tree.extensions.sglang_flash_misc_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_misc,
+        )
+        from TraceLens.Trace2Tree.extensions.sglang_flash_moe_children_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_moe_children,
+        )
+        from TraceLens.Trace2Tree.extensions.sglang_flash_indexer_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_indexer,
+        )
+
+        class _Tree:
+            def __init__(self, events):
+                self.events = []
+                self.events_by_uid = {}
+                self.name2event_uids = {}
+                self.cpu_root_nodes = []
+                self.seq_num2event_uids_map = {}
+                for e in events:
+                    set_bookkeeping_attr(self, e)
+                    self.name2event_uids.setdefault(e["name"], []).append(e["UID"])
+                self.cpu_root_nodes = [events[0]["UID"]]
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid[uid]
+
+            def get_parent_event(self, evt):
+                pid = evt.get("parent")
+                return self.events_by_uid.get(pid) if pid is not None else None
+
+        def _evt(name, cat="python_function", **extra):
+            base = {
+                "ph": "X",
+                "name": name,
+                "cat": cat,
+                "pid": 1,
+                "tid": 1,
+                "ts": 0,
+                "dur": 1,
+                "args": {},
+                "children": [],
+                "gpu_events": [],
+            }
+            base.update(extra)
+            return base
+
+        # mHC boundary owner
+        owner = _evt(
+            "/sgl-workspace/sglang/python/sglang/kernels/ops/layernorm/mhc_boundary_hip.py(403): hc_boundary_fused",
+            annotation=self._ANN,
+        )
+        child = _evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        tree = _Tree([owner, child])
+        owner["children"] = [child["UID"]]
+        child["parent"] = owner["UID"]
+        create_pseudo_ops_sglang_flash_misc(tree)
+        assert any(e.get("name") == "pseudo_hc_boundary" for e in tree.events)
+
+        # MoE gemm2 child under fused_moe_
+        fused = _evt(
+            "aiter::fused_moe_",
+            cat="cpu_op",
+            args={
+                "Input Dims": [[1, 5120], [96, 4608, 2560], [96, 5120, 1152], [1, 6]],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float4_e2m1fn_x2",
+                    "c10::Float4_e2m1fn_x2",
+                    "float",
+                ],
+            },
+        )
+        gemm2 = _evt(
+            "aiter::fused_moe_->gemm2_a4w4_port_hmax8192 (Synthetic Op)",
+            cat="cpu_op",
+        )
+        tree2 = _Tree([fused, gemm2])
+        fused["children"] = [gemm2["UID"]]
+        gemm2["parent"] = fused["UID"]
+        create_pseudo_ops_sglang_flash_moe_children(tree2)
+        assert any(
+            e.get("name") == "pseudo_op::moe_flydsl_gemm2_a4w4" for e in tree2.events
+        )
+
+        # Indexer MQA owner
+        mqa = _evt(
+            "aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4.py(638): flydsl_pa_mqa_logits_fp4",
+            annotation=self._ANN,
+        )
+        launch = _evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        tree3 = _Tree([mqa, launch])
+        mqa["children"] = [launch["UID"]]
+        launch["parent"] = mqa["UID"]
+        create_pseudo_ops_sglang_flash_indexer(tree3)
+        assert any(e.get("name") == "pseudo_pa_mqa_logits_fp4" for e in tree3.events)

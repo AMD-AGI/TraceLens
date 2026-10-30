@@ -1221,3 +1221,472 @@ class mla_decode_v4_asm(InferenceAttention):
         if self.param_details.get("_no_perf"):
             return None
         return super().get_maf_type()
+
+
+class sgl_kernel_deepseek_v4_topk_transform_512:
+    """
+    Perf model for sgl_kernel::deepseek_v4_topk_transform_512 (Flash indexer
+    top-k + page-table transform; topk fixed at 512 by the op name).
+
+    Expected Input Dims:
+        [0] score (rows, L_max)   [1] lengths (rows,)
+        [2] src/aux indices      [3] dst / topk indices (rows, 512)
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            rows = dims[0][0]
+            topk = dims[3][1] if len(dims) > 3 and dims[3] and len(dims[3]) > 1 else 512
+            params = {
+                "rows": rows,
+                "topk": topk,
+                "dtype_score": types[0],
+                "dtype_page_table": types[3] if len(types) > 3 else "int",
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params.update(stats)
+        params["valid_scores"] = sum(
+            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
+            for p in ("c", "g")
+        )
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["valid_scores"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_score = name2bpe(p["dtype_score"])
+        bpe_idx = name2bpe(p["dtype_page_table"]) or 4
+        if bpe_score is None:
+            return None
+        rows, topk = p["rows"], p["topk"]
+        gathered = min(topk, p["valid_scores"] / rows) if rows else 0
+        read_scores = p["valid_scores"] * bpe_score
+        return read_scores + rows * (gathered + topk) * bpe_idx
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class sgl_kernel_fast_topk:
+    """
+    Perf model for sgl_kernel::fast_topk (Flash decode indexer selection).
+
+    Expected Input Dims:
+        [0] score (rows, L_max)  [1] topk_idx (rows, topk)  [2] lengths (rows,)
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            rows, l_max = dims[0][0], dims[0][1]
+            topk = dims[1][1] if len(dims) > 1 and dims[1] and len(dims[1]) > 1 else 0
+            params = {
+                "rows": rows,
+                "l_max": l_max,
+                "topk": topk,
+                "dtype_score": types[0],
+                "dtype_idx": types[1] if len(types) > 1 else "int",
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params.update(stats)
+        params["valid_scores"] = sum(
+            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
+            for p in ("c", "g")
+        )
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["valid_scores"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_score = name2bpe(p["dtype_score"])
+        bpe_idx = name2bpe(p["dtype_idx"]) or 4
+        if bpe_score is None:
+            return None
+        rows, topk = p["rows"], p["topk"]
+        return p["valid_scores"] * bpe_score + rows * topk * bpe_idx
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for fast_topk is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for fast_topk is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class _FlashIndexerConfig:
+    """Hardcoded Flash indexer geometry when Input Dims are absent on Synthetic Ops."""
+
+    _CONFIGS = {
+        "DeepSeek-V4-Pro": {
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+            "index_topk": 1024,
+        },
+        "DeepSeek-V4-Flash": {
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+            "index_topk": 512,
+        },
+    }
+
+    @classmethod
+    def config_for(cls, model_name):
+        if model_name:
+            for key, cfg in cls._CONFIGS.items():
+                if key.lower() in str(model_name).lower():
+                    return cfg
+        return cls._CONFIGS["DeepSeek-V4-Flash"]
+
+
+class pseudo_pa_mqa_logits_fp4(InferenceAttention):
+    """
+    Flash SGLang FP4 MQA lightning-indexer logits (pa_mqa_logits_fp4_*).
+
+    QK-only MQA score path (no PV). Prefer annotation sq/sk; fall back to
+    Flash indexer head/dim defaults stamped by the Trace2Tree injector.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            args = event.get("args") or {}
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+            cfg = _FlashIndexerConfig.config_for(args.get("v4_model_name"))
+            H = int(args.get("index_n_heads") or cfg["index_n_heads"])
+            d = int(args.get("index_head_dim") or cfg["index_head_dim"])
+            index_topk = int(args.get("index_topk") or cfg["index_topk"])
+            N_Q = stats["c_sq"] + stats["g_sq"]
+            dims = args.get("Input Dims") or []
+            types = args.get("Input type") or []
+            if dims and len(dims) > 3 and dims[3] and len(dims[3]) >= 3:
+                N_Q, H, d = dims[3][0], dims[3][1], dims[3][2]
+            dtype_Q = types[3] if len(types) > 3 else "c10::Float4_e2m1fn_x2"
+            dtype_KV = types[2] if len(types) > 2 else "c10::Float4_e2m1fn_x2"
+            return {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H,
+                "H_KV": 1,
+                "N_KV": stats["c_sk"] + stats["g_sk"],
+                "d_h_qk": d,
+                "d_h_v": d,
+                "dropout": 0.0,
+                "causal": True,
+                "flash_impl": True,
+                "index_topk": index_topk,
+                "dtype_Q": dtype_Q,
+                "dtype_KV": dtype_KV,
+                **stats,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        if p["c_sq"] == 0 and p["g_sq"] == 0:
+            return None
+        H, d = self.H_Q, self.d_h_qk
+        ctx_qk = H * (2 * p["c_sqsk"] - p["c_sqsq"]) * d
+        gen_qk = H * (2 * p["g_sqsk"]) * d
+        return ctx_qk + gen_qk
+
+    def bytes(self, bytes_per_element=None):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_q = name2bpe(p.get("dtype_Q")) or 1
+        bpe_kv = name2bpe(p.get("dtype_KV")) or 1
+        N_Q, H, d = self.N_Q, self.H_Q, self.d_h_qk
+        total_sk = p["c_sk"] + p["g_sk"]
+        read_q = N_Q * H * d * bpe_q
+        # MQA: keys shared across index heads.
+        read_k = total_sk * d * bpe_kv
+        avg_ctx = total_sk / N_Q if N_Q else 0
+        topk = min(p["index_topk"], avg_ctx) if p["index_topk"] else avg_ctx
+        write_logits = N_Q * topk * 4  # streamed logits / top candidates
+        return read_q + read_k + write_logits
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "fp4"
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class pseudo_quantize_fp4_indexer:
+    """
+    Flash indexer FP4 quant (`quantize_fp4_indexer_tensor` / `_quantize_fp4_indexer`).
+
+    Models elementwise FP4 pack of indexer keys. Geometry from injector stamps
+    or annotation + Flash indexer defaults.
+    """
+
+    category = "GroupQuant"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            args = event.get("args") or {}
+            cfg = _FlashIndexerConfig.config_for(args.get("v4_model_name"))
+            d = int(args.get("index_head_dim") or cfg["index_head_dim"])
+            annotation = str(event.get("annotation", "NA"))
+            try:
+                stats = InferenceAttention._parse_chunk_stats(annotation)
+                n_tok = stats["c_sk"] + stats["g_sk"]
+            except (NotImplementedError, ValueError, TypeError):
+                stats = None
+                n_tok = int(args.get("num_tokens") or 0)
+            dims = args.get("Input Dims") or []
+            if dims and dims[0]:
+                # Prefer explicit tensor numel when present.
+                shape = dims[0]
+                numel = 1
+                for x in shape:
+                    numel *= int(x)
+                n_tok = numel // max(d, 1)
+            if n_tok <= 0:
+                return {"_no_perf": True}
+            return {
+                "num_elems": n_tok * d,
+                "dtype_in": "c10::BFloat16",
+                "stats": stats,
+            }
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # max-abs + scale per element (same order as other quant models)
+        return 2 * p["num_elems"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_in = name2bpe(p["dtype_in"]) or 2
+        return p["num_elems"] * bpe_in + p["num_elems"] * 1  # bf16 read + fp4 write
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "fp4"
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class pseudo_flash_indexer_topk:
+    """
+    Pseudo parent for Flash PD indexer selection that currently lands on
+    aten::topk (+ optional repeat_interleave). Uses score matrix dims from the
+    wrapped aten::topk event rather than inventing a generic aten::topk formula
+    for unrelated call sites.
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            dims = event["args"]["Input Dims"]
+            types = event["args"].get("Input type") or []
+            rows, cols = dims[0][0], dims[0][1]
+            # Guard: only Flash indexer-scale score matrices (avoid generic aten::topk).
+            if cols is None or int(cols) < 1024:
+                return {"_no_perf": True}
+            # k may be Concrete Inputs or a trailing empty dim; default Flash 512.
+            k = 512
+            concrete = event["args"].get("Concrete Inputs") or []
+            for item in concrete:
+                s = str(item).strip()
+                if s.isdigit():
+                    k = int(s)
+                    break
+            annotation = str(event.get("annotation", "NA"))
+            try:
+                stats = InferenceAttention._parse_chunk_stats(annotation)
+            except (NotImplementedError, ValueError, TypeError):
+                stats = {
+                    "c_sq": 0,
+                    "c_sk": 0,
+                    "c_sqsq": 0,
+                    "c_sqsk": 0,
+                    "g_sq": 0,
+                    "g_sk": 0,
+                    "g_sqsq": 0,
+                    "g_sqsk": 0,
+                }
+            return {
+                "rows": rows,
+                "cols": cols,
+                "k": k,
+                "dtype_score": types[0] if types else "float",
+                **stats,
+            }
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # Comparison work proportional to the score buffer scanned.
+        return p["rows"] * p["cols"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe = name2bpe(p["dtype_score"]) or 4
+        return p["rows"] * p["cols"] * bpe + p["rows"] * p["k"] * 4
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class fused_k_norm_rope_q_flashmla:
+    """
+    FlashMLA fused K-RMSNorm + RoPE + Q prep
+    (`fused_k_norm_rope_q_flashmla` / `fused_k_norm_rope_flashmla_with_q`).
+
+    Geometry from injector stamps (tokens, head_dim=512, rope_dim=64 defaults).
+    """
+
+    category = "FusedRoPE"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            args = event.get("args") or {}
+            annotation = str(event.get("annotation", "NA"))
+            try:
+                stats = InferenceAttention._parse_chunk_stats(annotation)
+                tokens = stats["c_sq"] + stats["g_sq"]
+            except (NotImplementedError, ValueError, TypeError):
+                tokens = int(args.get("num_tokens") or 0)
+            d_h = int(args.get("d_h") or 512)
+            rope_dim = int(args.get("rope_dim") or 64)
+            if tokens <= 0:
+                return {"_no_perf": True}
+            return {
+                "tokens": tokens,
+                "d_h": d_h,
+                "rope_dim": rope_dim,
+                "dtype": "c10::BFloat16",
+            }
+        except (ValueError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # RMSNorm ~2*d_h + RoPE ~6*rope_dim per token (sin/cos apply pair)
+        return p["tokens"] * (2 * p["d_h"] + 6 * p["rope_dim"])
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe = name2bpe(p["dtype"]) or 2
+        # read K + write rotated K (+ optional Q touch ~ same width)
+        return 3 * p["tokens"] * p["d_h"] * bpe
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "bf16"
+
+    def get_maf_type(self):
+        return "vector"

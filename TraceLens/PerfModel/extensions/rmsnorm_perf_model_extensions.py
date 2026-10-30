@@ -9,6 +9,7 @@ Performance models for RMSNorm pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+from TraceLens.PerfModel.utils import name2bpe
 
 
 class RMSNorm(CoreRMSNorm):
@@ -616,3 +617,65 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         bytes_write_out = M * self.n_out * self.bpe_in
         bytes_write_res = M * N * self.bpe_in
         return bytes_read + bytes_write_out + bytes_write_res
+
+
+class rmsnorm_fake_quant_fp8:
+    """
+    Flash SGLang `_rmsnorm_fake_quant_fp8` — fused RMSNorm + FP8 fake-quant.
+
+    Accepts either aiter-style Input Dims or injector-stamped (M, N).
+    """
+
+    category = "RMSNorm"
+    bwd_category = None
+    sheet_category = "RMSNorm"
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        try:
+            if dims and len(dims) > 1 and dims[1] and len(dims[1]) >= 2:
+                M, N = dims[1][0], dims[1][1]
+                dtype_in = types[1] if len(types) > 1 else "c10::BFloat16"
+            elif dims and dims[0] and len(dims[0]) >= 2:
+                M, N = dims[0][0], dims[0][1]
+                dtype_in = types[0] if types else "c10::BFloat16"
+            else:
+                M = int(args.get("M") or args.get("num_tokens") or 0)
+                N = int(args.get("N") or args.get("hidden_dim") or 0)
+                dtype_in = args.get("dtype_in") or "c10::BFloat16"
+                if min(M, N) <= 0:
+                    raise ValueError("missing rmsnorm dims")
+            return {"M": M, "N": N, "num_elems": M * N, "dtype_in": dtype_in}
+        except (ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # RMSNorm ~2N per row + fake-quant 2 per elem
+        return p["M"] * (2 * p["N"]) + 2 * p["num_elems"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe = name2bpe(p["dtype_in"]) or 2
+        return p["num_elems"] * bpe + p["N"] * bpe + p["num_elems"] * 1
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "fp8"
+
+    def get_maf_type(self):
+        return "vector"
