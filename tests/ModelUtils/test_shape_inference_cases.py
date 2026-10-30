@@ -2341,6 +2341,21 @@ def test_quant_storage_dtype_across_methods():
     )
     assert _quant_storage_dtype({"quant_method": "gptq", "bits": 4}) == "int4"
     assert _quant_storage_dtype({"quant_method": "awq", "bits": 8}) == "int8"
+    # Quark (AMD) nests the scheme under global_quant_config.weight.dtype.
+    assert (
+        _quant_storage_dtype(
+            {
+                "quant_method": "quark",
+                "global_quant_config": {"weight": {"dtype": "fp4"}},
+            }
+        )
+        == "fp4"
+    )
+    assert (
+        _quant_storage_dtype({"global_quant_config": {"weight": {"dtype": "fp8_e4m3"}}})
+        == "fp8_e4m3"
+    )
+    assert _quant_storage_dtype({"quant_method": "quark"}) is None
     assert _quant_storage_dtype({"quant_method": "unknown"}) is None
 
 
