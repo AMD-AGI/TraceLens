@@ -7379,6 +7379,29 @@ def _bind_named_section_inputs(
     return True
 
 
+def _step_boundary_sources(
+    step: str,
+    boundary_params: dict[str, tuple[str, ...]],
+    refs: dict[str, SourceRef],
+) -> list[SourceRef]:
+    """A step's sources from the method's own parameters, for a step with no listed
+    chained predecessor.
+
+    ``forward_step_predecessors`` is empty for a call whose first read of a tensor is a
+    bare forward parameter (``self.input_layernorm(hidden_states)`` as a model's very
+    first statement) rather than another step's output -- that fact is recorded in
+    ``forward_step_boundary_params`` instead. Leaving such a step without an input would
+    drop it, and everything chained after it, from the rendered graph even though it is
+    the model's actual entry point.
+    """
+    sources = []
+    for param in boundary_params.get(step, ()):
+        source = refs.get(f"@method_input:{param}") or refs.get("@method_input")
+        if source is not None:
+            sources.append(source)
+    return sources
+
+
 def _append_source_decoder_layer(
     merged_nodes: list[dict[str, Any]],
     *,
@@ -7421,6 +7444,12 @@ def _append_source_decoder_layer(
                 for predecessor in phi_live_arms.get(step, operation.predecessors)
                 if predecessor in refs
             ]
+            if not sources:
+                sources = _step_boundary_sources(
+                    step,
+                    getattr(decoder, "forward_step_boundary_params", None) or {},
+                    refs,
+                )
             if not sources:
                 continue
             if (operation.class_name or "") == PHI_CLASS and len(sources) == 1:
@@ -7465,6 +7494,12 @@ def _append_source_decoder_layer(
         inputs = [
             refs[predecessor] for predecessor in predecessors if predecessor in refs
         ]
+        if not inputs:
+            inputs = _step_boundary_sources(
+                step,
+                getattr(decoder, "forward_step_boundary_params", None) or {},
+                refs,
+            )
         if not inputs:
             continue
         section_prefix = _merge_node_id(id_prefix, component.attr_name)

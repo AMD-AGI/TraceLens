@@ -198,6 +198,7 @@ TraceLens/
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
 | Model visualizer agent       | [docs/how-to/visualize-model.md](docs/how-to/visualize-model.md)                                                                 |
 | TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
+| Model Roofline Projection    | [docs/how-to/generate-model-roofline-projection.md](docs/how-to/generate-model-roofline-projection.md)                           |
 
 ---
 
