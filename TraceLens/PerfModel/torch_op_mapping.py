@@ -295,6 +295,9 @@ unary_elemwise_ops = [
     "aten::silu",
     "aten::neg",
     "aten::pow",
+    "aten::_to_copy",
+    "aten::clone",
+    "aten::gelu",
 ]
 
 binary_elemwise_ops = [
@@ -407,6 +410,10 @@ for op in upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
 for op in bilinear_upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
+
+# Memory/data-movement op. Has a dedicated class (variable arity), so it
+# is registered individually rather than via a shared-class loop.
+op_to_perf_model_class_map["aten::cat"] = perf_model.aten_cat
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.

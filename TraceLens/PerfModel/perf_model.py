@@ -4139,6 +4139,55 @@ class aten_reduce(Reduce):
         }
 
 
+class aten_cat:
+    """
+    aten::cat(tensors, dim) -- concatenates a TensorList along `dim`.
+
+    Trace limitation: PyTorch's profiler records TensorList args as a single
+    'TensorList' placeholder in "Input type" (no per-tensor dtype), so bytes()
+    cannot be computed and returns None. Element counts (flops=0, since this
+    is pure data movement) are still exact, derived by summing the shape of
+    each tensor in the Input Dims[0] nested list.
+
+    Expected Input Dims from trace: [[[shape_1], [shape_2], ...], []]
+    Expected Input type from trace: ['TensorList', 'Scalar']
+    """
+
+    category = "data_movement"
+    bwd_category = None
+    sheet_category = "DataMovement"
+
+    def __init__(self, event, arch=None, python_path=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.num_input_elems = self.param_details["num_input_elems"]
+        self.num_output_elems = self.num_input_elems
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args", {})
+        tensor_shapes = args.get("Input Dims", [[]])[0] or []
+        num_input_elems = sum(prod(tuple(s)) for s in tensor_shapes if s)
+        return {"num_input_elems": num_input_elems}
+
+    def flops(self):
+        return 0
+
+    def flops_bwd(self):
+        return 0
+
+    def bytes(self):
+        # Per-tensor dtype is not recoverable from a TensorList arg.
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+    def get_maf_type(self):
+        return "vector"
+
+
 class GroupedGemm:
     """
     Grouped General Matrix Multiplication (GEMM).
