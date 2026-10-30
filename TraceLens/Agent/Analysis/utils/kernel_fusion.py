@@ -939,13 +939,15 @@ class FusionPricer:
         perf_rows: dict,
         baseline_ms: float,
         *,
+        display_ms: float | None = None,
         perf_rows2: dict | None = None,
         baseline2_ms: float = 0,
         same_platform: bool = False,
     ):
         """``peaks`` is (peak_bw_tbs, peak_maf_tflops); the trace 2 arguments price
         comparative candidates. Trace 2 Efficiency and Bound are filled only when
-        ``same_platform``."""
+        ``same_platform``. ``display_ms`` is the denominator of the detail rows'
+        %E2E (default ``baseline_ms``); multi_trace passes the focus node's time."""
         self.forms = forms
         self.peak_bw_tbs, self.peak_maf_tflops = peaks
         self.peak_bw_bytes_s = self.peak_bw_tbs * 1e12
@@ -953,6 +955,7 @@ class FusionPricer:
         self.vector_maf = self.peak_maf_tflops.get("vector_bf16", self.matrix_maf)
         self.perf_rows = perf_rows
         self.baseline_ms = baseline_ms
+        self.display_ms = baseline_ms if display_ms is None else display_ms
         self.perf_rows2 = perf_rows2
         self.baseline2_ms = baseline2_ms
         self.same_platform = same_platform
@@ -1049,7 +1052,7 @@ class FusionPricer:
             confidence=c.confidence,
             fusion_kind=c.fusion_kind,
             fusion_type=FUSION_TYPE_MATRIX if has_matrix_ops else FUSION_TYPE_MEMORY,
-            rows_trace1=self.build_rows(c.ops_trace1, self.perf_rows, self.baseline_ms),
+            rows_trace1=self.build_rows(c.ops_trace1, self.perf_rows, self.display_ms),
             rows_trace2=self.build_rows(
                 c.ops_trace2,
                 self.perf_rows2,
@@ -1160,7 +1163,7 @@ class FusionPricer:
                 if unmodeled_count > 0
                 else None
             ),
-            rows=self.build_rows(c.ops, self.perf_rows, self.baseline_ms),
+            rows=self.build_rows(c.ops, self.perf_rows, self.display_ms),
             op_keys=[g["perf_key"] for g in c.ops if g["perf_key"]],
         )
 

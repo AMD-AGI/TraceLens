@@ -403,6 +403,7 @@ _FUSION_P2_GOLDEN = {
     "resolution": "Fold the activation into the GEMM epilogue.",
     "prose_truncated": False,
     "priority": 2,
+    "node": None,
 }
 
 # (name, md, mode, has_op_row, n_warn) — the inline replacement for the disk
@@ -487,6 +488,7 @@ def _assert_schema_valid(report):
             "resolution",
             "prose_truncated",
             "impact",
+            "node",
             "members",
         }
         assert isinstance(task["priority"], int)
@@ -582,6 +584,61 @@ def test_envelope_agentic_golden(tmp_path):
     assert report["title"] == "ExampleMoE - MI300X Standalone Analysis"
 
 
+@pytest.mark.parametrize(
+    "table, expected",
+    [
+        pytest.param(
+            "| Rank | Category | Time (ms) | % of Compute Time | Ops |\n"
+            "|---|---|---|---|---|\n"
+            "| 1 | gemm | 10.5 | 50.0% | 4 | <!-- top-ops-row low=1.0 high=2.0 -->\n"
+            "| 2 | triton | 5.25 | 25.0% | 2 |\n",
+            [
+                (1, "gemm", 10.5, 50.0, 4, None),
+                (2, "triton", 5.25, 25.0, 2, None),
+            ],
+            id="public_5col_with_and_without_trailer",
+        ),
+        pytest.param(
+            "| Rank | Category | Time (ms) | % of Compute Time | Ops "
+            "| Potential improvement (time, E2E %) |\n"
+            "|---|---|---|---|---|---|\n"
+            "| 1 | gemm | 10.5 | 50.0% | 4 | ~1.0–2.0 ms (1.0–2.0%) |\n",
+            [(1, "gemm", 10.5, 50.0, 4, "~1.0–2.0 ms (1.0–2.0%)")],
+            id="rehydrated_6col",
+        ),
+        pytest.param(
+            "| Rank | Category | Time (ms) | % of Compute Time | Ops "
+            "| Potential improvement (time, % of decode) |\n"
+            "|---|---|---|---|---|---|\n"
+            "| 1 | gemm | 10.5 | 50.0% | 4 | ~1.0–2.0 ms (1.0–2.0%) |\n",
+            [(1, "gemm", 10.5, 50.0, 4, "~1.0–2.0 ms (1.0–2.0%)")],
+            id="rehydrated_6col_per_node_header",
+        ),
+        pytest.param(
+            "| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) "
+            "| % of Compute Time | Ops | Difference (ms) |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| 1 | gemm | 10.5 | 7.75 | 50.0% | 4 | -2.75 "
+            "| <!-- top-ops-row low=1.0 high=2.0 -->\n",
+            [(1, "gemm", 10.5, 50.0, 4, None)],
+            id="comparative_7col",
+        ),
+    ],
+)
+def test_top_operations_cells_follow_headers(tmp_path, table, expected):
+    md = f"# T\n\n<!-- impact-begin kind=top_ops -->\n{table}<!-- impact-end -->\n"
+    report, _ = _render_text(md, tmp_path)
+    keys = (
+        "rank",
+        "category",
+        "time_ms",
+        "pct_of_compute",
+        "ops",
+        "potential_improvement_md",
+    )
+    assert [tuple(row[k] for k in keys) for row in report["top_operations"]] == expected
+
+
 def test_exec_summary_metrics(tmp_path):
     report, _ = _render_text(_AGENTIC_MD, tmp_path)
     metrics = report["executive_summary"]["metrics"]
@@ -647,10 +704,10 @@ def test_impact_sum_and_task_order(tmp_path):
     assert [t["priority"] for t in tasks] == list(range(1, len(tasks) + 1))
 
 
-def test_compute_tasks_split_by_phase(tmp_path):
+def test_compute_tasks_split_by_node(tmp_path):
     md = (
-        _AGENTIC_MD.replace("category=gemm", "category=gemm phase=prefill")
-        .replace("category=moe_unfused", "category=moe_unfused phase=decode")
+        _AGENTIC_MD.replace("category=gemm", "category=gemm node=prefill_0")
+        .replace("category=moe_unfused", "category=moe_unfused node=decode_0")
         .replace("| pseudo_op::moe_flydsl_stage1 |", "| aiter::gemm_a16w16 |")
     )
     report, _ = _render_text(md, tmp_path)
@@ -659,14 +716,79 @@ def test_compute_tasks_split_by_phase(tmp_path):
         for t in report["compute_optimizations"]
         if t["operation"] == "aiter::gemm_a16w16"
     ]
-    assert sorted(t["phase"] for t in gemm) == ["decode", "prefill"]
+    assert sorted(t["node"] for t in gemm) == ["decode_0", "prefill_0"]
 
 
-def test_fallback_tasks_split_by_phase(tmp_path):
-    # Same kernel in two phases: the p_item marker's phase splits the task.
+_MULTI_TRACE_MD = """<!-- report-begin kind=report_mode mode=deterministic-fallback -->
+<!-- report-end -->
+
+## Executive Summary
+
+| Metric | Total | n0 | n1 |
+|---|---|---|---|
+| Total Time | 200.0 ms | 120.0 ms | 80.0 ms |
+| Compute % | 90.0% | 95.0% | 85.0% |
+
+## Compute Kernel Optimizations
+
+<!-- impact-begin kind=top_ops node=n0 -->
+| Rank | Category |
+|---|---|
+| 1 | gemm |
+<!-- impact-end -->
+
+<!-- impact-begin kind=top_ops node=n1 -->
+| Rank | Category |
+|---|---|
+| 1 | triton |
+<!-- impact-end -->
+
+<!-- reasoning-candidate tier=compute rank=1 -->
+#### P1: kernel_a
+<!-- impact-begin kind=p_item category=unknown low=1.0 mid=2.0 high=3.0 node=n0 -->
+<!-- impact-end -->
+
+**Data:**
+
+| Operation | Kernel Name | Time (ms) | % of Node |
+|---|---|---|---|
+| — | kernel_a | 10.000 | 8.33 |
+<!-- impact-begin kind=op_row rank=1 impacts=2.0 -->
+<!-- impact-end -->
+"""
+
+
+def test_multi_trace_report_carries_node_fields(tmp_path):
+    report, _ = _render_text(_MULTI_TRACE_MD, tmp_path)
+    summary = report["executive_summary"]
+    assert summary["metrics"]["total_time_ms"] == 200.0
+    assert summary["node_metrics"] == {
+        "n0": {"total_time_ms": 120.0, "compute_pct": 95.0},
+        "n1": {"total_time_ms": 80.0, "compute_pct": 85.0},
+    }
+    assert [(r["node"], r["category"]) for r in report["top_operations"]] == [
+        ("n0", "gemm"),
+        ("n1", "triton"),
+    ]
+    # 10.0 ms of the 200.0 ms Total Time, not the table's 8.33 cell.
+    (task,) = report["compute_optimizations"]
+    assert task["members"][0]["pct_e2e"] == 5.0
+
+
+def test_pct_of_node_table_needs_total_time(tmp_path):
+    # A thousands separator would parse as 2.0 ms and skew pct_e2e silently.
+    md = _MULTI_TRACE_MD.replace(
+        "| Total Time | 200.0 ms |", "| Total Time | 2,000.0 ms |"
+    )
+    with pytest.raises(ValueError, match="Total Time"):
+        _render_text(md, tmp_path)
+
+
+def test_fallback_tasks_split_by_node(tmp_path):
+    # Same kernel on two nodes: the p_item marker's node splits the task.
     cards = "".join(f"""<!-- reasoning-candidate tier=compute rank={rank} -->
 #### P{rank}: kernel_a
-<!-- impact-begin kind=p_item category=unknown low=1.0 mid=2.0 high=3.0 phase={phase} -->
+<!-- impact-begin kind=p_item category=unknown low=1.0 mid=2.0 high=3.0 node={node} -->
 <!-- impact-end -->
 
 **Data:**
@@ -677,14 +799,14 @@ def test_fallback_tasks_split_by_phase(tmp_path):
 <!-- impact-begin kind=op_row rank={rank} impacts=2.0 -->
 <!-- impact-end -->
 
-""" for rank, phase in enumerate(["prefill", "decode"], start=1))
+""" for rank, node in enumerate(["prefill_0", "decode_0"], start=1))
     md = (
         "<!-- report-begin kind=report_mode mode=deterministic-fallback -->\n"
         "<!-- report-end -->\n\n" + cards
     )
     report, _ = _render_text(md, tmp_path)
     tasks = report["compute_optimizations"]
-    assert sorted(t["phase"] for t in tasks) == ["decode", "prefill"]
+    assert sorted(t["node"] for t in tasks) == ["decode_0", "prefill_0"]
 
 
 def test_op_row_impacts_read_from_marker(tmp_path):
@@ -1187,6 +1309,22 @@ def test_fusion_tier_golden(tmp_path):
     assert softmax["flops_per_byte"] is None
     assert softmax["efficiency_percent"] is None
     assert softmax["bound"] is None
+
+
+def test_fusion_task_takes_node_from_card_p_item(tmp_path):
+    card = (
+        "## Kernel Fusion Opportunities (Experimental)\n\n"
+        "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n0 -->\n"
+        "<!-- impact-end -->\n\n"
+        + "Prose. " * 80
+        + "\n\n→ *See [Detailed Analysis](#detailed-analysis-fusion-P1) for details*\n\n"
+    )
+    md = _FUSION_MD.replace("## Detailed Analysis", card + "## Detailed Analysis", 1)
+    tasks = _render_text(md, tmp_path)[0]["fusion_optimizations"]
+    assert {t["operation"]: t["node"] for t in tasks} == {
+        "Unfused Attention": "n0",
+        "Unfused Activation": None,
+    }
 
 
 @pytest.mark.parametrize(

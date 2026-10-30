@@ -20,6 +20,7 @@ import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     PEAK_MEM_BW_KEY,
+    gpu_utilization_from_timeline,
     load_perf_rows,
 )
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms, load_arch
@@ -29,6 +30,7 @@ from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     FusionForms,
     FusionLabeler,
 )
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 from TraceLens.Reporting.generate_perf_report_from_config import (
     AGGREGATED_CSVS_DIR,
     RESOLVED_CONFIG_NAME,
@@ -132,24 +134,12 @@ def ops_summary_by_enhanced_category(csv_dir: str) -> list:
     return json.loads(grouped.to_json(orient="records"))
 
 
-def _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline: pd.DataFrame) -> dict:
-    """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows."""
-    gpu_data = {}
-    for _, row in gpu_timeline.iterrows():
-        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
-    return {
-        "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
-        "computation_time_percent": gpu_data.get("computation_time", {}).get(
-            "percent", 0
-        ),
-        "exposed_comm_time_percent": gpu_data.get("exposed_comm_time", {}).get(
-            "percent", 0
-        ),
-        "exposed_memcpy_time_percent": gpu_data.get("exposed_memcpy_time", {}).get(
-            "percent", 0
-        ),
-        "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
-    }
+def _kernel_time_ms(df: pd.DataFrame) -> float:
+    if "Kernel Time (µs)_sum" in df.columns:
+        return df["Kernel Time (µs)_sum"].sum() / 1000
+    if "total_direct_kernel_time_ms" in df.columns:
+        return df["total_direct_kernel_time_ms"].sum()
+    return 0
 
 
 def perf_report_metadata(csv_dir: str, platform: str) -> dict:
@@ -163,7 +153,7 @@ def perf_report_metadata(csv_dir: str, platform: str) -> dict:
     return {
         PEAK_MEM_BW_KEY: arch["mem_bw_gbps"] / 1000,
         "max_achievable_tflops": arch["max_achievable_tflops"],
-        "gpu_utilization": _gpu_utilization_metrics_from_gpu_timeline_df(gpu_timeline),
+        "gpu_utilization": gpu_utilization_from_timeline(gpu_timeline),
     }
 
 
@@ -281,15 +271,9 @@ def main():
     trace1_metadata = perf_report_metadata(trace1_csv_dir, platform)
     gpu_utilization_metrics = trace1_metadata["gpu_utilization"]
     if plans is not None:
-        job_utilization = {
-            plan.name: _gpu_utilization_metrics_from_gpu_timeline_df(
-                pd.read_csv(os.path.join(plan.output_csvs_dir, "gpu_timeline.csv"))
-            )
-            for plan in plans
-        }
-        focus_job = plans[0].name
+        focus_job = plans[0].node_id
         focus_csv_dir = plans[0].output_csvs_dir
-        system_utilization = job_utilization[focus_job]
+        system_utilization = gpu_utilization_metrics["nodes"][focus_job]
     else:
         focus_csv_dir = trace1_csv_dir
         system_utilization = gpu_utilization_metrics
@@ -297,7 +281,7 @@ def main():
     trace2_ops_summary_by_category = None
 
     if comparison_scope == "comparative" and trace2_csv_dir is not None:
-        trace2_gpu_utilization = _gpu_utilization_metrics_from_gpu_timeline_df(
+        trace2_gpu_utilization = gpu_utilization_from_timeline(
             pd.read_csv(os.path.join(trace2_csv_dir, "gpu_timeline.csv"))
         )
         with open(
@@ -835,12 +819,7 @@ def main():
         category_df = unified_df[unified_df["enhanced_category"] == category_name]
 
         # Calculate GPU kernel time (ms)
-        if "Kernel Time (µs)_sum" in category_df.columns:
-            gpu_kernel_time_ms = category_df["Kernel Time (µs)_sum"].sum() / 1000
-        elif "total_direct_kernel_time_ms" in category_df.columns:
-            gpu_kernel_time_ms = category_df["total_direct_kernel_time_ms"].sum()
-        else:
-            gpu_kernel_time_ms = 0
+        gpu_kernel_time_ms = _kernel_time_ms(category_df)
 
         # Calculate CPU duration (ms) - total_duration_us if available
         if "total_duration_us" in category_df.columns:
@@ -868,6 +847,14 @@ def main():
         cat_info["cpu_duration_ms"] = round(cpu_duration_ms, 3)
         cat_info["sync_time_ms"] = round(sync_time_ms, 3)
         cat_info["sync_ops_count"] = sync_ops_count
+        if NODE_COL in category_df.columns:
+            cat_info["nodes"] = {
+                node: {
+                    "gpu_kernel_time_ms": round(_kernel_time_ms(node_df), 3),
+                    "ops_count": len(node_df),
+                }
+                for node, node_df in category_df.groupby(NODE_COL, sort=False)
+            }
 
         # Flag sync bottleneck if significant
         if sync_time_ms > 0.1 * gpu_kernel_time_ms and sync_time_ms > 1:
@@ -918,13 +905,6 @@ def main():
 
     if plans is not None:
         manifest["focus_job"] = focus_job
-        manifest["gpu_utilization"] = {
-            **gpu_utilization_metrics,
-            "jobs": {
-                plan.name: {"phase": plan.phase, **job_utilization[plan.name]}
-                for plan in plans
-            },
-        }
 
     manifest_file = f"{output_dir}/category_data/category_manifest.json"
     with open(manifest_file, "w") as f:

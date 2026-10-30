@@ -64,9 +64,9 @@ jobs:
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `name` | when there's more than one job | Used in the output file names. Letters, digits, `_`, `-`, and `.`. |
-| `phase` | when `aggregation` is set | Phase label used by the aggregation, for example `prefill`, `decode`, or `mixed`. |
-| `node` | when `aggregation.policy` is `combine_by_node` | Node label used by the aggregation, for example `prefill_w0`. Jobs with the same node combine. |
+| `name` | when there's more than one job, unless `aggregation.policy` is `combine_by_node` | Used in the output file names. Letters, digits, `_`, `-`, and `.`. Defaults to the node id under `combine_by_node`. |
+| `phase` | when `aggregation` is set | Phase label used by the aggregation, for example `prefill`, `decode`, or `mixed`. Letters, digits, `_`, `-`, and `.`. |
+| `node` | when `aggregation.policy` is `combine_by_node` | Index of the node within its phase, a non-negative integer. The node id is `<phase>_<index>`, for example `prefill_0`. Jobs with the same phase and index combine, so give them distinct `name`s. |
 | `trace_path` | yes | Trace to analyze. |
 | `platform` | one of the two | Bundled or `TL_EXTENSION` architecture name, for example `MI300X`. |
 | `gpu_arch_json_path` | one of the two | Path to an architecture JSON file, for hardware that isn't bundled. |
@@ -182,13 +182,13 @@ aggregation:
 jobs:
   - name: prefill_rank0
     phase: prefill
-    node: prefill_w0
+    node: 0
     trace_path: /data/dsv2lite_pd/prefill/rank0.json.gz
     platform: MI300X
     capture_folder: /data/dsv2lite_pd/prefill/capture_traces
   - name: decode_rank0
     phase: decode
-    node: decode_w0
+    node: 0
     trace_path: /data/dsv2lite_pd/decode/rank0.json.gz
     platform: MI300X
     capture_folder: /data/dsv2lite_pd/decode/capture_traces
@@ -196,7 +196,7 @@ jobs:
 
 | Policy | Rows with the same key in different reports |
 |--------|---------------------------------------------|
-| `combine_by_node` | Combined only when the reports have the same `node`. Every table is one block per node, in job order, tagged with `node` and `phase`. |
+| `combine_by_node` | Combined only when the reports have the same node id. Every table is one block per node, in job order, tagged with `node` and `phase`. |
 | `combine`, `combine_by_phase`, `combine_stack` | Reserved. Not supported yet; the run stops with an error after the per-job reports. |
 
 When rows combine:

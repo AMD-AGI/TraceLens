@@ -38,6 +38,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     compute_impact_estimates,
     format_args,
     get_peak_specs,
+    gpu_utilization_from_timeline,
     load_category_data,
     standalone_efficiency,
     validate_efficiency,
@@ -63,6 +64,7 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _metrics_json_for_findings,
     _scan_args_cells,
     _validate_compute_data_tables,
+    _validate_exec_summary_nodes,
     _validate_fusion_data_tables,
     _validate_report_args_column,
     _validate_report_comparison_scope_diffs,
@@ -74,7 +76,6 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
 )
 from TraceLens.Agent.Analysis.utils.orchestrator_prepare import (
     ops_summary_by_enhanced_category,
-    _gpu_utilization_metrics_from_gpu_timeline_df,
     _normalize_category,
 )
 from TraceLens.Agent.Analysis.utils.kernel_fusion import (
@@ -900,16 +901,16 @@ def test_build_category_findings_quantified_grouping_standalone():
     assert f["rank"] == 1
 
 
-def test_findings_split_by_phase():
-    """Same-shaped ops in different phases stay separate findings, tagged by phase."""
+def test_findings_split_by_node():
+    """Same-shaped ops on different nodes stay separate findings, tagged by node."""
     eff = {"efficiency_percent": 50.0, "is_anomaly": False, "bound_type": "compute"}
     operations = [
-        {"name": "op_a", "time_ms": 10.0, "efficiency": eff, "phase": phase}
-        for phase in ("prefill", "decode")
+        {"name": "op_a", "time_ms": 10.0, "efficiency": eff, "node": node}
+        for node in ("n0", "n1")
     ]
     estimates = compute_impact_estimates(operations, "gemm", baseline_ms=100.0)
     findings = build_category_findings(estimates)
-    assert sorted(f["phase"] for f in findings) == ["decode", "prefill"]
+    assert sorted(f["node"] for f in findings) == ["n0", "n1"]
 
 
 def test_build_category_findings_drops_below_min_pitem():
@@ -1486,9 +1487,9 @@ def test_priority_consistency_r2_category_mismatch(tmp_path):
     assert any(e.startswith("R2:") for e in errors)
 
 
-def test_priority_consistency_r6_phase_mismatch(tmp_path):
+def test_priority_consistency_r6_node_mismatch(tmp_path):
     pd_data = _priority_data_two()
-    pd_data["findings"][0]["phase"] = "decode"
+    pd_data["findings"][0]["node"] = "decode_0"
     (tmp_path / "priority_data.json").write_text(json.dumps(pd_data))
     errors = _validate_report_priority_consistency(_passing_report(), str(tmp_path))
     assert any(e.startswith("R6:") for e in errors)
@@ -1504,6 +1505,51 @@ def test_priority_consistency_r4_top_ops_row_count(tmp_path):
     (tmp_path / "priority_data.json").write_text(json.dumps(pd_data))
     errors = _validate_report_priority_consistency(content, str(tmp_path))
     assert any(e.startswith("R4:") for e in errors)
+
+
+def test_priority_consistency_r4_per_node_top_ops(tmp_path):
+    # n1's block has one row but two of the priorities belong to n1 -> one R4.
+    content = "## Compute Kernel Optimizations\n" + "".join(
+        f"<!-- impact-begin kind=top_ops node={node} -->\n"
+        "| Rank | Category |\n|---|---|\n| 1 | gemm |\n<!-- impact-end -->\n"
+        for node in ("n0", "n1")
+    )
+    pd_data = {
+        "findings": [],
+        "priorities": [
+            {"rank": 1, "category": "gemm", "node": "n0"},
+            {"rank": 2, "category": "gemm", "node": "n1"},
+            {"rank": 3, "category": "sdpa_fwd", "node": "n1"},
+        ],
+    }
+    (tmp_path / "priority_data.json").write_text(json.dumps(pd_data))
+    errors = _validate_report_priority_consistency(content, str(tmp_path))
+    r4 = [e for e in errors if e.startswith("R4:")]
+    assert len(r4) == 1 and "'n1'" in r4[0]
+
+
+def test_priority_consistency_r6_detail_estimate_and_fusion_node(tmp_path):
+    content = (
+        "## Compute Kernel Optimizations\n\n"
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 node=n1 -->\n"
+        "<!-- impact-end -->\n\n"
+        "## Kernel Fusion Opportunities (Experimental)\n\n"
+        "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n0 -->\n"
+        "<!-- impact-end -->\n"
+        "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n1 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    pd_data = {"findings": [{"category": "gemm", "node": "n0"}], "priorities": []}
+    (tmp_path / "priority_data.json").write_text(json.dumps(pd_data))
+    (tmp_path / "category_data").mkdir()
+    (tmp_path / "category_data" / "category_manifest.json").write_text(
+        json.dumps({"focus_job": "n0"})
+    )
+    errors = _validate_report_priority_consistency(content, str(tmp_path))
+    r6 = [e for e in errors if e.startswith("R6:")]
+    assert len(r6) == 2
+    assert "detail_estimate" in r6[0] and "fusion P-item marker #2" in r6[1]
 
 
 def test_priority_consistency_absent_json_is_silent(tmp_path):
@@ -1629,6 +1675,31 @@ def test_check_priority_consistency_inv7_excludes_heuristic(tmp_path):
     _write_priority_data(str(tmp_path), data)
     result = _check_priority_consistency(str(tmp_path), {})
     assert result["status"] == "PASS"
+
+
+def test_check_priority_consistency_inv7_keyed_by_node_and_category(tmp_path):
+    data = {
+        "findings": [
+            {"category": "gemm", "node": "n0", "global_rank": 1, "impact_score": 100.0},
+            {"category": "gemm", "node": "n1", "global_rank": 2, "impact_score": 30.0},
+        ],
+        "priorities": [
+            {
+                "rank": rank,
+                "category": "gemm",
+                "node": node,
+                "source": "findings_rollup",
+                "impact_score": score,
+            }
+            for rank, node, score in ((1, "n0", 100.0), (2, "n1", 30.0))
+        ],
+    }
+    _write_priority_data(str(tmp_path), data)
+    assert _check_priority_consistency(str(tmp_path), {})["status"] == "PASS"
+    data["priorities"][1]["impact_score"] = 130.0
+    _write_priority_data(str(tmp_path), data)
+    result = _check_priority_consistency(str(tmp_path), {})
+    assert any("INV7'" in m and "node=n1" in m for m in result["messages"])
 
 
 def test_check_priority_consistency_missing_file(tmp_path):
@@ -1760,6 +1831,70 @@ def test_compute_data_tables_missing_data_table(tmp_path):
     assert any("no **Data:** table found" in e for e in errors)
 
 
+# ----- multi_trace validators: % of Node column and Executive Summary -----
+
+
+def test_validate_findings_file_by_node_data_column(tmp_path):
+    out = tmp_path / "analysis_output"
+    (out / "category_findings").mkdir(parents=True)
+    (out / "category_data").mkdir()
+    (out / "category_data" / "category_manifest.json").write_text(
+        json.dumps({"gpu_utilization": {"nodes": {"n0": {}}}})
+    )
+    fp = out / "category_findings" / "gemm_findings.md"
+    _write(str(fp), _valid_compute_findings())
+    _, errors = validate_findings_file(str(fp), "compute")
+    assert any("canonical columns" in e for e in errors)
+    _write(str(fp), _valid_compute_findings().replace("%E2E", "% of Node"))
+    _, errors = validate_findings_file(str(fp), "compute")
+    assert not any("canonical columns" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    "block, expected",
+    [
+        pytest.param(
+            "| Metric | Total | n0 | n1 |\n|---|---|---|---|\n"
+            "| Total Time | 200.0 ms | 120.0 ms | 80.005 ms |\n",
+            [],
+            id="matches",
+        ),
+        pytest.param(
+            "| Metric | Total | n1 | n0 |\n|---|---|---|---|\n"
+            "| Total Time | 200.0 ms | 80.0 ms | 120.0 ms |\n",
+            ["header"],
+            id="nodes_out_of_job_order",
+        ),
+        pytest.param(
+            "| Metric | Total | n0 | n1 |\n|---|---|---|---|\n"
+            "| Total Time | 200.0 ms | 120.0 ms | 81.0 ms |\n",
+            ["Total Time for n1"],
+            id="node_total_off_manifest",
+        ),
+        pytest.param(
+            "| Metric | Total | n0 | n1 |\n|---|---|---|---|\n"
+            "| Total Time | 200.0 ms | 120.0 ms |\n",
+            ["needs a Total Time row"],
+            id="total_row_missing_a_node_cell",
+        ),
+        pytest.param(
+            "| Metric | Total | n0 | n1 |\n|---|---|---|---|\n"
+            "| Compute % | 90.0% | 95.0% | 85.0% |\n",
+            ["needs a Total Time row"],
+            id="no_total_time_row",
+        ),
+    ],
+)
+def test_validate_exec_summary_nodes(block, expected):
+    gpu_util = {
+        "total_time_ms": 200.0,
+        "nodes": {"n0": {"total_time_ms": 120.0}, "n1": {"total_time_ms": 80.0}},
+    }
+    errors = _validate_exec_summary_nodes(block, gpu_util)
+    assert bool(errors) == bool(expected)
+    assert all(any(frag in e for e in errors) for frag in expected)
+
+
 # ----- _validate_fusion_data_tables / _iter_candidate_blocks -----
 
 
@@ -1888,7 +2023,7 @@ def test_passes_gates_delta_filters(delta_kernel, delta_type, expected):
     assert _builder()._passes_gates(t1, [gemm]) is expected
 
 
-# ----- _gpu_utilization_metrics_from_gpu_timeline_df -----
+# ----- gpu_utilization_from_timeline -----
 
 
 def test_gpu_utilization_metrics_full_rows():
@@ -1905,12 +2040,31 @@ def test_gpu_utilization_metrics_full_rows():
             "percent": [100.0, 99.8, 0.05, 0.01, 0.2],
         }
     )
-    m = _gpu_utilization_metrics_from_gpu_timeline_df(df)
+    m = gpu_utilization_from_timeline(df)
     assert m["total_time_ms"] == 1000.0
     assert m["computation_time_percent"] == 99.8
     assert m["exposed_comm_time_percent"] == 0.05
     assert m["exposed_memcpy_time_percent"] == 0.01
     assert m["idle_time_percent"] == 0.2
+
+
+def test_gpu_utilization_metrics_stacked_nodes():
+    df = pd.DataFrame(
+        {
+            "node": ["n1"] * 2 + ["n0"] * 2 + ["all"] * 2,
+            "type": ["total_time", "idle_time"] * 3,
+            "time ms": [500.0, 100.0, 1000.0, 100.0, 1500.0, 200.0],
+            "percent": [100.0, 20.0, 100.0, 10.0, 100.0, 13.0],
+        }
+    )
+    m = gpu_utilization_from_timeline(df)
+    assert m["total_time_ms"] == 1500.0
+    assert m["idle_time_percent"] == 13.0
+    assert list(m["nodes"]) == ["n1", "n0"]
+    assert m["nodes"]["n0"]["total_time_ms"] == 1000.0
+    assert m["nodes"]["n1"]["idle_time_percent"] == 20.0
+    with pytest.raises(ValueError, match="gpu_timeline.csv has no 'all' block"):
+        gpu_utilization_from_timeline(df[df["node"] != "all"])
 
 
 def test_gpu_utilization_metrics_missing_rows_default_zero():
@@ -1921,7 +2075,7 @@ def test_gpu_utilization_metrics_missing_rows_default_zero():
             "percent": [100.0],
         }
     )
-    m = _gpu_utilization_metrics_from_gpu_timeline_df(df)
+    m = gpu_utilization_from_timeline(df)
     assert m["total_time_ms"] == 500.0
     assert m["computation_time_percent"] == 0
     assert m["exposed_comm_time_percent"] == 0
@@ -2439,11 +2593,11 @@ def test_build_operation_metrics_flags_row_matching_op_key(tmp_path):
     assert [bool(o.get("fusion_flagged")) for o in ops] == [True, False]
 
 
-def test_build_operation_metrics_flags_only_the_fusion_phase(tmp_path):
+def test_build_operation_metrics_flags_only_the_fusion_node(tmp_path):
     cat_dir = tmp_path / "category_data"
     cat_dir.mkdir()
     (cat_dir / "kernel_fusion_metrics.json").write_text(
-        json.dumps({"phase": "decode", "high_confidence_op_keys": [_FUSION_ADD_KEY]})
+        json.dumps({"node": "n1", "high_confidence_op_keys": [_FUSION_ADD_KEY]})
     )
     row = {
         "name": "aten::add",
@@ -2456,16 +2610,35 @@ def test_build_operation_metrics_flags_only_the_fusion_phase(tmp_path):
         "thread_name": "t1",
         "kernel_details_summary": "[{'name': 'shared_kernel'}]",
     }
-    df = pd.DataFrame([{**row, "phase": "prefill"}, {**row, "phase": "decode"}])
+    df = pd.DataFrame([{**row, "node": "n0"}, {**row, "node": "n1"}])
     df["Kernel Time (µs)_sum"] = [300.0, 200.0]
     metadata = {
         "output_dir": str(tmp_path),
         "peak_mem_bw_tbs": 5.3,
         "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {
+            "nodes": {"n0": {"total_time_ms": 1.0}, "n1": {"total_time_ms": 1.0}}
+        },
     }
     ops = build_operation_metrics(df, metadata, {})
-    assert [o["phase"] for o in ops] == ["prefill", "decode"]
+    assert [o["node"] for o in ops] == ["n0", "n1"]
     assert [bool(o.get("fusion_flagged")) for o in ops] == [False, True]
+
+
+def test_build_operation_metrics_percent_of_node_only_with_node():
+    metadata = {
+        "peak_mem_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 708},
+        "gpu_utilization": {
+            "total_time_ms": 10.0,
+            "nodes": {"n0": {"total_time_ms": 2.0}},
+        },
+    }
+    df = pd.DataFrame({"name": ["aten::add"], "Kernel Time (µs)_sum": [500.0]})
+    assert "percent_of_node" not in build_operation_metrics(df, metadata, {})[0]
+    ops = build_operation_metrics(df.assign(node="n0"), metadata, {})
+    assert ops[0]["percent_of_node"] == 25.0
+    assert ops[0]["percent_of_total"] == 5.0
 
 
 # ----- analysis_utils: build_operation_metrics call-chain cap -----
@@ -3330,9 +3503,9 @@ def test_load_manifest_categories_prints_focus_job_utilization(
     manifest["focus_job"] = "decode"
     manifest["gpu_utilization"].update(
         idle_time_percent=5.0,
-        jobs={
-            "prefill": {"phase": "prefill", "idle_time_percent": 5.0},
-            "decode": {"phase": "decode", "idle_time_percent": 40.0},
+        nodes={
+            "prefill": {"idle_time_percent": 5.0},
+            "decode": {"idle_time_percent": 40.0},
         },
     )
     json.dump(manifest, open(manifest_path, "w"))
@@ -3416,6 +3589,59 @@ def test_generate_priority_data_unmodeled_and_heuristic(tmp_path):
     assert len(data["recommendations"]) == 0
 
 
+def test_generate_priority_data_per_node_ranks_without_cap(tmp_path):
+    cat_data = tmp_path / "category_data"
+    cat_data.mkdir()
+    manifest = {
+        "gpu_utilization": {
+            "total_time_ms": 1000.0,
+            "computation_time_percent": 100.0,
+            "nodes": {"n0": {"total_time_ms": 500.0}, "n1": {"total_time_ms": 500.0}},
+        },
+        "categories": [
+            {
+                "name": "gemm",
+                "tier": "compute_kernel",
+                "nodes": {
+                    "n0": {"gpu_kernel_time_ms": 100.0},
+                    "n1": {"gpu_kernel_time_ms": 90.0},
+                },
+            },
+            {
+                "name": "norm",
+                "tier": "compute_kernel",
+                "nodes": {
+                    "n0": {"gpu_kernel_time_ms": 80.0},
+                    "n1": {"gpu_kernel_time_ms": 10.0},
+                },
+            },
+        ],
+    }
+    (cat_data / "category_manifest.json").write_text(json.dumps(manifest))
+    (cat_data / "gemm_metrics.json").write_text(
+        json.dumps(
+            {
+                "category": "gemm",
+                "category_findings": [
+                    {"rank": 1, "node": "n0", "impact_score": 10.0},
+                    {"rank": 2, "node": "n1", "impact_score": 5.0},
+                ],
+            }
+        )
+    )
+    out_path = generate_priority_data(str(tmp_path), max_recommendations=1)
+    with open(out_path) as f:
+        data = json.load(f)
+    assert [(p["rank"], p["node"], p["category"]) for p in data["priorities"]] == [
+        (1, "n0", "gemm"),
+        (2, "n1", "gemm"),
+        (3, "n0", "norm"),
+    ]
+    assert [(r["category"], r["impact_score"]) for r in data["recommendations"]] == [
+        ("gemm", 15.0)
+    ]
+
+
 def test_generate_priority_data_exception_fallback(tmp_path):
     out_path = generate_priority_data(str(tmp_path))
     with open(out_path) as f:
@@ -3464,6 +3690,62 @@ def test_generate_perf_plot_rest_only_segment(tmp_path):
         )
     )
     assert plot_utils.generate_perf_plot(str(tmp_path), "Title") is True
+
+
+def test_generate_perf_plot_by_node(tmp_path, monkeypatch):
+    """One bar per node, each summing to its T, one color per category."""
+    cat_data = tmp_path / "category_data"
+    cat_data.mkdir()
+    (cat_data / "category_manifest.json").write_text(
+        json.dumps(
+            {
+                "gpu_utilization": {
+                    "total_time_ms": 150.0,
+                    "nodes": {
+                        "n0": {"total_time_ms": 100.0},
+                        "n1": {"total_time_ms": 50.0},
+                    },
+                },
+                "categories": [
+                    {
+                        "name": "gemm",
+                        "tier": "compute_kernel",
+                        "gpu_kernel_time_ms": 45.0,
+                        "nodes": {
+                            "n0": {"gpu_kernel_time_ms": 40.0},
+                            "n1": {"gpu_kernel_time_ms": 5.0},
+                        },
+                    },
+                    {
+                        "name": "norm",
+                        "tier": "compute_kernel",
+                        "gpu_kernel_time_ms": 30.0,
+                        "nodes": {
+                            "n0": {"gpu_kernel_time_ms": 10.0},
+                            "n1": {"gpu_kernel_time_ms": 20.0},
+                        },
+                    },
+                ],
+            }
+        )
+    )
+    figs = []
+    monkeypatch.setattr(
+        plot_utils.plt, "savefig", lambda *a, **kw: figs.append(plot_utils.plt.gcf())
+    )
+    assert plot_utils.generate_perf_plot(str(tmp_path), "Title", write_base64=False)
+
+    axes = figs[0].axes
+    assert [ax.get_title() for ax in axes] == ["n0 (100.00 ms)", "n1 (50.00 ms)"]
+    bars = [
+        {c.get_label().split(" ")[0]: c.patches[0] for c in ax.containers}
+        for ax in axes
+    ]
+    assert [sum(p.get_width() for p in b.values()) for b in bars] == [100.0, 50.0]
+    legend = [t.get_text() for t in axes[1].get_legend().get_texts()]
+    assert "Norm \u2014 20.0 ms (40.0%)" in legend
+    for category in ("Gemm", "Norm"):
+        assert bars[0][category].get_facecolor() == bars[1][category].get_facecolor()
 
 
 def test_embed_plot_in_report(tmp_path):
@@ -3985,24 +4267,52 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
 def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
     out = str(tmp_path)
     _write_minimal_orchestrator_csvs(out)
-    for name in ("aggregated", "job_a", "job_b"):
+    for name in ("aggregated", "prefill_0", "decode_0"):
         shutil.copytree(
             os.path.join(out, "perf_report_csvs"),
             os.path.join(out, f"perf_report_{name}_csvs"),
         )
+    aggregated = os.path.join(out, "perf_report_aggregated_csvs")
+    pd.DataFrame(
+        {
+            "node": ["prefill_0"] * 3 + ["decode_0"] * 3 + ["all"] * 3,
+            "type": ["total_time", "computation_time", "idle_time"] * 3,
+            "time ms": [
+                1000.0,
+                900.0,
+                100.0,
+                500.0,
+                400.0,
+                100.0,
+                1500.0,
+                1300.0,
+                200.0,
+            ],
+            "percent": [100.0, 90.0, 10.0, 100.0, 80.0, 20.0, 100.0, 86.0, 14.0],
+        }
+    ).to_csv(os.path.join(aggregated, "gpu_timeline.csv"), index=False)
+    pd.DataFrame(
+        {
+            "node": ["prefill_0", "decode_0"],
+            "name": ["aten::mm"] * 2,
+            "op category": ["GEMM"] * 2,
+            "Kernel Time (µs)_sum": [800_000.0, 300_000.0],
+            "total_duration_us": [900_000.0, 400_000.0],
+        }
+    ).to_csv(os.path.join(aggregated, "unified_perf_summary.csv"), index=False)
     (tmp_path / "trace.json.gz").touch()
     resolved = {
         "analysis_mode": "default",
         "output_dir": out,
-        "aggregation": {"policy": "combine_by_phase"},
+        "aggregation": {"policy": "combine_by_node"},
         "jobs": [
             {
-                "name": name,
                 "phase": phase,
+                "node": 0,
                 "trace_path": str(tmp_path / "trace.json.gz"),
                 "platform": "MI300X",
             }
-            for name, phase in (("job_a", "prefill"), ("job_b", "decode"))
+            for phase in ("prefill", "decode")
         ],
     }
     (tmp_path / "run_config.resolved.yaml").write_text(yaml.safe_dump(resolved))
@@ -4028,14 +4338,20 @@ def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
     kfa.main()
 
     manifest = json.load(open(os.path.join(cat_dir, "category_manifest.json")))
-    assert manifest["focus_job"] == "job_a"
-    assert manifest["focus_csv_dir"] == os.path.join(out, "perf_report_job_a_csvs")
-    assert {k: v["phase"] for k, v in manifest["gpu_utilization"]["jobs"].items()} == {
-        "job_a": "prefill",
-        "job_b": "decode",
-    }
-    metrics = json.load(open(os.path.join(cat_dir, "kernel_fusion_metrics.json")))
-    assert metrics["phase"] == "prefill"
+    assert manifest["focus_job"] == "prefill_0"
+    assert manifest["focus_csv_dir"] == os.path.join(out, "perf_report_prefill_0_csvs")
+    util = manifest["gpu_utilization"]
+    assert util["total_time_ms"] == 1500.0
+    assert list(util["nodes"]) == ["prefill_0", "decode_0"]
+    assert util["nodes"]["decode_0"]["total_time_ms"] == 500.0
+    gemm = next(c for c in manifest["categories"] if c["name"] == "gemm")
+    assert gemm["gpu_kernel_time_ms"] == 1100.0
+    assert list(gemm["nodes"].items()) == [
+        ("prefill_0", {"gpu_kernel_time_ms": 800.0, "ops_count": 1}),
+        ("decode_0", {"gpu_kernel_time_ms": 300.0, "ops_count": 1}),
+    ]
+    with open(os.path.join(cat_dir, "kernel_fusion_metrics.json")) as f:
+        assert json.load(f)["node"] == "prefill_0"
 
 
 class TestOrchestratorPhase11:

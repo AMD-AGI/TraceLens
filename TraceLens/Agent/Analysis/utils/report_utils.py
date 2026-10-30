@@ -21,8 +21,10 @@ import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     focus_job_utilization,
+    node_field,
     perf_report_csv_dir,
 )
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 
 def load_manifest(output_dir: str) -> dict:
@@ -211,6 +213,47 @@ def load_findings(output_dir):
     return result
 
 
+def _rollup_quantified(findings: List[dict], per_node: bool) -> List[dict]:
+    """Quantified findings summed per category (per node and category when
+    ``per_node``), sorted by ``impact_score`` descending.
+
+    Heuristic findings rank in ``findings[]`` but stay out of the rollup (a guess
+    must not inflate projected savings).
+    """
+    rollup: dict = defaultdict(
+        lambda: {
+            "impact_score": 0.0,
+            "impact_score_low": 0.0,
+            "impact_score_high": 0.0,
+            "operation_count": 0,
+        }
+    )
+    for f in findings:
+        if f.get("estimate_method") == "heuristic":
+            continue
+        entry = rollup[(f.get(NODE_COL) if per_node else None, f["category"])]
+        entry["impact_score"] += f.get("impact_score", 0)
+        entry["impact_score_low"] += f.get("impact_score_low", 0)
+        entry["impact_score_high"] += f.get("impact_score_high", 0)
+        entry["operation_count"] += f.get("operation_count", 0)
+    return sorted(
+        [
+            {
+                "category": cat,
+                **node_field(node),
+                "impact_score": round(v["impact_score"], 2),
+                "impact_score_low": round(v["impact_score_low"], 2),
+                "impact_score_high": round(v["impact_score_high"], 2),
+                "operation_count": v["operation_count"],
+                "type": "kernel_tuning",
+            }
+            for (node, cat), v in rollup.items()
+        ],
+        key=lambda x: x["impact_score"],
+        reverse=True,
+    )
+
+
 def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str:
     """Aggregate ``impact_estimates`` into ``priority_data.json`` -- the single
     deterministic source of truth for report P-item ordering, the Top-Ops
@@ -225,15 +268,18 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
         per-category rollup of ``findings`` (so the Top-Ops "Potential
         improvement" column equals the sum of the rendered P-item Impacts for
         that category). Unmodeled categories with >5% of compute time follow,
-        sorted by ``gpu_kernel_time_ms``.
-      - ``recommendations``: same quantified rollup, capped, used by the
-        extension plot.
+        sorted by ``gpu_kernel_time_ms``. On multi_trace runs every entry is per
+        (node, category), ranked globally, with no cap; the unmodeled threshold
+        applies to each node's category time.
+      - ``recommendations``: the per-category quantified rollup, capped, used by
+        the extension plot.
       - ``all_estimates``: flat unfiltered audit trail of every per-op
         estimate the analyzers emitted.
 
     Args:
         output_dir: Base output directory containing ``category_data/``.
-        max_recommendations: Max categories in the plot recommendations.
+        max_recommendations: Cap on the plot recommendations and, on a single
+            trace, on the priorities.
 
     Returns:
         Path to written ``priority_data.json``.
@@ -268,40 +314,8 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 cf["category_rank"] = cf.pop("rank", 0)
                 findings.append(cf)
 
-        quantified: dict = defaultdict(
-            lambda: {
-                "impact_score": 0.0,
-                "impact_score_low": 0.0,
-                "impact_score_high": 0.0,
-                "operation_count": 0,
-            }
-        )
-        for f in findings:
-            # Heuristic findings rank in findings[] but are kept out of the
-            # quantified savings rollup/plot (a guess must not inflate projected savings).
-            if f.get("estimate_method") == "heuristic":
-                continue
-            cat = f["category"]
-            quantified[cat]["impact_score"] += f.get("impact_score", 0)
-            quantified[cat]["impact_score_low"] += f.get("impact_score_low", 0)
-            quantified[cat]["impact_score_high"] += f.get("impact_score_high", 0)
-            quantified[cat]["operation_count"] += f.get("operation_count", 0)
-
-        plot_recs = sorted(
-            [
-                {
-                    "category": cat,
-                    "impact_score": round(v["impact_score"], 2),
-                    "impact_score_low": round(v["impact_score_low"], 2),
-                    "impact_score_high": round(v["impact_score_high"], 2),
-                    "operation_count": v["operation_count"],
-                    "type": "kernel_tuning",
-                }
-                for cat, v in quantified.items()
-            ],
-            key=lambda x: x["impact_score"],
-            reverse=True,
-        )[:max_recommendations]
+        node_recs = _rollup_quantified(findings, per_node=True)
+        plot_recs = _rollup_quantified(findings, per_node=False)[:max_recommendations]
 
         cat_display = {}
         for cat_entry in manifest.get("categories", []):
@@ -310,11 +324,20 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             )
 
         priorities: List[dict] = []
-        for rank, rec in enumerate(plot_recs, 1):
+        # The cap would empty short nodes' Top Ops tables: single trace only.
+        for rank, rec in enumerate(
+            (
+                node_recs
+                if "nodes" in manifest.get("gpu_utilization", {})
+                else node_recs[:max_recommendations]
+            ),
+            1,
+        ):
             priorities.append(
                 {
                     "rank": rank,
                     "category": rec["category"],
+                    **node_field(rec.get(NODE_COL)),
                     "display_name": cat_display.get(rec["category"], rec["category"]),
                     "impact_score": rec["impact_score"],
                     "impact_score_low": rec["impact_score_low"],
@@ -323,26 +346,29 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 }
             )
 
-        quantified_cats = set(quantified.keys())
-        heuristic_cats = {
-            f["category"] for f in findings if f.get("estimate_method") == "heuristic"
+        modeled_keys = {(r.get(NODE_COL), r["category"]) for r in node_recs} | {
+            (f.get(NODE_COL), f["category"])
+            for f in findings
+            if f.get("estimate_method") == "heuristic"
         }
         unmodeled = []
         for cat_entry in manifest.get("categories", []):
             cat_name = cat_entry.get("name")
             if cat_entry.get("tier") != "compute_kernel":
                 continue
-            if cat_name in quantified_cats or cat_name in heuristic_cats:
-                continue
-            gpu_time = cat_entry.get("gpu_kernel_time_ms", 0)
-            if gpu_time >= threshold_ms:
-                unmodeled.append(
-                    {
-                        "category": cat_name,
-                        "display_name": cat_entry.get("display_name", cat_name),
-                        "gpu_kernel_time_ms": round(gpu_time, 3),
-                    }
-                )
+            for node, entry in cat_entry.get("nodes", {None: cat_entry}).items():
+                if (node, cat_name) in modeled_keys:
+                    continue
+                gpu_time = entry.get("gpu_kernel_time_ms", 0)
+                if gpu_time >= threshold_ms:
+                    unmodeled.append(
+                        {
+                            "category": cat_name,
+                            **node_field(node),
+                            "display_name": cat_entry.get("display_name", cat_name),
+                            "gpu_kernel_time_ms": round(gpu_time, 3),
+                        }
+                    )
         unmodeled.sort(key=lambda x: x["gpu_kernel_time_ms"], reverse=True)
 
         next_rank = len(priorities) + 1
@@ -351,6 +377,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 {
                     "rank": next_rank,
                     "category": entry["category"],
+                    **node_field(entry.get(NODE_COL)),
                     "display_name": entry["display_name"],
                     "impact_score": None,
                     "gpu_kernel_time_ms": entry["gpu_kernel_time_ms"],

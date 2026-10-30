@@ -28,7 +28,7 @@ import pandas as pd
 
 from TraceLens.NcclAnalyser.nccl_analyser import list_to_tuple
 from TraceLens.PerfModel.utils import torch_dtype_map
-from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
+from TraceLens.Reporting.aggregate_perf_reports import ALL_NODES, NODE_COL
 
 TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
@@ -117,11 +117,43 @@ def perf_report_csv_dir(output_dir: str) -> str:
 
 
 def focus_job_utilization(manifest: dict) -> dict:
-    """The manifest's ``gpu_utilization``; on multi_trace runs, the focus job's entry."""
+    """The manifest's ``gpu_utilization``; on multi_trace runs, the focus node's entry."""
     gpu_util = manifest.get("gpu_utilization", {})
     if manifest.get("focus_job"):
-        return gpu_util["jobs"][manifest["focus_job"]]
+        return gpu_util["nodes"][manifest["focus_job"]]
     return gpu_util
+
+
+def gpu_utilization_from_timeline(gpu_timeline: pd.DataFrame) -> dict:
+    """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows.
+
+    A combine_by_node gpu_timeline has one block per node and a final ``all`` block:
+    the top level is ``all`` and ``nodes`` holds each node's metrics in job order.
+    """
+    if NODE_COL in gpu_timeline.columns:
+        blocks = {
+            node: gpu_utilization_from_timeline(block.drop(columns=NODE_COL))
+            for node, block in gpu_timeline.groupby(NODE_COL, sort=False)
+        }
+        if ALL_NODES not in blocks:
+            raise ValueError(f"gpu_timeline.csv has no {ALL_NODES!r} block.")
+        return {**blocks.pop(ALL_NODES), "nodes": blocks}
+    gpu_data = {}
+    for _, row in gpu_timeline.iterrows():
+        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
+    return {
+        "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
+        "computation_time_percent": gpu_data.get("computation_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_comm_time_percent": gpu_data.get("exposed_comm_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_memcpy_time_percent": gpu_data.get("exposed_memcpy_time", {}).get(
+            "percent", 0
+        ),
+        "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
+    }
 
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
@@ -441,7 +473,7 @@ def _load_fusion_op_keys(output_dir: str) -> Set[tuple]:
     except json.JSONDecodeError:
         return set()
     return {
-        (metrics.get(PHASE_COL), *key)
+        (metrics.get(NODE_COL), *key)
         for key in metrics.get(HIGH_CONFIDENCE_OP_KEYS, [])
     }
 
@@ -553,7 +585,8 @@ def build_operation_metrics(
     peak_mem_bw = get_peak_mem_bw_tbs(metadata)
     maf = metadata["max_achievable_tflops"]
     fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
-    e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+    gpu_util = metadata.get("gpu_utilization", {})
+    e2e_ms_total = gpu_util.get("total_time_ms", 0)
 
     # Calculate category total for % of category (kept for analyzer screening)
     total_time_ms = 0
@@ -591,8 +624,11 @@ def build_operation_metrics(
             "percent_of_total": percent_of_total,
             "efficiency": efficiency,
         }
-        if PHASE_COL in row:
-            op_metric[PHASE_COL] = row[PHASE_COL]
+        if NODE_COL in row:
+            op_metric[NODE_COL] = row[NODE_COL]
+            op_metric["percent_of_node"] = round(
+                time_ms / gpu_util["nodes"][row[NODE_COL]]["total_time_ms"] * 100, 2
+            )
 
         # Add efficiency warning if present (for anomaly detection)
         if efficiency.get("warning"):
@@ -656,7 +692,7 @@ def build_operation_metrics(
 
         if (
             fusion_op_keys
-            and (row.get(PHASE_COL), *row_perf_key(row, with_thread=True))
+            and (row.get(NODE_COL), *row_perf_key(row, with_thread=True))
             in fusion_op_keys
         ):
             op_metric["fusion_flagged"] = True
@@ -798,7 +834,7 @@ def compute_impact_estimates(
             continue
         impact_score_mid = score["impact_score"]
         time_ms = op["time_ms"]
-        phase = phase_field(op.get(PHASE_COL))
+        node = node_field(op.get(NODE_COL))
         if score["impact_estimate_method"] == "quantified":
             impact_score_high = impact_score_mid * (TARGET_HIGH / TARGET_MID)
             impact_score_low = impact_score_mid * (TARGET_LOW / TARGET_MID)
@@ -818,7 +854,7 @@ def compute_impact_estimates(
                     "bound_type": eff.get("bound_type"),
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
-                    **phase,
+                    **node,
                 }
             )
         else:
@@ -837,7 +873,7 @@ def compute_impact_estimates(
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
                     "percent_of_total": pct,
-                    **phase,
+                    **node,
                 }
             )
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
@@ -848,7 +884,7 @@ def build_category_findings(
 ) -> List[dict]:
     """Group one category's per-op impact estimates into P-item findings.
 
-    Groups are per phase (the ``phase`` of multi-trace estimates). Quantified
+    Groups are per node (the ``node`` of multi-trace estimates). Quantified
     estimates (``estimate_method != "heuristic"``) group by
     ``(bound_type, library, eff_bucket)`` in standalone, or ``(bound_type,
     library)`` in comparative (``efficiency_pct`` is a trace-time ratio there).
@@ -876,20 +912,20 @@ def build_category_findings(
         bound = e.get("bound_type") or "unknown"
         lib = e.get("library") or "Unknown"
         bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
-        g = groups[(e.get(PHASE_COL), bound, lib, bucket)]
+        g = groups[(e.get(NODE_COL), bound, lib, bucket)]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
         g["impact_score_high"] += e.get("impact_score_high", 0)
 
     findings = []
-    for (phase, bound, lib, bucket), g in groups.items():
+    for (node, bound, lib, bucket), g in groups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": bound,
-                **phase_field(phase),
+                **node_field(node),
                 "library": lib,
                 "eff_bucket": bucket,
                 "estimate_method": "quantified",
@@ -916,7 +952,7 @@ def build_category_findings(
         }
     )
     for e in heuristic:
-        g = hgroups[(e.get(PHASE_COL), e.get("operation", "Unknown"))]
+        g = hgroups[(e.get(NODE_COL), e.get("operation", "Unknown"))]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
@@ -925,13 +961,13 @@ def build_category_findings(
         if g["library"] is None:
             g["library"] = e.get("library")
 
-    for (phase, _), g in hgroups.items():
+    for (node, _), g in hgroups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": "unmodeled",
-                **phase_field(phase),
+                **node_field(node),
                 "library": g["library"] or "Unknown",
                 "eff_bucket": "unknown",
                 "estimate_method": "heuristic",
@@ -1023,9 +1059,9 @@ def row_perf_key(row, with_thread: bool) -> tuple:
     return perf_row_key(row.get("name", "Unknown"), *(row.get(c) for c in cols))
 
 
-def phase_field(phase) -> dict:
-    """``{"phase": phase}`` when a phase is set, else ``{}``."""
-    return {PHASE_COL: phase} if phase is not None else {}
+def node_field(node) -> dict:
+    """``{"node": node}`` when a node is set, else ``{}``."""
+    return {NODE_COL: node} if node is not None else {}
 
 
 def load_perf_rows(csv_path: str, with_thread: bool = True) -> Dict[tuple, pd.Series]:
