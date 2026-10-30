@@ -516,8 +516,15 @@ jobs:
               Path(".coveragerc").write_text("\n".join(out) + "\n")
               print("omitting skipped packages:", ", ".join(item.strip() for item in extra))
           PY
-          python -m coverage xml
-          python -m coverage report --fail-under=95
+          OMIT_FLAGS=""
+          if [ "$MODELUTILS" != "true" ]; then
+            OMIT_FLAGS="$OMIT_FLAGS --omit=TraceLens/ModelUtils/*"
+          fi
+          if [ "$VISUALIZER" != "true" ]; then
+            OMIT_FLAGS="$OMIT_FLAGS --omit=TraceLens/Visualizer/*"
+          fi
+          python -m coverage xml $OMIT_FLAGS
+          python -m coverage report --fail-under=95 $OMIT_FLAGS
 
       - name: Upload coverage to Codecov
         if: success() && needs.select-pr-tests.outputs.mode == 'all'
