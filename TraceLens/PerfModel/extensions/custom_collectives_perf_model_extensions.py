@@ -9,7 +9,7 @@ Performance models for custom collective operation extensions.
 """
 
 from math import prod
-from TraceLens.PerfModel.utils import name2bpe
+from TraceLens.PerfModel.utils import dense_counted_tensor, name2bpe
 
 
 class CustomCollective:
@@ -152,6 +152,36 @@ class custom_ar_all_reduce(CustomCollective):
 
     def bytes(self):
         # memory traffic per GPU: read inp + write out
+        return 2 * self.num_elems * self.bpe_in
+
+
+class vllm_all_reduce(custom_ar_all_reduce):
+    """HBM bytes of the local BF16 shard read and the reduced shard write; peer and IPC traffic are omitted."""
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        shape = self.param_details["op_shape"]
+        self.num_elems = prod(shape) if shape else 0
+        self.bpe_in = name2bpe(self.param_details["dtype_in"]) if shape else None
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type") or []
+        shape = tuple(dims[0]) if dims and dims[0] else ()
+        return {
+            "op_shape": shape,
+            "dtype_in": types[0] if types else "",
+            "stride_input": (),
+        }
+
+    def bytes(self):
+        if not self.num_elems or self.bpe_in is None:
+            return None
+        if not dense_counted_tensor(self.event, (0,)):
+            return None
         return 2 * self.num_elems * self.bpe_in
 
 

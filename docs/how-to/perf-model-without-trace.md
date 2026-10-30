@@ -101,6 +101,7 @@ decode, bf16, AMD Instinct™ MI300X) — all without a single trace.
 
 ## Related topics
 
+- [Project a model's roofline from its checkpoint alone](./generate-model-roofline-projection.md)
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
 - [GEMM analysis in TraceLens](../conceptual/gemm-analysis.md)
 - [Performance report columns](../reference/perf-report-columns.md)

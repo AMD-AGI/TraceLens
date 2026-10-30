@@ -419,6 +419,27 @@ class IterationAnnotation:
         }
 
 
+def add_logical_batch_size(details: dict, event: dict) -> dict:
+    """Attach annotation batch metadata without changing captured tensor sizes.
+
+    In graph replay, the logical batch can be smaller than the selected capture
+    batch. Performance models must continue to derive FLOPs and bytes from
+    ``Input Dims``.
+    """
+    annotation = event.get("annotation") if isinstance(event, dict) else None
+    if not annotation:
+        return details
+    ann = IterationAnnotation(str(annotation))
+    if ann.matched:
+        details["logical_batch_size"] = ann.batch_size
+        if ann.has_sqsk:
+            # Annotation lengths, kept off the g_sq / g_sk formula keys.
+            details["annotation_g_sq"] = ann.g_sq
+            details["annotation_g_sk"] = ann.g_sk
+            details["annotation_g_sqsk"] = ann.g_sqsk
+    return details
+
+
 def _fill_capture(ann, name):
     m = CAPTURE_PATTERN.match(name)
     if not m:
