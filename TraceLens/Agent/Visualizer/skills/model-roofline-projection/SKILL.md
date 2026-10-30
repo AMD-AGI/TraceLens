@@ -40,12 +40,10 @@ Follow **[reference.md](reference.md)** for every step: inputs, install check, t
 ## Rules
 
 - **One tool.** Run `TraceLens_model_roofline_projection`. Fall back to `python -m TraceLens.Visualizer.model_explorer_export.roofline_cli` only when that console script is absent. Do not hand-compute FLOPs/bytes or rebuild the graph in ad-hoc Python.
-- **CPU only, no trace.** This is a static projection: no trace file is read, no checkpoint weights are loaded, and no GPU is required to run the tool itself. A trace that already exists is the perf-report / analysis-orchestrator workflow, not this one.
-- **No GPU arch means no roofline time.** Without `--gpu-arch-name` or `--gpu-arch-json-path`, FLOPs and bytes are still printed but every roofline-time column is empty. Ask which GPU (`MI300X`, `MI325X`, or a custom arch JSON) before reporting "no roofline time" as the final answer, unless the user only asked for FLOPs/bytes.
-- **Shape is `--batch-size`/`--seq-len`, or `--dim KEY=VALUE` for anything more specific** (e.g. `--dim past_len=1024` for a decode step's cache length). `--dim` wins over `--batch-size`/`--seq-len` for the same key.
-- **Device sharding mirrors the visualizer.** `--tp`/`--pp`/`--ep` project one GPU's own share of the work; `--engine vllm`/`--engine sglang` switches whose parallel-layer classes decide the split. No `--engine` uses the checkpoint's own Hugging Face plans. Omitting a flag leaves that axis unsplit (count 1).
-- **Unmodeled is reported, not hidden.** Embeddings, convolutions, and anything else with no `TraceLens.PerfModel` formula show up as unmodeled rows and lower the rollup's "% of output elements modeled" line. Surface that coverage figure in the summary rather than only the top-N table.
-- **Config overrides, attention, and runtime regime are first-class**, exactly as in the model visualizer: `--config-override KEY=VALUE`, `--attention`, `--phase`/`--cache`/`--sequence-layout`/`--mode`/`--device`. An option the user named is never dropped because some other default exists.
+- **CPU only, no trace.** No trace file is read, no checkpoint weights are loaded, and no GPU is required. A trace that already exists is the perf-report / analysis-orchestrator workflow, not this one.
+- **Every stated option is a flag.** Walk the decision procedures in reference.md before building the command: GPU architecture, shape/dimension overrides, device sharding, config overrides, attention, and runtime regime are all first-class. An option the user named is never dropped because some other default exists.
+- **No GPU arch means no roofline time; report that, don't silently omit it.** See reference.md's [GPU architecture](reference.md#gpu-architecture) table.
+- **Unmodeled is reported, not hidden.** Surface the rollup's modeled-output-element share in the summary, not just the top-N table — see reference.md's [Step 3](reference.md#step-3-verify-and-report).
 - **Graph export and benchmarking are other skills.** A request to open the architecture in Model Explorer is `model-visualizer`. A request to collect a PyTorch profiler trace or run a benchmark is Magpie profiling. A request to analyze a trace that already exists is the analysis orchestrator.
 
 ## Primary outputs
