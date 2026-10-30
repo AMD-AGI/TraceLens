@@ -655,7 +655,7 @@ class TestCaptureMergeHelpers:
             str(folder), str(folder / "execution_details.json"), str(replay)
         )
         assert (
-            "no drafter capture batch size found for batch size 32"
+            "no drafter capture batch size found for execution root"
             in capsys.readouterr().out
         )
 
@@ -679,7 +679,7 @@ class TestCaptureMergeHelpers:
         )
         out = capsys.readouterr().out
         assert "capture file not found" in out
-        assert "no drafter capture trace for batch size 32" in out
+        assert "could not match capture roots to graph roots" in out
 
     def test_merge_warns_when_drafter_span_has_no_batch(self, tmp_path, capsys):
         _capture_tree_cache.clear()

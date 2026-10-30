@@ -1028,20 +1028,23 @@ class TestTraceCaptureMergeHelpers:
         metadata_path = tmp_path / "execution_details.json"
         metadata_path.write_text(json.dumps(metadata))
 
-        capture_map, batch_sizes = load_capture_folder(
+        capture_map, batch_sizes, _ = load_capture_folder(
             str(tmp_path), str(metadata_path), replay_rank=0
         )
         assert capture_map == {
-            "target_8_FULL": str(tmp_path / entries[1][0]),
-            "drafter_8_FULL": str(tmp_path / entries[2][0]),
+            "target_8_FULL": [
+                str(tmp_path / entries[0][0]),
+                str(tmp_path / entries[1][0]),
+            ],
+            "drafter_8_FULL": [str(tmp_path / entries[2][0])],
         }
         assert batch_sizes == {"target": [8, 8], "drafter": [8]}
 
         # No capture of the replay rank: fall back to all ranks.
-        capture_map, _ = load_capture_folder(
+        capture_map, _, _ = load_capture_folder(
             str(tmp_path), str(metadata_path), replay_rank=5
         )
-        assert capture_map["target_8_FULL"] == str(tmp_path / entries[3][0])
+        assert str(tmp_path / entries[3][0]) in capture_map["target_8_FULL"]
 
     def test_align_streams_multistream(self):
         graph_events = [
