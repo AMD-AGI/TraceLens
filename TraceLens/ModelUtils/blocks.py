@@ -47,6 +47,36 @@ class LayerVariant:
 
 
 @dataclass
+class RepeatedGroup:
+    """A node in the reconstructed repeated-``ModuleList`` nesting tree.
+
+    Unlike :class:`LayerVariant` (sub-variants of the ONE uniform decoder stack a
+    transformer has), this models an arbitrary NON-uniform nesting: a CNN's stages,
+    each a ``ModuleList`` of a different depth and channel width. The tree is rebuilt
+    from the flat :class:`TraceLens.ModelUtils.meta_trace.MetaModuleGroup` list by
+    dotted-path containment; see ``extract._build_nested_groups``.
+
+    A numeric index segment in a child path is collapsed to ``*`` (``stages.2.layers``
+    -> ``stages.*.layers``) so the per-stage ``layers`` lists fold into ONE logical
+    child whose ``per_index_counts`` records each parent position's own length
+    (ConvNeXt: ``[3, 3, 27, 3]``). ``per_index_counts`` is ``None`` for a uniform
+    child (every parent position repeats the child the same number of times).
+    """
+
+    path: str  # live dotted path, index segments collapsed to "*" (e.g. "stages.*.layers")
+    count: int  # len(ModuleList); for a collapsed child, the modal per-position length
+    element_class: str
+    label: str
+    children: list["RepeatedGroup"] = field(default_factory=list)
+    # One structural signature per element (from MetaModuleGroup.signatures), for
+    # in-group sub-variant bucketing with collections.Counter.
+    signatures: tuple[str, ...] = ()
+    # Per-parent-position child lengths when they diverge (ConvNeXt [3,3,27,3]);
+    # None when every parent position repeats this child uniformly.
+    per_index_counts: list[int] | None = None
+
+
+@dataclass
 class BlockComponent:
     """One submodule inside a decoder layer, ordered for export."""
 

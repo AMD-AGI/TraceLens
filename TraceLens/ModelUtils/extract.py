@@ -35,7 +35,12 @@ from TraceLens.ModelUtils.block_tree import (
     build_full_detailed_block_trees,
     is_method_wrapper,
 )
-from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVariant
+from TraceLens.ModelUtils.blocks import (
+    BlockComponent,
+    CodeAnalysis,
+    LayerVariant,
+    RepeatedGroup,
+)
 from TraceLens.ModelUtils.config_resolve import (
     apply_config_attribute_aliases,
     declared_config_aliases,
@@ -119,6 +124,11 @@ class ArchitectureSpec:
 
     # Live meta-tree structure (repeated ModuleLists), when instantiation succeeds.
     meta_module_groups: list[MetaModuleGroup] = field(default_factory=list)
+    # Reconstructed nesting tree of the repeated ModuleLists, populated only for a
+    # NON-uniform model (a CNN's per-stage channels/depths that the single uniform
+    # decoder stack cannot express). Empty for a uniform LLM, so the single-stack
+    # path is reached and its output is byte-identical. See reconcile_live_module_groups.
+    nested_module_groups: list[RepeatedGroup] = field(default_factory=list)
 
     # AST-derived block graph
     block_components: list[BlockComponent] = field(default_factory=list)
@@ -1675,6 +1685,101 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
     return variants
 
 
+def _build_nested_groups(groups: list[MetaModuleGroup]) -> list[RepeatedGroup]:
+    """Reconstruct the nesting tree of repeated ModuleLists from the flat live list.
+
+    ``walk_meta_module_tree`` returns a flat list whose nesting is encoded only in the
+    dotted ``path``. Rebuild parent/child by path containment, collapsing a numeric
+    segment that indexes into a parent group to ``*`` (``stages.2.layers`` ->
+    ``stages.*.layers``) so the per-stage ``layers`` lists fold into ONE logical child
+    carrying each parent position's own length in ``per_index_counts`` (ConvNeXt:
+    ``[3, 3, 27, 3]``). Returns the top-level (no-ancestor) groups.
+    """
+    from collections import Counter
+
+    group_paths = {group.path for group in groups}
+    collapsed: dict[str, list[tuple[int | None, MetaModuleGroup]]] = {}
+    for group in groups:
+        segments = group.path.split(".")
+        normalized: list[str] = []
+        parent_index: int | None = None
+        for i, segment in enumerate(segments):
+            if (
+                segment.isdigit()
+                and normalized
+                and ".".join(segments[:i]) in group_paths
+            ):
+                normalized.append("*")
+                parent_index = int(segment)  # last collapsed index = immediate parent's
+            else:
+                normalized.append(segment)
+        collapsed.setdefault(".".join(normalized), []).append((parent_index, group))
+
+    built: dict[str, RepeatedGroup] = {}
+    lengths_by_index: dict[str, dict[int, int]] = {}
+    for key, members in collapsed.items():
+        by_index = {idx: grp.length for idx, grp in members if idx is not None}
+        lengths_by_index[key] = by_index
+        representative = members[0][1]
+        counts = [grp.length for _, grp in members]
+        modal = Counter(counts).most_common(1)[0][0]
+        built[key] = RepeatedGroup(
+            path=key,
+            count=modal,
+            element_class=representative.element_class,
+            label="",
+            signatures=representative.signatures,
+        )
+
+    roots: list[RepeatedGroup] = []
+    for key in sorted(built, key=lambda k: len(k.split("."))):
+        segments = key.split(".")
+        parent_key = next(
+            (
+                ".".join(segments[:cut])
+                for cut in range(len(segments) - 1, 0, -1)
+                if ".".join(segments[:cut]) in built
+            ),
+            None,
+        )
+        group = built[key]
+        by_index = lengths_by_index[key]
+        if by_index and parent_key is not None:
+            # Size the per-position counts to the parent's own repeat count, so an
+            # absent child at a trailing parent index reads as 0, not a short list.
+            span = built[parent_key].count
+            group.per_index_counts = [by_index.get(i, 0) for i in range(span)]
+        elif by_index:
+            group.per_index_counts = [
+                by_index.get(i, 0) for i in range(max(by_index) + 1)
+            ]
+        if parent_key is None:
+            roots.append(group)
+        else:
+            built[parent_key].children.append(group)
+    return roots
+
+
+def _is_non_uniform(nested: list[RepeatedGroup]) -> bool:
+    """True when a repeated group's per-position counts genuinely diverge (a CNN).
+
+    Fires only on differing POSITIVE counts (ConvNeXt's ``[3, 3, 27, 3]``): the one
+    signal a uniform transformer -- even an MoE one -- cannot produce. A standard MoE
+    stack has a uniform expert count per layer, and a dense-replace MoE (experts absent
+    in the first *k* layers) gives ``[0, 0, 256, 256, ...]`` whose non-zero counts are
+    all equal, so neither is misread as non-uniform.
+    """
+
+    def diverges(group: RepeatedGroup) -> bool:
+        if group.per_index_counts is not None:
+            nonzero = {count for count in group.per_index_counts if count > 0}
+            if len(nonzero) > 1:
+                return True
+        return any(diverges(child) for child in group.children)
+
+    return any(diverges(group) for group in nested)
+
+
 def reconcile_live_module_groups(
     spec: ArchitectureSpec, groups: list[MetaModuleGroup] | None
 ) -> None:
@@ -1695,6 +1800,16 @@ def reconcile_live_module_groups(
             _finalize_layer_repeat_lines(spec)
         return
     spec.meta_module_groups = list(groups)
+
+    # A non-uniform nesting (a CNN's per-stage channels/depths) cannot be expressed as
+    # the single uniform decoder stack the rest of this function reconciles. Reconstruct
+    # the real tree and hand it to the graph builder instead, leaving the single-stack
+    # fields untouched so a uniform LLM reaches the code below byte-for-byte unchanged.
+    nested = _build_nested_groups(groups)
+    if _is_non_uniform(nested) and find_vision_tower(spec) is None:
+        spec.nested_module_groups = nested
+        _finalize_layer_repeat_lines(spec)
+        return
 
     primary = _select_primary_group(spec, groups)
     if primary is None:

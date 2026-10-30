@@ -27,13 +27,14 @@ from TraceLens.ModelUtils.ast_analyze import (
 )
 from TraceLens.ModelUtils.block_tree import (
     BlockNode,
+    build_block_node,
     collect_nested_diagrams,
     expand_block_tree_inplace,
     is_transparent_inline_expansion,
     resolved_phi_arms,
     subgraph_warrants_json_export,
 )
-from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
+from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant, RepeatedGroup
 from TraceLens.ModelUtils.computation_graph import (
     ComputationGraph,
     build_computation_graph,
@@ -10101,6 +10102,174 @@ def _synthesize_repeat_loop_boundaries(nodes: list[dict[str, Any]]) -> None:
         _wrap_container_loop_carried(nodes, container)
 
 
+def _repeat_group_config(namespace: str) -> dict[str, Any]:
+    """The red collapsible-group styling every N× repeated container shares."""
+    return {
+        "namespaceRegex": f"^{re.escape(namespace)}$",
+        "backgroundColor": "#fff5f4",
+        "borderColor": "#c0392b",
+        "textColor": "#1a1a1a",
+        "layoutDirection": "TOP_BOTTOM",
+    }
+
+
+def _ensure_nested_element_trees(
+    spec: ArchitectureSpec, basic_ops: BasicOpFilter
+) -> None:
+    """Register a detail tree for each leaf element class of the nested groups.
+
+    Mirrors :func:`extract._append_vision_section_tree`: a non-uniform model's
+    stage-element classes (``ConvNextLayer``) are fully parsed in the registry but
+    are not among the top-level export sections, so build each once and append it
+    so :func:`_append_section` can expand it by class.
+    """
+
+    def leaves(group: RepeatedGroup):
+        if group.children:
+            for child in group.children:
+                yield from leaves(child)
+        else:
+            yield group
+
+    existing = {tree.class_name for _label, tree in spec.export_block_trees}
+    for group in spec.nested_module_groups:
+        for leaf in leaves(group):
+            if leaf.element_class in existing:
+                continue
+            tree = build_block_node(
+                attr_name=leaf.element_class,
+                class_name=leaf.element_class,
+                registry=spec.class_registry,
+                basic_ops=basic_ops,
+                infer_init_steps=True,
+            )
+            spec.export_block_trees.append((leaf.element_class, tree))
+            existing.add(leaf.element_class)
+
+
+def _child_meta_path(parent: RepeatedGroup, pos: int, child: RepeatedGroup) -> str:
+    """Live module path of *child* at parent position *pos* (fills the collapsed ``*``)."""
+    suffix = child.path[len(parent.path) :]  # ".*.layers"
+    if suffix.startswith(".*"):
+        return f"{parent.path}.{pos}{suffix[2:]}"
+    return child.path
+
+
+def _stamp_meta_path(
+    nodes: list[dict[str, Any]], first_index: int, meta_path: str
+) -> None:
+    """Tag the convolution nodes just emitted with their live module path.
+
+    The path carries the stage index, which the per-stage ``[B, C, H, W]`` shape
+    override needs to tell one stage's conv from another's. Matched on the node id
+    (``.../dwconv``) because ``op_type`` is not stamped yet at emission time; the id
+    is used rather than the label so a ``ConvNextDropPath`` tile is not mistaken for
+    a convolution."""
+    for node in nodes[first_index:]:
+        if "conv" in str(node.get("id", "")).lower():
+            attrs = node.setdefault("attrs", [])
+            if isinstance(attrs, list):
+                attrs.append({"key": "meta_path", "value": meta_path})
+
+
+def _append_nested_repeated_group(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    count: int | None = None,
+    meta_path: str = "",
+    position_tag: str = "",
+) -> list[SourceRef]:
+    """Emit one repeated group (and its nested children) as graph nodes.
+
+    A non-uniform PARENT (ConvNeXt's ``stages``) is a SEQUENCE of distinct positions,
+    not an N× repeat: it emits each position's children in series. A LEAF group
+    (``ConvNextLayer``) is an ``N×`` container whose element-class body is expanded
+    once via :func:`_append_section`. Leaf containers are emitted FLAT under one
+    namespace and threaded in series -- the known-good decoder-variant shape -- rather
+    than nested in per-stage boxes, which would need boundary tiles at every level.
+    """
+    effective = group.count if count is None else count
+
+    if group.children:
+        exits = previous_exits
+        for pos in range(effective):
+            for child in group.children:
+                child_count = (
+                    child.per_index_counts[pos]
+                    if child.per_index_counts is not None
+                    else child.count
+                )
+                if child_count == 0:
+                    continue
+                exits = _append_nested_repeated_group(
+                    merged_nodes,
+                    spec=spec,
+                    group=child,
+                    namespace_prefix=namespace_prefix,
+                    id_prefix=id_prefix,
+                    basic_ops=basic_ops,
+                    previous_exits=exits,
+                    group_node_configs=group_node_configs,
+                    group_node_attributes=group_node_attributes,
+                    shape_inferencer=shape_inferencer,
+                    inline_expansion=inline_expansion,
+                    count=child_count,
+                    meta_path=_child_meta_path(group, pos, child),
+                    position_tag=f"{position_tag}s{pos}_",
+                )
+        return exits
+
+    slug = _sanitize_namespace_segment(
+        f"{position_tag}{effective}x_{group.element_class}"
+    )
+    namespace = _join_namespace(namespace_prefix, slug)
+    prefix = _merge_node_id(id_prefix, slug)
+    group_node_attributes[namespace] = {
+        "label": f"{effective}× {group.element_class}",
+        "count": str(effective),
+    }
+    group_node_configs.append(_repeat_group_config(namespace))
+    component = BlockComponent(
+        attr_name=group.element_class,
+        class_name=group.element_class,
+        role="other",
+        label=group.element_class,
+    )
+    first_node_index = len(merged_nodes)
+    exits = _append_section(
+        merged_nodes,
+        spec=spec,
+        component=component,
+        id_prefix=prefix,
+        namespace_prefix=namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+    if meta_path:
+        _stamp_meta_path(merged_nodes, first_node_index, meta_path)
+    return _wrap_actual_group_boundary(
+        merged_nodes,
+        namespace=namespace,
+        id_prefix=prefix,
+        inputs=previous_exits,
+        outputs=exits,
+        first_node_index=first_node_index,
+    )
+
+
 def build_merged_model_graph(
     spec: ArchitectureSpec,
     *,
@@ -10236,17 +10405,38 @@ def build_merged_model_graph(
         previous_exits = vision_combine_exits
 
     decoder_namespace = _decoder_namespace(spec)
-    previous_exits = _append_decoder_layers(
-        nodes,
-        spec=spec,
-        decoder_namespace=decoder_namespace,
-        basic_ops=resolved_basic_ops,
-        previous_exits=previous_exits,
-        group_node_configs=group_node_configs,
-        group_node_attributes=group_node_attributes,
-        shape_inferencer=shape_inferencer,
-        inline_expansion=inline_expansion,
-    )
+    if spec.nested_module_groups:
+        # A non-uniform nesting (a CNN's per-stage channels/depths) the single uniform
+        # decoder stack cannot express: emit it recursively from the reconstructed tree.
+        # Use a fixed "encoder" namespace -- a CNN has no decoder stack, so the
+        # decoder-derived namespace is meaningless (and ill-formed) here.
+        _ensure_nested_element_trees(spec, resolved_basic_ops)
+        for group in spec.nested_module_groups:
+            previous_exits = _append_nested_repeated_group(
+                nodes,
+                spec=spec,
+                group=group,
+                namespace_prefix="encoder",
+                id_prefix="encoder",
+                basic_ops=resolved_basic_ops,
+                previous_exits=previous_exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+            )
+    else:
+        previous_exits = _append_decoder_layers(
+            nodes,
+            spec=spec,
+            decoder_namespace=decoder_namespace,
+            basic_ops=resolved_basic_ops,
+            previous_exits=previous_exits,
+            group_node_configs=group_node_configs,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
 
     for component in _stack_tail_components(spec):
         expands = component_has_detail_section(component, spec)
