@@ -10,7 +10,7 @@ set -e
 usage() {
     echo "Usage: $0 <vllm-version> <path-to-TraceLens> [--base-image <image>] [docker build args...]"
     echo ""
-    echo "  vllm-version    One of: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31 (shorthand for v0.14.0 ... v0.31.0)"
+    echo "  vllm-version    One of: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v33 (shorthand for v0.14.0 ... v0.31.0, v0.33.0)"
     echo "  --base-image    Override the default base Docker image for the selected vllm version"
     echo ""
     echo "  Each version applies the matching vllm_patches/config_vllm_*.patch."
@@ -25,6 +25,10 @@ usage() {
     echo "  written per subsystem as graph_capture_rank_0[_encoder|_speculator].*."
     echo "  The v31 patch also adds one detailed sample_* span around the complete"
     echo "  speculative-drafter serving step."
+    echo ""
+    echo "  v33 ports the v31 graph-capture tracing to vLLM v0.33.0 (V2 model runner +"
+    echo "  cudagraph capture path). Since v0.33.0 is not yet released, its default base"
+    echo "  image is the ROCm 10 nightly; override with --base-image to pin a digest."
     echo ""
     echo "Examples:"
     echo "  $0 v14 /home/user/TraceLens -t tracelens-vllm"
@@ -113,9 +117,16 @@ case "${VLLM_VERSION}" in
         BASE_IMAGE="vllm/vllm-openai-rocm:v0.31.0"
         PATCH_FILE="config_vllm_v0.31.0.patch"
         ;;
+    v33)
+        # v0.33.0 is not yet released; track the ROCm 10 nightly. The patch was
+        # validated against 0.33.0rc1.dev229+g3966924d5. Pass --base-image to pin a
+        # specific nightly digest / an official v0.33.0 tag once published.
+        BASE_IMAGE="vllm/vllm-openai-rocm:nightly-rocm100"
+        PATCH_FILE="config_vllm_v0.33.0.patch"
+        ;;
     *)
         echo "Error: unsupported vllm version '${VLLM_VERSION}'"
-        echo "Supported versions: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31"
+        echo "Supported versions: v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v33"
         echo ""
         echo "vLLM v0.26.0 and later ship capture_torch_profiler and detailed_trace_annotation"
         echo "upstream, so the v26+ patches only add graph-capture tracing to the paths"

@@ -8,18 +8,25 @@
  * ?graph=<filename> (copied next to this page by the local server).
  */
 
+// ai-edge-model-explorer-visualizer@0.1.2 (Apache-2.0).
+// Copyright 2024 The Model Explorer Authors. See ./NOTICE.
+const MODEL_EXPLORER_VERSION = "0.1.2";
+
 function resolveWorkerScriptPath() {
   const embedded = document.getElementById("tracelens-worker-source");
   if (embedded?.textContent) {
     const blob = new Blob([embedded.textContent], { type: "application/javascript" });
     return URL.createObjectURL(blob);
   }
+  // The package README does not support a worker loaded from another origin.
   return "./worker.js";
 }
 
 if (window.modelExplorer) {
   window.modelExplorer.assetFilesBaseUrl =
-    "https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2/dist/static_files";
+    "https://unpkg.com/ai-edge-model-explorer-visualizer@" +
+    MODEL_EXPLORER_VERSION +
+    "/dist/static_files";
   window.modelExplorer.workerScriptPath = resolveWorkerScriptPath();
 }
 
@@ -182,14 +189,19 @@ const LEGACY_SHOW_ON_NODE_KEYS = ["model_explorer_show_on_node_item_v3"];
 // Model Explorer enum string values from ShowOnNodeItemType / ShowOnEdgeItemType.
 const TRACE_LENS_SHOW_ON_NODE = {
   "Op node id": { selected: false },
-  "Op node attributes": { selected: false, filterRegex: "output_shape" },
+  "Op node attributes": { selected: true, filterRegex: "parallel" },
   "Op node inputs": { selected: false },
   "Op node outputs": { selected: false },
   "Layer node children count": { selected: false },
   "Layer node descendants count": { selected: false },
   // Model Explorer leaves an edge unlabeled when either end is a collapsed group, so
   // expandable blocks carry their boundary shapes as layer attributes instead.
-  "Layer node attributes": { selected: true, filterRegex: "shape" },
+  // Anchored so ``full_shape`` stays in the JSON and off the drawing. The drawn
+  // keys are the per-GPU shape when the graph is partitioned.
+  "Layer node attributes": {
+    selected: true,
+    filterRegex: "^(output_shape|input_shape|shape)$|parallel",
+  },
 };
 
 const TRACE_LENS_SHOW_ON_EDGE = {
@@ -199,7 +211,7 @@ const TRACE_LENS_SHOW_ON_EDGE = {
 // Bump when the defaults below change so one refresh picks them up; between bumps the
 // viewer keeps whatever the user selected in the Model Explorer display menu.
 const DEFAULTS_VERSION_KEY = "tracelens_display_defaults_version";
-const DEFAULTS_VERSION = "4";
+const DEFAULTS_VERSION = "6";
 
 function configureModelExplorerDisplay() {
   for (const legacyKey of LEGACY_SHOW_ON_NODE_KEYS) {

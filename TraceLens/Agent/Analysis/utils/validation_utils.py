@@ -26,17 +26,26 @@ import json
 import os
 import re
 from collections import Counter
+from dataclasses import fields
 
+from .kernel_fusion import FusionEstimate
 from .report_utils import load_manifest, _scan_findings_dir
 
 # Constants
 
+TIER_COMPUTE = "compute"
+TIER_FUSION = "fusion"
+_FUSION_ROW_KEYS = tuple(
+    f.name for f in fields(FusionEstimate) if f.name.startswith("rows")
+)
+
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
 _COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 _SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
-# Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
+# Optional icon / prefix before P<N> (e.g. kernel fusion `### 🔴 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
+_FUSION_EMPTY_SENTENCE = "No kernel fusion opportunities detected."
 _DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
@@ -73,6 +82,7 @@ _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
     "FLOPS/Byte (T1)",
     "Bound (T1)",
 )
+
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
 _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
@@ -130,10 +140,20 @@ def _category_findings_empty(filepath):
     return isinstance(cf, list) and len(cf) == 0
 
 
+def _fusion_estimates_empty(filepath):
+    """True when the fusion metrics JSON has no impact_estimates (kernel-fusion-analyzer § empty)."""
+    try:
+        with open(_metrics_json_for_findings(filepath)) as f:
+            return not json.load(f).get("impact_estimates")
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def validate_findings_file(filepath, tier, comparison_scope=None):
     """Validate a single findings file against the sub-agent spec contract.
 
     Checks:
+    - Fusion tier with no ``impact_estimates``: only the spec's no-opportunities sentence
     - Required ## headers present and in correct order
     - P-item labels match tier (all tiers: Insight/Action/Impact)
     - At least one reasoning-candidate block in Detailed Analysis
@@ -158,6 +178,14 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     with open(filepath, "r") as f:
         content = f.read()
+
+    # With no impact_estimates the spec's file is a heading and this one sentence.
+    if tier == TIER_FUSION and _fusion_estimates_empty(filepath):
+        if _FUSION_EMPTY_SENTENCE in content:
+            return True, []
+        return False, [
+            f"Fusion findings with no impact_estimates must state: {_FUSION_EMPTY_SENTENCE}"
+        ]
 
     errors = []
 
@@ -230,6 +258,9 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             _validate_compute_data_tables(content, filepath, comparison_scope)
         )
 
+    if tier == TIER_FUSION:
+        errors.extend(_validate_fusion_data_tables(content))
+
     # Marker structure (folded in from the former Level-4 validate_markers).
     file_class = "category_findings" if tier == "compute" else "system_findings"
     errors.extend(
@@ -273,7 +304,9 @@ def _scan_args_cells(content):
 
 
 def _load_valid_args(*metrics_paths):
-    """Build set of operations[].args strings from one or more metrics JSONs."""
+    """Build set of Args strings from one or more metrics JSONs: operations[].args,
+    plus the rendered fusion rows' args (kernel_fusion_metrics.json
+    impact_estimates[].rows / rows_trace1 / rows_trace2)."""
     valid = set()
     for p in metrics_paths:
         try:
@@ -285,6 +318,13 @@ def _load_valid_args(*metrics_paths):
             op["args"]
             for op in d.get("operations", [])
             if isinstance(op.get("args"), str)
+        )
+        valid.update(
+            row["args"]
+            for est in d.get("impact_estimates", [])
+            for key in _FUSION_ROW_KEYS
+            for row in est.get(key, [])
+            if isinstance(row.get("args"), str)
         )
     return valid
 
@@ -311,8 +351,9 @@ def _load_compute_data_metrics(metrics_path):
     return args, paths, kernel_names
 
 
-def _iter_compute_candidate_blocks(content):
-    """Yield (start, end) line-index range for each tier=compute candidate block."""
+def _iter_candidate_blocks(content, tier):
+    """Yield (start, end, rank) for each candidate block of ``tier``: the line-index
+    range and the integer rank."""
     lines = content.splitlines()
     starts = [
         (idx, _CANDIDATE_RE.search(line))
@@ -320,10 +361,10 @@ def _iter_compute_candidate_blocks(content):
         if _CANDIDATE_RE.search(line)
     ]
     for i, (idx, m) in enumerate(starts):
-        if "tier=compute" not in m.group(0):
+        if m.group(1) != tier:
             continue
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
-        yield idx, end
+        yield idx, end, int(m.group(2))
 
 
 def _find_data_table(lines, start, end):
@@ -381,7 +422,7 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     )
     lines = content.splitlines()
     errors = []
-    for start, end in _iter_compute_candidate_blocks(content):
+    for start, end, _ in _iter_candidate_blocks(content, TIER_COMPUTE):
         table = _find_data_table(lines, start, end)
         if table is None:
             errors.append(
@@ -434,6 +475,31 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                         f"operations[].kernel_name_trunc in {cat_metrics_basename} "
                         f"(paste verbatim): {cells[kn_idx]}"
                     )
+    return errors
+
+
+def _validate_fusion_data_tables(content):
+    """For each <!-- reasoning-candidate tier=fusion --> block: the first
+    **Data:** table must start with the canonical fusion columns, in order.
+    """
+    lines = content.splitlines()
+    errors = []
+    for start, end, _ in _iter_candidate_blocks(content, TIER_FUSION):
+        table = _find_data_table(lines, start, end)
+        if table is None:
+            errors.append(
+                f"fusion-tier reasoning-candidate block at line {start + 1}: "
+                f"no **Data:** table found"
+            )
+            continue
+        header_line, header_cols, _ = table
+        n_cols = len(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)
+        if tuple(header_cols[:n_cols]) != _COMPUTE_DATA_REQUIRED_COLS_STANDALONE:
+            errors.append(
+                f"fusion Data table at line {header_line}: header must start "
+                f"with the {n_cols} canonical columns in order "
+                f"{list(_COMPUTE_DATA_REQUIRED_COLS_STANDALONE)}; got {header_cols}"
+            )
     return errors
 
 
@@ -768,6 +834,8 @@ def _validate_report_priority_consistency(content, output_dir):
     R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
     R4: Top Operations marker rows == len(priorities).
+    R6: Each kind=p_item marker's phase attr == findings[N-1].phase (both absent
+    outside multi_trace).
 
     Silently skips when priority_data.json is absent (Step 9 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
@@ -821,6 +889,11 @@ def _validate_report_priority_consistency(content, output_dir):
             errors.append(
                 f"R2: P-item marker #{idx + 1} category={cat_attr!r} != "
                 f"findings[{idx}].category={f.get('category')!r}"
+            )
+        if attrs.get("phase") != f.get("phase"):
+            errors.append(
+                f"R6: P-item marker #{idx + 1} phase={attrs.get('phase')!r} != "
+                f"findings[{idx}].phase={f.get('phase')!r}"
             )
         for attr_name, json_key in (
             ("low", "impact_score_low"),
@@ -942,7 +1015,7 @@ class MarkerValidator:
     KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "op_row"}
     REQUIRED_ATTRS_BY_KIND = {
         "p_item": ("low", "mid", "high"),
-        "detail_estimate": ("low", "high"),
+        "detail_estimate": ("low", "mid", "high"),
         "op_row": ("rank", "impacts"),
     }
     # Compute findings files that do NOT need a p_item marker.
@@ -1076,7 +1149,7 @@ class MarkerValidator:
         """
         lines = text.splitlines()
         errors = []
-        for start, end in _iter_compute_candidate_blocks(text):
+        for start, end, _ in _iter_candidate_blocks(text, TIER_COMPUTE):
             table = _find_data_table(lines, start, end)
             if table is None:
                 continue

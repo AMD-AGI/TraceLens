@@ -17,14 +17,29 @@ tensor shapes the static analysis can't infer.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from TraceLens.ModelUtils.basic_ops import DEFAULT_BASIC_OP_PATTERNS
-from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
+from TraceLens.ModelUtils.parallel_plan import (
+    ParallelDegree,
+    build_parallel_layout,
+    gpu_group_report,
+    scope_payload_to_gpu_group,
+    unique_gpu_groups,
+)
+from TraceLens.ModelUtils.basic_ops import BasicOpFilter
+from TraceLens.ModelUtils.cli_common import (
+    add_engine_argument,
+    add_model_source_arguments,
+    add_roofline_op_boundary_argument,
+    add_runtime_regime_arguments,
+    build_runtime_regime,
+)
 from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
     dump_model_ast,
@@ -32,6 +47,7 @@ from TraceLens.ModelUtils.extract import (
 )
 from TraceLens.ModelUtils.loader import (
     build_detailed_basic_ops,
+    build_roofline_basic_ops,
     load_model_spec,
     resolve_checkpoint_arg,
 )
@@ -150,124 +166,46 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    regime_group = parser.add_argument_group(
-        "runtime regime",
-        "Which RUN the drawing depicts. A forward branches on things no config "
-        "decides and only a run does, and both arms are real: drawing both "
-        "leaves every shape below the branch true of only one of them. Each "
-        "option picks exactly one arm, so the arm not taken is never drawn.",
+    partition_group = parser.add_argument_group(
+        "device partitions",
+        "How many ways to split the model. The split itself comes from the "
+        "plans on its Hugging Face config (base_model_tp_plan, "
+        "base_model_pp_plan, base_model_ep_plan, plus the causal-LM head), or, "
+        "with --engine, from that inference engine's own parallel-layer "
+        "classes. 1 leaves that axis unsplit.",
     )
-    regime_group.add_argument(
-        "--sequence-layout",
-        choices=list(RuntimeRegime.SEQUENCE_LAYOUTS),
-        default=RuntimeRegime.SEQUENCE_LAYOUTS[0],
-        help=(
-            "rectangular keeps [B, S, ...]; packed removes the padding first "
-            "and carries every real token as one row, [1, nnz, ...] "
-            "(default: rectangular)."
-        ),
+    add_engine_argument(parser, group=partition_group)
+    # --engine also controls --tp/--pp/--ep sharding idioms below, beyond what
+    # the shared add_engine_argument help text states for other CLIs.
+    partition_group.add_argument(
+        "--tp",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Tensor-parallel partitions (default: 1).",
     )
-    regime_group.add_argument(
-        "--phase",
-        choices=list(RuntimeRegime.PHASES),
-        default=RuntimeRegime.PHASES[0],
-        help=(
-            "prefill scores a whole prompt; decode advances one token, which "
-            "is what makes the query length 1 and can select different kernels "
-            "entirely (default: prefill)."
-        ),
+    partition_group.add_argument(
+        "--pp",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Pipeline-parallel partitions (default: 1).",
     )
-    regime_group.add_argument(
-        "--cache",
-        choices=list(RuntimeRegime.CACHES),
-        default=RuntimeRegime.CACHES[0],
-        help=(
-            "cold is the first forward, with nothing stored yet; warm "
-            "continues from a cache that already holds keys and values "
-            "(default: cold). decode always reads a cache."
-        ),
-    )
-    regime_group.add_argument(
-        "--attention",
-        default=None,
-        help=(
-            "Attention implementation to draw (eager, sdpa, "
-            "flash_attention_2, ...). eager draws the real matmul/softmax "
-            "chain where sdpa draws one fused kernel. Unset takes the "
-            "checkpoint's own setting, which is sdpa unless it says otherwise."
-        ),
-    )
-    regime_group.add_argument(
-        "--mode",
-        choices=list(RuntimeRegime.MODES),
-        default=RuntimeRegime.MODES[0],
-        help="Whether `self.training` reads true (default: inference).",
-    )
-    regime_group.add_argument(
-        "--config-override",
-        action="append",
-        metavar="KEY=VALUE",
-        default=[],
-        help=(
-            "Override one config key, repeatable. Applied left to right over "
-            "everything else -- the checkpoint, the config class defaults and "
-            "the model's own constructor writes -- so this is the last word. "
-            "A dotted key reaches a nested config "
-            "(vision_config.hidden_size=1024); the value is read as JSON when "
-            "it parses as one (8, true, null, [1, 2]) and as text otherwise. "
-            "Stating one key twice warns and keeps the last."
-        ),
+    partition_group.add_argument(
+        "--ep",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Expert-parallel partitions (default: 1).",
     )
 
-    ast_group = parser.add_argument_group("model source options")
-    ast_group.add_argument(
-        "--github",
-        "-g",
-        help=(
-            "Optional GitHub repo URL or github:owner/repo@ref:path for modeling source "
-            "when the HF repo does not ship modeling_*.py (repo must be whitelisted)"
-        ),
-    )
-    ast_group.add_argument(
-        "--allow-repo",
-        action="append",
-        default=[],
-        metavar="OWNER/REPO",
-        help=(
-            "Whitelist an extra GitHub repository for remote source introspection "
-            "(repeatable; huggingface/transformers is allowed by default)"
-        ),
-    )
-    ast_group.add_argument(
-        "--config-path",
-        help="Explicit config.json path inside the checkpoint",
-    )
-    ast_group.add_argument(
-        "--code-path",
-        type=Path,
-        help="Explicit path to modeling_*.py when auto-discovery is insufficient",
-    )
+    add_runtime_regime_arguments(parser)
+    ast_group = add_model_source_arguments(parser)
+    add_roofline_op_boundary_argument(parser, group=ast_group)
     ast_group.add_argument(
         "--dump-ast",
         type=Path,
         help="Write the parsed Python AST dump for the modeling file",
-    )
-    ast_group.add_argument(
-        "--basic-op-add",
-        action="append",
-        default=[],
-        metavar="REGEX",
-        help=(
-            "Regex for block names treated as basic leaf operations "
-            f"(repeatable; defaults: {', '.join(DEFAULT_BASIC_OP_PATTERNS)})"
-        ),
-    )
-    ast_group.add_argument(
-        "--basic-op-remove",
-        action="append",
-        default=[],
-        metavar="REGEX",
-        help="Remove a default basic-op regex (repeatable; pass exact pattern text)",
     )
     ast_group.add_argument(
         "--all-tensor-ops",
@@ -293,23 +231,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help="Also write flat operator export JSON with inferred tensor shapes",
-    )
-    ast_group.add_argument(
-        "--meta-shapes",
-        dest="meta_shapes",
-        action="store_true",
-        default=True,
-        help=(
-            "Run a meta-device forward pass (requires torch + transformers) to "
-            "capture ground-truth shapes for nn.Module layers AND for inline "
-            "operations the static analysis can't resolve (default: on)"
-        ),
-    )
-    ast_group.add_argument(
-        "--no-meta-shapes",
-        dest="meta_shapes",
-        action="store_false",
-        help="Disable torch-assisted shape inference (pure static analysis)",
     )
 
     torch_group = parser.add_argument_group("pure-PyTorch module options")
@@ -370,6 +291,77 @@ def file_created_at(path: Path) -> datetime:
     stat = Path(path).stat()
     timestamp = getattr(stat, "st_birthtime", None) or stat.st_mtime
     return datetime.fromtimestamp(timestamp)
+
+
+def subgraph_output_path(output: Path, index: int, count: int) -> Path:
+    """``model_subgraph_0.html`` when more than one group is written."""
+    if count <= 1:
+        return output
+    return output.with_name(f"{output.stem}_subgraph_{index}{output.suffix}")
+
+
+def prepare_gpu_group_payloads(
+    spec: Any, payload: dict
+) -> list[tuple[Any, dict]] | None:
+    """One payload per unique GPU group. ``None`` when the model is not split.
+
+    Prints the GPU-to-subgraph map. A single group keeps the caller's payload
+    object; several groups are copies so each file can name its own devices.
+    """
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is None or not layout.degree.requested():
+        return None
+    groups = unique_gpu_groups(layout, spec)
+    if not groups:
+        return None
+    for line in gpu_group_report(groups, layout.degree):
+        print(line)
+    prepared: list[tuple[Any, dict]] = []
+    for group in groups:
+        layout.gpu_group = group
+        stamped = payload if len(groups) == 1 else copy.deepcopy(payload)
+        scope_payload_to_gpu_group(stamped, layout)
+        _refresh_displayed_shapes(stamped)
+        _refresh_fact_sheet(spec, stamped)
+        prepared.append((group, stamped))
+    return prepared
+
+
+def _refresh_displayed_shapes(payload: dict) -> None:
+    """Drawn group shapes follow the per-GPU node shapes just written."""
+    from TraceLens.Visualizer.model_explorer_export.shapes import (
+        refresh_displayed_group_shapes,
+    )
+
+    for collection in payload.get("graphCollections") or []:
+        if not isinstance(collection, dict):
+            continue
+        for graph in collection.get("graphs") or []:
+            if isinstance(graph, dict):
+                refresh_displayed_group_shapes(graph)
+
+
+def _refresh_fact_sheet(spec: Any, payload: dict) -> None:
+    from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
+        build_fact_sheet_viewer,
+    )
+
+    viewer = build_fact_sheet_viewer(spec)
+    viewer_meta = payload.setdefault("tracelensViewer", {})
+    if isinstance(viewer_meta, dict):
+        viewer_meta["factSheet"] = viewer
+    for collection in payload.get("graphCollections") or []:
+        if not isinstance(collection, dict):
+            continue
+        for graph in collection.get("graphs") or []:
+            if not isinstance(graph, dict):
+                continue
+            attrs = graph.get("groupNodeAttributes")
+            if not isinstance(attrs, dict):
+                continue
+            root = attrs.get("")
+            if isinstance(root, dict):
+                root["architecture_fact_sheet"] = viewer["body"]
 
 
 def write_optional_output(
@@ -449,13 +441,19 @@ def _run_from_payload(args: argparse.Namespace, parser: argparse.ArgumentParser)
     return 0
 
 
+def _resolve_basic_ops(args: argparse.Namespace) -> BasicOpFilter:
+    """Pick the leaf-op granularity: roofline-model ops, or the usual detailed set."""
+    builder = (
+        build_roofline_basic_ops
+        if args.stop_at_roofline_ops
+        else build_detailed_basic_ops
+    )
+    return builder(add=args.basic_op_add, remove=args.basic_op_remove)
+
+
 def _load_ast_spec(
     checkpoint: str | None, args: argparse.Namespace
 ) -> ArchitectureSpec:
-    basic_ops = build_detailed_basic_ops(
-        add=args.basic_op_add, remove=args.basic_op_remove
-    )
-
     if args.dump_ast:
         ast_dump = dump_model_ast(
             checkpoint,
@@ -476,26 +474,31 @@ def _load_ast_spec(
         name=args.title,
         analyze_code=True,
         detailed=True,
-        basic_ops=basic_ops,
+        basic_ops=_resolve_basic_ops(args),
         require_code=True,
         allow_github_repos=args.allow_repo,
-        regime=RuntimeRegime(
-            sequence_layout=args.sequence_layout,
-            phase=args.phase,
-            cache=args.cache,
-            attention=args.attention,
-            mode=args.mode,
-        ),
+        regime=build_runtime_regime(args),
         config_overrides=parse_config_overrides(args.config_override),
+        engine=args.engine,
     )
 
 
 def _build_ast_payload(
     checkpoint: str | None, spec: ArchitectureSpec, args: argparse.Namespace
 ) -> dict:
-    basic_ops = build_detailed_basic_ops(
-        add=args.basic_op_add, remove=args.basic_op_remove
-    )
+    basic_ops = _resolve_basic_ops(args)
+    degree = ParallelDegree(tp=args.tp, pp=args.pp, ep=args.ep)
+    if degree.requested():
+        spec.parallel_layout = build_parallel_layout(spec, degree)
+        for line in spec.parallel_layout.fact_lines():
+            text = line.strip()
+            if (
+                "does not divide" in text
+                or text.startswith("The model declares")
+                or text.startswith("No Hugging Face")
+            ):
+                print(f"Warning: {text}", file=sys.stderr)
+
     payload = build_ast_model_explorer_payload(
         spec,
         basic_ops=basic_ops,
@@ -561,7 +564,7 @@ def _load_torch_module(target: str):  # pragma: no cover
 
 
 def _build_torch_module_payload(args: argparse.Namespace) -> dict:  # pragma: no cover
-    from TraceLens.ModelUtils.torch_introspect import (
+    from TraceLens.Visualizer.model_explorer_export.torch_payload import (
         build_exported_module_payload,
         build_torch_module_payload,
     )
@@ -645,6 +648,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         return _run_torch_module(args, parser)
 
+    for name in ("tp", "pp", "ep"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name} must be a positive number of partitions")
+
     checkpoint = resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
 
     if checkpoint is None and args.github is None:
@@ -687,36 +694,38 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error writing operator export: {exc}", file=sys.stderr)
             return 1
 
+    prepared = prepare_gpu_group_payloads(spec, payload)
+    serve_payload = prepared[0][1] if prepared else payload
     serve_requested = args.serve or args.open
-
-    if args.output is not None:
+    write_files = (
+        args.output is not None
+        or not serve_requested
+        or (prepared is not None and len(prepared) > 1)
+    )
+    if write_files:
         output = (
             default_html_output_path(checkpoint, getattr(args, "github", None))
-            if args.output == Path("__default__")
+            if args.output is None or args.output == Path("__default__")
             else args.output
         )
-        try:
-            write_optional_output(
-                payload,
-                output,
-                generated_at=datetime.now(),
-                drop_constants=args.drop_constants,
+        outputs = prepared if prepared else [(None, payload)]
+        count = len(prepared) if prepared else 1
+        for group, stamped in outputs:
+            path = (
+                output
+                if group is None
+                else subgraph_output_path(output, group.index, count)
             )
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error writing output: {exc}", file=sys.stderr)
-            return 1
-    elif not serve_requested:
-        try:
-            output = default_html_output_path(checkpoint, getattr(args, "github", None))
-            write_optional_output(
-                payload,
-                output,
-                generated_at=datetime.now(),
-                drop_constants=args.drop_constants,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error writing output: {exc}", file=sys.stderr)
-            return 1
+            try:
+                write_optional_output(
+                    stamped,
+                    path,
+                    generated_at=datetime.now(),
+                    drop_constants=args.drop_constants,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"Error writing output: {exc}", file=sys.stderr)
+                return 1
 
     if serve_requested:
         url = viewer_url(args.port)
@@ -725,7 +734,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.open:
                 open_viewer(url)
             serve_viewer(
-                payload=payload,
+                payload=serve_payload,
                 port=args.port,
                 block=args.serve,
                 drop_constants=args.drop_constants,

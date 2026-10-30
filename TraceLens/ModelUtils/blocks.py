@@ -152,6 +152,11 @@ class CodeAnalysis:
     class_registry: dict[str, ClassStructure] = field(default_factory=dict)
     external_imports: dict[str, str] = field(default_factory=dict)
     positional_helpers: list[str] = field(default_factory=list)
+    #: Whether this file binds a platform-detection flag (``_is_npu =
+    #: is_npu()``) that a branch reads -- i.e. whether which accelerator is
+    #: being modeled actually affects this graph, and so is worth stating on
+    #: the fact sheet.
+    device_sensitive: bool = False
 
     def has_block_graph(self) -> bool:
         return bool(

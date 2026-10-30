@@ -102,6 +102,50 @@ or `inference` for vLLM, SGLang, or ATOM), the execution mode and capture-folder
 inference, environment details (node, container, or virtual environment), and an
 optional output directory.
 
+### Run the agent from a YAML config
+
+If you already have a run config, point the agent at it instead of answering the
+prompts:
+
+```text
+Follow the analysis orchestrator installed with TraceLens and run the full
+agentic analysis workflow from config <run.yaml>, <scope>
+```
+
+Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. You can
+leave the scope out when the config already implies it: a single job runs as `standalone`,
+two jobs with `compare_to` on the first job run as `comparative`, and a config with an
+`aggregation` block runs as `multi_trace`.
+
+| Scope | Config shape |
+|---|---|
+| `standalone` | One job. |
+| `comparative` | Two jobs, each with an optional `capture_folder`. `compare_to` on the first job can name the second job instead of repeating its paths. |
+| `semantic` | Two graph-replay-only jobs with `analysis_mode: inference` and no `capture_folder`. |
+| `multi_trace` | Two or more named jobs on the same platform, each with a `phase`, and an `aggregation` block with policy `combine_only_same_phase`. Jobs that share a phase are combined in the report, and the first job is the one that kernel fusion and system analysis focus on. |
+
+For example, a `multi_trace` config for a prefill trace and a decode trace:
+
+```yaml
+analysis_mode: inference
+output_dir: /abs/path/analysis_output
+aggregation:
+  policy: combine_only_same_phase
+jobs:
+  - name: prefill_0
+    phase: prefill
+    trace_path: /abs/path/prefill_0.json.gz
+    platform: MI300X
+  - name: decode
+    phase: decode
+    trace_path: /abs/path/decode.json.gz
+    platform: MI300X
+```
+
+Every job needs a `platform`, and all trace, capture folder, and output paths must be
+absolute. For the full schema and more examples, see
+[Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
+
 ## Read the results
 
 Only `analysis.md` is intended for end-user review. Everything else under
@@ -158,19 +202,19 @@ matter.
 
 The high-level steps are:
 
-1. Query user inputs (comparison scope, trace paths, platforms, analysis mode,
-   environment setup).
-2. Generate the performance report (branching on analysis mode and comparison
-   scope).
-3. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
+1. Query user inputs, or read a run YAML (environment setup is always asked).
+2. Generate the performance reports with one call on the completed run config.
+3. Check trace quality, with a fallback for graph-under-recorded traces.
+4. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
    data, category filtering) and extract fusion candidates.
-4. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
+5. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
    parallel.
-5. Run the compute-kernel sub-agents in parallel.
-6. Aggregate the per-category findings into a globally ranked list.
-7. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
-8. Prepare report data and identify the model.
-9. Generate the final `analysis.md` report.
+6. Run the compute-kernel sub-agents in parallel.
+7. Aggregate the per-category findings into a globally ranked list.
+8. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
+9. Prepare report data and identify the model.
+10. Render the performance plot when no `agent_extension.py` is present.
+11. Generate the final `analysis.md` report.
 
 ### Sub-agents
 

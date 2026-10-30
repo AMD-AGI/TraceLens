@@ -25,6 +25,8 @@ single-run PyTorch traces, use
 instead. For the underlying concepts (the paged-attention roofline model and the
 steady-state region), see
 [Inference performance analysis in TraceLens](../conceptual/inference-analysis.md).
+To run this report from a YAML file instead of command-line flags, see
+[Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
 
 ## Supported frameworks and execution modes
 
