@@ -489,9 +489,33 @@ jobs:
 
       - name: Combine coverage
         if: success() && needs.select-pr-tests.outputs.mode == 'all'
+        env:
+          MODELUTILS: ${{ needs.changes.outputs.modelutils }}
+          VISUALIZER: ${{ needs.changes.outputs.visualizer }}
         run: |
           python -m pip install --upgrade pip coverage
           python -m coverage combine coverage-data-*/.coverage
+          # A skipped suite leaves its package at 0% and pulls the 95% gate
+          # down. Omit that package; a push still runs both suites.
+          python - << 'PY'
+          import os
+          from pathlib import Path
+          extra = []
+          if os.environ["MODELUTILS"] != "true":
+              extra.append("    TraceLens/ModelUtils/*")
+          if os.environ["VISUALIZER"] != "true":
+              extra.append("    TraceLens/Visualizer/*")
+          text = Path(".coveragerc").read_text()
+          if extra:
+              lines = text.splitlines()
+              out = []
+              for line in lines:
+                  out.append(line)
+                  if line.strip() == "omit =":
+                      out.extend(extra)
+              Path(".coveragerc").write_text("\n".join(out) + "\n")
+              print("omitting skipped packages:", ", ".join(item.strip() for item in extra))
+          PY
           python -m coverage xml
           python -m coverage report --fail-under=95
 

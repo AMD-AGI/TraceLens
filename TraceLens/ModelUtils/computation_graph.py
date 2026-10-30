@@ -953,9 +953,17 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
         kernel_spec = graph.nodes[kernel_index]
         declared_names = _kernel_input_names(kernel_spec)
 
-        # First pass: collect labeled and unlabeled edges.
+        # First pass: collect labeled and unlabeled edges. A producer feeding
+        # this kernel at several output ordinals (``q, k, v = qkv.split(...)``
+        # then ``self.attn(q, k, v)``) repeats the SAME (source, target) pair
+        # once per ordinal, in ordinal order, with the ordinals themselves
+        # recorded as a parallel list on ``link_output_ports`` -- tracking how
+        # many times a pair has been seen here is what tells its Nth repeat
+        # apart from its first, instead of every repeat reading back the same
+        # (first) port and leaving the rest with no port of their own.
         labeled: list[tuple[int, str]] = []
-        unlabeled_sources: list[int] = []
+        unlabeled_sources: list[tuple[int, str | None]] = []
+        seen_occurrences: dict[tuple[int, int], int] = {}
         for source, target in graph.links:
             if target != kernel_index:
                 continue
@@ -970,8 +978,15 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
             label = graph.link_port_labels.get((source, target))
             if label:
                 labeled.append((source, label))
+                continue
+            occurrence = seen_occurrences.get((source, target), 0)
+            seen_occurrences[(source, target)] = occurrence + 1
+            raw_port = graph.link_output_ports.get((source, target))
+            if isinstance(raw_port, list):
+                port = raw_port[occurrence] if occurrence < len(raw_port) else None
             else:
-                unlabeled_sources.append(source)
+                port = raw_port
+            unlabeled_sources.append((source, port))
 
         # Determine which declared names are already used by labeled edges.
         # Compound labels like "query/key/value" represent a bundled tensor
@@ -984,7 +999,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
         # Remaining declared names, in declaration order, for unlabeled edges.
         remaining = [name for name in declared_names if name.lower() not in used_names]
 
-        all_inputs: list[tuple[int, str]] = []
+        all_inputs: list[tuple[int, str, str | None]] = []
         seen_labels: dict[str, int] = {}
 
         for source, label in labeled:
@@ -992,7 +1007,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
             seen_labels[label] = count + 1
             if count > 0:
                 label = f"{label}_{count + 1}"
-            all_inputs.append((source, label))
+            all_inputs.append((source, label, None))
 
         # What the KERNEL calls each operand beats what produced it: a Triton
         # stage's label is a glyph for the arithmetic it does, which names
@@ -1003,7 +1018,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
         # kernel's name at a reader who can already see it.
         operand_parameters = _kernel_operand_parameters(kernel_spec)
         port_roles = _kernel_port_roles(kernel_spec)
-        for idx, source in enumerate(unlabeled_sources):
+        for idx, (source, forced_port) in enumerate(unlabeled_sources):
             src_spec = graph.nodes[source]
             source_attr = (
                 str(src_spec.block.attr_name) if src_spec.block is not None else ""
@@ -1024,7 +1039,7 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
             seen_labels[label] = count + 1
             if count > 0:
                 label = f"{label}_{count + 1}"
-            all_inputs.append((source, label))
+            all_inputs.append((source, label, forced_port))
 
         # Fan a shared producer into its distinct role ports: a ``kv`` input that
         # feeds both the ``key`` and ``value`` kernel parameters becomes two
@@ -1034,29 +1049,36 @@ def _add_kernel_port_nodes(graph: ComputationGraph) -> None:
         # fabricated upstream.
         split_map = _kernel_port_split(kernel_spec)
         if split_map:
-            expanded: list[tuple[int, str]] = []
-            for source, label in all_inputs:
+            expanded: list[tuple[int, str, str | None]] = []
+            for source, label, forced_port in all_inputs:
                 roles = split_map.get(label.strip().lower())
                 if roles:
-                    expanded.extend((source, role) for role in roles)
+                    expanded.extend((source, role, forced_port) for role in roles)
                 else:
-                    expanded.append((source, label))
+                    expanded.append((source, label, forced_port))
             all_inputs = expanded
 
         if all_inputs:
             remove_in: set[tuple[int, int]] = {
-                (src, kernel_index) for src, _ in all_inputs
+                (src, kernel_index) for src, _, _ in all_inputs
             }
             graph.links = [lk for lk in graph.links if lk not in remove_in]
 
-            for source, label in all_inputs:
+            for source, label, forced_port in all_inputs:
                 graph.link_port_labels.pop((source, kernel_index), None)
                 # Preserve the producer's output ordinal: a kernel input reading a
                 # specific slice of a multi-output producer (``value_states`` is
                 # ordinal 1 of an ``expand_kv`` split) must keep that port so the
                 # new source→port edge docks the right slice instead of defaulting
-                # to slice 0.
-                source_port = graph.link_output_ports.get((source, kernel_index))
+                # to slice 0. ``forced_port`` is this specific occurrence's own
+                # ordinal, already picked out of a shared producer's port LIST
+                # above; it beats a bare dict re-read, which cannot tell one
+                # repeat of the same (source, kernel) pair from another.
+                source_port = (
+                    forced_port
+                    if forced_port is not None
+                    else graph.link_output_ports.get((source, kernel_index))
+                )
                 safe_label = label.replace("/", "_")
 
                 # A model that repeats its key/value heads does so in its own
@@ -2092,8 +2114,40 @@ def _wire_all_predecessor_edges(
                             graph.links.remove(stale)
                             graph.link_output_ports.pop(stale, None)
                             graph.link_port_labels.pop(stale, None)
+                # A module call reading a specific slot of a multi-output
+                # producer (``k_norm(key_states)`` where ``key_states`` is
+                # ordinal 1 of an ``unbind``) tags its edge with that ordinal so
+                # the producer fans out into one port per consumed slot instead
+                # of docking every consumer onto slot 0. Skip the port tag when
+                # the source was already redirected onto the ordinal's own
+                # per-slot producer above: the CALLER's tuple ordinal names a
+                # port on the call, not on that producer, so tagging it there
+                # would dangle. Ask the producer instead -- usually it has one
+                # output and answers "0", but it can itself be a multi-output op
+                # (``k_nope, value_states = kv.split(...)`` makes the split the
+                # producer of the slot ``value_states``, its SECOND slice).
+                port_str = (
+                    str(ordinal_map[arg_name])
+                    if arg_name is not None
+                    and arg_name in ordinal_map
+                    and not ordinal_slot_resolved
+                    else None
+                )
                 if link not in graph.links:
                     graph.links.append(link)
+                    if port_str is not None:
+                        graph.link_output_ports[link] = port_str
+                elif port_str is not None and not _link_output_port_recorded(
+                    graph.link_output_ports.get(link), port_str
+                ):
+                    # Same source-target pair but a genuinely different output
+                    # port -- e.g. q, k, v each from the same split op at
+                    # ordinals 0, 1, 2, all feeding the same submodule call.
+                    # Mirror section-1's parallel-edge logic.
+                    graph.links.append(link)
+                    graph.link_output_ports[link] = _merge_link_output_port(
+                        graph.link_output_ports.get(link), port_str
+                    )
                 if arg_name:
                     _drop_sibling_argument_edges(
                         graph,
@@ -2113,25 +2167,7 @@ def _wire_all_predecessor_edges(
                     extra_link = (source_index, extra)
                     if extra_link not in graph.links:
                         graph.links.append(extra_link)
-                # A module call reading a specific slot of a multi-output
-                # producer (``k_norm(key_states)`` where ``key_states`` is
-                # ordinal 1 of an ``unbind``) tags its edge with that ordinal so
-                # the producer fans out into one port per consumed slot instead
-                # of docking every consumer onto slot 0. Skip the port tag when
-                # the source was already redirected onto the ordinal's own
-                # per-slot producer above: the CALLER's tuple ordinal names a
-                # port on the call, not on that producer, so tagging it there
-                # would dangle. Ask the producer instead -- usually it has one
-                # output and answers "0", but it can itself be a multi-output op
-                # (``k_nope, value_states = kv.split(...)`` makes the split the
-                # producer of the slot ``value_states``, its SECOND slice).
-                if (
-                    arg_name is not None
-                    and arg_name in ordinal_map
-                    and not ordinal_slot_resolved
-                ):
-                    graph.link_output_ports[link] = str(ordinal_map[arg_name])
-                elif ordinal_slot_resolved and resolved_slot_name:
+                if ordinal_slot_resolved and resolved_slot_name:
                     slot_port = _producer_slot_port(
                         graph, source_index, resolved_slot_name, default=""
                     )
