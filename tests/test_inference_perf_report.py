@@ -526,7 +526,173 @@ def test_merge_capture_trace_integration(dirpath, trace_gz, capture_folder):
     assert len(merged.events) > 0
 
 
+class _ChildTree:
+    def event_to_category(self, event):
+        return event.get("cat")
+
+    def get_children_events(self, event):
+        return event.get("children_events", [])
+
+
+def _launch(kernel_name):
+    return {
+        "name": "hipGraphLaunch",
+        "cat": "cuda_runtime",
+        "ts": 0,
+        "children_events": [
+            {"name": kernel_name, "cat": "kernel", "ts": 1, "children_events": []}
+        ],
+    }
+
+
+_SAMPLE_32 = (
+    "sample_128_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq128sk1sqsq512sqsk1)"
+)
+
+
+def _write_replay(path, annotation, kernel_names):
+    events = [_mk_event("user_annotation", annotation, 0, 1000, 1, 1, {})]
+    ts = 100
+    for corr, name in enumerate(kernel_names, start=1):
+        events.append(
+            _mk_event(
+                "cuda_runtime",
+                "hipGraphLaunch",
+                ts,
+                40,
+                1,
+                1,
+                {"correlation": corr},
+            )
+        )
+        events.append(
+            _mk_event("kernel", name, ts + 5, 10, 1, 1, {"correlation": corr})
+        )
+        ts += 100
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump({"traceEvents": events}, f)
+
+
+def _write_capture_index(folder, rows, present):
+    for name in present:
+        (folder / name).write_text(json.dumps({"traceEvents": []}))
+    (folder / "execution_details.json").write_text(json.dumps(rows))
+
+
 class TestCaptureMergeHelpers:
+    def test_repeated_full_launches_select_full_when_both_modes_exist(
+        self, tmp_path, capsys
+    ):
+        _capture_tree_cache.clear()
+        replay = tmp_path / "replay.json.gz"
+        _write_replay(replay, _SAMPLE_32, ["draft", "draft"])
+        folder = tmp_path / "cap"
+        folder.mkdir()
+        rows = [
+            {
+                "file": "full.json",
+                "batch_size": 32,
+                "mode": "FULL",
+                "capture_type": "drafter",
+            },
+            {
+                "file": "piece.json",
+                "batch_size": 32,
+                "mode": "PIECEWISE",
+                "capture_type": "drafter",
+            },
+        ]
+        _write_capture_index(folder, rows, ["full.json", "piece.json"])
+        merge_capture_trace_into_graph(
+            str(folder), str(folder / "execution_details.json"), str(replay)
+        )
+        assert "key=drafter_32_FULL" in capsys.readouterr().out
+
+    def test_differing_launches_select_piecewise_when_both_modes_exist(
+        self, tmp_path, capsys
+    ):
+        _capture_tree_cache.clear()
+        replay = tmp_path / "replay.json.gz"
+        _write_replay(replay, _SAMPLE_32, ["draft", "extend"])
+        folder = tmp_path / "cap"
+        folder.mkdir()
+        rows = [
+            {
+                "file": "full.json",
+                "batch_size": 32,
+                "mode": "FULL",
+                "capture_type": "drafter",
+            },
+            {
+                "file": "piece.json",
+                "batch_size": 32,
+                "mode": "PIECEWISE",
+                "capture_type": "drafter",
+            },
+        ]
+        _write_capture_index(folder, rows, ["full.json", "piece.json"])
+        merge_capture_trace_into_graph(
+            str(folder), str(folder / "execution_details.json"), str(replay)
+        )
+        assert "key=drafter_32_PIECEWISE" in capsys.readouterr().out
+
+    def test_merge_warns_when_lookup_exceeds_captured_batches(self, tmp_path, capsys):
+        _capture_tree_cache.clear()
+        replay = tmp_path / "replay.json.gz"
+        _write_replay(replay, _SAMPLE_32, ["draft"])
+        folder = tmp_path / "cap"
+        folder.mkdir()
+        rows = [
+            {
+                "file": "full.json",
+                "batch_size": 8,
+                "mode": "FULL",
+                "capture_type": "drafter",
+            }
+        ]
+        _write_capture_index(folder, rows, ["full.json"])
+        merge_capture_trace_into_graph(
+            str(folder), str(folder / "execution_details.json"), str(replay)
+        )
+        assert (
+            "no drafter capture batch size found for execution root"
+            in capsys.readouterr().out
+        )
+
+    def test_merge_warns_when_indexed_capture_file_is_missing(self, tmp_path, capsys):
+        _capture_tree_cache.clear()
+        replay = tmp_path / "replay.json.gz"
+        _write_replay(replay, _SAMPLE_32, ["draft"])
+        folder = tmp_path / "cap"
+        folder.mkdir()
+        rows = [
+            {
+                "file": "missing.json",
+                "batch_size": 32,
+                "mode": "FULL",
+                "capture_type": "drafter",
+            }
+        ]
+        _write_capture_index(folder, rows, [])
+        merge_capture_trace_into_graph(
+            str(folder), str(folder / "execution_details.json"), str(replay)
+        )
+        out = capsys.readouterr().out
+        assert "capture file not found" in out
+        assert "could not match capture roots to graph roots" in out
+
+    def test_merge_warns_when_drafter_span_has_no_batch(self, tmp_path, capsys):
+        _capture_tree_cache.clear()
+        replay = tmp_path / "replay.json.gz"
+        _write_replay(replay, "draft", ["draft"])
+        folder = tmp_path / "cap"
+        folder.mkdir()
+        (folder / "execution_details.json").write_text("[]")
+        merge_capture_trace_into_graph(
+            str(folder), str(folder / "execution_details.json"), str(replay)
+        )
+        assert "could not determine batch size" in capsys.readouterr().out
+
     def test_align_capture_to_graph_memcpy(self):
         capture = [{"name": "cudaMemcpy", "args": {}}]
         graph = [{"name": "MemcpyHtoD", "args": {}}]
@@ -627,6 +793,146 @@ class TestInferenceZipPhase8:
         classify_graph_capture_trace(str(capture_dir))
         details = json.loads((capture_dir / "execution_details.json").read_text())
         assert details[0]["batch_size"] == 4
+        assert details[0]["request_bs"] is None
+        assert details[0]["token"] == 4
+        assert details[0]["num_captures"] == 1
+
+    def test_classify_capture_annotation_aligned_with_dummy_run(self, tmp_path):
+        """A capture_{N}_{mode} annotation wins when it lines up with _dummy_run."""
+        capture_dir = tmp_path / "cap"
+        capture_dir.mkdir()
+        events = {
+            "traceEvents": [
+                _mk_event(
+                    "cpu_op",
+                    "vllm/v1/worker/gpu_model_runner.py(1): _dummy_run",
+                    1000,
+                    50,
+                    1,
+                    1,
+                    {},
+                ),
+                _mk_event(
+                    "user_annotation",
+                    "capture_16_FULL",
+                    1010,
+                    40,
+                    1,
+                    1,
+                    {},
+                ),
+                _mk_event("cuda_runtime", "cudaStreamBeginCapture", 1100, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op",
+                    "aten::mm",
+                    1200,
+                    20,
+                    1,
+                    1,
+                    {"Input Dims": [[8, 4]]},
+                ),
+            ]
+        }
+        name = "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz"
+        with gzip.open(capture_dir / name, "wt", encoding="utf-8") as f:
+            json.dump(events, f)
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        assert details[0]["batch_size"] == 16
+        assert details[0]["mode"] == "FULL"
+        assert details[0]["capture_type"] == "drafter"
+        assert details[0]["request_bs"] == 7
+        assert details[0]["token"] == 8
+        assert details[0]["num_captures"] == 1
+
+    def test_classify_sglang_spec_decode_captures(self, tmp_path):
+        """Filename request count is bs; batch_size is the leading token dim."""
+        capture_dir = tmp_path / "cap"
+        capture_dir.mkdir()
+        files = {
+            # name: tokens (most common first dim)
+            "DecodeCudaGraphRunner_bs_7_rank0.json.gz": 42,
+            "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz": 7,
+            "EAGLEDraftExtendCudaGraphRunner_bs_7_rank0.json.gz": 42,
+            "graph_capture_rank_0.json.gz": 16,
+        }
+        for name, tokens in files.items():
+            events = [
+                _mk_event("cuda_runtime", "hipStreamBeginCapture", 0, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op", "aten::mm", 20, 5, 1, 1, {"Input Dims": [[tokens, 8]]}
+                ),
+            ]
+            with gzip.open(capture_dir / name, "wt", encoding="utf-8") as f:
+                json.dump({"traceEvents": events}, f)
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        got = {
+            d["file"]: (
+                d["capture_type"],
+                d["batch_size"],
+                d["request_bs"],
+                d["token"],
+                d["num_captures"],
+            )
+            for d in details
+        }
+        assert got == {
+            "DecodeCudaGraphRunner_bs_7_rank0.json.gz": ("target", 42, 7, 42, 1),
+            "EAGLEDraftCudaGraphRunner_bs_7_rank0.json.gz": ("drafter", 7, 7, 7, 1),
+            "EAGLEDraftExtendCudaGraphRunner_bs_7_rank0.json.gz": (
+                "drafter_extend",
+                42,
+                7,
+                42,
+                1,
+            ),
+            "graph_capture_rank_0.json.gz": ("target", 16, None, 16, 1),
+        }
+
+    def test_classify_atom_spec_decode_captures(self, tmp_path):
+        """ATOM filenames give bs; batch_size is the leading token dim."""
+        capture_dir = tmp_path / "cap"
+        capture_dir.mkdir()
+        files = {
+            "bs_32_q_4_rank0.json.gz": 128,
+            "bs_7_rank0.json.gz": 28,
+            "draft_step_forward_bs_32_rank0.json.gz": 32,
+        }
+        for name, tokens in files.items():
+            events = [
+                _mk_event("cuda_runtime", "hipStreamBeginCapture", 0, 10, 1, 1, {}),
+                _mk_event(
+                    "cpu_op", "aten::mm", 20, 5, 1, 1, {"Input Dims": [[tokens, 8]]}
+                ),
+            ]
+            with gzip.open(capture_dir / name, "wt", encoding="utf-8") as f:
+                json.dump({"traceEvents": events}, f)
+        classify_graph_capture_trace(str(capture_dir))
+        details = json.loads((capture_dir / "execution_details.json").read_text())
+        got = {
+            d["file"]: (
+                d["capture_type"],
+                d["batch_size"],
+                d["request_bs"],
+                d["token"],
+                d["mode"],
+                d["num_captures"],
+            )
+            for d in details
+        }
+        assert got == {
+            "bs_32_q_4_rank0.json.gz": ("target", 128, 32, 128, "FULL", 1),
+            "bs_7_rank0.json.gz": ("target", 28, 7, 28, "FULL", 1),
+            "draft_step_forward_bs_32_rank0.json.gz": (
+                "drafter",
+                32,
+                32,
+                32,
+                "FULL",
+                1,
+            ),
+        }
 
 
 @pytest.mark.parametrize("dirpath,trace_gz", _discover_inference_cases())

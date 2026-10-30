@@ -15,7 +15,10 @@ from typing import Dict, List, Optional, Sequence
 
 from collections import deque
 
-from ...util import normalize_name_for_comparison
+from ...util import TraceEventUtils, normalize_name_for_comparison
+
+TK = TraceEventUtils.TraceKeys
+TP = TraceEventUtils.TracePhases
 from ...Trace2Tree.trace_to_tree import TraceToTree
 from ...Trace2Tree.util import (
     _descendant_gpu_time,
@@ -23,6 +26,10 @@ from ...Trace2Tree.util import (
     _reattach_worker_threads,
 )
 from ..utils.annotation_utils import (
+    ANNOTATION_CAT,
+    ITERATION_BACKUP_PATTERNS,
+    ITERATION_PATTERNS,
+    IterationAnnotation,
     find_known_annotations,
     name_skeleton,
 )
@@ -69,7 +76,7 @@ def _child_groups(tree: TraceToTree, ordered: Sequence[dict], norm: Dict) -> tup
     """
     groups: Dict[str, List[dict]] = {}
     for child in ordered:
-        groups.setdefault(norm[child["UID"]], []).append(child)
+        groups.setdefault(norm[child[TK.UID]], []).append(child)
     gpu = {name: _descendant_gpu_time(tree, inst) for name, inst in groups.items()}
     return groups, gpu
 
@@ -113,13 +120,13 @@ def _bookend_diagnostics(
     cascade's job, and doing it here would walk the subtree a second time on the
     descent's hot path.
     """
-    blocked_uids = {e.get("UID") for e in blocked}
+    blocked_uids = {e.get(TK.UID) for e in blocked}
     return {
         "before_uids": [
-            e.get("UID") for e in prefix if e.get("UID") not in blocked_uids
+            e.get(TK.UID) for e in prefix if e.get(TK.UID) not in blocked_uids
         ],
         "after_uids": [
-            e.get("UID") for e in suffix if e.get("UID") not in blocked_uids
+            e.get(TK.UID) for e in suffix if e.get(TK.UID) not in blocked_uids
         ],
     }
 
@@ -139,20 +146,22 @@ def _periodic_candidate(
     :func:`_child_groups`). Frames whose *name* carries no GPU work anywhere are
     dropped before the period search.
     """
-    live = [e for e in ordered if gputime_by_name.get(norm[e["UID"]], 0.0) > 0]
-    period, pattern, start = _find_repeating_period([norm[e["UID"]] for e in live])
+    live = [e for e in ordered if gputime_by_name.get(norm[e[TK.UID]], 0.0) > 0]
+    period, pattern, start = _find_repeating_period([norm[e[TK.UID]] for e in live])
     if period is None or period == 1:
         return None
     unit_blocks = _blocks_by_pattern(live, pattern, start, norm)
     if len(unit_blocks) < MIN_LABEL_CHILDREN:
         return None
     prefix = list(live[:start])
-    blocked_uids = {e.get("UID") for b in unit_blocks for e in b}
-    last_block_end = unit_blocks[-1][-1]["ts"] + unit_blocks[-1][-1].get("dur", 0)
+    blocked_uids = {e.get(TK.UID) for b in unit_blocks for e in b}
+    last_block_end = unit_blocks[-1][-1][TK.TimeStamp] + unit_blocks[-1][-1].get(
+        TK.Duration, 0
+    )
     suffix = [
         e
         for e in live
-        if e["ts"] >= last_block_end and e.get("UID") not in blocked_uids
+        if e[TK.TimeStamp] >= last_block_end and e.get(TK.UID) not in blocked_uids
     ]
     iteration_roots: List[dict] = []
     root_gpu_times: List[float] = []
@@ -160,8 +169,10 @@ def _periodic_candidate(
     for block in unit_blocks:
         first, last = block[0], block[-1]
         event = dict(first)
-        event["name"] = node.get("name", event.get("name", ""))
-        event["dur"] = (last["ts"] + last.get("dur", 0)) - first["ts"]
+        event[TK.Name] = node.get(TK.Name, event.get(TK.Name, ""))
+        event[TK.Duration] = (last[TK.TimeStamp] + last.get(TK.Duration, 0)) - first[
+            TK.TimeStamp
+        ]
         iteration_roots.append(event)
         root_gpu_times.append(_descendant_gpu_time(tree, block))
         blocked.extend(block)
@@ -206,10 +217,10 @@ def _grouped_candidate(
     gpu_time, _, instances = families[0]
 
     blocked = list(instances)
-    first_ts = instances[0].get("ts", 0)
-    last_end = instances[-1].get("ts", 0) + instances[-1].get("dur", 0)
-    prefix = [e for e in ordered if e.get("ts", 0) < first_ts]
-    suffix = [e for e in ordered if e.get("ts", 0) >= last_end]
+    first_ts = instances[0].get(TK.TimeStamp, 0)
+    last_end = instances[-1].get(TK.TimeStamp, 0) + instances[-1].get(TK.Duration, 0)
+    prefix = [e for e in ordered if e.get(TK.TimeStamp, 0) < first_ts]
+    suffix = [e for e in ordered if e.get(TK.TimeStamp, 0) >= last_end]
     root_gpu_times = [_descendant_gpu_time(tree, [e]) for e in instances]
 
     candidate = _branch_candidate(
@@ -298,7 +309,9 @@ def find_pattern(
     When *node* is provided, iteration roots are named after it (branch
     descent). Otherwise each root keeps its own name (sibling roots).
     """
-    norm = {e["UID"]: normalize_name_for_comparison(e.get("name", "")) for e in ordered}
+    norm = {
+        e[TK.UID]: normalize_name_for_comparison(e.get(TK.Name, "")) for e in ordered
+    }
     groups, gputime_by_name = _child_groups(tree, ordered, norm)
     best: Optional[RootSet] = None
     dummy_node = node if node is not None else {}
@@ -340,7 +353,7 @@ def detect_from_branch_descent(
             break
         children = tree.get_children_events(node)
         if len(children) >= MIN_LABEL_CHILDREN:
-            ordered = sorted(children, key=lambda e: e.get("ts", 0))
+            ordered = sorted(children, key=lambda e: e.get(TK.TimeStamp, 0))
             candidate = find_pattern(tree, ordered, total_gpu, node=node, depth=depth)
             if candidate is not None and (
                 best is None
@@ -373,7 +386,7 @@ def detect_from_sibling_roots(
     no repeating pattern among the entry roots. The caller decides whether
     coverage is acceptable.
     """
-    ordered = sorted(entry_roots, key=lambda e: e.get("ts", 0))
+    ordered = sorted(entry_roots, key=lambda e: e.get(TK.TimeStamp, 0))
     candidate = find_pattern(tree, ordered, total_gpu)
     if candidate is None:
         return None
@@ -406,7 +419,7 @@ def _annotation_root_set(
     single-family set (unknown families, vLLM), several when known iteration
     annotations span phases (SGLang EXTEND/DECODE, ATOM prefill/decode).
     """
-    ordered = sorted(roots, key=lambda e: e.get("ts", 0))
+    ordered = sorted(roots, key=lambda e: e.get(TK.TimeStamp, 0))
     coverage = attribution.audit(ordered)
     few_roots = len(ordered) < MIN_ROOTS
     known_labels = phase_confidence is PhaseConfidence.HIGH
@@ -417,7 +430,7 @@ def _annotation_root_set(
     else:
         status = DetectStatus.NOT_SPLITTABLE
 
-    skeletons = sorted({name_skeleton(r.get("name", "")) for r in ordered})
+    skeletons = sorted({name_skeleton(r.get(TK.Name, "")) for r in ordered})
     return RootSet(
         roots=ordered,
         method=method,
@@ -433,6 +446,45 @@ def _annotation_root_set(
     )
 
 
+_KNOWN_PATTERNS = ITERATION_PATTERNS + ITERATION_BACKUP_PATTERNS
+
+
+def _enrich_unmatched_roots(roots: list[dict], annotations: Sequence[dict]) -> None:
+    """Inherit a contained known annotation's name when a root has no metadata.
+
+    When the preferred-tier selects a root whose name does not parse as a
+    known ``IterationAnnotation`` (e.g. ``scheduler.run_batch``), look for
+    a single known annotation whose duration is fully contained within
+    that root.  If exactly one is found, graft its name onto the root so
+    that ``IterationAnnotation`` parses it with full metadata (batch size,
+    sq/sk aggregates, phase).
+    """
+    annot_by_ts = sorted(
+        (
+            a
+            for a in annotations
+            if a.get(TK.Category) == ANNOTATION_CAT and a.get(TK.Phase) == TP.Complete
+        ),
+        key=lambda a: a.get(TK.TimeStamp, 0),
+    )
+    for root in roots:
+        if IterationAnnotation(root.get(TK.Name, "")).matched:
+            continue
+        r_ts = root[TK.TimeStamp]
+        r_end = r_ts + root.get(TK.Duration, 0)
+        contained_known = []
+        for a in annot_by_ts:
+            a_ts = a.get(TK.TimeStamp, 0)
+            if a_ts > r_end:
+                break
+            a_end = a_ts + a.get(TK.Duration, 0)
+            if a_ts >= r_ts and a_end <= r_end:
+                if any(p.match(a.get(TK.Name, "")) for p in _KNOWN_PATTERNS):
+                    contained_known.append(a)
+        if len(contained_known) == 1:
+            root[TK.Name] = contained_known[0][TK.Name]
+
+
 def _detect_from_known_annotations(
     annotations: Sequence[dict],
     attribution: GpuAttribution,
@@ -440,6 +492,7 @@ def _detect_from_known_annotations(
     known = find_known_annotations(annotations)
     if not known:
         return None
+    _enrich_unmatched_roots(known, annotations)
     return _annotation_root_set(
         known,
         attribution,
@@ -455,7 +508,7 @@ def _detect_from_unknown_annotations(
 ) -> Optional[RootSet]:
     grouped: Dict[str, List[dict]] = {}
     for event in annotations:
-        grouped.setdefault(name_skeleton(event.get("name", "")), []).append(event)
+        grouped.setdefault(name_skeleton(event.get(TK.Name, "")), []).append(event)
 
     candidates = []
     for instances in grouped.values():
@@ -485,7 +538,7 @@ def _log_attempt(step: str, root_set: Optional[RootSet]) -> None:
     cov = root_set.coverage
     max_shown = 3
 
-    skeletons = sorted({name_skeleton(r.get("name", "")) for r in root_set.roots})
+    skeletons = sorted({name_skeleton(r.get(TK.Name, "")) for r in root_set.roots})
     shown = ", ".join(
         s if len(s) <= 60 else s[:57] + "..." for s in skeletons[:max_shown]
     )
@@ -533,11 +586,13 @@ def _try_bookend_enhancement(
         return None
 
     def _span(events: Sequence[dict], name: str) -> dict:
-        ordered = sorted(events, key=lambda e: e["ts"])
+        ordered = sorted(events, key=lambda e: e[TK.TimeStamp])
         last = ordered[-1]
         root = dict(ordered[0])
-        root["name"] = name
-        root["dur"] = last["ts"] + last.get("dur", 0) - ordered[0]["ts"]
+        root[TK.Name] = name
+        root[TK.Duration] = (
+            last[TK.TimeStamp] + last.get(TK.Duration, 0) - ordered[0][TK.TimeStamp]
+        )
         return root
 
     roots = list(candidate.roots)

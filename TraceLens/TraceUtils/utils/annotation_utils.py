@@ -12,6 +12,7 @@ and populates its fields from whichever registered pattern matches:
 - ``CaptureAnnotation``   -> graph-capture annotations
 """
 
+import bisect
 import re
 from functools import lru_cache
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -39,9 +40,11 @@ VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d
 # step[DECODE bs=64 g_sq=128 g_sqsq=256 g_sqsk=262144 g_sk=131072]  <- MTP: g_sq > bs
 # step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40
 #     g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]
+# step[TARGET_VERIFY bs=32 c_sq=128 c_sqsq=512 c_sqsk=188244 c_sk=47061]
 # Case-insensitive: some builds emit lowercase phases (``step[decode bs=1]``).
 SGLANG_DETAILED_PATTERN = re.compile(
-    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]", re.IGNORECASE
+    r"step\[(?:EXTEND|DECODE|MIXED|(?:TARGET_)?VERIFY)\b[^\]]*sqsq=\d+[^\]]*\]",
+    re.IGNORECASE,
 )
 # step[EXTEND bs=2 toks=14721]
 # step[DECODE bs=64]
@@ -49,6 +52,69 @@ SGLANG_DETAILED_PATTERN = re.compile(
 SGLANG_NATIVE_PATTERN = re.compile(
     r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]", re.IGNORECASE
 )
+
+# Spec-decode roots that replay graphs. The drafter graphs replay directly under
+# the draft / draft_extend stage spans; step[DRAFT bs=N] only wraps eager
+# draft-model forwards, so it is not a root.
+# Native VERIFY parses as sglang_native but stays out of the backup tier so
+# native-trace splits are unchanged; the detailed label is a primary-tier root.
+# step[VERIFY bs=32]
+# step[TARGET_VERIFY bs=7]  <- older builds
+SGLANG_VERIFY_PATTERN = re.compile(r"step\[(?:TARGET_)?VERIFY\b[^\]]*\]", re.IGNORECASE)
+SPEC_ROLE_TARGET = "target"
+SPEC_ROLE_DRAFTER = "drafter"
+SPEC_ROLE_DRAFTER_EXTEND = "drafter_extend"
+# SGLang spec-decode drafter annotations.
+# draft          <- drafter decode (graph replay)
+# draft_extend   <- drafter extend (eager, prefill-shaped)
+SGLANG_DRAFT_DECODE_PATTERN = re.compile(r"^draft$")
+SGLANG_DRAFT_EXTEND_PATTERN = re.compile(r"^draft_extend$")
+# vLLM wraps sample_tokens with the execute annotation shape. The HIP graph
+# replays under it are the drafter; the lookup key is generation request count,
+# not the token batch in sq.
+# sample_128_context_0(sq0sk0sqsq0sqsk0)_generation_32(sq128sk42473sqsq512sqsk169892)
+VLLM_SAMPLE_PATTERN = re.compile(
+    r"sample_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+)
+# ATOM spec-decode annotations.
+# decode[bs=32 tok=128 d=32 spec=3]  <- target verify (decode with speculative steps)
+ATOM_VERIFY_PATTERN = re.compile(r"^decode\[.*\bspec=\d+.*\]")
+# propose_eagle[0/3 tok=4 bs=1]       <- step 0: drafter extend (eager, prefill-shaped)
+# propose_eagle[1/3 tok=1 bs=1/1 graph] <- step 1+: drafter decode (graph replay)
+ATOM_PROPOSE_EXTEND_PATTERN = re.compile(r"^propose_\w+\[0/")
+ATOM_PROPOSE_DECODE_PATTERN = re.compile(r"^propose_\w+\[[1-9]\d*/")
+
+SPEC_VERIFY_PATTERNS = [SGLANG_VERIFY_PATTERN, ATOM_VERIFY_PATTERN]
+SPEC_DRAFT_PATTERNS = [
+    (SGLANG_DRAFT_DECODE_PATTERN, SPEC_ROLE_DRAFTER),
+    (SGLANG_DRAFT_EXTEND_PATTERN, SPEC_ROLE_DRAFTER_EXTEND),
+    (VLLM_SAMPLE_PATTERN, SPEC_ROLE_DRAFTER),
+    (ATOM_PROPOSE_EXTEND_PATTERN, SPEC_ROLE_DRAFTER_EXTEND),
+    (ATOM_PROPOSE_DECODE_PATTERN, SPEC_ROLE_DRAFTER),
+]
+
+CAPTURE_ROLE_PATTERNS = [
+    (re.compile(r"DraftExtend"), SPEC_ROLE_DRAFTER_EXTEND),
+    (re.compile(r"Draft|_speculator|draft_step_forward"), SPEC_ROLE_DRAFTER),
+]
+
+SGLANG_RUNNER_BS_PATTERN = re.compile(r"^\w*CudaGraphRunner_bs_(\d+)_")
+ATOM_TARGET_BS_PATTERN = re.compile(r"^bs_(\d+)(?:_q_\d+)?_rank_?\d+")
+ATOM_DRAFT_BS_PATTERN = re.compile(r"^draft_step_forward_bs_(\d+)_rank_?\d+")
+
+
+def filename_request_bs(basename: str):
+    """Request count from a capture filename, or None when the name has none."""
+    for pattern in (
+        ATOM_DRAFT_BS_PATTERN,
+        ATOM_TARGET_BS_PATTERN,
+        SGLANG_RUNNER_BS_PATTERN,
+    ):
+        match = pattern.match(basename)
+        if match:
+            return int(match.group(1))
+    return None
+
 
 # prefill[bs=2 tok=14721 ctx=[7803, 6918]]
 # prefill[bs=6 tok=17408 ctx=[4096, 4096, 4096]...+3]  <- ctx truncated past 5
@@ -68,8 +134,15 @@ CAPTURE_PATTERN = re.compile(r"capture_(\d+)_(.*)")
 # execute_diffusion_1_1024x1024   (diffusion replay: batch_size, resolution)
 DIFFUSION_NATIVE_PATTERN = re.compile(r"execute_diffusion_(\d+)_(\d+x\d+)")
 
-# Root-discovery priority: PRIMARY (detailed) patterns are tried first and
-# BACKUP (native) patterns are used only when no primary root is found.
+# SGLang scheduler.run_batch encompasses the target model forward pass and is
+# a better iteration boundary than the short step[VERIFY/EXTEND] marker.
+SGLANG_ENGINE_STEP_PATTERN = re.compile(r"^scheduler\.run_batch$")
+
+# Root-discovery priority: PREFERRED > PRIMARY > BACKUP.  Each tier is tried in
+# order; the first tier that produces any matches wins.
+ITERATION_PREFERRED_PATTERNS = [
+    SGLANG_ENGINE_STEP_PATTERN,
+]
 ITERATION_PATTERNS = [
     VLLM_DETAILED_PATTERN,
     ATOM_DETAILED_PATTERN,
@@ -136,7 +209,8 @@ def _fill_sglang_native(ann, name):
         return False
     kind_word, bs = m.group(1).upper(), int(m.group(2))
     toks = int(m.group(3) or 0)
-    if kind_word == "DECODE":
+    # VERIFY carries no per-request draft-token count, so g_sq is requests here.
+    if kind_word in ("DECODE", "VERIFY", "TARGET_VERIFY"):
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
     else:  # EXTEND / MIXED treated as prefill; toks = total prompt tokens.
         ann.context_requests = bs
@@ -164,6 +238,10 @@ def _fill_sglang_detailed(ann, name):
     )
     if mode == "DECODE":
         ann.generation_requests, ann.generation_sum = bs, ann.g_sq
+    # Verify is a decode step, but its draft tokens are tree-masked against each
+    # other, so the roofline patch emits them as c_* for the causal correction.
+    elif mode in ("VERIFY", "TARGET_VERIFY"):
+        ann.generation_requests, ann.generation_sum = bs, ann.c_sq
     elif mode == "EXTEND":
         ann.context_requests, ann.context_sum = bs, ann.c_sq
     else:  # MIXED: c=/g= are per-group request counts.
@@ -236,6 +314,7 @@ class IterationAnnotation:
         ("vllm_native", VLLM_NATIVE_PATTERN, _fill_vllm_native),
         ("sglang_detailed", SGLANG_DETAILED_PATTERN, _fill_sglang_detailed),
         ("sglang_native", SGLANG_NATIVE_PATTERN, _fill_sglang_native),
+        ("sglang_native", SGLANG_VERIFY_PATTERN, _fill_sglang_native),
         ("atom_detailed", ATOM_DETAILED_PATTERN, _fill_atom),
         ("atom_native", ATOM_NATIVE_PATTERN, _fill_atom),
         ("diffusion_native", DIFFUSION_NATIVE_PATTERN, _fill_diffusion),
@@ -399,10 +478,14 @@ class CaptureAnnotation:
 def find_known_annotations(annotations: List[dict]) -> List[dict]:
     """Annotations matching a recognized iteration pattern, sorted by timestamp.
 
-    Tries the detailed tier first, then the native/backup tier, returning the
-    first tier that produces any matches.
+    Tries preferred > detailed > native/backup tiers, returning the first tier
+    that produces any matches.
     """
-    for patterns in (ITERATION_PATTERNS, ITERATION_BACKUP_PATTERNS):
+    for patterns in (
+        ITERATION_PREFERRED_PATTERNS,
+        ITERATION_PATTERNS,
+        ITERATION_BACKUP_PATTERNS,
+    ):
         matches = [
             e
             for e in annotations
@@ -413,6 +496,88 @@ def find_known_annotations(annotations: List[dict]) -> List[dict]:
             matches.sort(key=lambda x: x.get("ts", 0))
             return matches
     return []
+
+
+def _match_verify_role(name: str) -> Optional[str]:
+    return (
+        SPEC_ROLE_TARGET if any(p.match(name) for p in SPEC_VERIFY_PATTERNS) else None
+    )
+
+
+def _match_draft_role(name: str) -> Optional[str]:
+    return next((role for p, role in SPEC_DRAFT_PATTERNS if p.match(name)), None)
+
+
+def spec_decode_role(name: str) -> Optional[str]:
+    """Capture role (``SPEC_ROLE_*``) a spec-decode root replays, else ``None``."""
+    return _match_verify_role(name) or _match_draft_role(name)
+
+
+def find_spec_decode_annotations(annotations: List[dict]) -> List[dict]:
+    """Spec-decode roots (verify + drafter stages), sorted by timestamp.
+
+    Untiered, unlike ``find_known_annotations``: these roots coexist with
+    detailed prefill roots, which would otherwise hide them.
+    """
+    matches = [
+        e
+        for e in annotations
+        if e.get("cat") == ANNOTATION_CAT and spec_decode_role(e.get("name", ""))
+    ]
+    matches.sort(key=lambda x: x.get("ts", 0))
+    return matches
+
+
+def spec_decode_batch_sizes(
+    roots: List[dict],
+) -> List[Optional[Tuple[int, ...]]]:
+    """Candidate capture batch sizes per root, aligned with *roots*.
+
+    Returns a tuple of batch sizes to try for each root.  vLLM drafter
+    ``sample_`` roots return two sizes: the decode batch size
+    (``num_requests``) and the prefill batch size
+    (``num_requests * (num_speculative_tokens + 1)``), because the drafter
+    uses separate CUDA graph managers for each phase.  SGLang / ATOM
+    drafter roots and target roots return a single-element tuple with the
+    request count.  ``None`` for roots that are not spec-decode roots or
+    have no VERIFY to borrow from.
+    """
+
+    def requests(root):
+        ann = parse_annotation(root["name"])
+        return ann.context_requests + ann.generation_requests
+
+    verify = sorted(
+        (r for r in roots if _match_verify_role(r.get("name", ""))),
+        key=lambda r: r["ts"],
+    )
+    starts = [r["ts"] for r in verify]
+
+    def gap(a, b):
+        return max(0, b["ts"] - a["ts"] - a["dur"], a["ts"] - b["ts"] - b["dur"])
+
+    sizes: List[Optional[Tuple[int, ...]]] = []
+    for root in roots:
+        name = root.get("name", "")
+        if VLLM_SAMPLE_PATTERN.match(name):
+            ann = IterationAnnotation("execute_" + name[len("sample_") :])
+            decode_bs = ann.context_requests + ann.generation_requests
+            prefill_bs = ann.batch_size
+            candidates = {decode_bs, prefill_bs}
+            sizes.append(tuple(sorted(candidates)) if candidates else None)
+            continue
+        role = spec_decode_role(name)
+        if role == SPEC_ROLE_TARGET:
+            sizes.append((requests(root),))
+            continue
+        i = bisect.bisect_left(starts, root["ts"])
+        nearby = verify[max(i - 1, 0) : i + 1]
+        if role is None or not nearby:
+            sizes.append(None)
+            continue
+        nearest = min(nearby, key=lambda v: gap(root, v))
+        sizes.append((requests(nearest),))
+    return sizes
 
 
 # --- family keys ------------------------------------------------------------

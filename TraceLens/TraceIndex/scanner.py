@@ -8,14 +8,12 @@
 
 import gzip
 import hashlib
-import re
 from pathlib import Path
 from typing import Optional
 
 from TraceLens.TraceIndex.models import TraceRecord
 from TraceLens.TraceIndex.utils import classify_skip, normalize_path, rel_to
-
-RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
+from TraceLens.util import extract_rank
 
 
 def is_json_gz(path: Path) -> bool:
@@ -64,16 +62,6 @@ def detect_format(path: Path, prefix: str) -> str:
     if suffix == ".json":
         return "json_unknown"
     return "trace_named_unknown"
-
-
-def extract_rank(path: Path) -> Optional[int]:
-    match = RANK_RE.search(normalize_path(path))
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
 
 
 def trace_record_from_path(

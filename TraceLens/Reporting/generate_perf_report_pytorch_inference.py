@@ -32,7 +32,10 @@ from TraceLens.Reporting.reporting_utils import (
 from TraceLens.util import TraceEventUtils
 from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
+    CAPTURE_ROLE_PATTERNS,
+    SPEC_ROLE_TARGET,
     CaptureAnnotation,
+    filename_request_bs,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
@@ -223,7 +226,8 @@ def find_capture_annotation_events(events):
 
 def classify_graph_capture_trace(input_folder: str):
     """
-    Return {file, batch_size, mode} for a single graph-capture trace file.
+    Return {file, batch_size, mode, capture_type, request_bs, token, num_captures}
+    for one capture file.
     Supports .json, .json.gz, and .zip (containing a .json).
     """
     execution_details_path = os.path.join(input_folder, "execution_details.json")
@@ -292,24 +296,49 @@ def classify_graph_capture_trace(input_folder: str):
         dummy_roots = find_dummy_run_roots(events)
         annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
+        role = next(
+            (r for p, r in CAPTURE_ROLE_PATTERNS if p.search(basename)),
+            SPEC_ROLE_TARGET,
+        )
+        request_bs = filename_request_bs(basename)
+        token = most_common_first_dim(events)
+        num_captures = count_stream_begin_captures(events)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
             cap = CaptureAnnotation(annotation_roots[0]["name"])
             batch_size, mode = cap.batch_size, cap.mode
             print(
-                f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
+                f"batch_size: {batch_size}, request_bs: {request_bs}, token: {token}, mode: {mode} parsed from annotation, num_captures: {num_captures}"
             )
-            results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+            results.append(
+                {
+                    "file": basename,
+                    "batch_size": batch_size,
+                    "mode": mode,
+                    "capture_type": role,
+                    "request_bs": request_bs,
+                    "token": token,
+                    "num_captures": num_captures,
+                }
+            )
             continue
 
-        num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = most_common_first_dim(events)
+        batch_size = token
         print(
-            f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
+            f"batch_size: {batch_size}, request_bs: {request_bs}, token: {token}, mode: {mode}, capture_type: {role} inferred, num_captures: {num_captures}"
         )
-
-        results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+        results.append(
+            {
+                "file": basename,
+                "batch_size": batch_size,
+                "mode": mode,
+                "capture_type": role,
+                "request_bs": request_bs,
+                "token": token,
+                "num_captures": num_captures,
+            }
+        )
     with open(f"{input_folder}/execution_details.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults written to {input_folder}/execution_details.json")

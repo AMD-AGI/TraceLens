@@ -129,6 +129,15 @@ def get_filename(filepath: str) -> str:
     return filepath
 
 
+_RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
+
+
+def extract_rank(path) -> Optional[int]:
+    """Return the rank number embedded in a trace path (``rank_3``, ``rank-3``), or None."""
+    match = _RANK_RE.search(str(path).replace("\\", "/"))
+    return int(match.group(1)) if match else None
+
+
 def _load_xplane_converter():
     """Load the optional JAX xprof converter."""
     try:

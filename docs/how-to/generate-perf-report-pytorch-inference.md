@@ -326,7 +326,7 @@ annotations and graph-capture tracing:
 | `ATOM_ENABLE_DETAILED_ANNOTATION` | env var    | When`1`, execution-step annotations carry roofline metrics (`sqsq`, `sqsk`, `sk`) alongside the batch and token counts. The aggregates are computed only while the profiler is running, so unprofiled steps pay nothing. |
 | `ATOM_PROFILER_MORE`              | env var    | When`1`, records shapes and CPU call stacks, which the report needs for shape-level analysis.                                                                                                                                  |
 | `--torch-profiler-dir DIR`        | server arg | Destination for the profiler traces. ATOM writes one subdirectory per rank (`rank_N/`).                                                                                                                                        |
-| `--mark-trace`                    | server arg | Enables the graph-capture profiler, writing one trace per captured batch size to`capture_traces/bs_{bs}_rank{N}.json.gz`. Recent nightlies add a query-length field and use `bs_{bs}_q_{q}_rank{N}.json.gz` instead.         |
+| `--mark-trace`                    | server arg | Enables the graph-capture profiler. Target files are `bs_{bs}_rank{N}.json.gz` or `bs_{bs}_q_{q}_rank{N}.json.gz`. Drafter files are `draft_step_forward_bs_{bs}_rank{N}.json.gz`. TraceLens keys both by the request batch size in the file name.         |
 
 ```bash
 export ATOM_PROFILER_MORE=1
@@ -460,7 +460,35 @@ TraceLens_generate_perf_report_pytorch_inference \
 When `--capture_folder` is set, TraceLens first classifies the capture traces
 (writing an `execution_details.json` in the folder if one isn't already present),
 then merges the matching subtrees into the graph tree before running the standard
-analysis.
+analysis. Each `execution_details.json` entry lists `file`, `batch_size`, `mode`,
+`capture_type` (`target`, `drafter` or `drafter_extend`; `target` when absent),
+`request_bs`, `token`, and `num_captures`. `batch_size` is the number parsed from a `capture_{N}_{mode}`
+annotation when that annotation lines up with a dummy-run root, and otherwise
+the most common leading input dimension. `token` is that same leading
+dimension. `request_bs` is the request count from the filename when the name carries
+one. `num_captures` is the number of `StreamBeginCapture` runtime events in the
+file; one or fewer is `FULL`, and more than one is `PIECEWISE`. Captures from the same rank as the replay trace are preferred.
+
+### Speculative decoding
+
+For SGLang EAGLE/MTP runs, the `step[VERIFY bs=N]` (`step[TARGET_VERIFY bs=N]` on
+older builds) roots merge with the target captures, and the `draft` and
+`draft_extend` stage spans merge with the drafter and draft-extend captures.
+The stage spans carry no batch size, so they borrow `N` from the adjacent verify
+root. SGLang captures are keyed by request batch size, taken from the
+`*CudaGraphRunner_bs_N_*` file name. A roofline-patched verify label
+(`step[TARGET_VERIFY bs=N c_sq=... c_sqsq=...]`) is also an iteration root, so the
+trace splitter splits on it; it counts as a decode step. `step[DRAFT ...]` spans and stages without a
+graph launch aren't merged. vLLM speculator captures
+(`graph_capture_rank_0_speculator.*`) are classified as `drafter`. The drafter
+replays sit under `sample_` spans that mirror the `execute_` annotation; those
+spans merge with the drafter capture keyed by generation request count. Several
+launches of one kernel sequence share the FULL capture. ATOM target files
+`bs_{bs}_q_{q}_rank{N}` and drafter files `draft_step_forward_bs_{bs}_rank{N}` are
+keyed by that request batch size. `decode[bs=N tok=... spec=...]` merges with the
+target capture, `propose_*[0/...]` with drafter extend, and later `propose_*`
+steps with the drafter capture. The propose spans borrow `N` from the adjacent
+decode annotation.
 
 ## Inference-oriented options
 
