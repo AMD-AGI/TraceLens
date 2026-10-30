@@ -13,6 +13,10 @@ REDUCE_KERNEL = "_sparse_attn_decode_reduce_kernel"
 TRITON_FN = "_rocm_sparse_attn_decode_triton"
 PSEUDO_NAME = "pseudo_vllm_sparse_attn_decode"
 BLOCK_K = 32
+DECODE_FN = "_forward_decode"
+# Called only by compress-ratio-4 (CSA) layers before the sparse decode.
+CSA_TOPK_FN = "compute_global_topk_ragged_indices_and_indptr"
+LAYER_FN = "DeepseekV4DecoderLayer"
 
 
 def create_pseudo_ops_vllm_sparse_decode(trace_tree):
@@ -61,9 +65,21 @@ def _find_shapes(trace_tree, owner):
             partial = found_p
         if query and partial:
             return query, partial
-        if "DeepseekV4DecoderLayer" in (node.get("name") or ""):
+        if LAYER_FN in (node.get("name") or ""):
             break
     return query, partial
+
+
+def _is_csa_decode(trace_tree, owner):
+    for anc in _ancestors(trace_tree, owner):
+        name = anc.get("name") or ""
+        if DECODE_FN in name:
+            return any(
+                CSA_TOPK_FN in (evt.get("name") or "") for evt in _walk(trace_tree, anc)
+            )
+        if LAYER_FN in name:
+            break
+    return False
 
 
 def _walk(trace_tree, root):
@@ -140,6 +156,7 @@ def _inject_group(trace_tree, owner, kernels):
             "Concrete Inputs": None,
             "Pseudo op": True,
             "v4_block_k": BLOCK_K,
+            "v4_mode": "csa" if _is_csa_decode(trace_tree, owner) else None,
         },
         "children": [launcher["UID"] for launcher in launchers],
         "gpu_events": [kernel["UID"] for kernel in kernels],

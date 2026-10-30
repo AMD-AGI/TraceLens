@@ -571,7 +571,6 @@ class TestPerfModelExtensions:
     def test_deepseek_v4_mla_decode_uses_page_indices(self):
         num_kv = 67072
         event = {
-            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
             "args": {
                 "Input Dims": [
                     [8, 16, 512],
@@ -637,8 +636,8 @@ class TestPerfModelExtensions:
             },
         }
         model = aext.mla_decode_v4_asm(event)
-        assert model.param_details["logical_batch_size"] == 5
-        assert model.param_details["annotation_g_sk"] == 5
+        assert model.param_details["kv_mode"] is None
+        assert model.param_details["kv_capacity"] == num_kv
         assert model.param_details["g_sqsk"] == num_kv
         assert model.param_details["num_kv"] == num_kv
         assert model.get_compute_precision() == "fp8"
@@ -656,6 +655,169 @@ class TestPerfModelExtensions:
             + 8 * 16 * 16 * 4
             + 8 * 4
         )
+
+    @staticmethod
+    def _mla_v4_capacity_event(capacity, annotation=None):
+        # DSv4-Pro TP8 decode: 8 captured rows, 16 heads, 16 KV splits.
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 16, 512],
+                    [8, 16, 64],
+                    [197068, 1, 1, 512],
+                    [197068, 1, 1, 64],
+                    [9],
+                    [9],
+                    [capacity],
+                    [9],
+                    [16],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [8, 16, 16, 512],
+                    [8, 16, 16, 1],
+                    [8, 16, 512],
+                    [8],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                ],
+                "Concrete Inputs": [""] * 9 + ["1", "0.", "0", "16"],
+            },
+        }
+        if annotation is not None:
+            event["annotation"] = annotation
+        return event
+
+    @staticmethod
+    def _decode_annotation(requests, ctx):
+        total = requests * ctx
+        return (
+            "execute_{0}_context_0(sq0sk0sqsq0sqsk0)_generation_{0}"
+            "(sq{0}sk{1}sqsq{0}sqsk{1})".format(requests, total)
+        )
+
+    def test_mla_decode_v4_hca_kv_from_annotation(self):
+        # Capacity 8 * (1M / 128 + 128 + 64): only the 32K live range is read.
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        model = aext.mla_decode_v4_asm(event)
+        p = model.param_details
+        assert p["kv_mode"] == "hca"
+        assert p["kv_capacity"] == 67072
+        assert p["num_kv"] == 8 * (128 + 32768 // 128)
+        assert p["g_sqsk"] == p["N_KV"] == p["num_kv"]
+        assert p["logical_batch_size"] == 8
+        num_kv = p["num_kv"]
+        assert model.flops() == 4 * 16 * 512 * num_kv
+        assert model.bytes() == (
+            8 * 16 * 512
+            + 8 * 16 * 64 * 2
+            + num_kv * (512 + 64 * 2 + 4)
+            + 9 * 4 * 3
+            + 16 * 4
+            + 8 * 16 * 16 * 512 * 4
+            + 8 * 16 * 16 * 4
+        )
+
+    def test_mla_decode_v4_logical_batch_below_capture(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(5, 32768))
+        p = aext.mla_decode_v4_asm(event).param_details
+        assert p["num_kv"] == 5 * (128 + 32768 // 128)
+
+    def test_mla_decode_v4_csa_capped_by_index_topk(self):
+        capacity = 8 * (1024 + 128)
+        long_ctx = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 32768))
+        ).param_details
+        assert long_ctx["kv_mode"] == "csa"
+        assert long_ctx["num_kv"] == capacity
+        short_ctx = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 1000))
+        ).param_details
+        assert short_ctx["num_kv"] == 8 * (128 + 250)
+
+    def test_mla_decode_v4_window_and_topk_overrides(self):
+        capacity = 8 * (512 + 128)
+        event = self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 1000))
+        default = aext.mla_decode_v4_asm(event).param_details
+        assert default["kv_mode"] == "csa"
+        assert default["num_kv"] == 8 * (128 + 250)
+        event["args"]["v4_window"] = 64
+        event["args"]["v4_index_topk"] = 256
+        overridden = aext.mla_decode_v4_asm(event).param_details
+        assert overridden["kv_mode"] == "hca"
+        assert overridden["num_kv"] == 8 * (64 + 8)
+
+    def test_mla_decode_v4_swa_window_only(self):
+        capacity = 8 * (128 + 64)
+        full = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 1000))
+        ).param_details
+        assert full["kv_mode"] == "swa"
+        assert full["num_kv"] == 8 * 128
+        short = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 50))
+        ).param_details
+        assert short["num_kv"] == 8 * 50
+
+    def test_mla_decode_v4_annotation_without_kv_keeps_capacity(self):
+        for annotation in (
+            "decode[bs=8 tok=8 d=8]",
+            "step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40 "
+            "g_sq=0 g_sk=0 g_sqsq=0 g_sqsk=0]",
+        ):
+            p = aext.mla_decode_v4_asm(
+                self._mla_v4_capacity_event(67072, annotation)
+            ).param_details
+            assert p["kv_mode"] is None
+            assert p["num_kv"] == 67072
+
+    def test_mla_decode_v4_rejects_paged_kv(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        event["args"]["Input Dims"][2] = [98534, 2, 1, 512]
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["_no_perf"] is True
+        assert model.bytes() is None
+
+    def test_mla_decode_v4_buffers_before_scalars(self):
+        legacy = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        current = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        args = current["args"]
+        for key in ("Input Dims", "Input type"):
+            args[key] = args[key][:9] + args[key][13:17] + args[key][9:13]
+        args["Concrete Inputs"] = [""] * 13 + ["1", "0.", "0", "16"]
+        old = aext.mla_decode_v4_asm(legacy)
+        new = aext.mla_decode_v4_asm(current)
+        assert old.param_details["buffer_base"] == 13
+        assert new.param_details["buffer_base"] == 9
+        assert new.param_details["num_kv_splits"] == 16
+        assert new.flops() == old.flops()
+        assert new.bytes() == old.bytes()
+
+    def test_mla_decode_v4_unknown_layout_is_no_perf(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        event["args"]["Input Dims"] = event["args"]["Input Dims"][:13]
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["_no_perf"] is True
+        assert model.flops() is None
+        assert model.bytes() is None
 
     def test_mla_bytes_reject_broadcast_stride(self):
         event = {
@@ -1395,22 +1557,37 @@ class TestPerfModelExtensions:
             is None
         )
 
-        sparse = aext.vllm_sparse_attn_decode(
-            {
-                "args": {
-                    "Input Dims": [[1, 16, 512], [1, 32, 16]],
-                    "Input type": ["c10::BFloat16", "float"],
-                    "v4_block_k": 32,
-                }
-            }
-        )
-        assert sparse.flops() == 16 * 4 * 1 * 1024 * 512
-        assert (
-            sparse.bytes()
-            == 2 * 1 * 16 * 512 * 2 + 1 * 1024 * 576 + 2 * 1 * 32 * 16 * 4
+        sparse_event = {
+            "annotation": self._decode_annotation(1, 8192),
+            "args": {
+                "Input Dims": [[1, 16, 512], [1, 32, 16]],
+                "Input type": ["c10::BFloat16", "float"],
+                "v4_block_k": 32,
+                "v4_mode": "csa",
+            },
+        }
+        sparse = aext.vllm_sparse_attn_decode(sparse_event)
+        # 8K context: 128 window rows + min(8192 // 4, 1024) CSA rows.
+        attended = 128 + 1024
+        assert sparse.param_details["attended_kv"] == attended
+        assert sparse.flops() == 16 * 4 * 1 * attended * 512
+        assert sparse.bytes() == (
+            2 * 1 * 16 * 512 * 2
+            + 1 * attended * (576 + 4)
+            + 2 * 1 * 32 * 16 * (2 + 512) * 4
         )
         assert sparse.get_compute_precision() == "bf16"
         assert sparse.get_maf_type() == "matrix"
+        for drop in ("annotation", "v4_mode"):
+            event = {
+                "annotation": sparse_event["annotation"],
+                "args": dict(sparse_event["args"]),
+            }
+            if drop == "annotation":
+                del event["annotation"]
+            else:
+                event["args"]["v4_mode"] = None
+            assert aext.vllm_sparse_attn_decode(event).flops() is None
         assert (
             aext.vllm_sparse_attn_decode(
                 {"args": {"Input Dims": [[1, 16, 512]], "v4_block_k": 32}}
@@ -1565,6 +1742,8 @@ class TestPerfModelExtensions:
         assert len(parents) == 1
         parent = parents[0]
         assert parent["args"]["Input Dims"] == [[1, 16, 512], [1, 32, 16]]
+        # _forward_decode without the CSA top-k build: HCA or SWA-only.
+        assert parent["args"]["v4_mode"] is None
         kernel_uids = []
         for evt in tree.events:
             if evt.get("cat") == "kernel" and "sparse_attn_decode" in evt.get(
@@ -1589,6 +1768,142 @@ class TestPerfModelExtensions:
         for uid in owners[0]["gpu_events"]:
             owned += tree.get_UID2event(uid)["dur"]
         assert owned == 60
+
+    def test_vllm_sparse_attn_decode_partial_layouts(self):
+        def model(partial, block_k=32, annotation=self._decode_annotation(2, 1000)):
+            return aext.vllm_sparse_attn_decode(
+                {
+                    "annotation": annotation,
+                    "args": {
+                        "Input Dims": [[2, 16, 512], partial],
+                        "Input type": ["c10::BFloat16", "float"],
+                        "v4_block_k": block_k,
+                        "v4_mode": "csa",
+                    },
+                }
+            )
+
+        heads_first = model([2, 16, 8]).param_details
+        assert heads_first["num_splits"] == 8
+        assert heads_first["attended_kv"] == 128 + 250
+        assert heads_first["g_sqsk"] == 2 * (128 + 250)
+        # A captured batch of 2 rows with one live request reads one KV range.
+        padded = model([2, 16, 8], annotation=self._decode_annotation(1, 50))
+        assert padded.param_details["attended_kv"] == 50 + 12
+        assert padded.param_details["g_sqsk"] == 50 + 12
+        for partial, block_k in (
+            ([3, 8, 16], 32),
+            ([2, 8, 4], 32),
+            ([2, 8, 16], 0),
+        ):
+            assert model(partial, block_k).param_details.get("_no_perf") is True
+
+    @staticmethod
+    def _list_tree():
+        class _Tree:
+            def __init__(self):
+                self.events = []
+                self.events_by_uid = {}
+                self.name2event_uids = {}
+                self.seq_num2event_uids_map = {}
+
+            def add(self, name, cat, parent=None, args=None):
+                uid = len(self.events)
+                evt = {"UID": uid, "name": name, "cat": cat, "children": []}
+                if args is not None:
+                    evt["args"] = args
+                if parent is not None:
+                    evt["parent"] = parent
+                    self.events_by_uid[parent]["children"].append(uid)
+                self.events.append(evt)
+                self.events_by_uid[uid] = evt
+                self.name2event_uids.setdefault(name, []).append(uid)
+                return uid
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid.get(uid)
+
+            def get_parent_event(self, event):
+                parent = event.get("parent")
+                return None if parent is None else self.events_by_uid[parent]
+
+        return _Tree()
+
+    def test_vllm_sparse_decode_skips_unowned_and_wrapped_kernels(self):
+        from TraceLens.Trace2Tree.extensions import vllm_sparse_decode_pseudo_ops as v
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+            apply_pseudo_op_extensions,
+        )
+
+        tree = self._list_tree()
+        partial = v.PARTIAL_KERNEL + ".kd"
+        reduce = v.REDUCE_KERNEL + ".kd"
+        tree.add("unrelated_kernel", "kernel")
+        orphan_launch = tree.add("hipModuleLaunchKernel", "cuda_runtime")
+        tree.add(partial, "kernel", orphan_launch)
+
+        layer = tree.add("DeepseekV4DecoderLayer", "python_function")
+        decode = tree.add("rocm.py(1524): " + v.DECODE_FN, "python_function", layer)
+        tree.add("rocm.py(1550): " + v.CSA_TOPK_FN, "python_function", decode)
+        owner = tree.add(v.TRITON_FN, "python_function", decode)
+        tree.add(
+            "aten::empty",
+            "cpu_op",
+            owner,
+            {
+                "Input Dims": [[2, 16, 512], [3, 32, 16]],
+                "Input type": ["c10::BFloat16", "float"],
+            },
+        )
+        launch = tree.add("hipModuleLaunchKernel", "cuda_runtime", owner)
+        tree.add(partial, "kernel", launch)
+        tree.add(reduce, "kernel", launch)
+
+        wrapped_owner = tree.add(v.TRITON_FN, "python_function")
+        wrapped = tree.add(v.PSEUDO_NAME, "cpu_op", wrapped_owner, {})
+        tree.add(partial, "kernel", wrapped)
+
+        apply_pseudo_op_extensions(tree, verbose=True)
+        pseudo = [e for e in tree.events if e["name"] == v.PSEUDO_NAME]
+        assert len(pseudo) == 2
+        injected = pseudo[-1]
+        # No partial matches the 2-token query before the decoder-layer boundary.
+        assert injected["args"]["Input Dims"] is None
+        assert injected["parent"] == owner
+        assert injected["args"]["v4_mode"] == "csa"
+        assert tree.events_by_uid[launch]["parent"] == injected["UID"]
+        assert len(injected["gpu_events"]) == 2
+
+        v.create_pseudo_ops_vllm_sparse_decode(tree)
+        assert len([e for e in tree.events if e["name"] == v.PSEUDO_NAME]) == 2
+
+        layer_only = tree.add(v.LAYER_FN, "python_function")
+        bare_owner = tree.add(v.TRITON_FN, "python_function", layer_only)
+        assert v._is_csa_decode(tree, tree.events_by_uid[bare_owner]) is False
+
+    def test_mla_v4_stage2_skips_without_single_donor(self):
+        from TraceLens.Trace2Tree.extensions import mla_v4_stage2_shapes as s
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+            apply_pseudo_op_extensions,
+        )
+
+        tree = self._list_tree()
+        tree.add(s._STAGE2_KERNEL, "cpu_op")
+        tree.add(s._STAGE2_KERNEL, "kernel")
+        no_parent_py = tree.add("hipModuleLaunchKernel", "cuda_runtime")
+        tree.add(s._STAGE2_KERNEL, "kernel", no_parent_py)
+
+        py = tree.add("aiter/mla.py(1): " + s._PARENT_PY, "python_function")
+        tree.events_by_uid[py]["children"].append(999)
+        dims = {"Input Dims": [[8, 16, 512]]}
+        tree.add(s._DONOR_OP, "cpu_op", py, dims)
+        tree.add(s._DONOR_OP, "cpu_op", py, dims)
+        two_donors = tree.add("hipModuleLaunchKernel", "cuda_runtime", py)
+        tree.add(s._STAGE2_KERNEL, "kernel", two_donors)
+
+        apply_pseudo_op_extensions(tree, verbose=True)
+        for uid in (no_parent_py, two_donors):
+            assert "args" not in tree.events_by_uid[uid]
 
     def test_deepseek_v4_model_mappings(self):
         mappings = get_pseudo_op_mappings()

@@ -455,9 +455,19 @@ class pseudo_v4_paged_decode_hca(_V4PagedDecodeBase):
 
 
 class vllm_sparse_attn_decode(_V4PagedDecodeBase):
-    """HBM bytes of the BF16 query and output, the FP8 KV records, and the fp32 split partials; the page pool is not read."""
+    """HBM bytes of the BF16 query and output, the FP8 KV records and their slot indices, and the fp32 split partials written by the partial kernel and read back by the reduce; the page pool is not read.
+
+    Each query reads the rows in its ``main_indptr`` / ``extra_indptr`` ranges,
+    so the attended KV comes from the step annotation: ``min(ctx, window)``
+    window rows plus ``min(ctx // 4, index_topk)`` CSA rows. Only CSA layers
+    (``v4_mode == "csa"``, stamped by the injector) are modeled; HCA and
+    SWA-only layers launch the same kernel and are no-perf.
+    """
 
     _KV_RECORD_BYTES = 576
+    _INDEX_BYTES = 4
+    WINDOW = 128
+    INDEX_TOPK = 1024
 
     @classmethod
     def get_param_details(cls, event):
@@ -477,7 +487,18 @@ class vllm_sparse_attn_decode(_V4PagedDecodeBase):
                 raise ValueError
             if tokens <= 0 or heads <= 0 or d_h <= 0 or splits <= 0 or block_k <= 0:
                 raise ValueError
-            attended = splits * block_k
+            if args.get("v4_mode") != "csa":
+                raise ValueError
+            ann = IterationAnnotation(str(event.get("annotation")))
+            if not ann.has_sqsk or ann.g_sq <= 0 or ann.g_sk <= 0:
+                raise ValueError
+            window = int(args.get("v4_window") or cls.WINDOW)
+            index_topk = int(args.get("v4_index_topk") or cls.INDEX_TOPK)
+            mean_ctx = int(ann.g_sk // ann.g_sq)
+            attended = min(mean_ctx, window) + min(
+                mean_ctx // cls.CSA_COMPRESS_STRIDE, index_topk
+            )
+            live = min(ann.g_sq, tokens)
             details = {
                 "B": 1,
                 "N_Q": tokens,
@@ -496,14 +517,18 @@ class vllm_sparse_attn_decode(_V4PagedDecodeBase):
                 "c_sqsq": 0,
                 "c_sqsk": 0,
                 "g_sq": tokens,
-                "g_sk": tokens * attended,
+                "g_sk": live * attended,
                 "g_sqsq": tokens,
-                "g_sqsk": tokens * attended,
+                "g_sqsk": live * attended,
                 "dtype_Q": "c10::BFloat16",
                 "dtype_KV": "c10::Float8_e4m3fn",
                 "sliding_window": attended,
                 "attended_kv": attended,
+                "live_queries": live,
                 "num_splits": splits,
+                "v4_mode": "csa",
+                "window": window,
+                "index_topk": index_topk,
             }
             return add_logical_batch_size(details, event)
         except (IndexError, KeyError, TypeError, ValueError):
@@ -513,11 +538,12 @@ class vllm_sparse_attn_decode(_V4PagedDecodeBase):
         if self.param_details.get("_no_perf"):
             return None
         tokens = self.param_details["g_sq"]
-        attended = self.param_details["attended_kv"]
+        kv_rows = self.param_details["g_sqsk"]
         splits = self.param_details["num_splits"]
         q_bytes = 2 * tokens * self.H_Q * self.d_h_qk * 2
-        kv_bytes = tokens * attended * self._KV_RECORD_BYTES
-        partial_bytes = 2 * tokens * splits * self.H_Q * 4
+        kv_bytes = kv_rows * (self._KV_RECORD_BYTES + self._INDEX_BYTES)
+        # part_m, part_l and part_acc [tokens, splits, H, d]: written, then read by the reduce.
+        partial_bytes = 2 * tokens * splits * self.H_Q * (2 + self.d_h_qk) * 4
         return q_bytes + kv_bytes + partial_bytes
 
 
@@ -1006,22 +1032,86 @@ class gdn_attention_core(InferenceAttention):
 
 
 class mla_decode_v4_asm(InferenceAttention):
-    """HBM bytes of the gathered KV pages, not the page pool; a multi-split launch leaves the BF16 output to stage 2."""
+    """HBM bytes of the gathered KV pages, not the page pool; a multi-split launch leaves the BF16 output to stage 2.
+
+    ``kv_page_indices`` is sized for the maximum context under CUDA graphs, so
+    with a sq/sk step annotation the attended KV rows come from the annotated
+    context: ``min(ctx, window)`` plus ``ctx / stride`` compressed rows, where
+    the layer (SWA / CSA / HCA) is inferred from the per-request index
+    capacity. The buffer length remains the upper bound and the fallback.
+    ``v4_window`` / ``v4_index_topk`` event args override the defaults.
+    """
+
+    WINDOW = 128
+    # Upper bound on the CSA index budget; only separates CSA from HCA capacity.
+    MAX_INDEX_TOPK = 1024
+    INDEX_ALIGN = 64
+    COMPRESS_STRIDE = {
+        "swa": None,
+        "csa": _V4PagedDecodeBase.CSA_COMPRESS_STRIDE,
+        "hca": _V4PagedDecodeBase.HCA_COMPRESS_STRIDE,
+    }
+
+    @classmethod
+    def _layer_mode(cls, capacity_per_req, window, index_topk):
+        """SWA / CSA / HCA from the per-request ``kv_page_indices`` capacity."""
+        if capacity_per_req <= window + cls.INDEX_ALIGN:
+            return "swa"
+        if capacity_per_req <= window + index_topk + cls.INDEX_ALIGN:
+            return "csa"
+        return "hca"
+
+    @classmethod
+    def _live_kv(cls, event, capacity, num_seqs):
+        """Attended KV rows from the step annotation, or None without one."""
+        annotation = event.get("annotation")
+        if not annotation or num_seqs <= 0:
+            return None
+        ann = IterationAnnotation(str(annotation))
+        if not ann.has_sqsk or ann.g_sq <= 0 or ann.g_sk <= 0:
+            return None
+        args = event.get("args") or {}
+        window = int(args.get("v4_window") or cls.WINDOW)
+        index_topk = int(args.get("v4_index_topk") or cls.MAX_INDEX_TOPK)
+        capacity_per_req = capacity // num_seqs
+        mode = cls._layer_mode(capacity_per_req, window, index_topk)
+        mean_ctx = ann.g_sk / ann.g_sq
+        per_req = min(math.ceil(mean_ctx), window)
+        stride = cls.COMPRESS_STRIDE[mode]
+        if stride:
+            per_req += math.ceil(mean_ctx / stride)
+        per_req = min(per_req, capacity_per_req)
+        return mode, min(per_req * min(ann.g_sq, num_seqs), capacity)
 
     @staticmethod
-    def get_param_details(event):
+    def _buffer_base(dims):
+        """Index of the split partials: 13 when the scalars precede the output
+        buffers (older aiter), 9 when the buffers come first (current aiter)."""
+        for base in (13, 9):
+            if (
+                len(dims) > base + 2
+                and len(dims[base]) == 4
+                and len(dims[base + 1]) == 4
+                and len(dims[base + 2]) == 3
+            ):
+                return base
+        return None
+
+    @classmethod
+    def get_param_details(cls, event):
         args = event.get("args", {})
         dims = args.get("Input Dims") or []
         types = args.get("Input type") or []
-        if len(dims) < 16 or len(dims[0]) != 3 or len(dims[2]) != 4 or not dims[6]:
+        base = cls._buffer_base(dims)
+        if base is None or len(dims[0]) != 3 or len(dims[2]) != 4 or not dims[6]:
             return add_logical_batch_size(
                 InferenceAttention.no_perf_param_details(), event
             )
         page_size = dims[2][1]
         h_kv = dims[2][2]
-        num_kv = dims[6][0] * page_size
+        kv_capacity = dims[6][0] * page_size
         q_tokens, h_q, d_qk = dims[0]
-        d_v = dims[15][-1]
+        d_v = dims[base + 2][-1]
         ints = []
         for item in args.get("Concrete Inputs") or []:
             if item in ("", None):
@@ -1038,13 +1128,18 @@ class mla_decode_v4_asm(InferenceAttention):
             or h_kv != 1
             or max_seqlen_q != 1
             or q_tokens <= 0
-            or num_kv <= 0
+            or kv_capacity <= 0
             or d_qk != 512
         ):
             return add_logical_batch_size(
                 InferenceAttention.no_perf_param_details(), event
             )
-        # g_sqsk is the page-index length; one query token per page.
+        num_seqs = dims[5][0] - 1 if dims[5] else 0
+        live = cls._live_kv(event, kv_capacity, num_seqs)
+        num_kv, kv_mode = kv_capacity, None
+        if live is not None:
+            kv_mode, num_kv = live
+        # One query token per attended KV row, so g_sqsk equals the KV row count.
         details = {
             "B": 1,
             "N_Q": q_tokens,
@@ -1064,18 +1159,23 @@ class mla_decode_v4_asm(InferenceAttention):
             "dtype_Q": types[0] if types else None,
             "q_tokens": q_tokens,
             "num_kv": num_kv,
+            "kv_capacity": kv_capacity,
+            "kv_mode": kv_mode,
             "num_kv_splits": num_kv_splits,
             "dtype_rope": types[1] if len(types) > 1 else None,
             "dtype_kv": types[2] if len(types) > 2 else None,
             "dtype_kvrope": types[3] if len(types) > 3 else None,
             "dtype_index": types[6] if len(types) > 6 else "int",
-            "split_shape": dims[13],
-            "lse_shape": dims[14],
-            "out_shape": dims[15],
+            "buffer_base": base,
+            "split_shape": dims[base],
+            "lse_shape": dims[base + 1],
+            "out_shape": dims[base + 2],
             "indptr_elems": sum(dims[i][0] for i in (4, 5, 7) if dims[i]),
             "sink_elems": dims[8][0] if dims[8] else 0,
             "valid_elems": (
-                dims[16][0] if write_valid and len(dims) > 16 and dims[16] else 0
+                dims[base + 3][0]
+                if write_valid and len(dims) > base + 3 and dims[base + 3]
+                else 0
             ),
             "rope_elems": math.prod(dims[1]) if len(dims) > 1 and dims[1] else 0,
             "kv_rope_dim": dims[3][-1] if len(dims) > 3 and dims[3] else 64,
@@ -1090,7 +1190,10 @@ class mla_decode_v4_asm(InferenceAttention):
         p = self.param_details
         if p.get("_no_perf"):
             return None
-        if not dense_counted_tensor(self.event, (0, 1, 2, 3, 6, 8, 13, 14, 15)):
+        base = p["buffer_base"]
+        if not dense_counted_tensor(
+            self.event, (0, 1, 2, 3, 6, 8, base, base + 1, base + 2)
+        ):
             return None
         bpe_q = name2bpe(str(p["dtype_Q"]).lower())
         bpe_kv = name2bpe(str(p["dtype_kv"]).lower())
