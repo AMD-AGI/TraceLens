@@ -298,8 +298,8 @@ def test_writer_cards_per_node(tmp_path):
     assert (
         "## Executive Summary\n\n| Metric | Total | prefill_0 | decode_0 |\n"
         "|---|---|---|---|\n| Total Time | 4.00 ms | 3.20 ms | 0.80 ms |\n\n"
-        "Total sums each node's captured GPU time; it is not wall time. "
-        "Ranking weighs nodes by that time.\n\n## Compute Kernel Optimizations\n\n"
+        "Total is the sum of node times, not wall time.\n\n"
+        "## Compute Kernel Optimizations\n\n"
     ) in md
     # Impact is the group's share of all nodes' 4.0 ms; the table shows its share
     # of its own node.

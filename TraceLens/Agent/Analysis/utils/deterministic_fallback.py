@@ -84,10 +84,7 @@ _PLUMBING_WRAPPER_STARTSWITH = ("Memcpy", "__amd_rocclr_")
 _PERCENT_LABELS = ("%E2E", "E2E")
 _PERCENT_LABELS_BY_NODE = (PCT_OF_NODE_COL, "of all nodes")
 
-_TOTAL_TIME_NOTE = (
-    "Total sums each node's captured GPU time; it is not wall time. "
-    "Ranking weighs nodes by that time."
-)
+_TOTAL_TIME_NOTE = "Total is the sum of node times, not wall time."
 
 _TABLE_HEADER = (
     "| Operation | Args | Kernel Path | Kernel Name | Time (ms) | {pct} | "

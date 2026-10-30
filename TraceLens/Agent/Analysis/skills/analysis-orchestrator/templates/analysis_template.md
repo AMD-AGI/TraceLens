@@ -108,15 +108,15 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
 | Top Bottleneck Category | Category (V%) |
 
 <!-- === MULTI_TRACE Executive Summary: replaces the table above; the paragraph adds one sentence giving each node's time, compute % and idle %, from `gpu_utilization.nodes`. Total column = `gpu_utilization`; node columns = `gpu_utilization.nodes[<node>]`, in that order. A node's Top Bottleneck Category V% = its top `categories[].nodes[<node>].gpu_kernel_time_ms` / (`nodes[<node>].total_time_ms * nodes[<node>].computation_time_percent / 100`). Row labels appear only in this table. === -->
-| Metric | Total | <node_1> | <node_2> |
+| Metric | Total | <node_0> | <node_1> |
 |--------|-------|----------|----------|
-| Total Time | X ms | X ms | X ms |
-| Compute % | Y% | Y% | Y% |
-| Idle % | Z% | Z% | Z% |
-| Exposed Communication % | W% | W% | W% |
-| Top Bottleneck Category | Category (V%) | Category (V%) | Category (V%) |
+| Total Time | X ms | X_0 ms | X_1 ms |
+| Compute % | Y% | Y_0% | Y_1% |
+| Idle % | Z% | Z_0% | Z_1% |
+| Exposed Communication % | W% | W_0% | W_1% |
+| Top Bottleneck Category | Category (V%) | Category_0 (V_0%) | Category_1 (V_1%) |
 
-Total sums each node's captured GPU time; it is not wall time. Ranking weighs nodes by that time.
+Total is the sum of node times, not wall time.
 
 <!-- === COMPARATIVE Executive Summary === -->
 [1 paragraph comparative overview: summarize which trace is faster overall, by how much, and the dominant gap categories]
@@ -151,9 +151,9 @@ One row per entry in `priority_data.json::priorities[]`, in array order (no mani
 <!-- impact-end -->
 
 <!-- === MULTI_TRACE Top Operations: one table per node in `gpu_utilization.nodes` order, replacing the standalone table; skip a node with no rows. Rows are the `priorities[]` entries whose `node` is that node, in array order; `Rank` = `rank` (global). `Time (ms)` = `categories[].nodes[<node>].gpu_kernel_time_ms`; `Ops` = `categories[].nodes[<node>].ops_count`; `% of Compute Time` divides by `nodes[<node>].total_time_ms * nodes[<node>].computation_time_percent / 100`. The bold line sits outside the marker. === -->
-**<node_1>** (<gpu_utilization.nodes[node_1].total_time_ms> ms)
+**<node_0>** (<gpu_utilization.nodes[node_0].total_time_ms> ms)
 
-<!-- impact-begin kind=top_ops node=<node_1> -->
+<!-- impact-begin kind=top_ops node=<node_0> -->
 | Rank | Category | Time (ms) | % of Compute Time | Ops |
 |------|----------|-----------|-------------------|-----|
 | 1 | ... | ... | ... | ... | <!-- top-ops-row low=<impact_score_low> high=<impact_score_high> -->

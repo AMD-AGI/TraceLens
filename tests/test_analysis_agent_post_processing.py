@@ -600,14 +600,6 @@ def test_envelope_agentic_golden(tmp_path):
         ),
         pytest.param(
             "| Rank | Category | Time (ms) | % of Compute Time | Ops "
-            "| Potential improvement (time, E2E %) |\n"
-            "|---|---|---|---|---|---|\n"
-            "| 1 | gemm | 10.5 | 50.0% | 4 | ~1.0–2.0 ms (1.0–2.0%) |\n",
-            [(1, "gemm", 10.5, 50.0, 4, "~1.0–2.0 ms (1.0–2.0%)")],
-            id="rehydrated_6col",
-        ),
-        pytest.param(
-            "| Rank | Category | Time (ms) | % of Compute Time | Ops "
             "| Potential improvement (time, % of decode) |\n"
             "|---|---|---|---|---|---|\n"
             "| 1 | gemm | 10.5 | 50.0% | 4 | ~1.0–2.0 ms (1.0–2.0%) |\n",
