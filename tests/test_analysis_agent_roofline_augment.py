@@ -11,6 +11,7 @@ from TraceLens.Agent.Analysis.utils.roofline_augment import (
     achieved_from_measurement,
     augment,
     classify_kernel,
+    merge_into_priority_data,
     report_notes,
     summarize_projection,
 )
@@ -182,3 +183,56 @@ def test_augment_picks_dominant_unmodeled_kernel_per_category(tmp_path):
 
 def test_report_notes_absent_returns_empty(tmp_path):
     assert report_notes(tmp_path) == {}
+
+
+def test_merge_into_priority_data_is_additive(tmp_path):
+    (tmp_path / "priority_data.json").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "category": "other",
+                        "global_rank": 1,
+                        "estimate_method": "heuristic",
+                        "bound_type": None,
+                        "members": [
+                            {
+                                "operation": "hipModuleLaunchKernel->_inkling_rel_attention_kernel.kd (Synthetic Op)",
+                                "efficiency_pct": None,
+                            }
+                        ],
+                    },
+                    {
+                        "category": "elementwise",
+                        "global_rank": 2,
+                        "members": [{"operation": "aten::copy_"}],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = [
+        {
+            "kernel": "_inkling_rel_attention_kernel.kd",
+            "roofline_category": "Attention",
+            "bound": "MEMORY_BOUND",
+            "arithmetic_intensity": 8.0,
+            "roofline_us_per_gpu": 1705.0,
+            "achieved": {"pct_of_peak": 1.3, "ceiling": "memory bandwidth"},
+            "note": "> roofline note",
+        }
+    ]
+    merged = merge_into_priority_data(tmp_path, entries)
+    assert merged == 1
+    data = json.loads((tmp_path / "priority_data.json").read_text())
+    f0, f1 = data["findings"]
+    # The matching finding gains an additive roofline block...
+    assert f0["roofline"]["bound"] == "MEMORY_BOUND"
+    assert f0["roofline"]["source"] == "analytical-model-explorer"
+    # ...without disturbing existing fields.
+    assert f0["estimate_method"] == "heuristic"
+    assert f0["bound_type"] is None
+    assert f0["members"][0]["efficiency_pct"] is None
+    # Non-matching finding is untouched.
+    assert "roofline" not in f1

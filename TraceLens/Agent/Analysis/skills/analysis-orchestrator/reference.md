@@ -553,11 +553,11 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ---
 
-## Step 10.5: Analytical Roofline Augmentation (optional)
+## Step 10.5: Analytical Roofline Augmentation (optional, deterministic)
 
-A kernel is roofline-modeled from the trace only when the trace carries its Input Dims (`record_shapes=True`) **and** PerfModel has a formula for it. A model's custom kernels (bespoke attention, fused-MoE) otherwise surface as `estimate_method: "heuristic"` — ranked by E2E GPU-time share with no bound classification. When a resolvable model source is available, you can fill that gap with the **analytical** roofline, which derives op shapes from the model config and so needs no trace shapes.
+A kernel is roofline-modeled from the trace only when the trace carries its Input Dims (`record_shapes=True`) **and** PerfModel has a formula for it. A model's custom kernels (bespoke attention, fused-MoE) otherwise surface as `estimate_method: "heuristic"` — ranked by E2E GPU-time share with no bound classification. When a resolvable model source is available, this gap is filled **deterministically** with the analytical roofline, which derives op shapes from the model config and so needs no trace shapes.
 
-Run it only when `<Model>` resolves to a real checkpoint / HF id and you know the trace's runtime regime (decode/prefill, batch, context). Skip it otherwise.
+This is a deterministic script, not an agent task. It writes its results into the structured findings data and the report simply renders them — the orchestrator does **not** compute or interpret the roofline. Run it only when `<Model>` resolves to a real checkpoint / HF id and you know the trace's runtime regime (decode/prefill, batch, context); skip it otherwise. It **must run after Step 8.5** (`generate_priority_data`), because it merges into `priority_data.json`, which Step 8.5 regenerates from scratch.
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.roofline_augment \
@@ -568,9 +568,11 @@ Run it only when `<Model>` resolves to a real checkpoint / HF id and you know th
   --gpu-arch-json-path <platform_file>
 ```
 
-This writes `<output_dir>/metadata/roofline_augmentation.json` with, for the dominant unmodeled kernel of each roofline category (Attention, MoE, ...): its `bound` (memory/compute), `arithmetic_intensity`, per-GPU `roofline_us_per_gpu`, an `achieved` block (measured kernel time vs the config-derived FLOPs/bytes → achieved TFLOP/s · GB/s · % of the bound's ceiling), and a ready-to-embed Markdown `note`. The achieved % assumes every invocation runs the projected phase shape, so it is reliable for a single-phase capture and skewed for a mixed-regime (e.g. agentic) one — the note states this. It modifies no finding files.
+For the dominant unmodeled kernel of each roofline category (Attention, MoE, ...), the script:
+- writes `<output_dir>/metadata/roofline_augmentation.json` (full record: `bound`, `arithmetic_intensity`, per-GPU `roofline_us_per_gpu`, an `achieved` block — measured kernel time vs config-derived FLOPs/bytes → TFLOP/s · GB/s · % of the bound's ceiling — and a pre-rendered Markdown `note`); and
+- **deterministically merges** an additive `roofline` block onto the matching `priority_data.json::findings[]` entry (matched by kernel name in a member's `operation`). It leaves every existing field untouched — `bound_type`, `efficiency_pct`, `estimate_method` — so nothing reclassifies the finding or trips the efficiency-anomaly check. The achieved % assumes each invocation runs the projected phase shape (reliable for a single-phase capture, skewed for a mixed-regime one; the note says so). No findings files are modified.
 
-**Step 12 integration:** in Step 12(e) Detailed Analysis, after loading `report_notes(<output_dir>)` from `TraceLens.Agent.Analysis.utils.roofline_augment`, append each kernel's `note` as a blockquote immediately under the `**Identification:**` line of the matching compute finding (match by `kernel` substring). Because the kernel is now modeled analytically, **reconcile any wording that still calls it wholly unmodeled**: where the finding's Executive-Summary line, card Insight, or "Reasoning" text says "no performance model" / "cannot compute a roofline", qualify it to "no *trace-based* perf model (analytical roofline below)" so the report is not self-contradictory. If `roofline_augmentation.json` is absent, skip — the report is unchanged.
+**Step 12 rendering (data-driven, no interpretation):** when a `priority_data.json` finding carries a `roofline` block, render `finding.roofline.note` verbatim as a blockquote immediately under that finding's `**Identification:**` line in Step 12(e), and, because the kernel is now modeled analytically, qualify any residual "no performance model" / "cannot compute a roofline" wording in that finding (Executive-Summary line, card Insight, Reasoning) to "no *trace-based* perf model (analytical roofline below)" so the report is not self-contradictory. Findings without a `roofline` block are unchanged.
 
 ---
 

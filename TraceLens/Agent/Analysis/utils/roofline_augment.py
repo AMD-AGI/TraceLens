@@ -10,14 +10,21 @@ bespoke kernels -- a custom attention or fused-MoE -- therefore fall through as
 "heuristic / unmodeled", and the orchestrator can only rank them by E2E
 GPU-time share, with no bound classification or roofline floor.
 
-This utility closes that gap *without* needing trace shapes: it runs TraceLens's
-model-explorer roofline (:func:`...roofline_cli.run_projection`), which derives
-op shapes from the model config, at the trace's runtime regime (decode/prefill,
-batch, context). It then maps each modeled roofline op (Attention, MoE, GEMM,
-...) onto the matching orchestrator finding by kernel name / module path, and
-writes ``metadata/roofline_augmentation.json`` plus ready-to-embed Markdown
-notes. Report generation (reference.md Step 12) injects each note beside its
-kernel in the Detailed Analysis.
+This utility closes that gap *without* needing trace shapes, **deterministically**
+(a script, not an agent task): it runs TraceLens's model-explorer roofline
+(:func:`...roofline_cli.run_projection`), which derives op shapes from the model
+config, at the trace's runtime regime (decode/prefill, batch, context). It maps
+the dominant unmodeled kernel of each roofline category (Attention, MoE, ...) to
+the matching orchestrator finding by kernel name, then:
+
+- writes ``metadata/roofline_augmentation.json`` (the full record), and
+- **merges an additive ``roofline`` block onto the matching
+  ``priority_data.json::findings[]`` entry** (:func:`merge_into_priority_data`),
+  leaving every existing field untouched.
+
+Report generation renders ``finding.roofline.note`` verbatim from that data — it
+does not compute or interpret the roofline. Must run after Step 8.5
+(``generate_priority_data``), which regenerates ``priority_data.json``.
 
 CLI::
 
@@ -284,7 +291,49 @@ def augment(
     (meta / "roofline_augmentation.json").write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
     )
+    payload["merged_findings"] = merge_into_priority_data(output_dir, entries)
     return payload
+
+
+def merge_into_priority_data(output_dir: Path, entries: list[dict]) -> int:
+    """Deterministically fold each roofline entry into the matching
+    ``priority_data.json`` finding.
+
+    Matches an entry to a finding by its kernel name appearing in a member's
+    ``operation`` string, then attaches an additive ``roofline`` block (bound,
+    arithmetic intensity, per-GPU floor, achieved throughput, pre-rendered note).
+    It leaves every existing field untouched -- in particular ``bound_type``,
+    ``efficiency_pct`` and ``estimate_method`` -- so nothing downstream
+    reclassifies the finding or trips the efficiency-anomaly check. Report
+    generation renders ``findings[i].roofline.note`` verbatim; no agent
+    interpretation is involved. Returns the number of findings annotated."""
+    path = output_dir / "priority_data.json"
+    if not path.is_file() or not entries:
+        return 0
+    data = json.loads(path.read_text(encoding="utf-8"))
+    findings = data.get("findings", [])
+    merged = 0
+    for entry in entries:
+        kernel = entry["kernel"]
+        block = {
+            "source": "analytical-model-explorer",
+            "roofline_category": entry["roofline_category"],
+            "bound": entry["bound"],
+            "arithmetic_intensity": entry["arithmetic_intensity"],
+            "roofline_us_per_gpu": entry["roofline_us_per_gpu"],
+            "achieved": entry.get("achieved"),
+            "note": entry["note"],
+        }
+        for finding in findings:
+            if "roofline" in finding:
+                continue
+            members = finding.get("members") or []
+            if any(kernel in str(m.get("operation", "")) for m in members):
+                finding["roofline"] = block
+                merged += 1
+                break
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return merged
 
 
 def report_notes(output_dir: Path) -> dict[str, str]:
