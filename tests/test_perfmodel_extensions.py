@@ -6937,7 +6937,6 @@ class TestFlashDSv41PerfModels:
         from TraceLens.Trace2Tree.extensions.sglang_sparse_decode_pseudo_ops import (
             create_pseudo_ops_sglang_sparse_decode,
         )
-        from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
         # Minimal synthetic tree: python owner with launcher+kernel children.
         owner = {
@@ -6976,7 +6975,6 @@ class TestFlashDSv41PerfModels:
             "children": [],
             "gpu_events": [],
         }
-        events = [owner, launcher, kernel]
 
         # Build via TraceToTree-like minimal stub if full ctor is heavy: call helpers directly.
         class _Tree:
