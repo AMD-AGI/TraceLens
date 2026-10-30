@@ -35,6 +35,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _project_op,
     _split_shape_text,
     build_projection_dims,
+    conv_ops_from_meta,
     project_roofline,
     resolve_dim,
     resolve_shape,
@@ -264,6 +265,42 @@ def test_conv_cost_matches_perf_model():
     # prod(out) * 2 * prod(weight[1:]) + bias term.
     assert flops == 112 * 112 * 64 * 2 * (3 * 7 * 7) + (112 * 112 * 64)
     assert bytes_moved is not None
+
+
+def test_conv_ops_from_meta_costs_every_instance():
+    # Two live conv instances a meta forward would hand back: the ConvNeXt stem
+    # (regular, biased) and a depthwise 7x7 block conv (groups == channels).
+    meta_convs = [
+        {
+            "path": "convnext.embeddings.patch_embeddings",
+            "input_shape": [1, 3, 224, 224],
+            "output_shape": [1, 128, 56, 56],
+            "weight_shape": [128, 3, 4, 4],
+            "bias": True,
+            "transposed": False,
+        },
+        {
+            "path": "convnext.encoder.stages.0.layers.0.dwconv",
+            "input_shape": [1, 128, 56, 56],
+            "output_shape": [1, 128, 56, 56],
+            "weight_shape": [128, 1, 7, 7],
+            "bias": True,
+            "transposed": False,
+        },
+    ]
+    ops = conv_ops_from_meta(meta_convs, dtype="float32")
+    assert len(ops) == 2
+    assert all(op.modeled and op.category == "CONV" for op in ops)
+    stem, dwconv = ops
+    # prod(out) * 2 * prod(weight[1:]) + bias term, per CONV.flops_func.
+    assert stem.flops == 128 * 56 * 56 * 2 * (3 * 4 * 4) + (128 * 56 * 56)
+    assert dwconv.flops == 128 * 56 * 56 * 2 * (1 * 7 * 7) + (128 * 56 * 56)
+    assert stem.output_elements == 128 * 56 * 56
+    # The checkpoint's declared dtype drives the compute spec (fp32 here).
+    assert stem.compute_spec == "matrix_fp32"
+    # Entries missing geometry/shapes are skipped, not silently miscosted.
+    assert conv_ops_from_meta([{"path": "x", "output_shape": [1, 8, 4, 4]}]) == []
+    assert conv_ops_from_meta(None) == []
 
 
 def test_dispatch_conv_routes_and_needs_geometry():

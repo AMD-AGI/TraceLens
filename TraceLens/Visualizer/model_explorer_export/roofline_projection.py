@@ -20,12 +20,22 @@ SDPA, the Normalization family, Softmax, generic elementwise/reduction ops, and
 MoE expert routing -- exactly the leaf granularity
 :func:`TraceLens.ModelUtils.build_roofline_basic_ops` stops AST expansion at,
 plus the vLLM/SGLang engine boundaries (``ParallelLMHead``, ``FusedMoEFactory``)
-that never expand at all (see "Known approximations" below). Convolutions are
-costed only when the meta-device pass threaded the kernel geometry onto the
-node's ``details`` attr (``conv_weight=[...]``); the input/output shapes alone
-cannot recover the weight's kernel size or groups. Anything else (embeddings, a
-conv with no threaded geometry) is reported as "unmodeled" rather than silently
-dropped, so the projection's coverage is always visible instead of assumed.
+that never expand at all (see "Known approximations" below). Convolutions in a
+graph node are costed only when the meta-device pass threaded the kernel
+geometry onto the node's ``details`` attr (``conv_weight=[...]``); the
+input/output shapes alone cannot recover the weight's kernel size or groups.
+Anything else (embeddings, a conv with no threaded geometry) is reported as
+"unmodeled" rather than silently dropped, so the projection's coverage is always
+visible instead of assumed.
+
+Convolutional models are handled separately. Their non-uniform stages (per-stage
+channels/depths) don't fit the single-repeated-decoder shape the graph expands,
+so their convolutions never become graph nodes at all. :func:`conv_ops_from_meta`
+costs them from the live conv instances a meta-device forward captures (see
+:func:`TraceLens.ModelUtils.meta_trace.trace_meta_conv_ops`) -- each already
+carries the concrete ``[B, C, H, W]`` shapes and weight geometry CONV needs, with
+no dependence on symbolic spatial shape inference -- and the CLI lets those
+supersede any unmodeled conv node.
 
 Known approximations, stated once here rather than scattered in comments:
   - GEMM bias is assumed absent (bias FLOPs are O(M*N), negligible next to the
@@ -1006,6 +1016,56 @@ def _conv_cost(
         else None
     )
     return "CONV", "matrix", flops, bytes_moved
+
+
+def conv_ops_from_meta(
+    meta_convs: list[dict[str, Any]] | None,
+    *,
+    dtype: str = "bfloat16",
+    gpu_arch: dict[str, Any] | None = None,
+) -> list[RooflineOp]:
+    """Roofline ops for every convolution a meta-device forward captured.
+
+    Each entry is one live ``_ConvNd`` instance from
+    :func:`TraceLens.ModelUtils.meta_trace.trace_meta_conv_ops`, carrying the
+    concrete ``[B, C, H, W]`` in/out shapes and weight geometry CONV needs. This
+    is the static roofline's path for convolutional models: their non-uniform
+    stages (per-stage channels/depths) don't fit the single-repeated-decoder
+    shape the graph pipeline expands, so the convs never become graph nodes --
+    but each live instance already carries exactly the geometry to cost it, with
+    no dependence on symbolic spatial shape inference."""
+    bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    ops: list[RooflineOp] = []
+    for conv in meta_convs or []:
+        out_shape = tuple(conv.get("output_shape") or ())
+        in_shape = tuple(conv["input_shape"]) if conv.get("input_shape") else None
+        weight_shape = tuple(conv.get("weight_shape") or ())
+        if not out_shape or in_shape is None or not weight_shape:
+            continue
+        path = str(conv.get("path") or "")
+        base = RooflineOp(
+            name=path,
+            section=path.split(".")[-1] or path,
+            computation="Conv",
+            operation="",
+            category=None,
+            modeled=False,
+            reason=None,
+            output_elements=prod(out_shape),
+            instances=1,
+        )
+        bias = bool(conv.get("bias"))
+        transposed = bool(conv.get("transposed"))
+        flops = CONV.flops_func(in_shape, weight_shape, out_shape, bias, transposed)
+        bytes_moved = (
+            CONV.bytes_func(in_shape, weight_shape, out_shape, bias, bpe)
+            if bpe is not None
+            else None
+        )
+        ops.append(
+            _finish_op(base, "CONV", "matrix", flops, bytes_moved, dtype, gpu_arch)
+        )
+    return ops
 
 
 def _sdpa_cost(
