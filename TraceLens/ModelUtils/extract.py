@@ -1609,27 +1609,44 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
     if decoder is None or not depth or not config:
         return []
 
-    varying: list[tuple[str, str, Any]] = []
+    # A multimodal checkpoint nests the text model's keys under ``text_config``;
+    # the decoder reads those directly (``config.dense_mlp_idx``), so flatten them
+    # up for the per-instance branch resolution (text keys win on conflict).
+    text_config = config.get("text_config")
+    resolve_config = (
+        {**config, **text_config} if isinstance(text_config, dict) else config
+    )
+
+    # ``(override_attr, resolve_cls, resolve_attr, override_key)``: which component
+    # attr this variant swaps, the class to ask + the attr to ask it about, and the
+    # override key ("" swaps the component's OWN class; a nested name swaps a child).
+    varying: list[tuple[str, Any, str, str]] = []
+    # The decoder's OWN conditional components: ``self.mlp = Dense if layer_id <
+    # dense_mlp_idx else MoE`` makes one attr build two different CLASSES by layer.
+    for attr, options in (decoder.init_assignment_options or {}).items():
+        if len(options) > 1:
+            varying.append((attr, decoder, attr, ""))
+    # A child component's own nested conditional (DeepSeek's per-layer compressor).
     for comp_attr, comp_class in (decoder.init_assignments or {}).items():
         comp = registry.get(comp_class)
         if comp is None:
             continue
         for nested, options in (comp.init_assignment_options or {}).items():
             if len(options) > 1:
-                varying.append((comp_attr, nested, comp))
+                varying.append((comp_attr, comp, nested, nested))
     if not varying:
         return []
 
     signatures: list[tuple[tuple[str, str, str], ...]] = []
     for layer_idx in range(depth):
         chosen: list[tuple[str, str, str]] = []
-        for comp_attr, nested, comp in varying:
+        for override_attr, resolve_cls, resolve_attr, override_key in varying:
             picked = instance_submodule_class(
-                comp, nested, config, {"layer_idx": layer_idx}
+                resolve_cls, resolve_attr, resolve_config, {"layer_idx": layer_idx}
             )
             if picked is None:
                 return []  # one unknown and the whole split is a guess
-            chosen.append((comp_attr, nested, picked))
+            chosen.append((override_attr, override_key, picked))
         signatures.append(tuple(chosen))
 
     if len(set(signatures)) <= 1:
@@ -1641,6 +1658,7 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
 
     basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
     components = {comp.attr_name: comp for comp in spec.block_components}
+    comp_roles = {attr: comp.role for attr, comp in components.items()}
     variants: list[LayerVariant] = []
     for signature, layers in sorted(
         indices.items(), key=lambda item: (-len(item[1]), item[1][0])
@@ -1661,12 +1679,29 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
             layer_indices=list(layers),
         )
         for comp_attr, rel_overrides in sorted(overrides.items()):
+            # A ``""`` override swaps the component's OWN class (``self.mlp`` is
+            # Dense here, MoE there). That is a top-level swap the merge renders
+            # from ``ffn_class``/``attention_class`` by role -- set those; the
+            # prebuilt-tree path below is for NESTED (deep-submodule) swaps only.
+            swapped = rel_overrides.get("")
+            if isinstance(swapped, str) and swapped != SUBMODULE_OMITTED:
+                role = comp_roles.get(comp_attr)
+                if role in ("ffn", "moe"):
+                    variant.ffn_class = swapped
+                    variant.ffn_attr = comp_attr
+                    variant.ffn_label = swapped
+                elif role == "attention":
+                    variant.attention_class = swapped
+                    variant.attention_label = swapped
+            nested_overrides = {k: v for k, v in rel_overrides.items() if k != ""}
+            if not nested_overrides:
+                continue
             built = _build_variant_component_tree(
                 spec,
                 components.get(comp_attr),
                 comp_attr,
                 (decoder.init_assignments or {}).get(comp_attr),
-                rel_overrides,
+                nested_overrides,
                 basic_ops,
             )
             if built is not None:
@@ -1985,6 +2020,15 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
             class_registry=spec.class_registry,
             decoder_class=spec.decoder_class,
         )
+        # The config/string path reads per-layer TYPE lists (``layer_types``,
+        # ``moe_layer_freq``); it does not resolve a plain ``if layer_id <
+        # config.dense_mlp_idx: self.mlp = Dense else MoE`` that picks the
+        # component CLASS by an integer threshold. When it found no split, fall
+        # back to the AST per-instance resolver, which does.
+        if len(spec.layer_variants or []) <= 1:
+            static = _static_layer_variants(spec)
+            if len(static) > 1:
+                spec.layer_variants = static
     _finalize_layer_repeat_lines(spec)
 
     if analysis.attention_type:

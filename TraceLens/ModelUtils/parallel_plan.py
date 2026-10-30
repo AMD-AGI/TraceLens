@@ -1452,6 +1452,16 @@ def _plan_sources(spec: Any) -> list[Path]:
             candidates.append(
                 path.with_name("configuration_" + path.name[len("modeling_") :])
             )
+        # A model split across a package keeps its parallel-layer classes in
+        # sibling modules: a vLLM/SGLang ``model.py`` imports its
+        # ``ColumnParallelLinear`` attention / ``FusedMoE`` / MLP from
+        # ``attention.py`` / ``moe.py`` / ``mlp.py`` next to it, so the entry file
+        # alone declares no plan. Include the package-directory siblings so their
+        # plans are seen too (extra classes with no plan are simply ignored, and
+        # ``_select_groups`` still filters to the ones that declare one).
+        parent = path.parent
+        if parent.is_dir():
+            candidates.extend(sorted(parent.glob("*.py")))
         for candidate in candidates:
             if candidate in seen or not candidate.is_file():
                 continue

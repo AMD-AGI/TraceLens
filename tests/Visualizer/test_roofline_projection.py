@@ -22,6 +22,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     RooflineProjection,
     _RT,
     _attention_boundary_cost,
+    _attention_extra_ops,
     _attr_text,
     _classify_normalization,
     _dispatch_op_cost,
@@ -31,6 +32,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _moe_cost,
     _parse_op_node,
     _project_op,
+    _shard,
     _split_shape_text,
     build_projection_dims,
     project_roofline,
@@ -819,3 +821,90 @@ def test_cli_rejects_unknown_engine(capsys):
             ]
         )
     assert "invalid choice" in capsys.readouterr().err
+
+
+# Custom-layer introspection: packed attention projections, relative attention,
+# and tensor-/expert-parallel sharding of the role-based analytical costs.
+
+
+@pytest.fixture
+def _reset_rt():
+    """Restore the module-global introspection singleton after a test mutates it."""
+    yield
+    _RT.reset()
+
+
+def test_shard_divides_only_above_degree_one():
+    assert _shard(64, 8) == 8
+    assert _shard(64, 1) == 64
+    assert _shard(8, 8) == 1
+    # Never below one GPU's single head, even when the count is smaller than TP.
+    assert _shard(3, 8) == 1
+
+
+def test_attention_extra_ops_costs_packed_qkv_and_o_projections(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 64
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.hidden_size = 6144
+    ops = _attention_extra_ops(
+        "decoder", "decoder/attn", instances=1, dims={"B": 1, "S": 1}, bpe=2,
+        dtype="bfloat16", gpu_arch=None,
+    )
+    names = {op.computation for op in ops}
+    assert names == {"qkv_proj", "o_proj"}  # no d_rel -> no relative rows
+    qkv = next(op for op in ops if op.computation == "qkv_proj")
+    # Fused Q + K + V width: h_q*d + 2*h_kv*d, contracted over hidden.
+    assert qkv.flops == 2 * (1 * (64 * 128 + 2 * 8 * 128) * 6144)
+    assert all(op.modeled and op.category == "GEMM" for op in ops)
+
+
+def test_attention_extra_ops_emits_relative_attention_rows_when_declared(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 64
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.hidden_size = 6144
+    _RT.d_rel = 16
+    _RT.rel_extent = 1024
+    ops = _attention_extra_ops(
+        "decoder", "decoder/attn", instances=1, dims={"B": 1, "S": 1}, bpe=2,
+        dtype="bfloat16", gpu_arch=None,
+    )
+    names = {op.computation for op in ops}
+    assert {"rel_r_proj", "rel_bias"} <= names
+    r = next(op for op in ops if op.computation == "rel_r_proj")
+    assert r.flops == 2 * (1 * (64 * 16) * 6144)  # hidden -> h_q * d_rel
+
+
+def test_attention_extra_ops_needs_attention_dims(_reset_rt):
+    _RT.reset()  # no attn_heads/head_dim/hidden -> nothing to cost
+    assert _attention_extra_ops(
+        "s", "n", 1, {"B": 1, "S": 1}, 2, "bfloat16", None
+    ) == []
+
+
+def test_moe_cost_shards_intermediate_by_tp_and_tokens_by_ep(_reset_rt):
+    dims = {"B": 1, "S": 8, "H": 4096}
+    _RT.reset()
+    whole = _moe_cost(dims, top_k=2, intermediate_size=1024, bpe=2)[2]
+    _RT.tp = 8  # column-shard each expert's intermediate width
+    tp_only = _moe_cost(dims, top_k=2, intermediate_size=1024, bpe=2)[2]
+    assert tp_only == pytest.approx(whole / 8)
+    _RT.reset()
+    _RT.ep = 2  # expert-parallel halves the per-GPU routed-token work
+    ep_only = _moe_cost(dims, top_k=2, intermediate_size=1024, bpe=2)[2]
+    assert ep_only == pytest.approx(whole / 2)
+
+
+def test_attention_boundary_cost_shards_heads_by_tp(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 64
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.n_layers = 1
+    whole = _attention_boundary_cost({"B": 1, "S": 1}, bpe=2)[2]
+    _RT.tp = 8
+    sharded = _attention_boundary_cost({"B": 1, "S": 1}, bpe=2)[2]
+    assert sharded == pytest.approx(whole / 8)
