@@ -168,7 +168,7 @@ TraceLens/
 │   ├── EventReplay/      # Extracts meta data and replays almost arbitrary operations
 │   ├── TraceIndex/       # Build a searchable SQLite catalog of TraceLens reports
 │   ├── TraceUtils/       # Shared trace loaders and annotation helpers
-│   └── Agent/            # Agentic optimization report (Analysis) and trace collection (Profiling)
+│   └── Agent/            # Agentic analysis, profiling, and model visualization
 ├── docs/               # tool-specific guides
 ├── examples/           # example traces, notebooks, scripts, custom-workflows
 ├── notebooks/          # end-to-end profiling and analysis walkthroughs
@@ -196,6 +196,7 @@ TraceLens/
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
+| Model visualizer agent       | [docs/how-to/visualize-model.md](docs/how-to/visualize-model.md)                                                                 |
 | TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
 | Model Roofline Projection    | [docs/how-to/generate-model-roofline-projection.md](docs/how-to/generate-model-roofline-projection.md)                           |
 

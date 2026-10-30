@@ -82,7 +82,10 @@ setup(
         ],
     },
     exclude_package_data={
-        "TraceLens": ["Agent/Analysis/skills/analysis-orchestrator/evals/*"],
+        "TraceLens": [
+            "Agent/Analysis/skills/analysis-orchestrator/evals/*",
+            "Agent/Visualizer/skills/model-visualizer/evals/*",
+        ],
     },
     install_requires=[
         "pandas",
