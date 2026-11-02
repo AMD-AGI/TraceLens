@@ -129,8 +129,8 @@ class aiter_fused_qk_rmsnorm(RMSNorm):
     get_param_details uses Q at [0]/[1]; K shape/channels from [3]/[4] in __init__.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         dims = event["args"]["Input Dims"]
         self.k_shape = tuple(dims[3])
         self.k_num_channels = int(dims[4][0])
