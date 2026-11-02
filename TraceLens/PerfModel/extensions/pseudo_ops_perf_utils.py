@@ -50,6 +50,7 @@ def get_pseudo_op_mappings():
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
+        "sglang_profiler::topk__post_process_topk_ids": moe_perf_model_extensions.sglang_fused_append_shared_experts,
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
         "sglang_profiler::moe_sorting_small__run_small_sort": moe_perf_model_extensions.SglangMoeSortingSmall,
@@ -72,6 +73,7 @@ def get_pseudo_op_mappings():
         "pseudo_v4_paged_decode_hca": attention_perf_model_extensions.pseudo_v4_paged_decode_hca,
         "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
+        "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
@@ -124,6 +126,7 @@ def get_pseudo_op_mappings():
         "aiter::rmsnorm2d_fwd_with_add_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
         "aiter::add_rmsnorm": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
         "aiter::rmsnorm2d_fwd_with_dynamicquant_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
+        "aiter::_fused_qk_rmsnorm_kernel": rmsnorm_perf_model_extensions.aiter_fused_qk_rmsnorm,
         "vllm::rocm_aiter_rmsnorm_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_fp8_group_quant,
         "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
@@ -132,6 +135,7 @@ def get_pseudo_op_mappings():
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
         "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "vllm::rocm_aiter_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
         "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,

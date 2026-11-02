@@ -496,28 +496,29 @@ jobs:
           python -m pip install --upgrade pip coverage
           python -m coverage combine coverage-data-*/.coverage
           # A skipped suite leaves its package at 0% and pulls the 95% gate
-          # down. Omit that package; a push still runs both suites.
-          python - << 'PY'
-          import os
-          from pathlib import Path
-          extra = []
-          if os.environ["MODELUTILS"] != "true":
-              extra.append("    TraceLens/ModelUtils/*")
-          if os.environ["VISUALIZER"] != "true":
-              extra.append("    TraceLens/Visualizer/*")
-          text = Path(".coveragerc").read_text()
-          if extra:
-              lines = text.splitlines()
-              out = []
-              for line in lines:
-                  out.append(line)
-                  if line.strip() == "omit =":
-                      out.extend(extra)
-              Path(".coveragerc").write_text("\n".join(out) + "\n")
-              print("omitting skipped packages:", ", ".join(item.strip() for item in extra))
-          PY
-          python -m coverage xml
-          python -m coverage report --fail-under=95
+          # down. coverage.py keeps a single --omit value, so a second flag
+          # replaces the first and that package stays in the total. Pass every
+          # skipped package in one comma-separated value, and quote it so the
+          # shell does not expand the globs. A push runs both suites and
+          # passes no flag.
+          OMIT=""
+          if [ "$MODELUTILS" != "true" ]; then
+            OMIT="TraceLens/ModelUtils/*"
+          fi
+          if [ "$VISUALIZER" != "true" ]; then
+            if [ -n "$OMIT" ]; then
+              OMIT="$OMIT,TraceLens/Visualizer/*"
+            else
+              OMIT="TraceLens/Visualizer/*"
+            fi
+          fi
+          if [ -n "$OMIT" ]; then
+            python -m coverage xml --omit="$OMIT"
+            python -m coverage report --fail-under=95 --omit="$OMIT"
+          else
+            python -m coverage xml
+            python -m coverage report --fail-under=95
+          fi
 
       - name: Upload coverage to Codecov
         if: success() && needs.select-pr-tests.outputs.mode == 'all'

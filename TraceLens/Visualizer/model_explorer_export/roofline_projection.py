@@ -15,15 +15,27 @@ operator export means a ``--tp``/``--pp``/``--ep`` split, and the merged
 per-GPU local shapes it produces, is the same split and the same shapes the
 visualizer draws -- not a second, independently-matched approximation of it.
 
-Op coverage is intentionally narrow: GEMM (``Linear``/``matmul``/``bmm``), SDPA,
-the Normalization family, Softmax, generic elementwise/reduction ops, and MoE
-expert routing -- exactly the leaf granularity
+Op coverage is intentionally narrow: GEMM (``Linear``/``matmul``/``bmm``), CONV,
+SDPA, the Normalization family, Softmax, generic elementwise/reduction ops, and
+MoE expert routing -- exactly the leaf granularity
 :func:`TraceLens.ModelUtils.build_roofline_basic_ops` stops AST expansion at,
 plus the vLLM/SGLang engine boundaries (``ParallelLMHead``, ``FusedMoEFactory``)
-that never expand at all (see "Known approximations" below). Anything else
-(embeddings, convolutions -- CONV needs kernel/stride geometry the graph does
-not carry) is reported as "unmodeled" rather than silently dropped, so the
-projection's coverage is always visible instead of assumed.
+that never expand at all (see "Known approximations" below). Convolutions in a
+graph node are costed only when the meta-device pass threaded the kernel
+geometry onto the node's ``details`` attr (``conv_weight=[...]``); the
+input/output shapes alone cannot recover the weight's kernel size or groups.
+Anything else (embeddings, a conv with no threaded geometry) is reported as
+"unmodeled" rather than silently dropped, so the projection's coverage is always
+visible instead of assumed.
+
+Convolutional models are handled separately. The graph expands a non-uniform
+stage once (one conv node per stage, plus the stem and each stage's leading
+downsampling conv). :func:`conv_ops_from_meta` still costs every live conv
+instance a meta-device forward captures (see
+:func:`TraceLens.ModelUtils.meta_trace.trace_meta_conv_ops`) -- each already
+carries the concrete ``[B, C, H, W]`` shapes and weight geometry CONV needs --
+and the CLI lets those supersede the graph's conv rows so a repeated stage is
+not counted twice.
 
 Known approximations, stated once here rather than scattered in comments:
   - GEMM bias is assumed absent (bias FLOPs are O(M*N), negligible next to the
@@ -45,20 +57,26 @@ Known approximations, stated once here rather than scattered in comments:
     hidden, experts-per-token, expert intermediate size) instead, the same
     numbers the model's own config declares, rather than from their (unusable)
     node shape.
-  - MoE routing is costed as ``experts_per_tok`` GEMM passes per token (the
-    gate_up_proj and down_proj of only the SELECTED experts), never
+  - MoE routing is costed as ``experts_per_tok`` grouped-GEMM passes per token
+    (the gate_up_proj and down_proj of only the SELECTED experts), never
     ``num_experts`` passes -- the router picks a subset per token, so costing
     every expert for every token would overstate FLOPs by
-    ``num_experts / experts_per_tok``. The router's own softmax/top-k
-    selection and the shared-expert add are not separately costed (both are
-    O(tokens), negligible next to the O(tokens*hidden*intermediate) expert
-    GEMMs).
+    ``num_experts / experts_per_tok``. The expert GEMMs use :class:`GroupedGemm`
+    over ``G = min(num_experts, active_tokens)`` distinct weight matrices, so the
+    weight-byte term reflects the experts actually streamed (``G`` falls back to
+    1, the prior single-weight cost, when ``num_experts`` is unknown). When
+    expert-parallel (``--ep > 1``) the dispatch/combine all-to-all that moves
+    token hidden states between EP ranks is added as FLOPs-free data movement
+    (:class:`MoEComm`). The router's own softmax/top-k selection and the
+    shared-expert add are not separately costed (both are O(tokens), negligible
+    next to the O(tokens*hidden*intermediate) expert GEMMs).
 """
 
 from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from dataclasses import dataclass, field
 from math import prod
 from typing import Any
@@ -67,9 +85,11 @@ from TraceLens.ModelUtils.extract import ArchitectureSpec
 from TraceLens.ModelUtils.loader import build_roofline_basic_ops
 from TraceLens.ModelUtils.shape_inference import ShapeContext, Symbol
 from TraceLens.PerfModel.perf_model import (
+    CONV,
     GEMM,
     SDPA,
     BinaryElementwise,
+    GroupedGemm,
     Normalization,
     Reduce,
     Softmax,
@@ -102,6 +122,22 @@ _BYTES_PER_ELEMENT: dict[str, float] = {
 # nn.Module (operation == "nn_module") vs. a bare functional call.
 _GEMM_NN_MODULE_COMPUTATIONS = frozenset({"Linear"})
 _GEMM_FUNCTIONAL_LABELS = frozenset({"matmul", "batchmatmul", "mm", "bmm"})
+
+# Convolution module computations. The input/output shapes are on the node; the
+# weight shape (kernel geometry + groups) and the bias/transposed flags are not
+# derivable from them, so they are threaded on the node's ``details`` attr by the
+# meta-device pass (``conv_weight=[...]``, ``conv_bias=0|1``, ``conv_transposed=0|1``)
+# and parsed by ``_parse_conv_details``.
+_CONV_COMPUTATIONS = frozenset(
+    {
+        "Conv1d",
+        "Conv2d",
+        "Conv3d",
+        "ConvTranspose1d",
+        "ConvTranspose2d",
+        "ConvTranspose3d",
+    }
+)
 
 # A vLLM/SGLang ``--engine`` draw labels a sharded linear by its own class
 # (``RowParallelLinear``) or, for a model-specific subclass TraceLens'
@@ -222,9 +258,11 @@ _REDUCTION_COMPUTATIONS = frozenset(
     }
 )
 
-# A node's instance count is the innermost ``"<N>x_..."`` repeat-count
-# namespace segment around it -- the merged graph's own per-variant tile count.
-_REPEAT_NAMESPACE_SEGMENT = re.compile(r"^(\d+)x(?:_|$)")
+# A node's instance count is the innermost repeat-count namespace segment
+# around it. A uniform stack is ``45x_DecoderLayer``. A non-uniform stage is
+# ``s2_27x_ConvNextLayer``: the stage index keeps the containers distinct, and
+# the count is the digits before ``x_``.
+_REPEAT_NAMESPACE_SEGMENT = re.compile(r"^(?:s\d+_)?(\d+)x(?:_|$)")
 
 # Ids this synthetic/boundary-marker prefix never carries real computation --
 # an @input/@output port marker or a collective TraceLens inserted for a
@@ -388,6 +426,7 @@ def project_roofline(
     seq_len: int,
     extra_dims: dict[str, int] | None = None,
     gpu_arch: dict[str, Any] | None = None,
+    checkpoint: str | Path | None = None,
 ) -> RooflineProjection:
     """Project a kernel-by-kernel roofline for *spec* at a concrete batch/seq length.
 
@@ -403,7 +442,13 @@ def project_roofline(
     moe_top_k = spec.num_experts_per_tok
     moe_intermediate_size = spec.moe_intermediate_size or spec.intermediate_size
     payload = build_model_explorer_payload(
-        spec, basic_ops=build_roofline_basic_ops(), include_shapes=True
+        spec,
+        basic_ops=build_roofline_basic_ops(),
+        include_shapes=True,
+        # The nested stage tree and the concrete spatial shapes are read off a
+        # meta-device module. Without the checkpoint the projection builds the
+        # uniform-stack graph and a CNN's stage body never appears.
+        meta_shapes_checkpoint=str(checkpoint) if checkpoint else None,
     )
     graphs = payload["graphCollections"][0]["graphs"]
     nodes = graphs[0]["nodes"] if graphs else []
@@ -415,10 +460,17 @@ def project_roofline(
         parsed = _parse_op_node(node)
         if parsed is None:
             continue
-        section, computation, class_name, operation, output_text, input_texts, role = (
-            parsed
-        )
-        instances = _repeat_count(str(node.get("namespace") or ""))
+        (
+            section,
+            computation,
+            class_name,
+            operation,
+            output_text,
+            input_texts,
+            role,
+            details,
+        ) = parsed
+        instances = _repeat_count(str(node.get("namespace") or ""), node)
         result.ops.append(
             _project_op(
                 str(node.get("id")),
@@ -434,13 +486,23 @@ def project_roofline(
                 moe_top_k,
                 moe_intermediate_size,
                 role,
+                details,
             )
         )
     return result
 
 
-def _repeat_count(namespace: str) -> int:
-    """The innermost ``"<N>x_..."`` tile-repeat count in *namespace*, or 1."""
+def _repeat_count(namespace: str, node: dict[str, Any] | None = None) -> int:
+    """How many times the exported node stands for a live module.
+
+    A ``repeat_count`` attr wins. The stage body stamps its depth there, and a
+    submodule that exists only on the first element (a ResNet projection
+    shortcut) stamps ``1`` so the stage depth does not multiply it. Otherwise
+    the innermost ``{N}x_`` / ``s{stage}_{N}x_`` namespace segment, or 1.
+    """
+    stamped = _attr_text((node or {}).get("attrs"), "repeat_count")
+    if stamped and str(stamped).isdigit():
+        return int(stamped)
     count = 1
     for segment in namespace.split("/"):
         match = _REPEAT_NAMESPACE_SEGMENT.match(segment)
@@ -489,7 +551,17 @@ def _parse_op_node(
     namespace = str(node.get("namespace") or "")
     section = namespace.split("/")[-1] if namespace else node_id
     role = _attr_text(attrs, "role") or ""
-    return section, computation, class_name, operation, output_text, input_texts, role
+    details = _attr_text(attrs, "details") or ""
+    return (
+        section,
+        computation,
+        class_name,
+        operation,
+        output_text,
+        input_texts,
+        role,
+        details,
+    )
 
 
 def _project_op(
@@ -506,6 +578,7 @@ def _project_op(
     moe_top_k: int | None,
     moe_intermediate_size: int | None,
     role: str = "",
+    details: str = "",
 ) -> RooflineOp:
     base = RooflineOp(
         name=node_id,
@@ -564,7 +637,7 @@ def _project_op(
         input_shapes = [
             resolve_shape(shape, dims) if shape else None for shape in input_texts
         ]
-        cost = _dispatch_op_cost(computation, input_shapes, output_shape, bpe)
+        cost = _dispatch_op_cost(computation, input_shapes, output_shape, bpe, details)
     except DimResolutionError as exc:
         base.reason = f"unresolved input dim {exc}"
         return base
@@ -650,6 +723,8 @@ class _RuntimeIntrospection:
         "weight_bpe",
         "moe_top_k",
         "moe_intermediate",
+        "moe_num_experts",
+        "ep",
         "attn_heads",
         "attn_kv_heads",
         "attn_head_dim",
@@ -665,6 +740,8 @@ class _RuntimeIntrospection:
         self.weight_bpe = None
         self.moe_top_k = None
         self.moe_intermediate = None
+        self.moe_num_experts = None
+        self.ep = 1
         self.attn_heads = None
         self.attn_kv_heads = None
         self.attn_head_dim = None
@@ -706,6 +783,9 @@ def _populate_introspection(spec):
     _RT.weight_bpe = _introspect_weight_bpe(cfg.get("quantization_config"))
     _RT.moe_top_k = spec.num_experts_per_tok
     _RT.moe_intermediate = spec.moe_intermediate_size or spec.intermediate_size
+    _RT.moe_num_experts = spec.num_experts
+    layout = getattr(spec, "parallel_layout", None)
+    _RT.ep = getattr(getattr(layout, "degree", None), "ep", 1) or 1
     _RT.attn_heads = spec.num_attention_heads
     _RT.attn_kv_heads = spec.num_key_value_heads or spec.num_attention_heads
     if spec.head_dim:
@@ -767,13 +847,30 @@ def _moe_cost(
     intermediate_size: int | None,
     bpe: float | None,
 ) -> tuple[str, str, float, float | None, int] | None:
-    """GEMM cost of the gate_up_proj + down_proj of the SELECTED experts only.
+    """GroupedGEMM cost of the gate_up_proj + down_proj of the SELECTED experts,
+    plus the EP dispatch/combine all-to-all when expert-parallel.
 
     ``top_k``/``intermediate_size`` come from the architecture's own MoE
     config (``spec.num_experts_per_tok``, ``spec.moe_intermediate_size``), not
     ``dims[Symbol.INTERMEDIATE]`` -- that key prefers a model's DENSE
     ``intermediate_size`` (shared-expert / non-MoE layers) when both are
     declared, which is the wrong width for the routed experts this costs.
+
+    The expert GEMMs are costed with :class:`GroupedGemm` over
+    ``G = min(num_experts, active_tokens)`` distinct expert weight matrices --
+    the weights actually streamed from HBM for this token count -- rather than a
+    single shared weight. FLOPs are unchanged (only the selected token-expert
+    pairs compute); the weight-byte term now scales with the experts touched, so
+    the memory-bound/compute-bound crossover tracks the real prefill-vs-decode
+    behaviour instead of understating decode weight traffic by ~``G``x. When
+    ``num_experts`` is unknown ``G`` falls back to 1 (the prior single-weight
+    cost).
+
+    When ``_RT.ep > 1`` the dispatch and combine all-to-all that move token
+    hidden states between expert-parallel ranks are added as pure data movement
+    (:class:`MoEComm`, FLOPs-free). This is the MoE op's own intrinsic
+    communication, distinct from the ``@comm:`` TP/PP collectives the projection
+    leaves to TreePerf.
     """
     if not top_k or not intermediate_size:
         return None
@@ -783,19 +880,27 @@ def _moe_cost(
     except (KeyError, DimResolutionError):
         return None
     active_tokens = tokens * top_k
-    gate_up_flops = GEMM.flops_func(
-        active_tokens, 2 * intermediate_size, hidden, bias=False
-    )
+    groups = min(_RT.moe_num_experts, active_tokens) if _RT.moe_num_experts else 1
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
-    gate_up_bytes = GEMM.bytes_func(
-        active_tokens, 2 * intermediate_size, hidden, False, wbpe, wbpe, bpe, bpe
-    )
-    down_flops = GEMM.flops_func(active_tokens, hidden, intermediate_size, bias=False)
-    down_bytes = GEMM.bytes_func(
-        active_tokens, hidden, intermediate_size, False, wbpe, wbpe, bpe, bpe
-    )
+    # gate_up_proj: [active_tokens, hidden] x per-expert [hidden, 2*intermediate].
+    gate_up_flops = GroupedGemm.flops_func(active_tokens, hidden, 2 * intermediate_size)
+    # down_proj: [active_tokens, intermediate] x per-expert [intermediate, hidden].
+    down_flops = GroupedGemm.flops_func(active_tokens, intermediate_size, hidden)
     flops = gate_up_flops + down_flops
-    bytes_moved = None if bpe is None else gate_up_bytes + down_bytes
+    bytes_moved: float | None = None
+    if bpe is not None:
+        gate_up_bytes = GroupedGemm.bytes_func(
+            active_tokens, hidden, 2 * intermediate_size, groups, wbpe, bpe
+        )
+        down_bytes = GroupedGemm.bytes_func(
+            active_tokens, intermediate_size, hidden, groups, wbpe, bpe
+        )
+        bytes_moved = gate_up_bytes + down_bytes
+        if _RT.ep > 1:
+            # Dispatch sends each token's hidden state to its top_k expert ranks;
+            # combine gathers the expert outputs back (MoEComm: num_tokens * hidden
+            # * bpe each). Token activations move at the activation dtype, not wbpe.
+            bytes_moved += 2 * active_tokens * hidden * bpe
     return "MoE", "matrix", flops, bytes_moved, tokens * hidden
 
 
@@ -818,12 +923,15 @@ def _dispatch_op_cost(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
+    details: str = "",
 ) -> tuple[str, str, float, float | None] | None:
     """Return ``(category, maf_type, flops, bytes)`` for an op, or ``None`` if unmodeled."""
     if computation in _GEMM_NN_MODULE_COMPUTATIONS:
         return _gemm_cost_linear(input_shapes, output_shape, bpe)
     if computation.lower() in _GEMM_FUNCTIONAL_LABELS:
         return _gemm_cost_matmul(input_shapes, output_shape, bpe)
+    if computation in _CONV_COMPUTATIONS:
+        return _conv_cost(details, input_shapes, output_shape, bpe)
     if computation == _SDPA_COMPUTATION:
         return _sdpa_cost(input_shapes, bpe)
     normalization_family = _classify_normalization(computation)
@@ -876,6 +984,105 @@ def _gemm_cost_matmul(
     flops = GEMM.flops_func(m, n, k, bias=False)
     bytes_moved = GEMM.bytes_func(m, n, k, False, bpe, bpe, bpe, bpe)
     return "GEMM", "matrix", flops, bytes_moved
+
+
+_CONV_WEIGHT_RE = re.compile(r"conv_weight=\[([0-9,\s]+)\]")
+_CONV_FLAG_RE = re.compile(r"conv_(bias|transposed)=([01])")
+
+
+def _parse_conv_details(details: str) -> tuple[tuple[int, ...], bool, bool] | None:
+    """``(weight_shape, bias, transposed)`` from a node's ``details`` attr, or
+    ``None`` when the convolution geometry was not threaded onto the node.
+
+    The meta-device pass stamps ``conv_weight=[C_out, C_in/groups, *kernel]``,
+    ``conv_bias=0|1``, and ``conv_transposed=0|1`` (see ``meta_trace`` /
+    ``_CONV_COMPUTATIONS``)."""
+    if not details:
+        return None
+    match = _CONV_WEIGHT_RE.search(details)
+    if not match:
+        return None
+    try:
+        weight = tuple(int(tok) for tok in match.group(1).split(",") if tok.strip())
+    except ValueError:
+        return None
+    if not weight:
+        return None
+    flags = {k: v == "1" for k, v in _CONV_FLAG_RE.findall(details)}
+    return weight, flags.get("bias", False), flags.get("transposed", False)
+
+
+def _conv_cost(
+    details: str,
+    input_shapes: list[tuple[int, ...] | None],
+    output_shape: tuple[int, ...],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """CONV FLOPs/bytes from the input/output shapes plus the weight geometry on
+    the node's ``details`` attr. The strides/padding/dilation that `nn.Conv*`
+    uses only determine the output shape, which is already resolved here, so the
+    static ``CONV.flops_func``/``bytes_func`` need only the three shapes plus the
+    bias/transposed flags."""
+    parsed = _parse_conv_details(details)
+    if parsed is None or not input_shapes or not input_shapes[0] or not output_shape:
+        return None
+    weight_shape, bias, transposed = parsed
+    input_shape = input_shapes[0]
+    flops = CONV.flops_func(input_shape, weight_shape, output_shape, bias, transposed)
+    bytes_moved = (
+        CONV.bytes_func(input_shape, weight_shape, output_shape, bias, bpe)
+        if bpe is not None
+        else None
+    )
+    return "CONV", "matrix", flops, bytes_moved
+
+
+def conv_ops_from_meta(
+    meta_convs: list[dict[str, Any]] | None,
+    *,
+    dtype: str = "bfloat16",
+    gpu_arch: dict[str, Any] | None = None,
+) -> list[RooflineOp]:
+    """Roofline ops for every convolution a meta-device forward captured.
+
+    Each entry is one live ``_ConvNd`` instance from
+    :func:`TraceLens.ModelUtils.meta_trace.trace_meta_conv_ops`, carrying the
+    concrete ``[B, C, H, W]`` in/out shapes and weight geometry CONV needs. The
+    graph draws one conv per stage; each live instance here carries the geometry
+    to cost that instance, and the CLI uses these rows in place of the graph's
+    conv rows so the repeated stage is not counted twice."""
+    bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    ops: list[RooflineOp] = []
+    for conv in meta_convs or []:
+        out_shape = tuple(conv.get("output_shape") or ())
+        in_shape = tuple(conv["input_shape"]) if conv.get("input_shape") else None
+        weight_shape = tuple(conv.get("weight_shape") or ())
+        if not out_shape or in_shape is None or not weight_shape:
+            continue
+        path = str(conv.get("path") or "")
+        base = RooflineOp(
+            name=path,
+            section=path.split(".")[-1] or path,
+            computation="Conv",
+            operation="",
+            category=None,
+            modeled=False,
+            reason=None,
+            output_elements=prod(out_shape),
+            instances=1,
+        )
+        bias = bool(conv.get("bias"))
+        transposed = bool(conv.get("transposed"))
+        flops = CONV.flops_func(in_shape, weight_shape, out_shape, bias, transposed)
+        bytes_moved = (
+            CONV.bytes_func(in_shape, weight_shape, out_shape, bias, bpe)
+            if bpe is not None
+            else None
+        )
+        ops.append(
+            _finish_op(base, "CONV", "matrix", flops, bytes_moved, dtype, gpu_arch)
+        )
+    return ops
 
 
 def _sdpa_cost(

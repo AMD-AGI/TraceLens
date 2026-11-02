@@ -85,6 +85,7 @@ from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
 from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     RMSNorm,
     aiter_add_rmsnorm,
+    aiter_fused_qk_rmsnorm,
     aiter_rmsnorm,
     aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
     aiter_rmsnorm_quant,
@@ -132,6 +133,7 @@ from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
     pseudo_v4_paged_decode_csa,
     pseudo_v4_paged_decode_hca,
     pseudo_v4_paged_decode_swa,
+    sgl_kernel_fast_topk_transform_fused,
     vllm_unified_mla_attention_with_output,
 )
 from TraceLens.PerfModel.kernel_name_parser import parse_rocm_gemm
@@ -184,6 +186,14 @@ class TestPseudoOpsPerfUtils:
         assert mappings["vllm::gdn_attention_core"] is gdn_attention_core
         assert mappings["aiter::gemm_a8w8_blockscale_ck"] is gemm_a8w8_blockscale
         assert mappings["_C_custom_ar::all_reduce"] is custom_ar_all_reduce
+        assert (
+            mappings["sglang_profiler::topk__post_process_topk_ids"]
+            is sglang_fused_append_shared_experts
+        )
+        assert (
+            mappings["sgl_kernel::fast_topk_transform_fused"]
+            is sgl_kernel_fast_topk_transform_fused
+        )
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -3135,6 +3145,64 @@ class TestRmsNormExtensionsCoverage:
         model = aiter_rmsnorm(event)
         assert model.flops() > 0
 
+    def test_aiter_fused_qk_rmsnorm(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    (12, 2048),
+                    (2048,),
+                    (),
+                    (12, 512),
+                    (512,),
+                    (),
+                    (12, 2048),
+                    (12, 512),
+                ],
+                "Input type": ["c10::BFloat16"] * 8,
+                "Input Strides": [
+                    (2624, 1),
+                    (1,),
+                    (),
+                    (2624, 1),
+                    (1,),
+                    (),
+                    (2048, 1),
+                    (512, 1),
+                ],
+            }
+        }
+        model = aiter_fused_qk_rmsnorm(event)
+        assert model.num_channels == 2048
+        assert model.k_num_channels == 512
+        assert model.k_shape == (12, 512)
+        assert model.k_num_elems == 12 * 512
+        q_only = aiter_rmsnorm(
+            {
+                "args": {
+                    "Input Dims": [(12, 2048), (12, 2048), (2048,), ()],
+                    "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                    "Input Strides": [(2048, 1), (2048, 1), (1,), ()],
+                }
+            }
+        )
+        k_only = aiter_rmsnorm(
+            {
+                "args": {
+                    "Input Dims": [(12, 512), (12, 512), (512,), ()],
+                    "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                    "Input Strides": [(512, 1), (512, 1), (1,), ()],
+                }
+            }
+        )
+        assert model.flops() == q_only.flops() + k_only.flops()
+        assert model.bytes() == q_only.bytes() + k_only.bytes()
+        assert model.flops() == 122928
+        assert model.bytes() == 128000
+        assert (
+            get_pseudo_op_mappings()["aiter::_fused_qk_rmsnorm_kernel"]
+            is aiter_fused_qk_rmsnorm
+        )
+
     def test_aiter_rmsnorm2d_dynamicquant(self):
         event = {
             "args": {
@@ -3320,6 +3388,48 @@ class TestAttentionExtensionsCoverage:
         }
         model = pa_decode_gluon(event)
         assert model.flops() > 0
+
+    def test_sgl_kernel_fast_topk_transform_fused(self):
+        def event(annotation, rows=8, max_len=1048640):
+            return {
+                "annotation": annotation,
+                "args": {
+                    "Input Dims": [(rows, max_len), (rows,), (rows, 2048)],
+                    "Input type": ["float", "int", "int"],
+                },
+            }
+
+        decode = sgl_kernel_fast_topk_transform_fused(
+            event(
+                "execute_8_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_8(sq8sk815046sqsq8sqsk815046)"
+            )
+        )
+        assert decode.flops() == 815046
+        assert decode.bytes() == 815046 * 4 + 8 * (2048 + 2048) * 4
+        assert decode.get_compute_precision() == "fp32"
+
+        short = sgl_kernel_fast_topk_transform_fused(
+            event(
+                "execute_2_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_2(sq2sk1000sqsq2sqsk1000)",
+                rows=2,
+            )
+        )
+        assert short.bytes() == 1000 * 4 + 2 * (500 + 2048) * 4
+
+        prefill = sgl_kernel_fast_topk_transform_fused(
+            event(
+                "execute_4_context_1(sq4sk10sqsq16sqsk40)"
+                "_generation_0(sq0sk0sqsq0sqsk0)",
+                rows=4,
+            )
+        )
+        assert prefill.flops() == 7 + 8 + 9 + 10
+
+        no_annotation = sgl_kernel_fast_topk_transform_fused(event("NA"))
+        assert no_annotation.flops() is None
+        assert no_annotation.bytes() is None
 
     def test_mla_tilelang_sparse_fwd_topk_sliding_window(self):
         event = {
