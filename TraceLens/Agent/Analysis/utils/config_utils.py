@@ -16,7 +16,8 @@ Every front end (interactive answers, a user YAML, Hyperloom) produces a dict in
 the wrapper's schema. ``check_config`` rejects a wrong shape for the scope,
 adds the wiring and the agent report flags, then lets the wrapper validate the
 result. Scopes: standalone (1 job), comparative and semantic (2 jobs),
-multi_trace (2 or more jobs with ``aggregation``; the first job is the focus).
+multi_trace (2 or more jobs with ``aggregation``, one job per node; the first
+job is the focus).
 In multi_trace the flags are only checked: a ``false`` is rejected, not
 overwritten.
 Every change is printed. The completed config is written to
@@ -35,7 +36,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import yaml
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
-from TraceLens.Reporting.aggregate_perf_reports import POLICY_SAME_PHASE
+from TraceLens.Reporting.aggregate_perf_reports import POLICY_BY_NODE
 from TraceLens.Reporting.generate_perf_report_from_config import (
     ConfigError,
     load_run_config,
@@ -193,6 +194,15 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
         completed[flag] = value
 
     plans = plan_reports(completed)
+    if scope == SCOPE_MULTI_TRACE:
+        node_ids = [plan.node_id for plan in plans]
+        repeated = sorted({node for node in node_ids if node_ids.count(node) > 1})
+        if repeated:
+            raise ConfigError(
+                "multi_trace takes one job per node; repeated: "
+                + ", ".join(repeated)
+                + "."
+            )
 
     focus = plans[0]
     variables = {
@@ -204,7 +214,7 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
     if focus.capture_folder is not None:
         variables["capture_folder"] = focus.capture_folder
     if scope == SCOPE_MULTI_TRACE:
-        variables["focus_job"] = focus.name
+        variables["focus_job"] = focus.node_id
     elif scope in _PAIR_SCOPES:
         variables.update(
             comparison_method="semantic" if scope == SCOPE_SEMANTIC else "tracediff",
@@ -283,7 +293,7 @@ def main(argv=None) -> None:
                     "jobs": [_assign_pairs(job.split(",")) for job in args.job],
                 }
                 if args.scope == SCOPE_MULTI_TRACE:
-                    config.setdefault("aggregation", {"policy": POLICY_SAME_PHASE})
+                    config.setdefault("aggregation", {"policy": POLICY_BY_NODE})
             else:
                 config = load_run_config(args.config)
             result = check_config(config, args.scope)
@@ -330,11 +340,9 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
         aggregation = config.get("aggregation")
         if (
             not isinstance(aggregation, dict)
-            or aggregation.get("policy") != POLICY_SAME_PHASE
+            or aggregation.get("policy") != POLICY_BY_NODE
         ):
-            errors.append(
-                f"multi_trace: aggregation.policy must be {POLICY_SAME_PHASE}."
-            )
+            errors.append(f"multi_trace: aggregation.policy must be {POLICY_BY_NODE}.")
         errors += [
             f"multi_trace: {flag} must be {json.dumps(value)}, got {json.dumps(config[flag])}."
             for flag, value in AGENT_REPORT_FLAGS.get(analysis_mode, {}).items()

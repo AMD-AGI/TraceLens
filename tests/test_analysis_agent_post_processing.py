@@ -26,18 +26,25 @@ import re
 import subprocess
 import sys
 
+import pandas as pd
 import pytest
 
 from TraceLens.Agent.Analysis.post_processing import (
+    TASK_SOURCE_COLUMNS,
     AnalysisReport,
     ComputeMember,
     ComputeTask,
     Impact,
     ReportInfo,
+    compute_tasks,
     render_analysis_json,
 )
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
+    build_operation_metrics,
+)
+from TraceLens.Agent.Analysis.post_processing.analysis_json import (
+    _strip_trailing_comment,
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     _find_data_table,
@@ -46,6 +53,12 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
 
 # Constants
 _NULL_CELLS = {"", "-", "—", "–"}
+
+
+def test_strip_trailing_comment_handles_newlines():
+    row = "| value | <!-- generated\nmarker -->\n"
+    assert _strip_trailing_comment(row) == "| value |"
+
 
 # --------------------------------------------------------------------------- #
 # Inline md fixtures — trimmed from real single-trace reports so numbers and
@@ -399,6 +412,7 @@ _FUSION_P2_GOLDEN = {
     "resolution": "Fold the activation into the GEMM epilogue.",
     "prose_truncated": False,
     "priority": 2,
+    "node": None,
 }
 
 # (name, md, mode, has_op_row, n_warn) — the inline replacement for the disk
@@ -483,6 +497,7 @@ def _assert_schema_valid(report):
             "resolution",
             "prose_truncated",
             "impact",
+            "node",
             "members",
         }
         assert isinstance(task["priority"], int)
@@ -578,6 +593,53 @@ def test_envelope_agentic_golden(tmp_path):
     assert report["title"] == "ExampleMoE - MI300X Standalone Analysis"
 
 
+@pytest.mark.parametrize(
+    "table, expected",
+    [
+        pytest.param(
+            "| Rank | Category | Time (ms) | % of Compute Time | Ops |\n"
+            "|---|---|---|---|---|\n"
+            "| 1 | gemm | 10.5 | 50.0% | 4 | <!-- top-ops-row low=1.0 high=2.0 -->\n"
+            "| 2 | triton | 5.25 | 25.0% | 2 |\n",
+            [
+                (1, "gemm", 10.5, 50.0, 4, None),
+                (2, "triton", 5.25, 25.0, 2, None),
+            ],
+            id="public_5col_with_and_without_trailer",
+        ),
+        pytest.param(
+            "| Rank | Category | Time (ms) | % of Compute Time | Ops "
+            "| Potential improvement (time, % of decode) |\n"
+            "|---|---|---|---|---|---|\n"
+            "| 1 | gemm | 10.5 | 50.0% | 4 | ~1.0–2.0 ms (1.0–2.0%) |\n",
+            [(1, "gemm", 10.5, 50.0, 4, "~1.0–2.0 ms (1.0–2.0%)")],
+            id="rehydrated_6col_per_node_header",
+        ),
+        pytest.param(
+            "| Rank | Category | Trace 1 Time (ms) | Trace 2 Time (ms) "
+            "| % of Compute Time | Ops | Difference (ms) |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| 1 | gemm | 10.5 | 7.75 | 50.0% | 4 | -2.75 "
+            "| <!-- top-ops-row low=1.0 high=2.0 -->\n",
+            [(1, "gemm", 10.5, 50.0, 4, None)],
+            id="comparative_7col",
+        ),
+    ],
+)
+def test_top_operations_cells_follow_headers(tmp_path, table, expected):
+    md = f"# T\n\n<!-- impact-begin kind=top_ops -->\n{table}<!-- impact-end -->\n"
+    report, _ = _render_text(md, tmp_path)
+    keys = (
+        "rank",
+        "category",
+        "time_ms",
+        "pct_of_compute",
+        "ops",
+        "potential_improvement_md",
+    )
+    assert [tuple(row[k] for k in keys) for row in report["top_operations"]] == expected
+
+
 def test_exec_summary_metrics(tmp_path):
     report, _ = _render_text(_AGENTIC_MD, tmp_path)
     metrics = report["executive_summary"]["metrics"]
@@ -643,10 +705,10 @@ def test_impact_sum_and_task_order(tmp_path):
     assert [t["priority"] for t in tasks] == list(range(1, len(tasks) + 1))
 
 
-def test_compute_tasks_split_by_phase(tmp_path):
+def test_compute_tasks_split_by_node(tmp_path):
     md = (
-        _AGENTIC_MD.replace("category=gemm", "category=gemm phase=prefill")
-        .replace("category=moe_unfused", "category=moe_unfused phase=decode")
+        _AGENTIC_MD.replace("category=gemm", "category=gemm node=prefill_0")
+        .replace("category=moe_unfused", "category=moe_unfused node=decode_0")
         .replace("| pseudo_op::moe_flydsl_stage1 |", "| aiter::gemm_a16w16 |")
     )
     report, _ = _render_text(md, tmp_path)
@@ -655,14 +717,79 @@ def test_compute_tasks_split_by_phase(tmp_path):
         for t in report["compute_optimizations"]
         if t["operation"] == "aiter::gemm_a16w16"
     ]
-    assert sorted(t["phase"] for t in gemm) == ["decode", "prefill"]
+    assert sorted(t["node"] for t in gemm) == ["decode_0", "prefill_0"]
 
 
-def test_fallback_tasks_split_by_phase(tmp_path):
-    # Same kernel in two phases: the p_item marker's phase splits the task.
+_MULTI_TRACE_MD = """<!-- report-begin kind=report_mode mode=deterministic-fallback -->
+<!-- report-end -->
+
+## Executive Summary
+
+| Metric | Total | n0 | n1 |
+|---|---|---|---|
+| Total Time | 200.0 ms | 120.0 ms | 80.0 ms |
+| Compute % | 90.0% | 95.0% | 85.0% |
+
+## Compute Kernel Optimizations
+
+<!-- impact-begin kind=top_ops node=n0 -->
+| Rank | Category |
+|---|---|
+| 1 | gemm |
+<!-- impact-end -->
+
+<!-- impact-begin kind=top_ops node=n1 -->
+| Rank | Category |
+|---|---|
+| 1 | triton |
+<!-- impact-end -->
+
+<!-- reasoning-candidate tier=compute rank=1 -->
+#### P1: kernel_a
+<!-- impact-begin kind=p_item category=unknown low=1.0 mid=2.0 high=3.0 node=n0 -->
+<!-- impact-end -->
+
+**Data:**
+
+| Operation | Kernel Name | Time (ms) | % of Node |
+|---|---|---|---|
+| — | kernel_a | 10.000 | 8.33 |
+<!-- impact-begin kind=op_row rank=1 impacts=2.0 -->
+<!-- impact-end -->
+"""
+
+
+def test_multi_trace_report_carries_node_fields(tmp_path):
+    report, _ = _render_text(_MULTI_TRACE_MD, tmp_path)
+    summary = report["executive_summary"]
+    assert summary["metrics"]["total_time_ms"] == 200.0
+    assert summary["node_metrics"] == {
+        "n0": {"total_time_ms": 120.0, "compute_pct": 95.0},
+        "n1": {"total_time_ms": 80.0, "compute_pct": 85.0},
+    }
+    assert [(r["node"], r["category"]) for r in report["top_operations"]] == [
+        ("n0", "gemm"),
+        ("n1", "triton"),
+    ]
+    # 10.0 ms of the 200.0 ms Total Time, not the table's 8.33 cell.
+    (task,) = report["compute_optimizations"]
+    assert task["members"][0]["pct_e2e"] == 5.0
+
+
+def test_pct_of_node_table_needs_total_time(tmp_path):
+    # A thousands separator would parse as 2.0 ms and skew pct_e2e silently.
+    md = _MULTI_TRACE_MD.replace(
+        "| Total Time | 200.0 ms |", "| Total Time | 2,000.0 ms |"
+    )
+    with pytest.raises(ValueError, match="Total Time"):
+        _render_text(md, tmp_path)
+
+
+def test_fallback_tasks_split_by_node(tmp_path):
+    # Same kernel on two nodes: the p_item marker's node splits the task.
     cards = "".join(f"""<!-- reasoning-candidate tier=compute rank={rank} -->
 #### P{rank}: kernel_a
-<!-- impact-begin kind=p_item category=unknown low=1.0 mid=2.0 high=3.0 phase={phase} -->
+<!-- impact-begin kind=p_item category=unknown low=1.0 mid=2.0 high=3.0 node={node} -->
 <!-- impact-end -->
 
 **Data:**
@@ -673,14 +800,14 @@ def test_fallback_tasks_split_by_phase(tmp_path):
 <!-- impact-begin kind=op_row rank={rank} impacts=2.0 -->
 <!-- impact-end -->
 
-""" for rank, phase in enumerate(["prefill", "decode"], start=1))
+""" for rank, node in enumerate(["prefill_0", "decode_0"], start=1))
     md = (
         "<!-- report-begin kind=report_mode mode=deterministic-fallback -->\n"
         "<!-- report-end -->\n\n" + cards
     )
     report, _ = _render_text(md, tmp_path)
     tasks = report["compute_optimizations"]
-    assert sorted(t["phase"] for t in tasks) == ["decode", "prefill"]
+    assert sorted(t["node"] for t in tasks) == ["decode_0", "prefill_0"]
 
 
 def test_op_row_impacts_read_from_marker(tmp_path):
@@ -1185,6 +1312,22 @@ def test_fusion_tier_golden(tmp_path):
     assert softmax["bound"] is None
 
 
+def test_fusion_task_takes_node_from_card_p_item(tmp_path):
+    card = (
+        "## Kernel Fusion Opportunities (Experimental)\n\n"
+        "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n0 -->\n"
+        "<!-- impact-end -->\n\n"
+        + "Prose. " * 80
+        + "\n\n→ *See [Detailed Analysis](#detailed-analysis-fusion-P1) for details*\n\n"
+    )
+    md = _FUSION_MD.replace("## Detailed Analysis", card + "## Detailed Analysis", 1)
+    tasks = _render_text(md, tmp_path)[0]["fusion_optimizations"]
+    assert {t["operation"]: t["node"] for t in tasks} == {
+        "Unfused Attention": "n0",
+        "Unfused Activation": None,
+    }
+
+
 @pytest.mark.parametrize(
     "surfaced,expected",
     [
@@ -1219,3 +1362,50 @@ def test_fusion_blocks_do_not_change_compute_tasks(tmp_path):
     assert base["fusion_optimizations"] == []
     assert both["compute_optimizations"] == base["compute_optimizations"]
     assert len(both["fusion_optimizations"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# compute_tasks: tasks built from per-row op metrics, no md
+# --------------------------------------------------------------------------- #
+
+
+def test_compute_tasks_group_rows_by_op():
+    perf_rows = pd.DataFrame(
+        [
+            {
+                "name": "op_a",
+                "count": 2,
+                "Kernel Time (µs)_sum": 10000.0,
+                "Pct Roofline_mean": 60.0,
+                "Roofline Bound": "COMPUTE_BOUND",
+                "Input Dims": "[[2, 3]]",
+                "Input type": "['c10::BFloat16']",
+                "call_stack_full": "['mod.py', 'kernel_a']",
+            },
+            {"name": "op_a", "count": 1, "Kernel Time (µs)_sum": 10000.0},
+            {"name": "op_b", "count": 1, "Kernel Time (µs)_sum": 5000.0},
+        ]
+    )
+    metadata = {
+        "peak_mem_bw_tbs": 5.3,
+        "max_achievable_tflops": {"matrix_bf16": 700.0},
+        "gpu_utilization": {"total_time_ms": 100.0},
+    }
+    ops = build_operation_metrics(
+        perf_rows, metadata, {"extra_fields": list(TASK_SOURCE_COLUMNS)}
+    )
+
+    task_a, task_b = compute_tasks(ops)
+
+    assert (task_a["operation"], task_a["priority"]) == ("op_a", 1)
+    assert task_a["impact"] == {"mid": 6.5}
+    assert (task_b["operation"], task_b["priority"]) == ("op_b", 2)
+    full, bare = task_a["members"]
+    assert full["args_shapes"] == ["(2,3)"]
+    assert full["args_datatypes"] == ["bf16"]
+    assert full["kernel_name"] == ["kernel_a"]
+    assert full["bound"] == "compute-bound"
+    assert full["efficiency_peak_value"] == 700.0
+    assert full["efficiency_peak_unit"] == "TFLOPS"
+    assert bare["args_shapes"] is None
+    assert bare["kernel_name"] == []
