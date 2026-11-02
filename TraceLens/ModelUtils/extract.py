@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
 
 from TraceLens.ModelUtils.ast_analyze import (
+    ANALYZED_MODULE_KEY,
     RUNTIME_REGIME_KEY,
     RuntimeRegime,
     analyze_sources,
@@ -34,7 +35,12 @@ from TraceLens.ModelUtils.block_tree import (
     build_full_detailed_block_trees,
     is_method_wrapper,
 )
-from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVariant
+from TraceLens.ModelUtils.blocks import (
+    BlockComponent,
+    CodeAnalysis,
+    LayerVariant,
+    RepeatedGroup,
+)
 from TraceLens.ModelUtils.config_resolve import (
     apply_config_attribute_aliases,
     declared_config_aliases,
@@ -118,6 +124,11 @@ class ArchitectureSpec:
 
     # Live meta-tree structure (repeated ModuleLists), when instantiation succeeds.
     meta_module_groups: list[MetaModuleGroup] = field(default_factory=list)
+    # Reconstructed nesting tree of the repeated ModuleLists, populated only for a
+    # NON-uniform model (a CNN's per-stage channels/depths that the single uniform
+    # decoder stack cannot express). Empty for a uniform LLM, so the single-stack
+    # path is reached and its output is byte-identical. See reconcile_live_module_groups.
+    nested_module_groups: list[RepeatedGroup] = field(default_factory=list)
 
     # AST-derived block graph
     block_components: list[BlockComponent] = field(default_factory=list)
@@ -137,6 +148,11 @@ class ArchitectureSpec:
     export_block_trees: list[tuple[str, BlockNode]] = field(default_factory=list)
     class_registry: dict = field(default_factory=dict, repr=False)
     basic_ops: BasicOpFilter | None = None
+    # The already-parsed modeling source, kept so a second ArchitectureSpec for
+    # the same checkpoint (a locally-sharded config variant, say) can be built
+    # from it directly -- see rebuild_architecture_with_overrides -- without
+    # re-fetching or re-parsing the source.
+    code_analysis: CodeAnalysis | None = field(default=None, repr=False)
     # Which run this spec was built for, and the config keys the caller
     # overrode. Both are recorded so a reader of the graph can see WHICH run it
     # depicts -- a decided branch leaves no trace in the drawing otherwise.
@@ -972,12 +988,24 @@ def _infer_layer_variants(
         if _classify_role(attr, cls) in {"ffn", "moe"}
     ]
     decoder_options: list[str] = []
+    # Which of the two FFN-ish attrs actually builds a given class -- a dense/MoE
+    # choice as common as MiniMax's is not always one attr with a config-chosen
+    # class (what every resolver below assumes and defaults to "mlp" for); it can
+    # be two DIFFERENT attrs, each built unconditionally but only one per layer
+    # (``self.block_sparse_moe = MoE(...)`` xor ``self.mlp = MLP(...)``). Reversing
+    # ``init_assignment_options`` the same way the attr union above was built
+    # gives the real attr back once the class is known.
+    ffn_attr_for_class: dict[str, str] = {}
     if class_registry and decoder_class:
         decoder = class_registry.get(decoder_class)
         if isinstance(decoder, ClassStructure):
             for attr in ("mlp", "block_sparse_moe"):
-                decoder_options.extend(decoder.init_assignment_options.get(attr, []))
+                options = decoder.init_assignment_options.get(attr, [])
+                decoder_options.extend(options)
+                for class_name in options:
+                    ffn_attr_for_class.setdefault(class_name, attr)
     decoder_options = list(dict.fromkeys(decoder_options))
+    ffn_attr_candidates = frozenset(ffn_attr_for_class.values())
     moe_option = next(
         (
             class_name
@@ -1039,6 +1067,10 @@ def _infer_layer_variants(
                 ffn_attr, ffn_class = "mlp", moe_option
             else:
                 ffn_attr, ffn_class = "mlp", dense_option
+        # Every resolver above defaults an unresolved attr to the literal "mlp";
+        # the reverse map knows better when the class came from the two-attr union.
+        if ffn_class is not None and ffn_class in ffn_attr_for_class:
+            ffn_attr = ffn_attr_for_class[ffn_class]
 
         attn_label = _label_for("attention", attn_class or "Attention", "self_attn")
         ffn_role = ffn_role_for_class(ffn_attr or "mlp", ffn_class or "MLP")
@@ -1065,6 +1097,15 @@ def _infer_layer_variants(
         key=lambda item: (-item[1], item[0][0], item[0][2]),
     ):
         attn_label, attn_class, ffn_display, ffn_class, ffn_attr = key
+        # A sibling FFN attr this variant did not pick (``mlp`` when this layer
+        # built ``block_sparse_moe``, or vice versa) does not exist on the live
+        # layer; the renderer skips it instead of drawing a module that is not
+        # there (see ``LayerVariant.omitted_components``).
+        omitted = (
+            ffn_attr_candidates - {ffn_attr}
+            if ffn_attr and len(ffn_attr_candidates) > 1
+            else frozenset()
+        )
         variants.append(
             LayerVariant(
                 label=f"{attn_label} + {ffn_display}",
@@ -1075,6 +1116,7 @@ def _infer_layer_variants(
                 ffn_class=ffn_class,
                 ffn_attr=ffn_attr,
                 layer_indices=list(indices_by_key[key]),
+                omitted_components=omitted,
             )
         )
 
@@ -1643,6 +1685,146 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
     return variants
 
 
+def _build_nested_groups(groups: list[MetaModuleGroup]) -> list[RepeatedGroup]:
+    """Reconstruct the nesting tree of repeated ModuleLists from the flat live list.
+
+    ``walk_meta_module_tree`` returns a flat list whose nesting is encoded only in the
+    dotted ``path``. Rebuild parent/child by path containment, collapsing a numeric
+    segment that indexes into a parent group to ``*`` (``stages.2.layers`` ->
+    ``stages.*.layers``) so the per-stage ``layers`` lists fold into ONE logical child
+    carrying each parent position's own length in ``per_index_counts`` (ConvNeXt:
+    ``[3, 3, 27, 3]``). Returns the top-level (no-ancestor) groups.
+    """
+    from collections import Counter
+
+    group_paths = {group.path for group in groups}
+    collapsed: dict[str, list[tuple[int | None, MetaModuleGroup]]] = {}
+    for group in groups:
+        segments = group.path.split(".")
+        normalized: list[str] = []
+        parent_index: int | None = None
+        for i, segment in enumerate(segments):
+            if (
+                segment.isdigit()
+                and normalized
+                and ".".join(segments[:i]) in group_paths
+            ):
+                normalized.append("*")
+                parent_index = int(segment)  # last collapsed index = immediate parent's
+            else:
+                normalized.append(segment)
+        collapsed.setdefault(".".join(normalized), []).append((parent_index, group))
+
+    built: dict[str, RepeatedGroup] = {}
+    lengths_by_index: dict[str, dict[int, int]] = {}
+    for key, members in collapsed.items():
+        by_index = {idx: grp.length for idx, grp in members if idx is not None}
+        lengths_by_index[key] = by_index
+        representative = members[0][1]
+        counts = [grp.length for _, grp in members]
+        modal = Counter(counts).most_common(1)[0][0]
+        built[key] = RepeatedGroup(
+            path=key,
+            count=modal,
+            element_class=representative.element_class,
+            label="",
+            signatures=representative.signatures,
+            element_classes=representative.element_classes,
+            descriptors=representative.descriptors,
+        )
+
+    roots: list[RepeatedGroup] = []
+    for key in sorted(built, key=lambda k: len(k.split("."))):
+        segments = key.split(".")
+        parent_key = next(
+            (
+                ".".join(segments[:cut])
+                for cut in range(len(segments) - 1, 0, -1)
+                if ".".join(segments[:cut]) in built
+            ),
+            None,
+        )
+        group = built[key]
+        by_index = lengths_by_index[key]
+        if by_index and parent_key is not None:
+            # Size the per-position counts to the parent's own repeat count, so an
+            # absent child at a trailing parent index reads as 0, not a short list.
+            span = built[parent_key].count
+            group.per_index_counts = [by_index.get(i, 0) for i in range(span)]
+        elif by_index:
+            group.per_index_counts = [
+                by_index.get(i, 0) for i in range(max(by_index) + 1)
+            ]
+        if parent_key is None:
+            roots.append(group)
+        else:
+            built[parent_key].children.append(group)
+    return roots
+
+
+def repeated_group_is_pipeline(group: RepeatedGroup) -> bool:
+    """True when the group's elements are more than one class.
+
+    ConvNeXt's ``downsampling_layer`` is ``[LayerNorm, Conv2d]``. Emitting that as
+    ``2× LayerNorm`` drops the convolution. A pipeline is drawn element by element,
+    in order, ahead of the stage's uniform repeated body.
+    """
+    return len(set(group.element_classes)) > 1
+
+
+def repeated_child_attr(parent: RepeatedGroup, child: RepeatedGroup) -> str:
+    """Attribute a child group occupies on its parent (``downsampling_layer``)."""
+    suffix = child.path[len(parent.path) :].lstrip(".")
+    if suffix.startswith("*."):
+        suffix = suffix[2:]
+    return suffix.split(".", 1)[0]
+
+
+def ordered_repeated_children(
+    spec: ArchitectureSpec, parent: RepeatedGroup
+) -> list[RepeatedGroup]:
+    """Children of one stage, in the order the parent forward runs them.
+
+    When the parent's class records every child attribute in ``forward_calls``,
+    that order wins. Otherwise a mixed-class pipeline (the downsampling convs)
+    leads the uniform repeated body — the arrangement a stage uses when the
+    parse did not name the calls.
+    """
+    registry = getattr(spec, "class_registry", None) or {}
+    owner = registry.get(parent.element_class)
+    calls = list(getattr(owner, "forward_calls", None) or [])
+    children = list(parent.children)
+    attrs = [repeated_child_attr(parent, child) for child in children]
+    if calls and all(attr in calls for attr in attrs):
+        return sorted(
+            children, key=lambda child: calls.index(repeated_child_attr(parent, child))
+        )
+    return sorted(
+        children,
+        key=lambda child: 0 if repeated_group_is_pipeline(child) else 1,
+    )
+
+
+def _is_non_uniform(nested: list[RepeatedGroup]) -> bool:
+    """True when a repeated group's per-position counts genuinely diverge (a CNN).
+
+    Fires only on differing POSITIVE counts (ConvNeXt's ``[3, 3, 27, 3]``): the one
+    signal a uniform transformer -- even an MoE one -- cannot produce. A standard MoE
+    stack has a uniform expert count per layer, and a dense-replace MoE (experts absent
+    in the first *k* layers) gives ``[0, 0, 256, 256, ...]`` whose non-zero counts are
+    all equal, so neither is misread as non-uniform.
+    """
+
+    def diverges(group: RepeatedGroup) -> bool:
+        if group.per_index_counts is not None:
+            nonzero = {count for count in group.per_index_counts if count > 0}
+            if len(nonzero) > 1:
+                return True
+        return any(diverges(child) for child in group.children)
+
+    return any(diverges(group) for group in nested)
+
+
 def reconcile_live_module_groups(
     spec: ArchitectureSpec, groups: list[MetaModuleGroup] | None
 ) -> None:
@@ -1663,6 +1845,16 @@ def reconcile_live_module_groups(
             _finalize_layer_repeat_lines(spec)
         return
     spec.meta_module_groups = list(groups)
+
+    # A non-uniform nesting (a CNN's per-stage channels/depths) cannot be expressed as
+    # the single uniform decoder stack the rest of this function reconciles. Reconstruct
+    # the real tree and hand it to the graph builder instead, leaving the single-stack
+    # fields untouched so a uniform LLM reaches the code below byte-for-byte unchanged.
+    nested = _build_nested_groups(groups)
+    if _is_non_uniform(nested) and find_vision_tower(spec) is None:
+        spec.nested_module_groups = nested
+        _finalize_layer_repeat_lines(spec)
+        return
 
     primary = _select_primary_group(spec, groups)
     if primary is None:
@@ -2492,11 +2684,14 @@ def load_architecture(
     code_analysis: CodeAnalysis | None = None
     code_labels: list[str] = []
 
+    analyzed_module: str | None = None
     if analyze_code:
         if engine and not code_path and not github:
             from TraceLens.ModelUtils.source import resolve_engine_modeling_files
 
-            source_files, code_labels = resolve_engine_modeling_files(engine, config)
+            source_files, code_labels, analyzed_module = resolve_engine_modeling_files(
+                engine, config
+            )
         else:
             source_files, code_labels = resolve_source_files(
                 resolved_checkpoint,
@@ -2535,9 +2730,12 @@ def load_architecture(
             # overrules the checkpoint, but not the person asking for this
             # drawing.
             config = _with_config_overrides(config, overrides)
+            analyzed_config = {**config, RUNTIME_REGIME_KEY: resolved_regime}
+            if analyzed_module:
+                analyzed_config[ANALYZED_MODULE_KEY] = analyzed_module
             code_analysis = analyze_sources(
                 read_sources(source_files),
-                config={**config, RUNTIME_REGIME_KEY: resolved_regime},
+                config=analyzed_config,
                 all_tensor_ops=all_tensor_ops,
                 # The model's configuration module sits beside its modeling one
                 # rather than being analysed, so its renames are read from there.
@@ -2547,6 +2745,7 @@ def load_architecture(
     spec = parse_architecture(
         config, config_label, name=name, code_analysis=code_analysis
     )
+    spec.code_analysis = code_analysis
     spec.runtime_regime = resolved_regime
     spec.config_overrides = overrides
     spec.engine = engine
@@ -2571,6 +2770,43 @@ def load_architecture(
         spec.basic_ops = resolved_basic_ops
         _build_export_block_trees(spec, resolved_basic_ops)
     return spec
+
+
+def rebuild_architecture_with_overrides(
+    spec: ArchitectureSpec, overrides: dict[str, Any]
+) -> ArchitectureSpec:
+    """A second :class:`ArchitectureSpec` for the same checkpoint, *overrides* applied.
+
+    Reuses *spec*'s already-parsed ``code_analysis`` -- no re-fetch or re-parse of
+    the modeling source, just a second, cheap, in-memory pass of config
+    normalization and block-tree construction. This is the right tool for "what
+    would this checkpoint's graph look like under a different config" (a
+    locally-sharded ``num_attention_heads``, say): the expensive half of loading
+    (finding and parsing the modeling source) does not change with the config,
+    only the normalization downstream of it does.
+
+    What this does NOT give you for free: real tensor shapes that come from a
+    meta-device forward pass (:meth:`ShapeInferencer.load_meta_shapes`) depend on
+    actually instantiating the module tree with the overridden config, so that
+    pass still has to run again against the returned spec.
+    """
+    merged = {**spec.config_overrides, **overrides}
+    config = _with_config_overrides(spec.raw_config, merged)
+    local = parse_architecture(
+        config, spec.source_path, name=spec.name, code_analysis=spec.code_analysis
+    )
+    local.code_analysis = spec.code_analysis
+    local.runtime_regime = spec.runtime_regime
+    local.config_overrides = merged
+    local.engine = spec.engine
+    local.checkpoint_source = spec.checkpoint_source
+    local.source_path = spec.source_path
+    local.github_source = spec.github_source
+    local.code_sources = spec.code_sources
+    if spec.basic_ops is not None:
+        local.basic_ops = spec.basic_ops
+        _build_export_block_trees(local, spec.basic_ops)
+    return local
 
 
 def dump_model_ast(

@@ -26,6 +26,10 @@ For example, this is the top-level visualization of GLM 5.3 Flash
 
 
 
+## Agent
+
+A skill drives this exporter from an agent chat: it installs the extra if needed, runs one `visualize_model_in_explorer` command, and checks the HTML or JSON file. See [TraceLens/Agent/Visualizer/README.md](../Agent/Visualizer/README.md).
+
 ## Installation
 
 From the TraceLens repository root:

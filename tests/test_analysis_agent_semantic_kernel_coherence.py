@@ -8,6 +8,7 @@
 
 import json
 import os
+import re
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -155,7 +156,7 @@ def test_final_blocks_context_rename():
     kernels = _final_kernels()
     lookup = {("A", "P", ("S1",), ("S2",)): "A:0"}
     finals, audit = kernel_coherence._final_blocks(
-        "A", kernels, {"S1", "S2"}, {"P"}, 1, lookup, {"A:0": "QKV"}, {}
+        "A", kernels, {"S1", "S2"}, {"P"}, 1, lookup, {"A:0": "QKV"}, {}, []
     )
     assert finals == ["S1", "QKV", "S2"]
     assert audit[1]["context_id"] == "A:0"
@@ -170,7 +171,7 @@ def test_final_blocks_fallback_remap():
     kernels = _final_kernels()
     lookup = {("A", "P", ("S1",), ("S2",)): "A:0"}
     finals, _ = kernel_coherence._final_blocks(
-        "A", kernels, {"S1", "S2"}, {"P"}, 1, lookup, {}, {"P": "FB"}
+        "A", kernels, {"S1", "S2"}, {"P"}, 1, lookup, {}, {"P": "FB"}, []
     )
     # cid found but not in renames -> fallback used
     assert finals == ["S1", "FB", "S2"]
@@ -179,7 +180,7 @@ def test_final_blocks_fallback_remap():
 def test_final_blocks_no_decision_keeps_first_pass():
     kernels = _final_kernels()
     finals, audit = kernel_coherence._final_blocks(
-        "A", kernels, {"S1", "S2"}, {"P"}, 1, {}, {}, {}
+        "A", kernels, {"S1", "S2"}, {"P"}, 1, {}, {}, {}, []
     )
     assert finals == ["S1", "P", "S2"]
     assert audit[1]["context_id"] == ""
@@ -189,10 +190,21 @@ def test_final_blocks_missing_context_uses_fallback():
     kernels = _final_kernels()
     # empty lookup -> cid "" -> falls through to fallback
     finals, audit = kernel_coherence._final_blocks(
-        "A", kernels, {"S1", "S2"}, {"P"}, 1, {}, {}, {"P": "FB"}
+        "A", kernels, {"S1", "S2"}, {"P"}, 1, {}, {}, {"P": "FB"}, []
     )
     assert finals == ["S1", "FB", "S2"]
     assert audit[1]["context_id"] == ""
+
+
+def test_final_blocks_fallback_regex():
+    kernels = _final_kernels()
+    regex = [(re.compile("^P"), "REGEX_FB")]
+    finals, audit = kernel_coherence._final_blocks(
+        "A", kernels, {"S1", "S2"}, {"P"}, 1, {}, {}, {}, regex
+    )
+    assert finals == ["S1", "REGEX_FB", "S2"]
+    assert audit[1]["final_block"] == "REGEX_FB"
+    assert audit[1]["match_source"] == "fallback_regex:^P"
 
 
 # ---------------------------------------------------------------------------

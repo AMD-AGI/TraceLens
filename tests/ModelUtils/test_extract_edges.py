@@ -1003,3 +1003,45 @@ class FooVisionModel:
         vision
     ), "vision tower detail tree should be appended alongside the text spine"
     assert vision[0].class_name == "FooVisionModel"
+
+
+# --------------------------------------------------------------------------- #
+# rebuild_architecture_with_overrides
+# --------------------------------------------------------------------------- #
+def test_rebuild_architecture_with_overrides_applies_config_and_keeps_provenance():
+    spec = parse_architecture(
+        {"model_type": "custom", "num_attention_heads": 32, "hidden_size": 4096},
+        "fixture",
+    )
+    spec.config_overrides = {"num_hidden_layers": 8}
+    spec.engine = "vllm"
+    spec.runtime_regime = "inference"
+    spec.checkpoint_source = "fixture"
+    spec.source_path = "fixture"
+    spec.github_source = "github://org/repo@sha/path"
+    spec.code_sources = ["github://org/repo@sha/path"]
+    spec.basic_ops = BasicOpFilter.for_detailed()
+
+    rebuilt = extract.rebuild_architecture_with_overrides(
+        spec, {"num_attention_heads": 16}
+    )
+
+    assert rebuilt.num_attention_heads == 16
+    # A prior override and a new one both apply; neither clobbers the other.
+    assert rebuilt.config_overrides == {
+        "num_hidden_layers": 8,
+        "num_attention_heads": 16,
+    }
+    assert rebuilt.engine == "vllm"
+    assert rebuilt.runtime_regime == "inference"
+    assert rebuilt.checkpoint_source == "fixture"
+    assert rebuilt.source_path == "fixture"
+    assert rebuilt.github_source == spec.github_source
+    assert rebuilt.code_sources == spec.code_sources
+    assert rebuilt.basic_ops is spec.basic_ops
+    # No class registry to build detail trees from -- an empty-but-present
+    # export, not a crash.
+    assert rebuilt.export_block_trees == []
+    # The original spec is left untouched by the second build.
+    assert spec.num_attention_heads == 32
+    assert spec.config_overrides == {"num_hidden_layers": 8}

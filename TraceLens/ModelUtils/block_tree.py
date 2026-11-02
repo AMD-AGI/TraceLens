@@ -2323,6 +2323,38 @@ def resolved_phi_arms(
     return dead_steps, live
 
 
+def _live_container_children(
+    base_attr: str, class_overrides: dict[str, Any] | None
+) -> list[tuple[int, str, str, dict[str, Any]]]:
+    """Indexed children of a ``Sequential`` / ``ModuleList`` recorded on the live module.
+
+    Overrides are keyed ``layer.0``, ``layer.1``, ... relative to the class being
+    built. A container the AST cannot see into (``nn.Sequential`` has no parsed
+    forward) still has to draw those children, or a ResNet bottleneck's three
+    convolutions stay one opaque tile.
+    """
+    if not class_overrides:
+        return []
+    prefix = base_attr + "."
+    indexed: list[tuple[int, str, str, dict[str, Any]]] = []
+    for key, value in class_overrides.items():
+        if value is SUBMODULE_OMITTED or not isinstance(value, str):
+            continue
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix) :]
+        if "." in rest or not rest.isdigit():
+            continue
+        nested = {
+            child[len(key) + 1 :]: child_value
+            for child, child_value in class_overrides.items()
+            if child.startswith(key + ".")
+        }
+        indexed.append((int(rest), rest, value, nested))
+    indexed.sort()
+    return indexed
+
+
 def build_block_node(
     *,
     attr_name: str,
@@ -2577,6 +2609,29 @@ def build_block_node(
                         ),
                         param_inputs=boundary_inputs,
                         basic=False,
+                    )
+                )
+            continue
+
+        # A live Sequential/ModuleList whose elements the meta tree recorded.
+        # Emitted before the forward-op leaf, which would otherwise draw the
+        # container as one opaque tile and drop the convolutions inside it.
+        indexed = _live_container_children(base_attr, class_overrides)
+        if indexed:
+            # The container is wiring, not a box. Its members are the parent's
+            # own steps, so an edge into the first convolution lands on that
+            # convolution instead of skipping a Sequential boundary.
+            for _order, name, child_cls, nested in indexed:
+                child_nodes.append(
+                    build_block_node(
+                        attr_name=f"{base_attr}.{name}",
+                        class_name=child_cls,
+                        registry=registry,
+                        basic_ops=basic_ops,
+                        visited=visited | {class_name},
+                        infer_init_steps=infer_init_steps,
+                        class_overrides=nested or None,
+                        forward_order=child_order,
                     )
                 )
             continue
