@@ -44,6 +44,8 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _parse_op_node,
     _populate_introspection,
     _project_op,
+    _LinearWidths,
+    _adopt_linear_width,
     _shard,
     _shard_heads,
     _split_shape_text,
@@ -1023,6 +1025,60 @@ def test_attention_extra_ops_uses_latent_ranks_when_declared(_reset_rt):
     names = {op.computation for op in ops}
     assert {"q_a_proj", "q_b_proj", "kv_a_proj", "kv_b_proj", "o_proj"} <= names
     assert "qkv_proj" not in names
+    _RT.qk_nope_head_dim = 16
+    _RT.qk_rope_head_dim = 16
+    _RT.v_head_dim = 16
+    latent = _attention_extra_ops(
+        "decoder",
+        "decoder/attn",
+        instances=1,
+        dims={"B": 1, "S": 1},
+        bpe=2,
+        dtype="bfloat16",
+        gpu_arch=None,
+    )
+    q_b = next(op for op in latent if op.computation == "q_b_proj")
+    # Query width is nope + rope, not the unrelated head_dim.
+    assert q_b.flops == 2 * 1 * (8 * (16 + 16)) * 256
+
+
+def test_index_topk_does_not_replace_a_layer_window(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 4
+    _RT.attn_kv_heads = 4
+    _RT.attn_head_dim = 16
+    _RT.n_layers = 1
+    _RT.index_topk = 4
+    dims = {"B": 1, "S": 1, "past_len": 32}
+    windowed = _attention_boundary_cost(dims, bpe=2, window=8)[2]
+    full = _attention_boundary_cost(dims, bpe=2, window=None)[2]
+    assert windowed < full
+    _RT.sliding_window = None
+    _RT.variant_windows = ()
+    indexed = _attention_boundary_cost(dims, bpe=2)[2]
+    _RT.index_topk = None
+    uncapped = _attention_boundary_cost(dims, bpe=2)[2]
+    assert indexed < uncapped
+
+
+def test_linear_widths_stay_with_their_owner():
+    widths = _LinearWidths()
+    widths.by_owner[("Attention", "proj")] = (8, 16)
+    widths.by_owner[("MLP", "proj")] = (32, 64)
+    assert widths.get("proj", "Attention") == (8, 16)
+    assert widths.get("proj", "MLP") == (32, 64)
+    assert widths.get("proj") is None
+
+
+def test_constructor_width_keeps_the_formula_shard(_reset_rt):
+    _RT.reset()
+    _RT.tp = 4
+    k, n = _adopt_linear_width(64, 128, 64, 32, "")
+    assert (k, n) == (64, _shard(128, 4))
+    k, n = _adopt_linear_width(128, 256, 32, 256, "")
+    assert (k, n) == (_shard(128, 4), 256)
+    k, n = _adopt_linear_width(64, 128, 64, 128, "ColumnParallelLinear")
+    assert (k, n) == (64, _shard(128, 4))
 
 
 def test_attention_boundary_uses_model_causal_policy_for_cold_prefill(_reset_rt):
@@ -1725,13 +1781,27 @@ def test_offline_draft_models_project_from_their_parsed_layers():
     projected = project_roofline(
         deepseek, batch_size=1, seq_len=4, num_predicted_tokens=2
     )
-    # The graph draws the draft, so the synthetic stack is not added beside it.
-    assert not any(op.section.startswith("mtp/") for op in projected.ops)
-    assert any("eh_proj" in op.name for op in projected.ops)
-    assert any(op.computation == "indexer_score" for op in projected.ops)
+    # The graph draws eh_proj and q_proj. The inlined attention core, indexer,
+    # and expert GEMMs are still costed, and the drawn leaves are not repeated.
+    missing = [op for op in projected.ops if op.section.startswith("mtp/")]
+    assert {op.section for op in missing} == {"mtp/0"}
+    assert any(op.computation == "attn" for op in missing)
+    assert (
+        next(op for op in missing if op.computation == "kv_proj").cost_source
+        == "source"
+    )
+    assert (
+        next(op for op in missing if op.computation == "attn").cost_source == "config"
+    )
+    assert any(op.computation == "indexer_score" for op in missing)
+    assert any(op.computation == "mlp" and op.category == "MoE" for op in missing)
+    assert not any(op.computation in {"eh_proj", "q_proj", "router"} for op in missing)
+    assert any(
+        "eh_proj" in op.name and not op.section.startswith("mtp/")
+        for op in projected.ops
+    )
     assert any(op.section.endswith("sliding_attention") for op in projected.ops)
     assert any(op.section.endswith("full_attention") for op in projected.ops)
-    assert any(op.category == "MoE" for op in projected.ops)
     assert projected.notes == []
 
     nextn = load_architecture(
@@ -1742,7 +1812,9 @@ def test_offline_draft_models_project_from_their_parsed_layers():
     )
     nextn.engine = "sglang"
     projected = project_roofline(nextn, batch_size=1, seq_len=4, num_predicted_tokens=1)
-    assert not any(op.section.startswith("mtp/") for op in projected.ops)
+    missing = [op for op in projected.ops if op.section.startswith("mtp/")]
+    assert any(op.computation == "attn" for op in missing)
+    assert not any(op.computation == "mlp" for op in missing)
     draft = [op for op in projected.ops if op.section.startswith("nextn")]
     assert draft and all(op.category != "MoE" for op in draft)
     assert any(op.category == "GEMM" for op in draft)

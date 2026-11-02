@@ -84,8 +84,9 @@ reported but no roofline time is computed (no hardware peaks to bound against).
   source (an MTP, NextN, or EAGLE class): its norms, its input projection,
   its attention, and that layer's own dense or MoE feed-forward. When the
   source has no draft layer, the depth is the fixed attention-plus-dense
-  template. The stack is not added again when the exported graph already
-  draws those draft modules. A vLLM or SGLang run whose modeling source did
+  template. Leaves the exported graph already draws are not costed again;
+  an attention core or expert GEMM that the graph inlined away still is.
+  A vLLM or SGLang run whose modeling source did
   not load says so in the projection notes, and the widths then come from
   the checkpoint config.
 - `--dim KEY=VALUE` (repeatable): override a specific symbolic dimension
@@ -126,22 +127,24 @@ MoE expert routing. A vLLM/SGLang `ParallelLMHead`/`FusedMoE` boundary — read
 from the engine's own source, where shape_inference has no rule for either —
 is costed from the architecture's own dims (vocab, hidden,
 experts-per-token, expert intermediate size) instead of its node shape; see
-"Known approximations" below. Everything else — embeddings, convolutions,
-reshapes/transposes — is reported as **unmodeled** rather than silently
+"Known approximations" below. A convolution is costed when the meta-device
+pass threaded its weight geometry onto the node. Embeddings and
+reshapes/transposes are reported as **unmodeled** rather than silently
 dropped, so the rollup's coverage share tells you how much of the model the
 projection actually accounts for.
 
 Known approximations:
 
-- GEMM bias is assumed absent.
+- GEMM bias is included when the node records it, or when the checkpoint sets
+  `attention_bias`, `mlp_bias`, or `lm_head_bias`.
 - Every Normalization op is assumed affine; RMSNorm is assumed bias-free, every
   other norm is assumed to have one.
-- SDPA is assumed causal exactly when the query and key/value sequence lengths
-  resolve equal (a self-attention prefill shape).
-- MoE routing is costed as `experts_per_tok` GEMM passes per token (the
-  gate_up_proj and down_proj of only the selected experts), never
-  `num_experts` passes. The router's own softmax/top-k selection and any
-  shared-expert add are not separately costed.
+- SDPA follows the checkpoint's causal flag. Decoder-only models are causal.
+  The mask applies on cold prefill; a warm cache keeps the unmasked FLOP count.
+- MoE routing is costed as `experts_per_tok` grouped-GEMM passes per token
+  (the gate_up_proj and down_proj of only the selected experts), never
+  `num_experts` passes. The router GEMM, its softmax, the combine, and a
+  shared expert are separate rows when the graph did not already draw them.
 
 ## Run from a chat
 

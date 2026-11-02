@@ -41,12 +41,13 @@ and the CLI lets those supersede the graph's conv rows so a repeated stage is
 not counted twice.
 
 Known approximations, stated once here rather than scattered in comments:
-  - A GEMM includes its bias add when the node details or ``attention_bias``
-    say the projection has one.
+  - A GEMM includes its bias add when the node details or the checkpoint
+    flags ``attention_bias``, ``mlp_bias``, or ``lm_head_bias`` say so.
   - Every Normalization op is assumed affine; RMSNorm is assumed bias-free,
     every other norm is assumed to have a bias.
-  - SDPA is assumed causal exactly when the query and key/value sequence
-    lengths resolve equal (self-attention prefill shape), non-causal otherwise.
+  - SDPA follows the checkpoint's causal flag. Decoder-only models are
+    causal. The mask applies on cold prefill, when the query length is the
+    whole key/value length; a warm cache keeps the unmasked FLOP count.
   - An op's instance count is the innermost ``"<N>x_..."`` repeat-count
     namespace segment surrounding it (the merged graph's own per-variant tile
     count), or 1 for an op outside any repeated layer. A hybrid/variant layer
@@ -70,9 +71,9 @@ Known approximations, stated once here rather than scattered in comments:
     1, the prior single-weight cost, when ``num_experts`` is unknown). Tensor
     parallel column-shards each expert's intermediate width; expert parallel
     gives one GPU ``1/EP`` of the routed rows and adds the dispatch/combine
-    all-to-all as FLOPs-free data movement (:class:`MoEComm`). The router's own
-    softmax/top-k selection and the shared-expert add are not separately costed
-    (both are O(tokens), negligible next to the expert GEMMs). A dense MLP that
+    all-to-all as FLOPs-free data movement (:class:`MoEComm`). The router's
+    GEMM, its softmax, the combine, and a shared expert are their own rows
+    when the graph did not already draw them. A dense MLP that
     shares the same attribute (the layers below a ``dense_mlp_idx`` threshold)
     is costed as a SwiGLU over every token at the dense intermediate width, not
     as that routed subset.
@@ -85,7 +86,8 @@ Known approximations, stated once here rather than scattered in comments:
     declares). The draft layer is the speculative class in the modeling
     source, and its feed-forward follows that layer, dense or MoE. With no
     such layer in the source, the stack falls back to one attention plus a
-    dense MLP. The stack is omitted when the graph already draws the draft.
+    dense MLP. Leaves the graph already drew are not emitted again; an
+    attention core or expert GEMM the graph inlined away still is.
 """
 
 from __future__ import annotations
@@ -543,7 +545,14 @@ def project_roofline(
             # projections, indexer, and norms live inside the opaque block.
             result.ops.extend(
                 _attention_extra_ops(
-                    section, node_id, instances, dims, bpe, dtype, gpu_arch
+                    section,
+                    node_id,
+                    instances,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                    owner_class=class_name,
                 )
             )
         if (
@@ -599,7 +608,8 @@ def project_roofline(
                     gpu_arch,
                 )
             )
-    if num_predicted_tokens > 0 and not _draft_children_drawn(nodes, spec):
+    if num_predicted_tokens > 0:
+        draft_nodes = _draft_graph_nodes(nodes, spec)
         result.ops.extend(
             _mtp_stack_ops(
                 dims,
@@ -607,6 +617,7 @@ def project_roofline(
                 gpu_arch,
                 _activation_bpe(spec),
                 spec=spec,
+                drawn=draft_nodes or None,
             )
         )
     if _RT.engine_miss:
@@ -702,6 +713,7 @@ def _attention_variant_rows(
     """One attention row per layer-type window, instead of one stack average."""
     rows: list[RooflineOp] = []
     opaque = not _attention_has_projection_leaves(nodes, node)
+    owner_class = _attr_text(node.get("attrs"), "class_name")
     for label, count, variant_window in _RT.variant_windows:
         cost = _attention_boundary_cost(dims, bpe, window=variant_window)
         if cost is None:
@@ -726,6 +738,7 @@ def _attention_variant_rows(
                     bpe,
                     dtype,
                     gpu_arch,
+                    owner_class=owner_class,
                 )
             )
     return rows
@@ -739,19 +752,66 @@ def _node_is_draft_container(node: dict[str, Any]) -> bool:
     return bool(SPECULATIVE_CLASS_RE.search(class_name))
 
 
-def _draft_children_drawn(nodes: list[Any], spec: Any) -> bool:
-    """True when the graph draws modules the speculative layer assigns."""
-    children = _draft_child_names(spec)
-    if not children:
-        return False
+def _draft_roots(spec: Any) -> set[str]:
+    """Attribute names of the speculative modules on the top-level model."""
+    from TraceLens.ModelUtils.ast_analyze import SPECULATIVE_CLASS_RE
+
+    roots: set[str] = set()
+    if spec is None:
+        return roots
+    for structure in _registry_structures(spec):
+        if SPECULATIVE_CLASS_RE.search(structure.name):
+            continue
+        for attr, class_name in _assignment_pairs(structure):
+            if SPECULATIVE_CLASS_RE.search(class_name) or SPECULATIVE_CLASS_RE.search(
+                attr
+            ):
+                roots.add(attr)
+    return roots
+
+
+def _draft_graph_nodes(nodes: list[Any], spec: Any) -> list[dict[str, Any]]:
+    """Nodes drawn inside the speculative module, not the backbone that shares its classes."""
+    roots = _draft_roots(spec)
+    if not roots:
+        return []
+    found: list[dict[str, Any]] = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
+        namespace = str(node.get("namespace") or "")
+        node_id = str(node.get("id") or "")
+        for root in roots:
+            if (
+                namespace == root
+                or namespace.startswith(root + "/")
+                or node_id == root
+                or node_id.startswith(root + "/")
+            ):
+                found.append(node)
+                break
+    return found
+
+
+def _drawn_names(nodes: list[dict[str, Any]]) -> set[str]:
+    """Class, role, and id segments of nodes the graph already costed."""
+    names: set[str] = set()
+    for node in nodes:
         class_name = _attr_text(node.get("attrs"), "class_name") or ""
-        leaf = str(node.get("id") or "").rsplit("/", 1)[-1]
-        if class_name in children or leaf in children:
-            return True
-    return False
+        role = _attr_text(node.get("attrs"), "role") or ""
+        if class_name:
+            names.add(class_name)
+        if role:
+            names.add(role)
+        for part in re.split(r"[/:]", str(node.get("id") or "")):
+            if part and not part.isdigit() and part != "seq":
+                names.add(part)
+    return names
+
+
+def _draft_children_drawn(nodes: list[Any], spec: Any) -> bool:
+    """True when the graph draws the speculative module itself."""
+    return bool(_draft_graph_nodes(nodes, spec))
 
 
 def _draft_child_names(spec: Any) -> set[str]:
@@ -1169,6 +1229,28 @@ def _engine_head_cost(
     return "GEMM", "matrix", flops, bytes_moved, tokens * vocab
 
 
+class _LinearWidths:
+    """Constructor ``(in, out)`` sizes, by owning class and by unanimous attr.
+
+    An attribute two classes size differently stays available on each class and
+    is left out of the shared map, so one module's ``proj`` cannot size another's.
+    """
+
+    def __init__(self) -> None:
+        self.by_owner: dict[tuple[str, str], tuple[int, int]] = {}
+        self.agreed: dict[str, tuple[int, int]] = {}
+
+    def get(self, attr: str, owner: str | None = None) -> tuple[int, int] | None:
+        if owner:
+            found = self.by_owner.get((owner, attr))
+            if found is not None:
+                return found
+        return self.agreed.get(attr)
+
+    def __bool__(self) -> bool:
+        return bool(self.by_owner or self.agreed)
+
+
 class _RuntimeIntrospection:
     """Per-run values introspected from the ArchitectureSpec (config.json +
     modeling source) so MoE / attention / quantization costs need no hardcoded
@@ -1206,6 +1288,7 @@ class _RuntimeIntrospection:
         "mlp_bias",
         "head_bias",
         "linear_widths",
+        "linear_owners",
         "variant_windows",
         "engine_miss",
         "module_dims",
@@ -1249,7 +1332,8 @@ class _RuntimeIntrospection:
         self.attention_bias = False
         self.mlp_bias = False
         self.head_bias = False
-        self.linear_widths = {}
+        self.linear_widths = _LinearWidths()
+        self.linear_owners = {}
         self.variant_windows = ()
         self.engine_miss = None
         self.module_dims = None
@@ -1533,12 +1617,9 @@ def _positive_int(value: Any) -> int | None:
     return value
 
 
-def _collect_linear_widths(registry: Any) -> dict[str, tuple[int, int]]:
-    """``attr -> (in_features, out_features)`` when every class agrees.
-
-    Disagreement leaves the attribute unset so a shared name such as ``proj``
-    cannot size one GEMM with another module's constructor.
-    """
+def _collect_linear_widths(registry: Any) -> _LinearWidths:
+    """Record every resolved linear, and the attrs whose sizes all agree."""
+    widths = _LinearWidths()
     found: dict[str, set[tuple[int, int]]] = {}
     for key, spec in (getattr(registry, "linear", None) or {}).items():
         class_name, attr = key if isinstance(key, tuple) and len(key) == 2 else ("", "")
@@ -1548,8 +1629,72 @@ def _collect_linear_widths(registry: Any) -> dict[str, tuple[int, int]]:
         out = _positive_int(getattr(spec, "out_features", None))
         if inn is None or out is None:
             continue
+        widths.by_owner[(str(class_name), str(attr))] = (inn, out)
         found.setdefault(str(attr), set()).add((inn, out))
-    return {attr: next(iter(pairs)) for attr, pairs in found.items() if len(pairs) == 1}
+    widths.agreed = {
+        attr: next(iter(pairs)) for attr, pairs in found.items() if len(pairs) == 1
+    }
+    return widths
+
+
+def _linear_parallel_style(class_name: str) -> str | None:
+    """The engine shard axis for a linear class, from the shared style table."""
+    from TraceLens.ModelUtils.parallel_plan import _ENGINE_LINEAR_STYLES
+
+    if not class_name:
+        return None
+    style = _ENGINE_LINEAR_STYLES.get(class_name)
+    if style:
+        return style
+    for name in sorted(_ENGINE_LINEAR_STYLES, key=len, reverse=True):
+        if name in class_name:
+            return _ENGINE_LINEAR_STYLES[name]
+    return None
+
+
+def _adopt_linear_width(
+    global_in: int,
+    global_out: int,
+    formula_k: int,
+    formula_n: int,
+    linear_class: str,
+) -> tuple[int, int]:
+    """Per-GPU ``(k, n)`` from a constructor width.
+
+    An engine parallel linear shards the axis its style names. A plain linear
+    keeps a formula axis that is already smaller than the constructor size and
+    takes the constructor size on every other axis.
+    """
+    style = _linear_parallel_style(linear_class)
+    if style == "rowwise":
+        return _shard(global_in, _RT.tp), global_out
+    if style in ("colwise", "packed_colwise", "embedding_rowwise"):
+        return global_in, _shard(global_out, _RT.tp)
+    inn = (
+        _shard(global_in, _RT.tp) if _RT.tp > 1 and formula_k < global_in else global_in
+    )
+    out = (
+        _shard(global_out, _RT.tp)
+        if _RT.tp > 1 and formula_n < global_out
+        else global_out
+    )
+    return inn, out
+
+
+def _index_linear_owners(spec: Any) -> dict[str, tuple[tuple[str, str], ...]]:
+    """``owner class -> ((attr, linear class), ...)`` for its linear assignments."""
+    from TraceLens.ModelUtils.ast_analyze import displays_as_linear
+
+    owners: dict[str, tuple[tuple[str, str], ...]] = {}
+    for structure in _registry_structures(spec):
+        rows = tuple(
+            (attr, class_name)
+            for attr, class_name in _assignment_pairs(structure)
+            if displays_as_linear(attr, class_name)
+        )
+        if rows:
+            owners[structure.name] = rows
+    return owners
 
 
 def _apply_source_widths(spec: Any) -> None:
@@ -1588,6 +1733,7 @@ def _apply_source_widths(spec: Any) -> None:
     _RT.module_dims = registry
     written = _overlay_source_scalars(registry)
     _RT.linear_widths = _collect_linear_widths(registry)
+    _RT.linear_owners = _index_linear_owners(spec)
     if (
         engine
         and not written
@@ -1700,8 +1846,6 @@ def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
             except DimResolutionError:
                 pass
     ctx = past + s
-    if _RT.index_topk:
-        ctx = min(ctx, _RT.index_topk)
     # Attention heads are column-sharded across TP; one GPU owns its share (KV
     # heads too, the way vLLM replicates/shards GQA by the TP degree).
     h_q = _shard_heads(_RT.attn_heads, _RT.tp)
@@ -1739,6 +1883,10 @@ def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
         else:
             n_local = n_layers if _RT.sliding_window else 0
         n_global = max(n_layers - n_local, 0)
+        # index_topk is the indexed-attention length. A per-layer window already
+        # says how far that layer attends, so the top-k does not replace it.
+        if _RT.index_topk and not _RT.sliding_window and n_local == 0:
+            ctx = min(ctx, _RT.index_topk)
         kv_local = min(ctx, _RT.sliding_window) if _RT.sliding_window else ctx
         eff_n_kv = (n_local * kv_local + n_global * ctx) / n_layers if n_layers else ctx
     # ``SDPA`` only accepts causal masking when query and key/value lengths
@@ -1774,6 +1922,8 @@ def _attention_extra_ops(
     bpe: float | None,
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
+    owner_class: str | None = None,
+    skip: set[str] | None = None,
 ) -> list[RooflineOp]:
     """The projection GEMMs (packed QKV + O) and, when the arch declares one, the
     relative-attention term (``r``-projection + relative-bias add) for a FUSED
@@ -1801,15 +1951,30 @@ def _attention_extra_ops(
     h_q = _shard_heads(_RT.attn_heads, _RT.tp)
     h_kv = _shard_heads(_RT.attn_kv_heads or _RT.attn_heads, _RT.tp)
     d_h = _RT.attn_head_dim
+    nope = _RT.qk_nope_head_dim or 0
+    rope = _RT.qk_rope_head_dim or 0
+    v_head = _RT.v_head_dim or 0
+    # Latent attention's query and value widths are the declared nope/rope/v
+    # ranks. head_dim remains the width when those ranks are absent.
+    q_head = (nope + rope) if (nope or rope) else d_h
+    v_width = v_head or q_head
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
-    q_out = h_q * d_h
+    q_out = h_q * q_head
     kv_out = h_kv * d_h
+    o_in = h_q * v_width
     ops: list[RooflineOp] = []
 
-    def _gemm_row(suffix: str, n: int, k: int, out_elems: int) -> list[RooflineOp]:
-        width = _RT.linear_widths.get(suffix)
+    def _gemm_row(
+        suffix: str,
+        n: int,
+        k: int,
+        out_elems: int,
+        owner: str | None = None,
+        linear_class: str = "",
+    ) -> list[RooflineOp]:
+        width = _RT.linear_widths.get(suffix, owner)
         if width:
-            k, n = width
+            k, n = _adopt_linear_width(width[0], width[1], k, n, linear_class)
             out_elems = tokens * n
         op = RooflineOp(
             name=f"{node_id}.{suffix}",
@@ -1829,7 +1994,8 @@ def _attention_extra_ops(
             else None
         )
         finished = _finish_op(op, "GEMM", "matrix", flops, byt, dtype, gpu_arch)
-        return [
+        finished.cost_source = "source" if width else "config"
+        rows = [
             finished,
             *_quant_matrix_rows(
                 f"{node_id}.{suffix}",
@@ -1841,34 +2007,68 @@ def _attention_extra_ops(
                 gpu_arch,
             ),
         ]
+        for row in rows[1:]:
+            row.cost_source = finished.cost_source
+        return rows
 
-    # Latent attention declares kv_lora_rank. Cost the low-rank Q/KV
-    # projections from those config widths. Otherwise vLLM/SGLang pack Q, K,
-    # and V into one column-parallel projection.
-    if _RT.kv_lora_rank:
-        if _RT.q_lora_rank:
+    # The attention class's own linear assignments are the projections. The
+    # packed or latent template is the fallback when that class declares none.
+    owned = _RT.linear_owners.get(owner_class or "", ())
+    owned_widths = [
+        (attr, linear_class, _RT.linear_widths.get(attr, owner_class))
+        for attr, linear_class in owned
+        if not skip or attr not in skip
+    ]
+    use_owner = bool(owned) and all(
+        width is not None for _attr, _cls, width in owned_widths
+    )
+    if use_owner:
+        for attr, linear_class, width in owned_widths:
+            if width is None:
+                continue
+            inn, out = width
             ops.extend(
-                _gemm_row("q_a_proj", _RT.q_lora_rank, hidden, tokens * _RT.q_lora_rank)
+                _gemm_row(attr, out, inn, tokens * out, owner_class, linear_class)
             )
-            ops.extend(_gemm_row("q_b_proj", q_out, _RT.q_lora_rank, tokens * q_out))
-        else:
+    elif _RT.kv_lora_rank:
+        # Latent attention declares kv_lora_rank. Cost the low-rank Q/KV
+        # projections from those config widths. Otherwise vLLM/SGLang pack Q, K,
+        # and V into one column-parallel projection.
+        kv_b_out = (
+            h_q * ((nope or d_h) + (v_head or d_h)) if (nope or v_head) else kv_out
+        )
+        kv_a_out = _RT.kv_lora_rank + rope
+        if _RT.q_lora_rank:
+            if not skip or "q_a_proj" not in skip:
+                ops.extend(
+                    _gemm_row(
+                        "q_a_proj", _RT.q_lora_rank, hidden, tokens * _RT.q_lora_rank
+                    )
+                )
+            if not skip or "q_b_proj" not in skip:
+                ops.extend(
+                    _gemm_row("q_b_proj", q_out, _RT.q_lora_rank, tokens * q_out)
+                )
+        elif not skip or "q_proj" not in skip:
             ops.extend(_gemm_row("q_proj", q_out, hidden, tokens * q_out))
-        ops.extend(
-            _gemm_row(
-                "kv_a_proj",
-                _RT.kv_lora_rank,
-                hidden,
-                tokens * _RT.kv_lora_rank,
+        if not skip or "kv_a_proj" not in skip:
+            ops.extend(_gemm_row("kv_a_proj", kv_a_out, hidden, tokens * kv_a_out))
+        if not skip or "kv_b_proj" not in skip:
+            ops.extend(
+                _gemm_row("kv_b_proj", kv_b_out, _RT.kv_lora_rank, tokens * kv_b_out)
             )
-        )
-        ops.extend(_gemm_row("kv_b_proj", kv_out, _RT.kv_lora_rank, tokens * kv_out))
     else:
-        ops.extend(
-            _gemm_row(
-                "qkv_proj", q_out + 2 * kv_out, hidden, tokens * (q_out + 2 * kv_out)
+        if not skip or "qkv_proj" not in skip:
+            ops.extend(
+                _gemm_row(
+                    "qkv_proj",
+                    q_out + 2 * kv_out,
+                    hidden,
+                    tokens * (q_out + 2 * kv_out),
+                )
             )
-        )
-    ops.extend(_gemm_row("o_proj", hidden, q_out, tokens * hidden))
+    if not use_owner and (not skip or "o_proj" not in skip):
+        ops.extend(_gemm_row("o_proj", hidden, o_in, tokens * hidden))
     # These operations are normally hidden by a fused engine attention
     # boundary.  Publish them only on that boundary (expanded graph leaves are
     # handled by the regular dispatch path).
@@ -2160,12 +2360,14 @@ class _DraftLayer:
 
     name: str
     norms: tuple[str, ...]
-    projections: tuple[str, ...]
+    projections: tuple[tuple[str, str], ...]
     has_attention: bool
     ffn_role: str | None
     convs: tuple[str, ...]
     classes: tuple[str, ...] = ()
     has_head: bool = False
+    attention_class: str | None = None
+    ffn_linears: tuple[str, ...] = ()
 
 
 def _registry_structures(spec: Any):
@@ -2325,10 +2527,12 @@ def _resolve_draft_layer(spec: Any) -> _DraftLayer | None:
             layer = child
     owners = [layer, *_block_children(spec, layer)]
     norms: list[str] = []
-    projections: list[str] = []
+    projections: list[tuple[str, str]] = []
     convs: list[str] = []
     has_attention = False
     has_head = False
+    attention_class: str | None = None
+    ffn_linears: list[str] = []
     for owner in owners:
         for attr, class_name in _assignment_pairs(owner):
             role = _classify_role(attr, class_name)
@@ -2336,12 +2540,26 @@ def _resolve_draft_layer(spec: Any) -> _DraftLayer | None:
                 norms.append(attr)
             elif role == "attention":
                 has_attention = True
+                attention_class = attention_class or class_name
             elif role == "head":
                 has_head = True
-            elif displays_as_linear(attr, class_name) and attr not in projections:
-                projections.append(attr)
+            elif displays_as_linear(attr, class_name) and attr not in {
+                name for name, _owner in projections
+            }:
+                projections.append((attr, owner.name))
             elif "Conv" in class_name and attr not in convs:
                 convs.append(attr)
+            if role in ("ffn", "moe"):
+                child = _structure_named(spec, class_name)
+                for child_attr, child_class in (
+                    _assignment_pairs(child) if child else []
+                ):
+                    if (
+                        displays_as_linear(child_attr, child_class)
+                        and _classify_role(child_attr, child_class) != "router"
+                        and child_attr not in ffn_linears
+                    ):
+                        ffn_linears.append(child_attr)
     roles = set()
     for owner in owners:
         roles.update(_ffn_roles_of(owner, spec))
@@ -2362,6 +2580,8 @@ def _resolve_draft_layer(spec: Any) -> _DraftLayer | None:
         convs=tuple(convs),
         classes=_draft_class_names(spec, owners),
         has_head=has_head,
+        attention_class=attention_class,
+        ffn_linears=tuple(ffn_linears),
     )
 
 
@@ -2426,15 +2646,22 @@ def _draft_depth_ops(
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
     saved: dict[str, Any] | None = None,
+    drawn: list[dict[str, Any]] | None = None,
 ) -> list[RooflineOp]:
-    """One speculative depth whose ops are the parsed draft layer's own modules."""
+    """One speculative depth whose ops are the parsed draft layer's own modules.
+
+    ``drawn`` is the graph's nodes inside the draft. Those leaves are not
+    emitted again. Attention and expert GEMMs the graph inlined away still are.
+    """
     ops: list[RooflineOp] = []
+    drawn_names = _drawn_names(drawn) if drawn else set()
+    partial = drawn is not None
     norm_elems = tokens * hidden
     norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
     norm_bytes = (
         _rmsnorm_bytes(norm_elems, hidden, True, bpe, bpe) if bpe is not None else None
     )
-    for name in draft.norms:
+    for name in draft.norms if not partial else ():
         ops.append(
             _analytical_op(
                 f"{node_id}.{name}",
@@ -2451,8 +2678,8 @@ def _draft_depth_ops(
             )
         )
     overridden = saved or {}
-    for name in draft.projections:
-        width = _RT.linear_widths.get(name)
+    for name, owner in draft.projections if not partial else ():
+        width = _RT.linear_widths.get(name, owner)
         if width and width != (hidden, hidden):
             k, n = width
             origin = "source"
@@ -2485,7 +2712,10 @@ def _draft_depth_ops(
         ):
             row.cost_source = origin
             ops.append(row)
-    if draft.has_attention:
+    attention_drawn = partial and (
+        "attention" in drawn_names or (draft.attention_class or "") in drawn_names
+    )
+    if draft.has_attention and not attention_drawn:
         attention = _attention_boundary_cost(dims, bpe)
         if attention is not None:
             category, maf_type, flops, bytes_moved = attention
@@ -2506,14 +2736,29 @@ def _draft_depth_ops(
             )
             ops.extend(
                 _attention_extra_ops(
-                    section, f"{node_id}.attn", 1, dims, bpe, dtype, gpu_arch
+                    section,
+                    f"{node_id}.attn",
+                    1,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                    owner_class=draft.attention_class,
+                    skip=drawn_names if partial else None,
                 )
             )
             attn_source = _overridden(_ATTENTION_WIDTH_FIELDS, overridden)
             for row in ops:
+                if row.cost_source == "source":
+                    continue
                 if row.computation == "attn" or row.name.startswith(f"{node_id}.attn"):
                     row.cost_source = attn_source
-    if draft.ffn_role == "moe":
+    ffn_drawn = partial and (
+        (draft.ffn_role or "") in drawn_names
+        or bool(draft.ffn_linears)
+        and all(name in drawn_names for name in draft.ffn_linears)
+    )
+    if draft.ffn_role == "moe" and not ffn_drawn:
         moe = _moe_cost(dims, _RT.moe_top_k, _RT.moe_intermediate, bpe)
         if moe is not None:
             category, maf_type, flops, bytes_moved, out_elems = moe
@@ -2533,13 +2778,24 @@ def _draft_depth_ops(
                 )
             )
             ops.extend(
-                _moe_extra_ops(section, f"{node_id}.mlp", 1, dims, bpe, dtype, gpu_arch)
+                _moe_extra_ops(
+                    section,
+                    f"{node_id}.mlp",
+                    1,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                    present=frozenset(
+                        name for name in ("router", "shared") if name in drawn_names
+                    ),
+                )
             )
             ffn_source = _overridden(frozenset({"moe_intermediate"}), overridden)
             for row in ops:
                 if row.name.startswith(f"{node_id}.mlp"):
                     row.cost_source = ffn_source
-    elif draft.ffn_role == "ffn":
+    elif draft.ffn_role == "ffn" and not ffn_drawn:
         dense = _dense_ffn_cost(dims, bpe)
         if dense is not None:
             category, maf_type, flops, bytes_moved, out_elems = dense
@@ -2607,6 +2863,7 @@ def _mtp_stack_ops(
     gpu_arch: dict[str, Any] | None,
     activation: tuple[float | None, str | None],
     spec: Any = None,
+    drawn: list[dict[str, Any]] | None = None,
 ) -> list[RooflineOp]:
     """One draft depth per predicted token, as its own stack.
 
@@ -2653,6 +2910,7 @@ def _mtp_stack_ops(
                         dtype,
                         gpu_arch,
                         saved,
+                        drawn,
                     )
                 )
             finally:
