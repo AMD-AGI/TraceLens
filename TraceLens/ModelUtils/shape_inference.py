@@ -3303,6 +3303,26 @@ class ShapeInferencer:
         for node in graph.nodes:
             self._publish_output_port_specs(node, merged, root, graph)
 
+        # A phi forwards an arm. A rank-1 parameter that also reaches it must
+        # not become the answer when an arm already has a wider shape.
+        for node in graph.nodes:
+            if (node.label or "").strip().lower() != "mutually exclusive branch":
+                continue
+            incoming = [
+                spec
+                for edge in graph.edges
+                if edge.target == node.id
+                and (spec := merged.get(edge.source)) is not None
+                and spec.shape
+                and 0 not in tuple(spec.shape)
+            ]
+            if not incoming:
+                continue
+            best = max(incoming, key=lambda spec: len(tuple(spec.shape)))
+            current = merged.get(node.id)
+            if current is None or len(tuple(current.shape)) < len(tuple(best.shape)):
+                merged[node.id] = best
+
         self._tensor_specs = merged
         self._active_seq_axes, self._active_hidden = prev_axes, prev_hidden
         return dict(merged)
@@ -4634,10 +4654,15 @@ class ShapeInferencer:
             # case shows the graph the model runs; reporting the empty one shows
             # nothing and makes every shape below it wrong.
             if inputs:
-                return next(
-                    (item for item in inputs if 0 not in tuple(item.shape)),
-                    inputs[0],
-                )
+                # A zero-extent arm is the empty instance of the other arm, so
+                # it is not a candidate. Among the rest, a rank-1 scale
+                # parameter (ConvNeXt's layer scale, shape ``[1]``) is not the
+                # tensor the branch forwards; the activation arm is. Same rank
+                # keeps the first arm, which is what a uniform phi already did.
+                live = [item for item in inputs if 0 not in tuple(item.shape)]
+                if not live:
+                    return inputs[0]
+                return max(live, key=lambda item: len(tuple(item.shape)))
             return external_spec()
 
         if operation_label == "tile":

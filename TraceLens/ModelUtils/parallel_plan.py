@@ -1079,8 +1079,12 @@ def _dtype_bytes(dtype: str | None) -> int | None:
 
 
 def _repeat_count(node: dict[str, Any]) -> int | None:
+    stamped = _attr(node, "repeat_count")
+    if stamped and stamped.isdigit():
+        return int(stamped)
     text = f"{node.get('namespace') or ''}/{node.get('id') or ''}"
-    counts = [int(match) for match in re.findall(r"(?:^|/)(\d+)x_", text)]
+    # ``45x_Decoder`` and a stage container ``s2_27x_ConvNextLayer``.
+    counts = [int(match) for match in re.findall(r"(?:^|/)(?:s\d+_)?(\d+)x_", text)]
     return counts[-1] if counts else None
 
 
