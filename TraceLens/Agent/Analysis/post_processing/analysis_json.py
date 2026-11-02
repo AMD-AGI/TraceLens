@@ -70,7 +70,13 @@ _TOTAL_TIME_RE = re.compile(
     r"^\|\s*Total Time\s*\|\s*(\d+(?:\.\d+)?) ms\s*\|", re.MULTILINE
 )
 _NULL_CELLS = {"", "-", "—", "–"}
-_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*$")
+_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*$", re.DOTALL)
+
+
+def _strip_trailing_comment(text: str) -> str:
+    """Remove one trailing HTML comment, including a multiline comment."""
+    return _TRAILING_COMMENT_RE.sub("", text)
+
 
 # Data-table header labels, normalized (lowercased, stripped) -> logical field.
 _HEADER_ALIASES = {
@@ -572,7 +578,7 @@ class AnalysisMdParser:
                 if header is not None:
                     break
                 continue
-            cells = self._split_row(_TRAILING_COMMENT_RE.sub("", stripped))
+            cells = self._split_row(_strip_trailing_comment(stripped))
             if header is None:
                 header = [c.lower() for c in cells]
                 continue

@@ -43,6 +43,9 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
     build_operation_metrics,
 )
+from TraceLens.Agent.Analysis.post_processing.analysis_json import (
+    _strip_trailing_comment,
+)
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     _find_data_table,
     _iter_candidate_blocks,
@@ -50,6 +53,12 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
 
 # Constants
 _NULL_CELLS = {"", "-", "—", "–"}
+
+
+def test_strip_trailing_comment_handles_newlines():
+    row = "| value | <!-- generated\nmarker -->\n"
+    assert _strip_trailing_comment(row) == "| value |"
+
 
 # --------------------------------------------------------------------------- #
 # Inline md fixtures — trimmed from real single-trace reports so numbers and
