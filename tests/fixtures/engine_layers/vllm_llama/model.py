@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """A vLLM-style decoder that imports its parallel linears from a sibling."""
 
 from .layers import QKVParallelLinear, RowParallelLinear

@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Offline SGLang-style block whose NextN draft is a dense layer."""
 
 import torch
