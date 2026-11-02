@@ -41,8 +41,8 @@ and the CLI lets those supersede the graph's conv rows so a repeated stage is
 not counted twice.
 
 Known approximations, stated once here rather than scattered in comments:
-  - GEMM bias is assumed absent (bias FLOPs are O(M*N), negligible next to the
-    O(M*N*K) matmul term for any realistic K).
+  - A GEMM includes its bias add when the node details or ``attention_bias``
+    say the projection has one.
   - Every Normalization op is assumed affine; RMSNorm is assumed bias-free,
     every other norm is assumed to have a bias.
   - SDPA is assumed causal exactly when the query and key/value sequence
@@ -93,7 +93,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import prod
 from typing import Any
 
@@ -339,6 +339,8 @@ class RooflineProjection:
     ops: list[RooflineOp] = field(default_factory=list)
     batch_size: int = 1
     seq_len: int = 0
+    notes: list[str] = field(default_factory=list)
+    """Engine-source misses and other reasons a width fell back to the config."""
 
     @property
     def modeled_ops(self) -> list[RooflineOp]:
@@ -385,6 +387,7 @@ class RooflineProjection:
             "modeled_output_element_share": (
                 modeled_elements / total_elements if total_elements else None
             ),
+            "notes": list(self.notes),
         }
 
 
@@ -512,18 +515,28 @@ def project_roofline(
             details,
         )
         result.ops.append(op)
-        # A fused attention leaf is costed by _attention_boundary_cost at only its
-        # SDPA core; its packed Q/K/V/O(/R) projections live inside the opaque
-        # block as no separate Linear nodes. Add them (and any relative-attention
-        # term) as their own rows so the projection GEMMs are not silently dropped.
+        _dims_only, dtype = _split_shape_text(output_text)
+        bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
         if (
+            role == "attention"
+            and op.modeled
+            and op.category == "Attention"
+            and _attention_variants_cover(op.instances)
+        ):
+            result.ops.pop()
+            result.ops.extend(
+                _attention_variant_rows(
+                    op, node_id, section, nodes, node, dims, bpe, dtype, gpu_arch
+                )
+            )
+        elif (
             role == "attention"
             and op.modeled
             and op.category == "Attention"
             and not _attention_has_projection_leaves(nodes, node)
         ):
-            _dims_only, dtype = _split_shape_text(output_text)
-            bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+            # A fused attention leaf is costed at only its SDPA core. Its packed
+            # projections, indexer, and norms live inside the opaque block.
             result.ops.extend(
                 _attention_extra_ops(
                     section, node_id, instances, dims, bpe, dtype, gpu_arch
@@ -535,12 +548,38 @@ def project_roofline(
             and op.category == "MoE"
             and not _is_leaf_computation(computation)
         ):
-            _dims_only, dtype = _split_shape_text(output_text)
-            bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
             result.ops.extend(
-                _moe_extra_ops(section, node_id, instances, dims, bpe, dtype, gpu_arch)
+                _moe_extra_ops(
+                    section,
+                    node_id,
+                    instances,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                    present=_moe_leaves_present(nodes, node),
+                )
             )
-    if num_predicted_tokens > 0:
+        if (
+            op.modeled
+            and op.category == "GEMM"
+            and computation in _GEMM_NN_MODULE_COMPUTATIONS
+            and _RT.weight_bpe is not None
+        ):
+            result.ops.extend(
+                _quant_side_ops(
+                    node_id,
+                    section,
+                    instances,
+                    input_texts,
+                    output_text,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+    if num_predicted_tokens > 0 and not _graph_contains_draft(nodes):
         result.ops.extend(
             _mtp_stack_ops(
                 dims,
@@ -550,6 +589,8 @@ def project_roofline(
                 spec=spec,
             )
         )
+    if _RT.engine_miss:
+        result.notes.append(_RT.engine_miss)
     return result
 
 
@@ -579,6 +620,172 @@ def _attention_has_projection_leaves(
         if any(marker in class_name for marker in _ENGINE_LINEAR_CLASS_MARKERS):
             return True
     return False
+
+
+def _child_nodes(nodes: list[Any], parent: dict[str, Any]) -> list[dict[str, Any]]:
+    namespace = str(parent.get("namespace") or "")
+    if not namespace:
+        return []
+    children = []
+    for node in nodes:
+        if not isinstance(node, dict) or node is parent:
+            continue
+        child_namespace = str(node.get("namespace") or "")
+        if child_namespace == namespace or child_namespace.startswith(namespace + "/"):
+            children.append(node)
+    return children
+
+
+def _moe_leaves_present(nodes: list[Any], moe_node: dict[str, Any]) -> frozenset[str]:
+    """Router and shared-expert leaves already drawn under this MoE tile."""
+    present: set[str] = set()
+    for node in _child_nodes(nodes, moe_node):
+        class_name = _attr_text(node.get("attrs"), "class_name") or ""
+        if not any(marker in class_name for marker in _ENGINE_LINEAR_CLASS_MARKERS):
+            if "Linear" not in class_name and "linear" not in class_name:
+                continue
+        text = " ".join(
+            (
+                class_name,
+                str(node.get("id") or ""),
+                str(node.get("label") or ""),
+                _attr_text(node.get("attrs"), "role") or "",
+            )
+        ).lower()
+        if "router" in text or re.search(r"\bgate\b", text):
+            present.add("router")
+        if "shared" in text:
+            present.add("shared")
+    return frozenset(present)
+
+
+def _attention_variants_cover(instances: int) -> bool:
+    windows = _RT.variant_windows
+    if len({window for _label, _count, window in windows}) < 2:
+        return False
+    return instances == sum(count for _label, count, _window in windows)
+
+
+def _attention_variant_rows(
+    op: RooflineOp,
+    node_id: str,
+    section: str,
+    nodes: list[Any],
+    node: dict[str, Any],
+    dims: dict[str, Any],
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+) -> list[RooflineOp]:
+    """One attention row per layer-type window, instead of one stack average."""
+    rows: list[RooflineOp] = []
+    opaque = not _attention_has_projection_leaves(nodes, node)
+    for label, count, variant_window in _RT.variant_windows:
+        cost = _attention_boundary_cost(dims, bpe, window=variant_window)
+        if cost is None:
+            return [op]
+        category, maf_type, flops, bytes_moved = cost
+        variant = replace(
+            op,
+            name=f"{node_id}.{label}",
+            section=f"{section}/{label}",
+            instances=count,
+        )
+        rows.append(
+            _finish_op(variant, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+        )
+        if opaque:
+            rows.extend(
+                _attention_extra_ops(
+                    f"{section}/{label}",
+                    f"{node_id}.{label}",
+                    count,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+    return rows
+
+
+def _graph_contains_draft(nodes: list[Any]) -> bool:
+    """Whether the exported graph already draws the speculative draft stack."""
+    from TraceLens.ModelUtils.ast_analyze import SPECULATIVE_CLASS_RE
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        texts = (
+            _attr_text(node.get("attrs"), "class_name") or "",
+            str(node.get("label") or ""),
+            str(node.get("namespace") or ""),
+        )
+        if any(SPECULATIVE_CLASS_RE.search(text) for text in texts):
+            return True
+    return False
+
+
+def _quant_side_ops(
+    node_id: str,
+    section: str,
+    instances: int,
+    input_texts: list[list[str]],
+    output_text: str,
+    dims: dict[str, Any],
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+) -> list[RooflineOp]:
+    """Activation quant and weight dequant beside a quantized linear GEMM.
+
+    Weight-only schemes (fp4, int4) dequantize the weight tensor. An fp8 matrix
+    also quantizes the activation. Modules listed in the quant config's
+    exclusion list stay at the activation dtype and get neither row.
+    """
+    if _RT.weight_bpe is None or bpe is None or _excluded_from_quant(node_id):
+        return []
+    dims_only, _dtype = _split_shape_text(output_text)
+    try:
+        output_shape = resolve_shape(dims_only, dims)
+        input_shape = resolve_shape(input_texts[0], dims) if input_texts else None
+    except (DimResolutionError, IndexError):
+        return []
+    if not output_shape or not input_shape:
+        return []
+    k = input_shape[-1]
+    n = output_shape[-1]
+    m = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
+    ops: list[RooflineOp] = []
+
+    def _unary(suffix: str, elements: int, bpe_in: float, bpe_out: float) -> None:
+        op = RooflineOp(
+            name=f"{node_id}.{suffix}",
+            section=section,
+            computation=suffix,
+            operation="",
+            category=None,
+            modeled=False,
+            reason=None,
+            output_elements=elements,
+            instances=instances,
+        )
+        ops.append(
+            _finish_op(
+                op,
+                "UnaryElementwise",
+                "vector",
+                UnaryElementwise.flops_func(elements),
+                UnaryElementwise.bytes_func(elements, bpe_in, bpe_out),
+                dtype,
+                gpu_arch,
+            )
+        )
+
+    _unary("weight_dequant", k * n, _RT.weight_bpe, bpe)
+    if _RT.weight_bpe == 1:
+        _unary("act_quant", m * k, bpe, _RT.weight_bpe)
+    return ops
 
 
 def _repeat_count(namespace: str, node: dict[str, Any] | None = None) -> int:
@@ -796,8 +1003,11 @@ def _finish_op(
     elif _RT.weight_bpe == 1:
         weight_precision = "fp8"
     peaks = (gpu_arch or {}).get("max_achievable_tflops") or {}
+    # SDPA and the indexer score run at the activation dtype. Only a weight
+    # GEMM or grouped expert GEMM may take the fp4/fp8 matrix peak.
     if (
-        maf_type == "matrix"
+        category in ("GEMM", "MoE")
+        and maf_type == "matrix"
         and weight_precision
         and f"matrix_{weight_precision}" in peaks
     ):
@@ -885,6 +1095,15 @@ class _RuntimeIntrospection:
         "kv_lora_rank",
         "q_lora_rank",
         "index_topk",
+        "qk_nope_head_dim",
+        "qk_rope_head_dim",
+        "v_head_dim",
+        "index_n_heads",
+        "index_head_dim",
+        "attention_bias",
+        "variant_windows",
+        "engine_miss",
+        "module_dims",
         "quant_excluded",
         "sconv_kernel",
         "dense_intermediate",
@@ -917,6 +1136,15 @@ class _RuntimeIntrospection:
         self.kv_lora_rank = None
         self.q_lora_rank = None
         self.index_topk = None
+        self.qk_nope_head_dim = None
+        self.qk_rope_head_dim = None
+        self.v_head_dim = None
+        self.index_n_heads = None
+        self.index_head_dim = None
+        self.attention_bias = False
+        self.variant_windows = ()
+        self.engine_miss = None
+        self.module_dims = None
         self.quant_excluded = ()
         self.sconv_kernel = None
         self.dense_intermediate = None
@@ -1003,6 +1231,14 @@ def _populate_introspection(spec):
     _RT.kv_lora_rank = _config_int(tcfg, "kv_lora_rank")
     _RT.q_lora_rank = _config_int(tcfg, "q_lora_rank")
     _RT.index_topk = _config_int(tcfg, "index_topk")
+    _RT.qk_nope_head_dim = _config_int(tcfg, "qk_nope_head_dim")
+    _RT.qk_rope_head_dim = _config_int(tcfg, "qk_rope_head_dim")
+    _RT.v_head_dim = _config_int(tcfg, "v_head_dim")
+    _RT.index_n_heads = _config_int(tcfg, "index_n_heads", "index_head_number")
+    _RT.index_head_dim = _config_int(tcfg, "index_head_dim")
+    _RT.attention_bias = tcfg.get("attention_bias") is True
+    _RT.variant_windows = _variant_windows(tcfg, _RT.sliding_window)
+    _apply_source_widths(spec)
     # Decoder-only checkpoints are causal by construction.  An explicit
     # ``is_causal``/``causal`` config value wins, while encoder and
     # encoder-decoder configs are non-causal unless they say otherwise.
@@ -1050,6 +1286,140 @@ def _config_int(config: dict[str, Any], *keys: str) -> int | None:
         if isinstance(value, int) and value > 0:
             return value
     return None
+
+
+# Constructor scalars that override the checkpoint when the modeling source
+# resolved them to a concrete int. Intermediate widths are taken only from a
+# class whose name says which MLP they belong to.
+_SOURCE_SCALAR_FIELDS = {
+    "head_dim": "attn_head_dim",
+    "attention_head_dim": "attn_head_dim",
+    "qk_nope_head_dim": "qk_nope_head_dim",
+    "qk_rope_head_dim": "qk_rope_head_dim",
+    "v_head_dim": "v_head_dim",
+    "kv_lora_rank": "kv_lora_rank",
+    "q_lora_rank": "q_lora_rank",
+    "index_topk": "index_topk",
+    "index_head_dim": "index_head_dim",
+    "index_n_heads": "index_n_heads",
+    "index_head_number": "index_n_heads",
+    "num_attention_heads": "attn_heads",
+    "num_heads": "attn_heads",
+    "num_key_value_heads": "attn_kv_heads",
+    "moe_intermediate_size": "moe_intermediate",
+    "intermediate_size": "dense_intermediate",
+}
+_WINDOWED_LAYER = ("sliding", "local", "swa")
+
+
+def _variant_windows(
+    config: dict[str, Any], sliding: int | None
+) -> tuple[tuple[str, int, int | None], ...]:
+    """Per-type attention windows from ``layer_types``.
+
+    A type whose name says sliding/local/swa uses the checkpoint window. Every
+    other type attends the full context. A single window for the whole stack
+    returns nothing, because ``sliding_window`` already describes that case.
+    """
+    types = config.get("layer_types")
+    if not isinstance(types, list) or not types:
+        return ()
+    groups: list[tuple[str, int, int | None]] = []
+    for item in types:
+        label = str(item)
+        lowered = label.lower()
+        window = sliding if any(token in lowered for token in _WINDOWED_LAYER) else None
+        if groups and groups[-1][0] == label and groups[-1][2] == window:
+            groups[-1] = (label, groups[-1][1] + 1, window)
+        else:
+            groups.append((label, 1, window))
+    if len({window for _label, _count, window in groups}) < 2:
+        return ()
+    return tuple(groups)
+
+
+def _source_class_relevant(name: str) -> bool:
+    lowered = name.lower()
+    return any(
+        token in lowered
+        for token in (
+            "attn",
+            "attention",
+            "moe",
+            "expert",
+            "decoder",
+            "mtp",
+            "nextn",
+            "eagle",
+            "draft",
+        )
+    )
+
+
+def _overlay_source_scalars(registry: Any, class_names: set[str] | None = None) -> dict:
+    """Copy concrete constructor ints onto ``_RT``. Returns the fields written."""
+    written: dict[str, int] = {}
+    scalars = getattr(registry, "scalar_by_class", None) or {}
+    for class_name, values in scalars.items():
+        if class_names is not None and class_name not in class_names:
+            continue
+        if class_names is None and not _source_class_relevant(str(class_name)):
+            continue
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            field_name = _SOURCE_SCALAR_FIELDS.get(str(key))
+            if field_name is None or isinstance(value, bool):
+                continue
+            if not isinstance(value, int) or value <= 0:
+                continue
+            if field_name == "dense_intermediate" and _looks_like_moe(str(class_name)):
+                continue
+            if field_name == "moe_intermediate" and not _looks_like_moe(
+                str(class_name)
+            ):
+                continue
+            setattr(_RT, field_name, value)
+            written[field_name] = value
+    return written
+
+
+def _apply_source_widths(spec: Any) -> None:
+    """Prefer constructor-resolved widths, and record a missing engine file.
+
+    A vLLM/SGLang run with no parsed modeling source used to emit the same
+    config rows as a successful parse. The projection note says which one ran.
+    """
+    _RT.engine_miss = None
+    _RT.module_dims = None
+    engine = getattr(spec, "engine", None)
+    class_registry = getattr(spec, "class_registry", None) or {}
+    code_paths = getattr(spec, "code_paths", None) or []
+    if engine and not class_registry and not code_paths:
+        _RT.engine_miss = (
+            f"{engine} modeling source was not loaded; "
+            "roofline widths come from the checkpoint config"
+        )
+        return
+    if not class_registry:
+        return
+    try:
+        from TraceLens.ModelUtils.shape_inference import ModuleDimRegistry
+
+        context = ShapeContext.from_spec(spec)
+        registry = ModuleDimRegistry.from_registry(
+            class_registry,
+            config=getattr(spec, "raw_config", None) or {},
+            context=context,
+        )
+    except Exception:
+        _RT.engine_miss = (
+            "modeling source could not be resolved into constructor widths; "
+            "roofline widths come from the checkpoint config"
+        )
+        return
+    _RT.module_dims = registry
+    _overlay_source_scalars(registry)
 
 
 def _activation_bpe(spec: ArchitectureSpec) -> tuple[float | None, str | None]:
@@ -1106,11 +1476,32 @@ def _is_leaf_computation(computation: str) -> bool:
 
 
 def _shard(n: int, degree: int) -> int:
-    """One GPU's share of *n* under a *degree*-way split (never below 1)."""
+    """One GPU's floor share of *n* under a *degree*-way split (never below 1).
+
+    Expert-parallel token counts use the floor: a rank cannot route a fraction
+    of a token. Head counts use :func:`_shard_heads`, which keeps the remainder
+    on the busiest rank.
+    """
     return max(1, n // degree) if degree and degree > 1 else n
 
 
-def _attention_boundary_cost(dims, bpe):
+def _shard_heads(n: int, degree: int) -> int:
+    """Head count on the busiest GPU.
+
+    Ranks that receive a remainder hold one more head than the floor. A count
+    smaller than the degree is still one head on the ranks that have one.
+    """
+    if not degree or degree <= 1 or n <= 0:
+        return n
+    if n <= degree:
+        return 1
+    return (n + degree - 1) // degree
+
+
+_WINDOW_UNSET = object()
+
+
+def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
     """Roofline cost of ONE attention layer, introspected from the arch spec
     (query/kv heads, head dim, sliding window, local/global layer mix). KV length
     is averaged across the local (windowed) and global layers so the per-layer
@@ -1135,26 +1526,51 @@ def _attention_boundary_cost(dims, bpe):
         ctx = min(ctx, _RT.index_topk)
     # Attention heads are column-sharded across TP; one GPU owns its share (KV
     # heads too, the way vLLM replicates/shards GQA by the TP degree).
-    h_q = _shard(_RT.attn_heads, _RT.tp)
-    h_kv = _shard(_RT.attn_kv_heads or _RT.attn_heads, _RT.tp)
+    h_q = _shard_heads(_RT.attn_heads, _RT.tp)
+    h_kv = _shard_heads(_RT.attn_kv_heads or _RT.attn_heads, _RT.tp)
     d_h = _RT.attn_head_dim
-    n_layers = _RT.n_layers or 1
-    if _RT.n_local_layers is not None:
-        n_local = _RT.n_local_layers
+    d_qk = d_h
+    d_v = _RT.v_head_dim or d_h
+    # Latent attention attends one compressed KV vector, not a sharded head
+    # stack of the full head dim. nope+rope is the query width; without those
+    # fields the latent rank itself is the score dimension.
+    if _RT.kv_lora_rank:
+        h_kv = 1
+        nope = _RT.qk_nope_head_dim or 0
+        rope = _RT.qk_rope_head_dim or 0
+        d_qk = nope + rope if nope or rope else _RT.kv_lora_rank
+        d_v = _RT.v_head_dim or nope or _RT.kv_lora_rank
+    if window is not _WINDOW_UNSET:
+        eff_n_kv = min(ctx, window) if isinstance(window, int) and window > 0 else ctx
+    elif _RT.variant_windows:
+        total = sum(count for _label, count, _window in _RT.variant_windows) or 1
+        weighted = 0.0
+        for _label, count, variant_window in _RT.variant_windows:
+            length = (
+                min(ctx, variant_window)
+                if isinstance(variant_window, int) and variant_window > 0
+                else ctx
+            )
+            weighted += count * length
+        eff_n_kv = weighted / total
     else:
-        n_local = n_layers if _RT.sliding_window else 0
-    n_global = max(n_layers - n_local, 0)
-    kv_local = min(ctx, _RT.sliding_window) if _RT.sliding_window else ctx
-    eff_n_kv = (n_local * kv_local + n_global * ctx) / n_layers if n_layers else ctx
+        n_layers = _RT.n_layers or 1
+        if _RT.n_local_layers is not None:
+            n_local = _RT.n_local_layers
+        else:
+            n_local = n_layers if _RT.sliding_window else 0
+        n_global = max(n_layers - n_local, 0)
+        kv_local = min(ctx, _RT.sliding_window) if _RT.sliding_window else ctx
+        eff_n_kv = (n_local * kv_local + n_global * ctx) / n_layers if n_layers else ctx
     # ``SDPA`` only accepts causal masking when query and key/value lengths
     # agree.  During warm-cache decode Q is a suffix of KV and the engine
     # applies the model's causal policy in its cache kernel; its FLOP count is
     # unchanged by the mask.  Cold/prefill self-attention therefore takes the
     # model-declared causal path instead of the historical forced ``False``.
     causal = _RT.causal_attention and past == 0 and s == eff_n_kv
-    flops = SDPA.flops_func(b, s, h_q, eff_n_kv, h_kv, d_h, d_h, causal)
+    flops = SDPA.flops_func(b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal)
     bytes_moved = (
-        SDPA.bytes_func(b, s, h_q, eff_n_kv, h_kv, d_h, d_h, causal, bpe)
+        SDPA.bytes_func(b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal, bpe)
         if bpe is not None
         else None
     )
@@ -1203,8 +1619,8 @@ def _attention_extra_ops(
     # Column-sharded projections: one GPU owns hidden/TP of the fused QKV output
     # and the O-proj input (the ``o_proj`` row below keeps the full hidden on its
     # other axis -- a RowParallel reduce).
-    h_q = _shard(_RT.attn_heads, _RT.tp)
-    h_kv = _shard(_RT.attn_kv_heads or _RT.attn_heads, _RT.tp)
+    h_q = _shard_heads(_RT.attn_heads, _RT.tp)
+    h_kv = _shard_heads(_RT.attn_kv_heads or _RT.attn_heads, _RT.tp)
     d_h = _RT.attn_head_dim
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
     q_out = h_q * d_h
@@ -1223,9 +1639,9 @@ def _attention_extra_ops(
             output_elements=out_elems,
             instances=instances,
         )
-        flops = GEMM.flops_func(tokens, n, k, bias=False)
+        flops = GEMM.flops_func(tokens, n, k, _RT.attention_bias)
         byt = (
-            GEMM.bytes_func(tokens, n, k, False, wbpe, wbpe, bpe, bpe)
+            GEMM.bytes_func(tokens, n, k, _RT.attention_bias, wbpe, wbpe, bpe, bpe)
             if bpe is not None
             else None
         )
@@ -1359,6 +1775,54 @@ def _attention_extra_ops(
             ops.append(
                 _finish_op(
                     bias, "BinaryElementwise", "vector", flops, byt, dtype, gpu_arch
+                )
+            )
+    if _RT.index_n_heads and _RT.index_head_dim:
+        h_i = _shard_heads(_RT.index_n_heads, _RT.tp)
+        d_i = _RT.index_head_dim
+        ops.append(_gemm_row("indexer_q", h_i * d_i, hidden, tokens * h_i * d_i))
+        ops.append(_gemm_row("indexer_k", d_i, hidden, tokens * d_i))
+        try:
+            score_ctx = _resolve_past(dims) + resolve_dim(dims["S"], dims)
+        except (KeyError, DimResolutionError):
+            score_ctx = 0
+        if score_ctx:
+            score_elems = tokens * h_i * score_ctx
+            score_flops = SDPA.flops_func(1, tokens, h_i, score_ctx, 1, d_i, d_i, False)
+            score_bytes = (
+                SDPA.bytes_func(1, tokens, h_i, score_ctx, 1, d_i, d_i, False, bpe)
+                if bpe is not None
+                else None
+            )
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.indexer_score",
+                    section,
+                    "indexer_score",
+                    instances,
+                    "Attention",
+                    "matrix",
+                    score_flops,
+                    score_bytes,
+                    score_elems,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+            topk_elems = tokens * score_ctx
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.indexer_topk",
+                    section,
+                    "indexer_topk",
+                    instances,
+                    "Reduce",
+                    "vector",
+                    float(topk_elems),
+                    topk_elems * bpe if bpe is not None else None,
+                    tokens * (_RT.index_topk or 1),
+                    dtype,
+                    gpu_arch,
                 )
             )
     return ops
@@ -1504,6 +1968,7 @@ class _DraftLayer:
     has_attention: bool
     ffn_role: str | None
     convs: tuple[str, ...]
+    classes: tuple[str, ...] = ()
 
 
 def _registry_structures(spec: Any):
@@ -1691,7 +2156,28 @@ def _resolve_draft_layer(spec: Any) -> _DraftLayer | None:
         has_attention=has_attention,
         ffn_role=ffn_role,
         convs=tuple(convs),
+        classes=tuple(dict.fromkeys(owner.name for owner in owners)),
     )
+
+
+def _push_draft_widths(draft: _DraftLayer) -> dict[str, Any]:
+    """Apply the draft class's constructor ints over the backbone widths."""
+    saved: dict[str, Any] = {}
+    scalars = getattr(_RT.module_dims, "scalar_by_class", None) or {}
+    for class_name in draft.classes:
+        for key, value in (scalars.get(class_name) or {}).items():
+            field_name = _SOURCE_SCALAR_FIELDS.get(str(key))
+            if (
+                field_name is None
+                or field_name in saved
+                or isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                continue
+            saved[field_name] = getattr(_RT, field_name)
+            setattr(_RT, field_name, value)
+    return saved
 
 
 def _tag_cost_source(ops: list[RooflineOp], cost_source: str) -> list[RooflineOp]:
@@ -1894,19 +2380,24 @@ def _mtp_stack_ops(
         section = f"mtp/{index}"
         node_id = f"mtp/{index}"
         if draft is not None:
-            ops.extend(
-                _draft_depth_ops(
-                    draft,
-                    section,
-                    node_id,
-                    dims,
-                    tokens,
-                    hidden,
-                    bpe,
-                    dtype,
-                    gpu_arch,
+            saved = _push_draft_widths(draft)
+            try:
+                ops.extend(
+                    _draft_depth_ops(
+                        draft,
+                        section,
+                        node_id,
+                        dims,
+                        tokens,
+                        hidden,
+                        bpe,
+                        dtype,
+                        gpu_arch,
+                    )
                 )
-            )
+            finally:
+                for field_name, value in saved.items():
+                    setattr(_RT, field_name, value)
             continue
         # No draft layer in the source. This template is the explicit fallback:
         # two RMSNorms, a 2H→H projection, attention, and a dense MLP.
@@ -2111,13 +2602,15 @@ def _moe_extra_ops(
     bpe: float | None,
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
+    present: frozenset[str] = frozenset(),
 ) -> list[RooflineOp]:
     """Cost opaque MoE routing and optional shared experts.
 
     The selected-expert GEMMs live in :func:`_moe_cost`.  The model graph often
     collapses the router and shared-expert path into that same opaque tile, so
-    publish their config-derived work as separate rows.  These are deliberately
-    skipped for expanded graphs, where their leaves are already present.
+    publish their config-derived work as separate rows.  ``present`` names the
+    pieces the graph already drew as leaves (``router``, ``shared``), which are
+    not costed again.
     """
     if not (_RT.moe_num_experts and _RT.hidden_size):
         return []
@@ -2128,50 +2621,51 @@ def _moe_extra_ops(
         return []
     ops: list[RooflineOp] = []
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
-    router_flops = GEMM.flops_func(tokens, _RT.moe_num_experts, hidden, bias=False)
-    router_bytes = (
-        GEMM.bytes_func(
-            tokens, _RT.moe_num_experts, hidden, False, wbpe, wbpe, bpe, bpe
+    if "router" not in present:
+        router_flops = GEMM.flops_func(tokens, _RT.moe_num_experts, hidden, bias=False)
+        router_bytes = (
+            GEMM.bytes_func(
+                tokens, _RT.moe_num_experts, hidden, False, wbpe, wbpe, bpe, bpe
+            )
+            if bpe is not None
+            else None
         )
-        if bpe is not None
-        else None
-    )
-    ops.append(
-        _analytical_op(
-            f"{node_id}.router",
-            section,
-            "router",
-            instances,
-            "GEMM",
-            "matrix",
-            router_flops,
-            router_bytes,
-            tokens * _RT.moe_num_experts,
-            dtype,
-            gpu_arch,
+        router_elements = tokens * _RT.moe_num_experts
+        ops.append(
+            _analytical_op(
+                f"{node_id}.router",
+                section,
+                "router",
+                instances,
+                "GEMM",
+                "matrix",
+                router_flops,
+                router_bytes,
+                router_elements,
+                dtype,
+                gpu_arch,
+            )
         )
-    )
-    router_elements = tokens * _RT.moe_num_experts
-    softmax_bytes = (
-        Softmax.bytes_func(tokens, _RT.moe_num_experts, bpe)
-        if bpe is not None
-        else None
-    )
-    ops.append(
-        _analytical_op(
-            f"{node_id}.router_softmax",
-            section,
-            "router_softmax",
-            instances,
-            "Softmax",
-            "vector",
-            Softmax.flops_func(tokens, _RT.moe_num_experts),
-            softmax_bytes,
-            router_elements,
-            dtype,
-            gpu_arch,
+        softmax_bytes = (
+            Softmax.bytes_func(tokens, _RT.moe_num_experts, bpe)
+            if bpe is not None
+            else None
         )
-    )
+        ops.append(
+            _analytical_op(
+                f"{node_id}.router_softmax",
+                section,
+                "router_softmax",
+                instances,
+                "Softmax",
+                "vector",
+                Softmax.flops_func(tokens, _RT.moe_num_experts),
+                softmax_bytes,
+                router_elements,
+                dtype,
+                gpu_arch,
+            )
+        )
     if _RT.moe_top_k:
         selected = tokens * _RT.moe_top_k * hidden
         combine_bytes = 3 * selected * bpe if bpe is not None else None
@@ -2190,7 +2684,7 @@ def _moe_extra_ops(
                 gpu_arch,
             )
         )
-    if _RT.num_shared_experts and _RT.moe_intermediate:
+    if "shared" not in present and _RT.num_shared_experts and _RT.moe_intermediate:
         shared_width = _RT.moe_intermediate * _RT.num_shared_experts
         previous = _RT.dense_intermediate
         _RT.dense_intermediate = shared_width
@@ -2242,9 +2736,15 @@ def _dispatch_op_cost(
 ) -> tuple[str, str, float, float | None] | None:
     """Return ``(category, maf_type, flops, bytes)`` for an op, or ``None`` if unmodeled."""
     if computation in _GEMM_NN_MODULE_COMPUTATIONS:
-        return _gemm_cost_linear(input_shapes, output_shape, bpe, weight_bpe)
+        return _gemm_cost_linear(
+            input_shapes,
+            output_shape,
+            bpe,
+            weight_bpe,
+            bias=_linear_has_bias(details),
+        )
     if computation.lower() in _GEMM_FUNCTIONAL_LABELS:
-        return _gemm_cost_matmul(input_shapes, output_shape, bpe)
+        return _gemm_cost_matmul(input_shapes, output_shape, bpe, weight_bpe)
     if computation in _CONV_COMPUTATIONS:
         return _conv_cost(details, input_shapes, output_shape, bpe)
     if computation == _SDPA_COMPUTATION:
@@ -2267,11 +2767,17 @@ def _dispatch_op_cost(
     return None
 
 
+def _linear_has_bias(details: str) -> bool:
+    """True when a node records an explicit linear bias."""
+    return bool(re.search(r"(?:^|[;,\s])bias=(?:1|true)\b", details or "", re.I))
+
+
 def _gemm_cost_linear(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
     weight_bpe: float | None = None,
+    bias: bool = False,
 ) -> tuple[str, str, float, float | None] | None:
     if not input_shapes or not input_shapes[0] or not output_shape:
         return None
@@ -2279,9 +2785,9 @@ def _gemm_cost_linear(
     k = input_shape[-1]
     n = output_shape[-1]
     m = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
-    flops = GEMM.flops_func(m, n, k, bias=False)
+    flops = GEMM.flops_func(m, n, k, bias)
     wbpe = weight_bpe if weight_bpe is not None else bpe
-    bytes_moved = GEMM.bytes_func(m, n, k, False, wbpe, wbpe, bpe, bpe)
+    bytes_moved = GEMM.bytes_func(m, n, k, bias, wbpe, wbpe, bpe, bpe)
     return "GEMM", "matrix", flops, bytes_moved
 
 
@@ -2289,6 +2795,7 @@ def _gemm_cost_matmul(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
+    weight_bpe: float | None = None,
 ) -> tuple[str, str, float, float | None] | None:
     if len(input_shapes) < 2:
         return None
@@ -2299,7 +2806,14 @@ def _gemm_cost_matmul(
     n = b_shape[-1]
     m = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
     flops = GEMM.flops_func(m, n, k, bias=False)
-    bytes_moved = GEMM.bytes_func(m, n, k, False, bpe, bpe, bpe, bpe)
+    # A parameter matrix has fewer leading dimensions than the batched
+    # activation it contracts with. Two batched operands are both activations.
+    bpe_b = (
+        weight_bpe
+        if weight_bpe is not None and len(b_shape) < len(output_shape)
+        else bpe
+    )
+    bytes_moved = GEMM.bytes_func(m, n, k, False, bpe, bpe_b, bpe, bpe)
     return "GEMM", "matrix", flops, bytes_moved
 
 

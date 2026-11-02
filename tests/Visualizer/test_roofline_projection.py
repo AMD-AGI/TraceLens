@@ -37,10 +37,15 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _engine_boundary_cost,
     _engine_head_cost,
     _introspect_weight_bpe,
+    _finish_op,
+    _graph_contains_draft,
     _moe_cost,
+    _moe_extra_ops,
     _parse_op_node,
+    _populate_introspection,
     _project_op,
     _shard,
+    _shard_heads,
     _split_shape_text,
     build_projection_dims,
     conv_ops_from_meta,
@@ -1456,3 +1461,276 @@ def test_unparsed_dense_variant_tile_is_named_for_the_dense_class():
     assert node["label"] == "InklingDenseMLP"
     assert attrs["class_name"] == "InklingDenseMLP"
     assert attrs["role"] == "ffn"
+
+
+def test_shard_heads_keeps_the_remainder_on_the_busiest_gpu():
+    assert _shard_heads(64, 8) == 8
+    assert _shard_heads(20, 8) == 3
+    assert _shard_heads(3, 8) == 1
+    assert _shard(20, 8) == 2
+
+
+def test_latent_attention_uses_one_kv_vector(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 8
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.n_layers = 1
+    full = _attention_boundary_cost({"B": 1, "S": 4}, bpe=2)[2]
+    _RT.kv_lora_rank = 64
+    _RT.qk_nope_head_dim = 32
+    _RT.qk_rope_head_dim = 16
+    _RT.v_head_dim = 32
+    latent = _attention_boundary_cost({"B": 1, "S": 4}, bpe=2)[2]
+    assert latent < full
+
+
+def test_indexer_rows_cover_query_key_score_and_topk(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 4
+    _RT.attn_kv_heads = 4
+    _RT.attn_head_dim = 32
+    _RT.hidden_size = 64
+    _RT.index_n_heads = 2
+    _RT.index_head_dim = 8
+    _RT.index_topk = 4
+    ops = _attention_extra_ops(
+        "decoder",
+        "decoder/attn",
+        instances=1,
+        dims={"B": 1, "S": 8},
+        bpe=2,
+        dtype="bfloat16",
+        gpu_arch=None,
+    )
+    names = {op.computation for op in ops}
+    assert {"indexer_q", "indexer_k", "indexer_score", "indexer_topk"} <= names
+
+
+def test_variant_windows_are_costed_separately(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 4
+    _RT.attn_kv_heads = 4
+    _RT.attn_head_dim = 16
+    _RT.n_layers = 2
+    _RT.sliding_window = 2
+    _RT.variant_windows = (("sliding_attention", 1, 2), ("full_attention", 1, None))
+    dims = {"B": 1, "S": 1, "past_len": 16}
+    sliding = _attention_boundary_cost(dims, bpe=2, window=2)[2]
+    full = _attention_boundary_cost(dims, bpe=2, window=None)[2]
+    mixed = _attention_boundary_cost(dims, bpe=2)[2]
+    assert sliding < full
+    assert mixed == pytest.approx((sliding + full) / 2)
+
+
+def test_functional_matmul_charges_weight_bytes_on_the_parameter(_reset_rt):
+    _RT.reset()
+    _RT.weight_bpe = 0.5
+    _category, _maf, _flops, narrow = _dispatch_op_cost(
+        "MatMul",
+        [(2, 10, 64), (64, 128)],
+        (2, 10, 128),
+        2,
+        weight_bpe=0.5,
+    )
+    _category, _maf, _flops, wide = _dispatch_op_cost(
+        "MatMul",
+        [(2, 10, 64), (2, 64, 128)],
+        (2, 10, 128),
+        2,
+        weight_bpe=0.5,
+    )
+    assert narrow < wide
+
+
+def test_linear_bias_flag_adds_the_bias_flops():
+    plain = _dispatch_op_cost("Linear", [(2, 10, 16)], (2, 10, 8), 2)[2]
+    biased = _dispatch_op_cost(
+        "Linear", [(2, 10, 16)], (2, 10, 8), 2, details="bias=1"
+    )[2]
+    assert biased == plain + 20 * 8
+
+
+def test_weight_peak_does_not_apply_to_attention(_reset_rt):
+    _RT.reset()
+    _RT.weight_bpe = 0.53125
+    op = RooflineOp(
+        name="attn",
+        section="decoder",
+        computation="attn",
+        operation="",
+        category=None,
+        modeled=False,
+        reason=None,
+        output_elements=1,
+        instances=1,
+    )
+    finished = _finish_op(
+        op,
+        "Attention",
+        "matrix",
+        100.0,
+        10.0,
+        "bfloat16",
+        {"max_achievable_tflops": {"matrix_fp4": 1000, "matrix_bf16": 100}},
+    )
+    assert finished.compute_spec == "matrix_bf16"
+
+
+def test_moe_extras_skip_leaves_already_in_the_graph(_reset_rt):
+    _RT.reset()
+    _RT.moe_num_experts = 4
+    _RT.moe_top_k = 2
+    _RT.moe_intermediate = 32
+    _RT.num_shared_experts = 1
+    _RT.hidden_size = 16
+    _RT.dense_intermediate = 32
+    ops = _moe_extra_ops(
+        "decoder",
+        "decoder/mlp",
+        1,
+        {"B": 1, "S": 1, "H": 16},
+        2,
+        "bfloat16",
+        None,
+        present=frozenset({"router", "shared"}),
+    )
+    names = {op.computation for op in ops}
+    assert "router" not in names
+    assert "shared_expert" not in names
+    assert "combine" in names
+
+
+def test_missing_engine_source_is_recorded(_reset_rt):
+    from types import SimpleNamespace
+
+    _populate_introspection(
+        SimpleNamespace(
+            engine="vllm",
+            class_registry={},
+            code_paths=[],
+            raw_config={},
+            num_experts_per_tok=None,
+            moe_intermediate_size=None,
+            intermediate_size=None,
+            num_experts=None,
+            num_shared_experts=None,
+            num_attention_heads=None,
+            num_key_value_heads=None,
+            head_dim=None,
+            hidden_size=None,
+            num_hidden_layers=None,
+            positional_encoding=None,
+            architectures=[],
+            model_type="",
+            parallel_layout=None,
+        )
+    )
+    assert _RT.engine_miss
+    assert "vllm" in _RT.engine_miss
+
+
+def test_draft_widths_come_from_the_draft_class(_reset_rt):
+    from types import SimpleNamespace
+
+    _RT.reset()
+    _RT.attn_heads = 4
+    _RT.attn_kv_heads = 4
+    _RT.attn_head_dim = 16
+    _RT.hidden_size = 64
+    _RT.dense_intermediate = 128
+    _RT.moe_intermediate = 1024
+    _RT.moe_top_k = 2
+    _RT.moe_num_experts = 4
+    _RT.n_layers = 1
+    _RT.module_dims = SimpleNamespace(
+        scalar_by_class={"DecoderLayer": {"moe_intermediate_size": 32}}
+    )
+    decoder = SimpleNamespace(
+        name="DecoderLayer",
+        init_assignments={"self_attn": "Attention", "mlp": "FusedMoE"},
+        init_assignment_options={},
+    )
+    draft = SimpleNamespace(
+        name="MultiTokenPredictorLayer",
+        init_assignments={
+            "enorm": "RMSNorm",
+            "hnorm": "RMSNorm",
+            "eh_proj": "Linear",
+            "mtp_block": "DecoderLayer",
+        },
+        init_assignment_options={},
+    )
+    spec = SimpleNamespace(
+        class_registry={
+            "MultiTokenPredictorLayer": draft,
+            "DecoderLayer": decoder,
+            "FusedMoE": SimpleNamespace(name="FusedMoE", init_assignments={}),
+        },
+        layer_variants=[],
+    )
+    narrow = _mtp_stack_ops(
+        {"B": 1, "S": 1, "H": 64, "V": 32},
+        num_predicted_tokens=1,
+        gpu_arch=None,
+        activation=(2, "bfloat16"),
+        spec=spec,
+    )
+    _RT.module_dims = None
+    wide = _mtp_stack_ops(
+        {"B": 1, "S": 1, "H": 64, "V": 32},
+        num_predicted_tokens=1,
+        gpu_arch=None,
+        activation=(2, "bfloat16"),
+        spec=spec,
+    )
+    narrow_mlp = next(op for op in narrow if op.computation == "mlp")
+    wide_mlp = next(op for op in wide if op.computation == "mlp")
+    assert narrow_mlp.flops < wide_mlp.flops
+    assert _RT.moe_intermediate == 1024
+
+
+def test_graph_draft_class_suppresses_the_synthetic_stack():
+    assert _graph_contains_draft(
+        [{"label": "MultiTokenPredictorLayer", "namespace": "model", "attrs": []}]
+    )
+    assert not _graph_contains_draft(
+        [{"label": "DecoderLayer", "namespace": "model/layers", "attrs": []}]
+    )
+
+
+def test_offline_draft_models_project_from_their_parsed_layers():
+    deepseek = load_architecture(
+        FIXTURES / "vllm_deepseek_like",
+        name="DeepSeek-like",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    deepseek.engine = "vllm"
+    projected = project_roofline(
+        deepseek, batch_size=1, seq_len=4, num_predicted_tokens=2
+    )
+    draft = [op for op in projected.ops if op.section.startswith("mtp/")]
+    # The checkpoint declares one draft depth, so a request for two tokens stops there.
+    assert {op.section for op in draft} == {"mtp/0"}
+    assert {op.cost_source for op in draft} == {"source"}
+    assert any(op.computation == "mlp" and op.category == "MoE" for op in draft)
+    assert any(op.computation == "indexer_score" for op in draft)
+    assert any(op.section.endswith("sliding_attention") for op in projected.ops)
+    assert any(op.section.endswith("full_attention") for op in projected.ops)
+    assert projected.notes == []
+
+    nextn = load_architecture(
+        FIXTURES / "sglang_nextn_like",
+        name="Qwen-NextN",
+        detailed=True,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    nextn.engine = "sglang"
+    projected = project_roofline(nextn, batch_size=1, seq_len=4, num_predicted_tokens=1)
+    draft = [op for op in projected.ops if op.section == "mtp/0"]
+    mlp = next(op for op in draft if op.computation == "mlp")
+    assert mlp.category == "GEMM" and mlp.cost_source == "source"
+    assert not any(
+        op.category == "MoE" and op.section.startswith("mtp/") for op in draft
+    )

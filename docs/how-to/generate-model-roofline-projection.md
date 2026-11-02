@@ -78,10 +78,16 @@ reported but no roofline time is computed (no hardware peaks to bound against).
 
 - `--batch-size`, `--seq-len`: the shape to project at (default: 1, 2048).
 - `--num-predicted-tokens N`: also cost a secondary MTP / speculative draft
-  stack of N tokens (default: 0, backbone only). Each token is one draft depth
-  (attention, a dense MLP, and the 2H→H input projection), capped at the depth
-  the checkpoint declares (`mtp_config.num_nextn_predict_layers` /
-  `num_mtp_layers`).
+  stack of N tokens (default: 0, backbone only), capped at the depth the
+  checkpoint declares (`mtp_config.num_nextn_predict_layers` /
+  `num_mtp_layers`). Each depth is the draft layer parsed from the modeling
+  source (an MTP, NextN, or EAGLE class): its norms, its input projection,
+  its attention, and that layer's own dense or MoE feed-forward. When the
+  source has no draft layer, the depth is the fixed attention-plus-dense
+  template. The stack is not added again when the exported graph already
+  draws those draft modules. A vLLM or SGLang run whose modeling source did
+  not load says so in the projection notes, and the widths then come from
+  the checkpoint config.
 - `--dim KEY=VALUE` (repeatable): override a specific symbolic dimension
   (e.g. `--dim past_len=1024`); takes precedence over `--batch-size`/`--seq-len`
   for the same key.
