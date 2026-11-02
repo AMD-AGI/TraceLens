@@ -142,6 +142,41 @@ def get_max_achievable_tflops(perf_model, arch):
     return maf_specs.get(compute_spec)
 
 
+def compute_roofline_time_and_bound(gflops, bytes_moved, peak_tflops, mem_bw_gbps):
+    """Roofline-bounded time (µs) and bound type from FLOPs, bytes, and arch peaks.
+
+    The lower bound an op could achieve: whichever of compute time (flops /
+    peak TFLOPS) or memory time (bytes / peak bandwidth) is larger. Returns
+    ``(None, None)`` when any input is missing or there is no work to bound.
+
+    Args:
+        gflops: GFLOPs performed by the op.
+        bytes_moved: Bytes read + written by the op.
+        peak_tflops: Max achievable TFLOPS for the op's compute spec.
+        mem_bw_gbps: Peak HBM bandwidth in GB/s.
+
+    Returns:
+        ``(roofline_time_us, roofline_bound)`` where ``roofline_bound`` is
+        ``"COMPUTE_BOUND"`` or ``"MEMORY_BOUND"``.
+    """
+    if (
+        peak_tflops is None
+        or mem_bw_gbps is None
+        or bytes_moved is None
+        or not gflops
+        or gflops <= 0
+    ):
+        return None, None
+    # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
+    compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
+    # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
+    memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
+    roofline_bound = (
+        "COMPUTE_BOUND" if compute_time_us >= memory_time_us else "MEMORY_BOUND"
+    )
+    return max(compute_time_us, memory_time_us), roofline_bound
+
+
 def _perf_model_init_kwargs(perf_model_class, event, arch, inductor_cache_dir=None):
     """
     Build keyword args for perf model construction. Only passes
