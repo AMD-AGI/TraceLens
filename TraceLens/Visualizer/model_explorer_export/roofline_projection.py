@@ -642,6 +642,8 @@ def _persistent_state_ops(
         return []
     state_ops: list[RooflineOp] = []
     for node in nodes:
+        if _attr_text(node.get("attrs"), "synthetic"):
+            continue
         output_text = _attr_text(node.get("attrs"), "output_shape")
         if not output_text:
             continue

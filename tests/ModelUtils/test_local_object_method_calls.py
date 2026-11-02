@@ -195,6 +195,19 @@ class Cache:
     assert stored == ["stores: primary", "stores: secondary"]
 
 
+def test_augmented_assignment_to_persistent_state_is_recorded() -> None:
+    source = """
+class Cache:
+    def update(self, value):
+        self.total += value
+"""
+    from TraceLens.ModelUtils.ast_analyze import named_method_operations
+
+    analysis = analyze_sources({"m.py": textwrap.dedent(source)})
+    ops = named_method_operations(analysis.class_registry["Cache"], "update")
+    assert any("stores: total" in op.details for op in ops)
+
+
 class TestWhatTheCallHandsIn:
     def test_each_argument_binds_to_the_methods_own_parameter(self) -> None:
         """The producers alone are positional; the NAMES are what the frame docks on.

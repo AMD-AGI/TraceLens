@@ -356,9 +356,7 @@ def export_module_inventory(
         for name, buffer in signature.inputs_to_buffers.items()
         if buffer in mutated
     }
-    state_outputs = {
-        output: buffer for output, buffer in signature.buffers_to_mutate.items()
-    }
+    state_outputs, user_outputs = _export_output_roles(signature)
     placeholders = [
         node
         for node in program.graph.nodes
@@ -405,8 +403,17 @@ def export_module_inventory(
             stand_in[node.name] = (inputs, reads_sizes)
             continue
         if node.op == "output":
-            # Export returns a tuple; the graph's output tile shows the first.
-            value = next((v for v in node.args[0] if v is not None), None)
+            # Export places mutation results ahead of user-visible results.
+            # The graph output tile must follow USER_OUTPUT, not an incidental
+            # buffer-update tensor.
+            value = next(
+                (
+                    item
+                    for item in node.args[0]
+                    if getattr(item, "name", None) in user_outputs
+                ),
+                None,
+            )
             value = getattr(value, "meta", {}).get("val")
         shape = dtype_name = None
         if isinstance(value, torch.Tensor):
@@ -422,11 +429,7 @@ def export_module_inventory(
             dtype=dtype_name,
             reads_sizes=reads_sizes,
             state_reads=(state_inputs[node.name],) if node.name in state_inputs else (),
-            state_writes=(
-                state_outputs[node.name],
-            )
-            if node.name in state_outputs
-            else (),
+            state_writes=state_outputs.get(node.name, ()),
         )
         inventory.append(info)
         traced.append(
@@ -458,6 +461,27 @@ def export_module_inventory(
             ", ".join(unresolved),
         )
     return inventory
+
+
+def _export_output_roles(signature: Any) -> tuple[dict[str, tuple[str, ...]], set[str]]:
+    """Return state-write identities and user-visible outputs from export specs."""
+    state_outputs: dict[str, list[str]] = {}
+    user_outputs: set[str] = set()
+    for spec in getattr(signature, "output_specs", ()):
+        kind = getattr(getattr(spec, "kind", None), "name", "")
+        argument = getattr(spec, "arg", None)
+        name = getattr(argument, "name", None)
+        if not name:
+            continue
+        if kind == "USER_OUTPUT":
+            user_outputs.add(name)
+        elif kind in {"BUFFER_MUTATION", "USER_INPUT_MUTATION", "PARAMETER_MUTATION"}:
+            identity = str(getattr(spec, "target", None) or name)
+            state_outputs.setdefault(name, []).append(identity)
+    return (
+        {name: tuple(dict.fromkeys(values)) for name, values in state_outputs.items()},
+        user_outputs,
+    )
 
 
 def _export_refining_ranges(

@@ -10575,7 +10575,9 @@ class _ForwardOperationExtractor:
         return names
 
     @staticmethod
-    def _stored_self_attrs(stmt: ast.Assign | ast.AnnAssign) -> tuple[str, ...]:
+    def _stored_self_attrs(
+        stmt: ast.Assign | ast.AnnAssign | ast.AugAssign,
+    ) -> tuple[str, ...]:
         """Every persistent ``self`` destination a statement writes.
 
         ``self.overlap_kv[name] = chunk_kv[...].clone()`` publishes a value into
@@ -10601,7 +10603,7 @@ class _ForwardOperationExtractor:
         return tuple(dict.fromkeys(stored))
 
     def _record_state_store(
-        self, stmt: ast.Assign | ast.AnnAssign, producer: str | None
+        self, stmt: ast.Assign | ast.AnnAssign | ast.AugAssign, producer: str | None
     ) -> None:
         """Mark the op behind a store to persistent state with what it writes."""
         if producer is None:
@@ -11577,6 +11579,7 @@ class _ForwardOperationExtractor:
                     )
                     if isinstance(stmt.target, ast.Name):
                         self.var_producer[stmt.target.id] = producer
+                    self._record_state_store(stmt, producer)
                 continue
             if isinstance(stmt, ast.Expr):
                 value = stmt.value

@@ -2387,7 +2387,10 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
                         "namespace": node.get("namespace", ""),
                         "attrs": [
                             {"key": "synthetic", "value": "@state_out"},
-                            {"key": "state_write", "value": state},
+                            # This is a visual boundary for a write already
+                            # represented on its producer.  Keep its identity
+                            # without making it a second costed write.
+                            {"key": "state_boundary", "value": state},
                             {
                                 "key": "output_shape",
                                 "value": _node_attr(node, "output_shape") or "",

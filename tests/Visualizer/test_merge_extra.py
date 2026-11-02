@@ -430,7 +430,7 @@ def test_state_write_keeps_a_cross_call_sink_when_it_has_local_consumers():
     sink = next(node for node in nodes if node["id"] == "update:@state_out:cache")
     assert sink["attrs"] == [
         {"key": "synthetic", "value": "@state_out"},
-        {"key": "state_write", "value": "cache"},
+        {"key": "state_boundary", "value": "cache"},
         {"key": "output_shape", "value": "[B, 8] float32"},
         {"key": "output_dtype", "value": ""},
     ]

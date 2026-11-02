@@ -10,12 +10,15 @@ These exercise the FX-inventory → ComputationGraph → Model Explorer payload
 transforms without importing torch, so they run under the torch-free CI.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from TraceLens.ModelUtils.torch_introspect import (
     FxNodeInfo,
     InputSpec,
     _dotted_prefixes,
+    _export_output_roles,
     computation_graph_from_fx_inventory,
     symbolic_example_sizes,
 )
@@ -150,6 +153,28 @@ def test_explorer_graph_preserves_structured_persistent_state_metadata():
         for attr in nodes["next_state"]["attrs"]
         if attr["key"] == "state_write"
     ] == ["cache.0", "auxiliary"]
+
+
+def test_export_output_roles_separate_mutations_from_user_outputs():
+    def spec(kind, name, target=None):
+        return SimpleNamespace(
+            kind=SimpleNamespace(name=kind),
+            arg=SimpleNamespace(name=name),
+            target=target,
+        )
+
+    writes, user_outputs = _export_output_roles(
+        SimpleNamespace(
+            output_specs=(
+                spec("BUFFER_MUTATION", "updated_cache", "cache"),
+                spec("USER_INPUT_MUTATION", "updated_state", "state"),
+                spec("USER_OUTPUT", "logits"),
+            )
+        )
+    )
+
+    assert writes == {"updated_cache": ("cache",), "updated_state": ("state",)}
+    assert user_outputs == {"logits"}
 
 
 def test_include_shapes_false_omits_shape_attrs():
