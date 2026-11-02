@@ -45,23 +45,61 @@ _CONV_OP_TYPES = frozenset(
 )
 
 
+# A one-segment match on these leaves collides across a bottleneck
+# (``layer.0.convolution`` vs ``layer.1.convolution``). A longer suffix,
+# which includes the index, is what tells them apart.
+_AMBIGUOUS_META_LEAVES = frozenset(
+    {
+        "convolution",
+        "conv",
+        "norm",
+        "bn",
+        "shortcut",
+        "activation",
+    }
+)
+
+
+# Ops that forward a tensor unchanged (or scale it). Once a real module
+# next to them has a concrete spatial shape, they take that shape instead of
+# the text-model ``[B, S, H]`` / ``[1]`` the symbolic pass left behind.
+_SHAPE_PRESERVING_LABELS = frozenset(
+    {
+        "Multiply",
+        "Add",
+        "GELU",
+        "ReLU",
+        "SiLU",
+        "Dropout",
+        "Identity",
+        "Mutually exclusive branch",
+        "DropPath",
+        "ConvNextDropPath",
+    }
+)
+
+
 def _attach_conv_meta_shapes(graph: dict[str, Any], checkpoint: str | Path) -> None:
-    """Overwrite each conv node's shapes with the live per-instance ``[B, C, H, W]``.
+    """Stamp live per-module ``[B, C, H, W]`` onto the nodes a meta forward named.
 
-    A non-uniform CNN's convolutions are emitted one representative per stage; the
-    symbolic text shape inference sizes them ``[B, S, H]`` because it has no spatial
-    rule. A meta-device forward (fed the model's own ``pixel_values``) captures each
-    conv's concrete in/out shapes keyed by full module path -- the authoritative
-    source. Match a node to its capture by its stamped ``meta_path`` (the stage) plus
-    the conv attr in its id (``dwconv``/``patch_embeddings``), symbolise the batch
-    axis, and stamp ``output_shape``/``input_shapes`` so the viewer and the graph
-    roofline read real spatial dims.
+    Symbolic inference sizes a CNN ``[B, S, H]`` (and a vision stem ``[B, S]
+    int64``) because it has no spatial rule. A meta forward fed the model's own
+    ``pixel_values`` captures every module's concrete in/out shapes, keyed by
+    full module path. A node matches the capture whose dotted suffix appears,
+    in order, in its id — ``convolution`` as well as ``dwconv`` — under its
+    stamped ``meta_path``. The batch axis is symbolised; channels and spatial
+    dims stay concrete. Boundaries of that module take its input and output,
+    and a shape-preserving neighbour (the layer-scale multiply, the residual
+    add) copies the concrete shape of its input.
     """
-    from TraceLens.ModelUtils.meta_trace import trace_meta_conv_ops
+    from TraceLens.ModelUtils.meta_trace import trace_meta_module_io
 
-    captures = trace_meta_conv_ops(checkpoint)
+    captures = trace_meta_module_io(checkpoint)
     if not captures:
         return
+    by_path = {
+        str(item.get("path") or ""): item for item in captures if item.get("path")
+    }
 
     def _attr(attrs: list[dict[str, str]], key: str) -> dict[str, str] | None:
         return next((item for item in attrs if item.get("key") == key), None)
@@ -74,75 +112,203 @@ def _attach_conv_meta_shapes(graph: dict[str, Any], checkpoint: str | Path) -> N
             existing["value"] = value
 
     def _dims(shape: list[int]) -> list[str]:
-        # Symbolise the batch axis; keep channels/spatial concrete.
+        # Symbolise the batch axis; keep channels and spatial dims concrete.
+        # Aliasing a channel of 128 onto ``S`` is what made a stage look textual.
         return ["B"] + [str(int(extent)) for extent in shape[1:]]
 
-    conv_leaves = ("dwconv", "patch_embeddings", "downsample", "conv")
+    def _shape_text(shape: list[int], dtype: str) -> str:
+        return f"[{', '.join(_dims(shape))}] {dtype or 'float32'}"
 
-    def _matches(capture: dict[str, Any], prefix: str | None, leaf: str | None) -> bool:
-        path = str(capture.get("path") or "")
-        if prefix is not None and path != prefix and not path.startswith(prefix + "."):
-            return False
-        # An exact module path is the leading conv itself (a ModuleList element
-        # whose path ends in an index, not in ``dwconv``).
-        if prefix is not None and path == prefix:
-            return True
-        if leaf is not None and path.rsplit(".", 1)[-1] != leaf:
-            return False
-        return prefix is not None or leaf is not None
+    def _suffix_score(path: str, ident: str) -> int:
+        segments = [segment for segment in path.split(".") if segment]
+        for start in range(len(segments)):
+            position = 0
+            matched = True
+            for segment in segments[start:]:
+                found = ident.find(segment.lower(), position)
+                if found < 0:
+                    matched = False
+                    break
+                position = found + len(segment)
+            if matched:
+                return len(segments) - start
+        return 0
 
-    for node in graph.get("nodes", []):
+    def _best(ident: str, prefix: str | None) -> dict[str, Any] | None:
+        # The module path itself is reserved for the section's own boundaries.
+        # A compute node has to name a descendant (``layer.0.convolution``), and
+        # one shared leaf (``convolution``) is not enough to tell the three
+        # bottleneck convs apart.
+        best: dict[str, Any] | None = None
+        best_score = 0
+        for path, capture in by_path.items():
+            if path == prefix:
+                continue
+            if prefix is not None and not path.startswith(prefix + "."):
+                continue
+            score = _suffix_score(path, ident)
+            if score <= 0 or score < best_score:
+                continue
+            leaf = path.rsplit(".", 1)[-1]
+            # ``convolution`` alone is shared by every bottleneck conv. The
+            # index in front of it is what makes the match.
+            if score == 1 and (leaf.isdigit() or leaf in _AMBIGUOUS_META_LEAVES):
+                continue
+            if score == best_score:
+                continue
+            best, best_score = capture, score
+        return best
+
+    nodes = [node for node in graph.get("nodes", []) if isinstance(node, dict)]
+    for node in nodes:
         attrs = node.get("attrs")
         if not isinstance(attrs, list):
             continue
-        op_type = _attr(attrs, "op_type")
-        class_name = _attr(attrs, "class_name")
-        # The tile label may be a stage banner ("stage 1 · Conv2d"). The conv
-        # class is what roofline and shape matching key on.
+        meta = _attr(attrs, "meta_path")
+        prefix = meta["value"] if meta is not None else None
+        synthetic = _attr(attrs, "synthetic")
         kind = None
+        class_name = _attr(attrs, "class_name")
+        op_type = _attr(attrs, "op_type")
         if class_name is not None and class_name.get("value") in _CONV_OP_TYPES:
             kind = class_name["value"]
         elif op_type is not None and op_type.get("value") in _CONV_OP_TYPES:
             kind = op_type["value"]
-        if kind is None:
+        # A permute's axes are on the node. Stamping a module output onto it
+        # would freeze the channels-last and channels-first layouts together.
+        if str(node.get("label") or "") == "Permute":
             continue
-        node_id = str(node.get("id", "")).lower()
-        leaf = next((name for name in conv_leaves if name in node_id), None)
-        meta_path = _attr(attrs, "meta_path")
-        prefix = meta_path["value"] if meta_path is not None else None
-        match = next(
-            (capture for capture in captures if _matches(capture, prefix, leaf)),
-            None,
-        )
-        if match is None:
+        if synthetic is not None and prefix in by_path:
+            match = by_path[prefix]
+            which = (
+                "input_shape" if synthetic.get("value") == "@input" else "output_shape"
+            )
+        else:
+            match = _best(str(node.get("id", "")).lower(), prefix)
+            # A leading conv's meta path IS the module. No descendant carries
+            # the geometry, so the section node takes the module itself.
+            if match is None and kind is not None and prefix in by_path:
+                match = by_path[prefix]
+            which = "output_shape"
+        if match is None or not match.get(which):
             continue
-        _set(attrs, "op_type", kind)
-        dtype = "float32"
-        current = _attr(attrs, "output_shape")
-        if current is not None and " " in str(current.get("value", "")):
-            # Keep a real float dtype (bf16/fp16); never a token int64 placeholder.
-            existing_dtype = str(current["value"]).rsplit(" ", 1)[-1]
-            if "float" in existing_dtype or existing_dtype.startswith(("bf", "fp")):
-                dtype = existing_dtype
-        _set(
-            attrs,
-            "output_shape",
-            f"[{', '.join(_dims(match['output_shape']))}] {dtype}",
-        )
-        if match.get("input_shape"):
+        dtype = str(match.get("dtype") or "float32")
+        if "int" in dtype:
+            dtype = "float32"
+        _set(attrs, "output_shape", _shape_text(match[which], dtype))
+        if which == "output_shape" and match.get("input_shape"):
             _set(attrs, "input_shapes", json.dumps([_dims(match["input_shape"])]))
-        if _attr(attrs, "details") is None and match.get("weight_shape"):
+        if kind is not None:
+            _set(attrs, "op_type", kind)
+        if match.get("weight_shape"):
             weight = ", ".join(str(int(dim)) for dim in match["weight_shape"])
             bias = 1 if match.get("bias") else 0
             transposed = 1 if match.get("transposed") else 0
-            _set(
-                attrs,
-                "details",
-                (
-                    f"conv_weight=[{weight}]; conv_bias={bias}; "
-                    f"conv_transposed={transposed}"
-                ),
-            )
+            details = _attr(attrs, "details")
+            if details is None or "conv_weight=" not in str(details.get("value")):
+                _set(
+                    attrs,
+                    "details",
+                    (
+                        f"conv_weight=[{weight}]; conv_bias={bias}; "
+                        f"conv_transposed={transposed}"
+                    ),
+                )
+
+    by_id = {str(node.get("id")): node for node in nodes}
+
+    def _concrete(node: dict[str, Any]) -> str | None:
+        attrs = node.get("attrs")
+        if not isinstance(attrs, list):
+            return None
+        current = _attr(attrs, "output_shape")
+        if current is None:
+            return None
+        text = str(current.get("value") or "")
+        if " S" in text or text.endswith("int64") or text.startswith("[1]"):
+            return None
+        if text.count(",") < 2:
+            return None
+        return text
+
+    def _permute_dims(attrs: list[dict[str, str]]) -> list[int] | None:
+        for key in ("raw_op", "details"):
+            item = _attr(attrs, key)
+            text = str(item.get("value") or "") if item is not None else ""
+            marker = "permute dims:" if "permute dims:" in text else "dims:"
+            if marker not in text:
+                continue
+            text = text.split(marker, 1)[1].split(";", 1)[0]
+            try:
+                return [int(part.strip()) for part in text.split(",") if part.strip()]
+            except ValueError:
+                return None
+        return None
+
+    def _permuted(text: str, dims: list[int]) -> str | None:
+        head, sep, tail = text.partition("]")
+        if not sep or not head.startswith("["):
+            return None
+        axes = [part.strip() for part in head[1:].split(",")]
+        if len(dims) != len(axes) or any(
+            index >= len(axes) or index < 0 for index in dims
+        ):
+            return None
+        return "[" + ", ".join(axes[index] for index in dims) + "]" + tail
+
+    for _pass in range(6):
+        changed = False
+        for node in nodes:
+            label = str(node.get("label") or "")
+            attrs = node.get("attrs")
+            if not isinstance(attrs, list):
+                continue
+            synthetic = _attr(attrs, "synthetic")
+            mirror = synthetic is not None and str(synthetic.get("value")) in {
+                "@output_mirror",
+                "@input_mirror",
+            }
+            if label == "Permute":
+                dims = _permute_dims(attrs)
+                sources = [
+                    _concrete(by_id[str(edge.get("sourceNodeId"))])
+                    for edge in node.get("incomingEdges") or []
+                    if str(edge.get("sourceNodeId")) in by_id
+                ]
+                sources = [shape for shape in sources if shape]
+                if dims is None or len(sources) != 1:
+                    continue
+                updated = _permuted(sources[0], dims)
+                current = _attr(attrs, "output_shape")
+                if updated and (current is None or current.get("value") != updated):
+                    _set(attrs, "output_shape", updated)
+                    changed = True
+                continue
+            if label not in _SHAPE_PRESERVING_LABELS and not mirror:
+                continue
+            incoming = [
+                _concrete(by_id[str(edge.get("sourceNodeId"))])
+                for edge in node.get("incomingEdges") or []
+                if str(edge.get("sourceNodeId")) in by_id
+            ]
+            incoming = [shape for shape in incoming if shape]
+            if not incoming:
+                continue
+            if any(shape != incoming[0] for shape in incoming):
+                # A scale multiply: keep the activation, not the rank-1 factor.
+                if label != "Multiply":
+                    continue
+                ranked = sorted(incoming, key=lambda shape: shape.count(","))
+                if ranked[-1].count(",") < 2:
+                    continue
+                incoming = [ranked[-1]]
+            current = _attr(attrs, "output_shape")
+            if current is not None and current.get("value") == incoming[0]:
+                continue
+            _set(attrs, "output_shape", incoming[0])
+            changed = True
+        if not changed:
+            break
 
 
 def build_model_explorer_payload(

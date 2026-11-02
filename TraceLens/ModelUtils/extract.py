@@ -1730,6 +1730,7 @@ def _build_nested_groups(groups: list[MetaModuleGroup]) -> list[RepeatedGroup]:
             label="",
             signatures=representative.signatures,
             element_classes=representative.element_classes,
+            descriptors=representative.descriptors,
         )
 
     roots: list[RepeatedGroup] = []

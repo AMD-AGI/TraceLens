@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from dataclasses import dataclass, field
 from math import prod
 from typing import Any
@@ -257,9 +258,11 @@ _REDUCTION_COMPUTATIONS = frozenset(
     }
 )
 
-# A node's instance count is the innermost ``"<N>x_..."`` repeat-count
-# namespace segment around it -- the merged graph's own per-variant tile count.
-_REPEAT_NAMESPACE_SEGMENT = re.compile(r"^(\d+)x(?:_|$)")
+# A node's instance count is the innermost repeat-count namespace segment
+# around it. A uniform stack is ``45x_DecoderLayer``. A non-uniform stage is
+# ``s2_27x_ConvNextLayer``: the stage index keeps the containers distinct, and
+# the count is the digits before ``x_``.
+_REPEAT_NAMESPACE_SEGMENT = re.compile(r"^(?:s\d+_)?(\d+)x(?:_|$)")
 
 # Ids this synthetic/boundary-marker prefix never carries real computation --
 # an @input/@output port marker or a collective TraceLens inserted for a
@@ -423,6 +426,7 @@ def project_roofline(
     seq_len: int,
     extra_dims: dict[str, int] | None = None,
     gpu_arch: dict[str, Any] | None = None,
+    checkpoint: str | Path | None = None,
 ) -> RooflineProjection:
     """Project a kernel-by-kernel roofline for *spec* at a concrete batch/seq length.
 
@@ -438,7 +442,13 @@ def project_roofline(
     moe_top_k = spec.num_experts_per_tok
     moe_intermediate_size = spec.moe_intermediate_size or spec.intermediate_size
     payload = build_model_explorer_payload(
-        spec, basic_ops=build_roofline_basic_ops(), include_shapes=True
+        spec,
+        basic_ops=build_roofline_basic_ops(),
+        include_shapes=True,
+        # The nested stage tree and the concrete spatial shapes are read off a
+        # meta-device module. Without the checkpoint the projection builds the
+        # uniform-stack graph and a CNN's stage body never appears.
+        meta_shapes_checkpoint=str(checkpoint) if checkpoint else None,
     )
     graphs = payload["graphCollections"][0]["graphs"]
     nodes = graphs[0]["nodes"] if graphs else []
@@ -460,7 +470,7 @@ def project_roofline(
             role,
             details,
         ) = parsed
-        instances = _repeat_count(str(node.get("namespace") or ""))
+        instances = _repeat_count(str(node.get("namespace") or ""), node)
         result.ops.append(
             _project_op(
                 str(node.get("id")),
@@ -482,8 +492,17 @@ def project_roofline(
     return result
 
 
-def _repeat_count(namespace: str) -> int:
-    """The innermost ``"<N>x_..."`` tile-repeat count in *namespace*, or 1."""
+def _repeat_count(namespace: str, node: dict[str, Any] | None = None) -> int:
+    """How many times the exported node stands for a live module.
+
+    A ``repeat_count`` attr wins. The stage body stamps its depth there, and a
+    submodule that exists only on the first element (a ResNet projection
+    shortcut) stamps ``1`` so the stage depth does not multiply it. Otherwise
+    the innermost ``{N}x_`` / ``s{stage}_{N}x_`` namespace segment, or 1.
+    """
+    stamped = _attr_text((node or {}).get("attrs"), "repeat_count")
+    if stamped and str(stamped).isdigit():
+        return int(stamped)
     count = 1
     for segment in namespace.split("/"):
         match = _REPEAT_NAMESPACE_SEGMENT.match(segment)

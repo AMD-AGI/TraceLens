@@ -105,3 +105,45 @@ def test_stages_are_labeled_and_downsampling_convs_lead_them():
     norm_node = next(node for node in nodes if node["id"] == norm)
     assert [edge["sourceNodeId"] for edge in conv_node["incomingEdges"]] == [norm]
     assert norm_node["label"] == "stage 1 · ConvNextLayerNorm"
+
+
+def test_stage_namespace_counts_as_its_depth_and_a_shortcut_once():
+    from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
+        _repeat_count,
+    )
+
+    assert _repeat_count("encoder/s2_27x_ConvNextLayer/dwconv") == 27
+    assert _repeat_count("45x_DecoderLayer/attn") == 45
+    shortcut = {"attrs": [{"key": "repeat_count", "value": "1"}]}
+    assert _repeat_count("encoder/s0_3x_ResNetBottleNeckLayer/shortcut", shortcut) == 1
+
+
+def test_a_sequential_body_expands_into_the_live_children():
+    import ast
+
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure
+    from TraceLens.ModelUtils.block_tree import build_block_node
+
+    def cls(name, calls, assignments):
+        return ClassStructure(
+            name=name,
+            node=ast.parse(f"class {name}:\n    pass").body[0],
+            init_assignments=assignments,
+            init_details={},
+            forward_calls=calls,
+            norm_before=[],
+        )
+
+    tree = build_block_node(
+        attr_name="Bottle",
+        class_name="Bottle",
+        registry={
+            "Bottle": cls("Bottle", ["layer"], {"layer": "Sequential"}),
+            "Conv2d": cls("Conv2d", [], {}),
+        },
+        basic_ops=BasicOpFilter.for_roofline(),
+        infer_init_steps=True,
+        class_overrides={"layer.0": "Conv2d", "layer.1": "Conv2d", "layer.2": "Conv2d"},
+    )
+    convs = [child for child in tree.children if child.class_name == "Conv2d"]
+    assert [child.attr_name for child in convs] == ["layer.0", "layer.1", "layer.2"]

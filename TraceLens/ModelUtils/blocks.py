@@ -80,6 +80,12 @@ class RepeatedGroup:
     # and must be emitted element by element, not as N× the first class. Empty
     # when the walk only recorded ``element_class``; those groups stay uniform.
     element_classes: tuple[str, ...] = ()
+    # One structural descriptor per element (dotted path, class), from the live
+    # module. The first element is the representative the graph expands; later
+    # elements say which attrs exist only on that first element (a ResNet
+    # projection shortcut) and which stage-level modules are not repeated
+    # (Swin's patch merging).
+    descriptors: tuple[tuple[tuple[str, str], ...], ...] = ()
 
 
 @dataclass

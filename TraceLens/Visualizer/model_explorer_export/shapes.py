@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
+from TraceLens.ModelUtils.ast_analyze import PHI_CLASS, PHI_LABEL
 from TraceLens.ModelUtils.block_tree import BlockNode
 from TraceLens.ModelUtils.shape_inference import (
     DimExpr,
@@ -1099,6 +1100,15 @@ def group_boundary_shapes(nodes: list[dict[str, Any]]) -> dict[str, dict[str, st
     return attributes
 
 
+def _is_phi(node: dict[str, Any]) -> bool:
+    if node.get("label") == PHI_LABEL:
+        return True
+    return any(
+        attr.get("key") == "class_name" and attr.get("value") == PHI_CLASS
+        for attr in node.get("attrs", [])
+    )
+
+
 def widen_broadcast_results(nodes: list[dict[str, Any]]) -> None:
     """Replace a broadcast result that is narrower than its operands.
 
@@ -1137,6 +1147,21 @@ def widen_broadcast_results(nodes: list[dict[str, Any]]) -> None:
             )
             if operation in _BROADCASTING_OPS:
                 updated = _fallback_node_spec(node, sources)
+            elif _is_phi(node):
+                # A phi forwards an arm. A rank-1 parameter that also reaches
+                # it is not a shape the branch produces.
+                arms = [
+                    spec
+                    for _port, spec in sources
+                    if spec.shape and 0 not in tuple(spec.shape)
+                ]
+                if not arms:
+                    continue
+                if current is not None and tuple(current.shape) in {
+                    tuple(spec.shape) for spec in arms
+                }:
+                    continue
+                updated = max(arms, key=lambda spec: len(tuple(spec.shape)))
             elif shape_preserving:
                 source_spec = sources[0][1]
                 updated = TensorSpec(

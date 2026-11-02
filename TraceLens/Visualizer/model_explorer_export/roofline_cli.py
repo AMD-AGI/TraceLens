@@ -304,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         seq_len=args.seq_len,
         extra_dims=extra_dims,
         gpu_arch=gpu_arch,
+        checkpoint=checkpoint,
     )
 
     # Convolutional models: the graph draws one conv per stage (and the stem /

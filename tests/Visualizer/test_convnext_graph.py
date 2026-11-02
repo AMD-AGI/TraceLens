@@ -43,8 +43,7 @@ def _attr(node, key):
 @pytest.fixture(scope="module")
 def convnext_export():
     # Use the roofline/export loader (leaf-op basic_ops) -- the real path this
-    # feature serves. (Full `detailed=True` diagram expansion hits a pre-existing,
-    # unrelated ConvNeXt recursion in the diagram machinery.)
+    # feature serves.
     try:
         args = build_parser().parse_args([CHECKPOINT])
         spec = load_architecture_spec_from_args(CHECKPOINT, args)
@@ -127,3 +126,11 @@ def test_convolutions_carry_concrete_per_stage_spatial_shapes(convnext_nodes):
             if slug in k and "downsampling" in k and "Conv2d" in k
         )
         assert value.startswith(prefix), f"downsample {slug}: {value!r} != {prefix}"
+    # The conv's own boundary used to stay on the text-model shape.
+    boundary = next(
+        node
+        for node in convnext_nodes
+        if "s1_downsampling_layer_1_Conv2d" in (node.get("id") or "")
+        and _attr(node, "synthetic") == "@output"
+    )
+    assert _attr(boundary, "output_shape").startswith("[B, 256, 28, 28]")

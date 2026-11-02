@@ -61,11 +61,43 @@ def test_resnet50_stages_render_with_per_stage_labels(resnet_export):
     body = payload["tracelensViewer"]["factSheet"]["body"]
     assert "Stages: 4× ResNetStage" in body
     assert "stage 2: 6× ResNetBottleNeckLayer" in body
-    # The stem convolution leads the encoder (embeddings), distinct from the stages.
+    # The stem convolution leads the encoder, and each bottleneck's three convs
+    # are nodes — not one opaque Sequential. The stem's shape is spatial.
     convs = []
     for node in graph["nodes"]:
+        attrs = {
+            item.get("key"): item.get("value")
+            for item in node.get("attrs") or []
+            if isinstance(item, dict)
+        }
+        if attrs.get("op_type") == "Conv2d":
+            convs.append((node["id"], attrs))
+    assert any("embed" in node_id for node_id, _attrs in convs)
+    assert any(
+        "layer" in node_id and "convolution" in node_id for node_id, _attrs in convs
+    )
+    stem = next(attrs for node_id, attrs in convs if "embed" in node_id)
+    assert stem["output_shape"].startswith("[B, 64, 112, 112]")
+    assert "conv_weight=" in (stem.get("details") or "")
+
+    # The stage depth multiplies the bottleneck body. The projection shortcut
+    # exists on the first block only, so it is counted once.
+    def _repeat(node_id: str) -> str | None:
+        node = next(node for node in graph["nodes"] if node["id"] == node_id)
         for item in node.get("attrs") or []:
-            if item.get("key") == "op_type" and item.get("value") == "Conv2d":
-                convs.append(node["id"])
-                break
-    assert any("embed" in node_id for node_id in convs)
+            if item.get("key") == "repeat_count":
+                return item.get("value")
+        return None
+
+    body = next(
+        node_id
+        for node_id, _attrs in convs
+        if "s2_6x_" in node_id and "shortcut" not in node_id
+    )
+    shortcut = next(
+        node_id
+        for node_id, _attrs in convs
+        if "s0_" in node_id and "shortcut" in node_id
+    )
+    assert _repeat(body) == "6"
+    assert _repeat(shortcut) == "1"

@@ -641,7 +641,7 @@ def conv_geometry_detail(module: Any) -> str | None:
     return f"conv_weight=[{shape}]; conv_bias={bias}; conv_transposed={transposed}"
 
 
-def _meta_main_input(model: Any, config: Any, batch_size: int):
+def _meta_main_input(model: Any, config: Any, batch_size: int, seq_len: int = 128):
     """Build the meta-device dummy for a model's ``main_input_name``.
 
     A vision model's ``main_input_name`` is ``pixel_values`` and its forward
@@ -657,7 +657,7 @@ def _meta_main_input(model: Any, config: Any, batch_size: int):
             (size[0], size[-1]) if isinstance(size, (list, tuple)) else (size, size)
         )
         return {name: torch.zeros(batch_size, channels, height, width, device="meta")}
-    return torch.zeros(batch_size, 128, dtype=torch.long, device="meta")
+    return torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
 
 
 def trace_meta_conv_ops(
@@ -739,6 +739,79 @@ def trace_meta_conv_ops(
     return captured or None
 
 
+def trace_meta_module_io(
+    checkpoint: str | Path,
+    *,
+    batch_size: int = 1,
+) -> list[dict[str, Any]] | None:
+    """Per-module concrete input and output shapes from one meta forward.
+
+    Each entry is ``{path, input_shape, output_shape, dtype}``. A convolution
+    also carries ``weight_shape``, ``bias``, and ``transposed``, the geometry
+    the static CONV formula needs. Vision models are fed ``pixel_values``; a
+    text model still gets token ids. Returns *None* when nothing was captured.
+    """
+    try:
+        import torch
+        from torch.nn.modules.conv import _ConvNd
+    except ImportError:
+        return None
+    result = _instantiate_meta_robust(checkpoint)
+    if result is None:
+        return None
+    model, cfg = result
+    try:
+        from TraceLens.ModelUtils.torch_trace import _patch_rotary_embeddings
+
+        _patch_rotary_embeddings(model)
+    except Exception:  # noqa: BLE001
+        pass
+
+    captured: list[dict[str, Any]] = []
+
+    def _make_hook(path: str, module: Any):
+        def hook(_module, inputs, output):
+            try:
+                out_shape = _tensor_shape_from_output(output)
+                if out_shape is None:
+                    return
+                in_shape = _tensor_shape_from_output(inputs[0]) if inputs else None
+                dtype = getattr(output, "dtype", None)
+                entry: dict[str, Any] = {
+                    "path": path,
+                    "input_shape": list(in_shape) if in_shape else None,
+                    "output_shape": list(out_shape),
+                    "dtype": str(dtype).replace("torch.", "") if dtype else "float32",
+                }
+                weight = getattr(module, "weight", None)
+                if isinstance(module, _ConvNd) and weight is not None:
+                    entry["weight_shape"] = [int(d) for d in tuple(weight.shape)]
+                    entry["bias"] = getattr(module, "bias", None) is not None
+                    entry["transposed"] = bool(getattr(module, "transposed", False))
+                captured.append(entry)
+            except Exception:
+                pass
+
+        return hook
+
+    handles = [
+        mod.register_forward_hook(_make_hook(name, mod))
+        for name, mod in model.named_modules()
+    ]
+    if not handles:
+        return None
+    try:
+        dummy = _meta_main_input(model, cfg, batch_size)
+        with torch.no_grad():
+            model(**dummy) if isinstance(dummy, dict) else model(dummy)
+    except Exception:
+        pass
+    finally:
+        for handle in handles:
+            handle.remove()
+    return captured or None
+
+
 def trace_meta_shapes(
     checkpoint: str | Path,
     config: dict[str, Any] | None = None,
@@ -812,9 +885,9 @@ def trace_meta_shapes(
 
     # ---- run forward pass --------------------------------------------------
     try:
-        dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
+        dummy = _meta_main_input(model, _config, batch_size, seq_len=seq_len)
         with torch.no_grad():
-            model(dummy)
+            model(**dummy) if isinstance(dummy, dict) else model(dummy)
     except Exception:
         # Meta tensors fail on data-dependent ops (nonzero, item, etc.).
         # Hooks fire *before* the failing op, so we keep partial results.
@@ -933,10 +1006,12 @@ def trace_meta_input_specs(
         mod.register_forward_pre_hook(_make_hook(mod), with_kwargs=True)
         for _name, mod in model.named_modules()
     ]
+    token_input = True
     try:
-        dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
+        dummy = _meta_main_input(model, _config, batch_size, seq_len=seq_len)
+        token_input = not isinstance(dummy, dict)
         with torch.no_grad():
-            model(dummy)
+            model(**dummy) if isinstance(dummy, dict) else model(dummy)
     except Exception:
         # Meta tensors fail on data-dependent ops; pre-hooks already fired for
         # every module reached before the failure (incl. the sparse indexer).
@@ -952,16 +1027,18 @@ def trace_meta_input_specs(
     masked: dict[str, set[tuple[tuple[Any, ...], str]]] = {}
     masked_by_class: dict[tuple[str, str], set[tuple[tuple[Any, ...], str]]] = {}
     target["global"], target["by_class"] = masked, masked_by_class
-    try:
-        dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
-        mask = torch.ones(batch_size, seq_len, dtype=torch.long, device="meta")
-        with torch.no_grad():
-            model(dummy, attention_mask=mask)
-    except Exception:
-        pass
-    finally:
-        for handle in handles:
-            handle.remove()
+    # A vision forward takes pixel_values, not token ids. Feeding it an
+    # attention mask records nothing and can clobber the image input shapes.
+    if token_input:
+        try:
+            dummy = torch.zeros(batch_size, seq_len, dtype=torch.long, device="meta")
+            mask = torch.ones(batch_size, seq_len, dtype=torch.long, device="meta")
+            with torch.no_grad():
+                model(dummy, attention_mask=mask)
+        except Exception:
+            pass
+    for handle in handles:
+        handle.remove()
     for param, values in masked.items():
         observed.setdefault(param, values)
     for class_key, values in masked_by_class.items():
