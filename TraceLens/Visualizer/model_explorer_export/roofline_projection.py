@@ -669,9 +669,7 @@ def _persistent_state_ops(
                         modeled=True,
                         reason=None,
                         output_elements=elements,
-                        instances=_repeat_count(
-                            str(node.get("namespace") or ""), node
-                        ),
+                        instances=_repeat_count(str(node.get("namespace") or ""), node),
                         flops=0.0,
                         bytes=bytes_moved,
                         roofline_time_us=roofline_time_us,

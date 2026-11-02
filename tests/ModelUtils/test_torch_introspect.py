@@ -136,9 +136,7 @@ def test_explorer_graph_preserves_structured_persistent_state_metadata():
             dtype="bfloat16",
             state_writes=("cache.0", "auxiliary"),
         ),
-        FxNodeInfo(
-            name="out", op="output", label="Output", inputs=["next_state"]
-        ),
+        FxNodeInfo(name="out", op="output", label="Output", inputs=["next_state"]),
     ]
 
     nodes = {

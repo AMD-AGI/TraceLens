@@ -90,7 +90,7 @@ def test_persistent_state_ops_cost_traced_reads_and_writes_independently():
                 {"key": "state_write", "value": "auxiliary_state"},
                 {"key": "output_shape", "value": "[B, H, 2*D] bfloat16"},
             ],
-        }
+        },
     ]
 
     ops = _persistent_state_ops(nodes, {"B": 2, "H": 8, "D": 16}, _ARCH)
