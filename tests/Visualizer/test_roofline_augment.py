@@ -10,14 +10,19 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from TraceLens.Visualizer.model_explorer_export.roofline_augment import (
     achieved_from_measurement,
     augment,
+    augment_phases,
     classify_kernel,
     merge_into_priority_data,
+    phase_argvs,
     report_notes,
     summarize_projection,
 )
+from TraceLens.Visualizer.model_explorer_export.roofline_cli import build_parser
 from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     RooflineOp,
     RooflineProjection,
@@ -247,3 +252,175 @@ def test_merge_into_priority_data_is_additive(tmp_path):
     assert f0["members"][0]["efficiency_pct"] is None
     # Non-matching finding is untouched.
     assert "roofline" not in f1
+
+
+def _attention_summary(bound, ai):
+    return {
+        "bound": bound,
+        "arithmetic_intensity": ai,
+        "roofline_us_per_gpu": 1705.0 if bound == "MEMORY_BOUND" else 4000.0,
+        "flops": 1.0,
+        "bytes": 1.0,
+        "flops_per_invocation": 0.0,
+        "bytes_per_invocation": 1.0e9,
+        "vs_ridge": "below",
+    }
+
+
+def test_augment_phases_omits_achieved_when_time_is_not_split(tmp_path):
+    cat_dir = tmp_path / "category_data"
+    cat_dir.mkdir()
+    (cat_dir / "other_metrics.json").write_text(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "kernel_name": "_inkling_rel_attention_kernel.kd",
+                        "time_ms": 8000.0,
+                        "count": 528,
+                        "impact_estimate_method": "heuristic",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    arch = {"peak_tflops": 1445.0, "mem_bw_gbps": 7200.0}
+    payload = augment_phases(
+        tmp_path,
+        [
+            {
+                "summary": {"Attention": _attention_summary("MEMORY_BOUND", 8.0)},
+                "regime": {"phase": "decode", "batch_size": 32, "seq_len": 1},
+                "ridge": 200.7,
+                "arch": arch,
+            },
+            {
+                "summary": {"Attention": _attention_summary("COMPUTE_BOUND", 200.0)},
+                "regime": {"phase": "prefill", "batch_size": 1, "seq_len": 8192},
+                "ridge": 200.7,
+                "arch": arch,
+            },
+        ],
+    )
+    assert [entry["kernel"] for entry in payload["entries"]] == [
+        "_inkling_rel_attention_kernel.kd"
+    ]
+    entry = payload["entries"][0]
+    assert [phase["phase"] for phase in entry["phases"]] == ["decode", "prefill"]
+    assert entry["achieved"] is None
+    assert "decode" in entry["note"] and "prefill" in entry["note"]
+    assert "no achieved-%" in entry["note"]
+
+
+def test_merge_attaches_the_matching_phase(tmp_path):
+    operation = "hipModuleLaunchKernel->_inkling_rel_attention_kernel.kd"
+    (tmp_path / "priority_data.json").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "phase": "decode",
+                        "estimate_method": "heuristic",
+                        "members": [{"operation": operation}],
+                    },
+                    {
+                        "phase": "prefill",
+                        "estimate_method": "heuristic",
+                        "members": [{"operation": operation}],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = [
+        {
+            "kernel": "_inkling_rel_attention_kernel.kd",
+            "roofline_category": "Attention",
+            "bound": "MEMORY_BOUND",
+            "arithmetic_intensity": 8.0,
+            "roofline_us_per_gpu": 1705.0,
+            "achieved": None,
+            "note": "> combined",
+            "phases": [
+                {
+                    "phase": "decode",
+                    "bound": "MEMORY_BOUND",
+                    "arithmetic_intensity": 8.0,
+                    "roofline_us_per_gpu": 1705.0,
+                    "achieved": {"pct_of_peak": 1.3, "ceiling": "memory bandwidth"},
+                    "note": "> decode note",
+                },
+                {
+                    "phase": "prefill",
+                    "bound": "COMPUTE_BOUND",
+                    "arithmetic_intensity": 200.0,
+                    "roofline_us_per_gpu": 4000.0,
+                    "achieved": {"pct_of_peak": 12.0, "ceiling": "compute peak"},
+                    "note": "> prefill note",
+                },
+            ],
+        }
+    ]
+    assert merge_into_priority_data(tmp_path, entries) == 2
+    decode, prefill = json.loads((tmp_path / "priority_data.json").read_text())[
+        "findings"
+    ]
+    assert decode["roofline"]["bound"] == "MEMORY_BOUND"
+    assert decode["roofline"]["phase"] == "decode"
+    assert decode["roofline"]["note"] == "> decode note"
+    assert decode["estimate_method"] == "heuristic"
+    assert prefill["roofline"]["bound"] == "COMPUTE_BOUND"
+    assert prefill["roofline"]["note"] == "> prefill note"
+
+
+def test_phase_argvs_skips_unresolved_and_builds_one_argv_per_phase():
+    assert (
+        phase_argvs(
+            {
+                "source": None,
+                "phases": [{"phase": "decode", "batch_size": 1, "seq_len": 1}],
+            }
+        )
+        == []
+    )
+    assert phase_argvs({"source": "org/model", "phases": []}) == []
+    argvs = phase_argvs(
+        {
+            "source": "org/model",
+            "engine": "vllm",
+            "tp": 8,
+            "pp": 1,
+            "ep": 2,
+            "gpu_arch_name": "MI300X",
+            "phases": [
+                {
+                    "phase": "decode",
+                    "batch_size": 32,
+                    "seq_len": 1,
+                    "dims": {"past_len": 65536},
+                },
+                {"phase": "prefill", "batch_size": 1, "seq_len": 8192},
+            ],
+        }
+    )
+    assert len(argvs) == 2
+    parsed = build_parser().parse_args(argvs[0])
+    assert parsed.source == "org/model"
+    assert parsed.phase == "decode"
+    assert parsed.batch_size == 32
+    assert parsed.seq_len == 1
+    assert parsed.tp == 8
+    assert parsed.ep == 2
+    assert parsed.engine == "vllm"
+    assert parsed.gpu_arch_name == "MI300X"
+    assert parsed.dim == ["past_len=65536"]
+    assert build_parser().parse_args(argvs[1]).phase == "prefill"
+    with pytest.raises(ValueError):
+        phase_argvs(
+            {
+                "source": "org/model",
+                "phases": [{"phase": "train", "batch_size": 1, "seq_len": 1}],
+            }
+        )

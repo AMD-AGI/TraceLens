@@ -13,29 +13,28 @@ bespoke kernels -- a custom attention or fused-MoE -- therefore fall through as
 "heuristic / unmodeled", and the orchestrator can only rank them by E2E
 GPU-time share, with no bound classification or roofline floor.
 
-This utility closes that gap *without* needing trace shapes, **deterministically**
-(a script, not an agent task): it runs TraceLens's model-explorer roofline
-(:func:`...roofline_cli.run_projection`), which derives op shapes from the model
-config, at the trace's runtime regime (decode/prefill, batch, context). It maps
-the dominant unmodeled kernel of each roofline category (Attention, MoE, ...) to
-the matching orchestrator finding by kernel name, then:
+This utility closes that gap *without* needing trace shapes. It runs TraceLens's
+model-explorer roofline (:func:`...roofline_cli.run_projection`), which derives
+op shapes from the model config, at one or more runtime regimes (decode/prefill,
+batch, context). It maps the dominant unmodeled kernel of each roofline category
+(Attention, MoE, ...) to the matching orchestrator finding by kernel name, then:
 
 - writes ``metadata/roofline_augmentation.json`` (the full record), and
-- **merges an additive ``roofline`` block onto the matching
-  ``priority_data.json::findings[]`` entry** (:func:`merge_into_priority_data`),
+- merges an additive ``roofline`` block onto the matching
+  ``priority_data.json::findings[]`` entry (:func:`merge_into_priority_data`),
   leaving every existing field untouched.
 
-Report generation renders ``finding.roofline.note`` verbatim from that data — it
-does not compute or interpret the roofline. Must run after Step 8.5
-(``generate_priority_data``), which regenerates ``priority_data.json``.
+The orchestrator does not invent the regime. A sub-agent writes
+``metadata/roofline_augment_args.json`` from the trace artifacts, and this
+script projects each phase in that file. A direct CLI remains for a single
+regime. Must run after Step 8.5 (``generate_priority_data``), which regenerates
+``priority_data.json``.
 
 CLI::
 
     python -m TraceLens.Visualizer.model_explorer_export.roofline_augment \\
       --output-dir <orchestrator_output_dir> \\
-      <checkpoint> --code-path <modeling.py> --engine vllm --tp 8 \\
-      --phase decode --batch-size 32 --seq-len 1 --dim past_len=65536 \\
-      --gpu-arch-json-path <platform>.json
+      --args-json <orchestrator_output_dir>/metadata/roofline_augment_args.json
 """
 
 from __future__ import annotations
@@ -243,16 +242,46 @@ def _note(
     )
 
 
-def _entry(
-    op: dict, kernel: str, roofline_cat: str, facts: dict, ridge, arch, regime
+def _is_modeled(op: dict) -> bool:
+    return (op.get("impact_estimate_method") or op.get("estimate_method")) == "modeled"
+
+
+def _kernel_name(op: dict) -> str:
+    return op.get("kernel_name") or op.get("name") or ""
+
+
+def _pick_dominant(ops: list[dict], categories: set[str]) -> dict[str, dict]:
+    """Highest-GPU-time unmodeled op per roofline category.
+
+    ``ops`` is already sorted by GPU time descending, so the first match wins.
+    Trace-modeled ops already carry a roofline and are skipped."""
+    picked: dict[str, dict] = {}
+    for op in ops:
+        if _is_modeled(op):
+            continue
+        category = classify_kernel(_kernel_name(op))
+        if category is None or category not in categories or category in picked:
+            continue
+        picked[category] = op
+    return picked
+
+
+def _phase_record(
+    op: dict, kernel: str, category: str, proj: dict, *, allow_achieved: bool
 ) -> dict:
-    achieved = achieved_from_measurement(
-        facts, op.get("time_ms"), op.get("count"), arch
+    facts = proj["summary"][category]
+    regime = proj["regime"]
+    achieved = (
+        achieved_from_measurement(
+            facts, op.get("time_ms"), op.get("count"), proj.get("arch")
+        )
+        if allow_achieved
+        else None
     )
     return {
-        "kernel": kernel,
-        "finding_category": op.get("_finding_category"),
-        "roofline_category": roofline_cat,
+        "phase": regime.get("phase"),
+        "batch_size": regime.get("batch_size"),
+        "seq_len": regime.get("seq_len"),
         "bound": facts["bound"],
         "arithmetic_intensity": facts["arithmetic_intensity"],
         "roofline_us_per_gpu": facts["roofline_us_per_gpu"],
@@ -261,46 +290,123 @@ def _entry(
         "measured_time_ms": op.get("time_ms"),
         "measured_count": op.get("count"),
         "achieved": achieved,
-        "note": _note(kernel, roofline_cat, facts, ridge, achieved, regime),
+        "note": _note(kernel, category, facts, proj.get("ridge"), achieved, regime),
     }
 
 
-def augment(
-    output_dir: Path,
-    summary: dict[str, dict],
-    regime: dict,
-    ridge: float | None,
-    arch: dict | None = None,
-) -> dict:
-    """Attach roofline facts to the dominant unmodeled trace kernel of each
-    roofline category.
+def _combined_note(category: str, phases: list[dict]) -> str:
+    """One blockquote covering every projected phase.
 
-    Only the single highest-GPU-time heuristic/unmodeled kernel per category is
-    augmented -- that is the one the orchestrator surfaces as a top finding and
-    the one the analytical roofline most directly explains. Trace-modeled ops
-    already carry a roofline and are skipped. When ``arch`` carries
-    ``peak_tflops``/``mem_bw_gbps``, each entry also reports the achieved
-    throughput (measured kernel time vs the config-derived FLOPs/bytes)."""
-    picked: dict[str, dict] = {}
-    for op in _dominant_ops(output_dir):  # already sorted by GPU time, desc
-        if (op.get("impact_estimate_method") or op.get("estimate_method")) == "modeled":
-            continue  # already roofline-modeled from the trace; nothing to add
-        kernel = op.get("kernel_name") or op.get("name") or ""
-        roofline_cat = classify_kernel(kernel)
-        if (
-            roofline_cat is None
-            or roofline_cat not in summary
-            or roofline_cat in picked
-        ):
-            continue
-        picked[roofline_cat] = _entry(
-            op, kernel, roofline_cat, summary[roofline_cat], ridge, arch, regime
+    Achieved % is omitted: the kernel's measured time is not split by phase,
+    so scoring it against one phase's shapes would mis-state the result."""
+    bits = []
+    for phase in phases:
+        ai = phase.get("arithmetic_intensity")
+        bound = (phase.get("bound") or "").replace("_", "-").lower() or "unclassified"
+        us = phase.get("roofline_us_per_gpu")
+        ai_txt = f"{ai:.1f} FLOP/byte" if ai is not None else "n/a"
+        us_txt = f", ~{us / 1000:.2f} ms/GPU roofline floor" if us else ""
+        bits.append(
+            f"**{phase.get('phase') or 'phase'}** {bound} (AI ≈ {ai_txt}{us_txt})"
         )
-    entries = list(picked.values())
+    return (
+        "> **Analytical roofline (model-explorer, config-derived):** the trace "
+        "carried no Input Dims for this kernel, so its shapes are taken from the "
+        "model config and costed with the same PerfModel roofline used elsewhere. "
+        f"Modeled as **{category}** at each captured phase — {'; '.join(bits)}. "
+        "Measured time is not split by phase, so no achieved-% is reported."
+    )
+
+
+def _finalize_entry(acc: dict) -> dict:
+    phases = acc["phases"]
+    primary = phases[0]
+    multi = len(phases) > 1
+    return {
+        **acc,
+        "bound": primary["bound"],
+        "arithmetic_intensity": primary["arithmetic_intensity"],
+        "roofline_us_per_gpu": primary["roofline_us_per_gpu"],
+        "flops": primary["flops"],
+        "bytes": primary["bytes"],
+        "measured_time_ms": primary["measured_time_ms"],
+        "measured_count": primary["measured_count"],
+        "achieved": None if multi else primary.get("achieved"),
+        "note": (
+            _combined_note(acc["roofline_category"], phases)
+            if multi
+            else primary["note"]
+        ),
+    }
+
+
+def augment_phases(output_dir: Path, projections: list[dict]) -> dict:
+    """Attach roofline facts for one or more projected regimes.
+
+    Each item of ``projections`` is ``{summary, regime, ridge, arch}``. Only the
+    highest-GPU-time unmodeled kernel per roofline category is augmented.
+
+    When the metrics ops carry a ``phase``, each regime is matched to the ops of
+    that phase and the achieved % uses that phase's measured time. When they do
+    not, every regime is attached to the same dominant kernel and the achieved %
+    is reported only for a single regime — a mixed capture's measured time is
+    not split by phase."""
+    ops = _dominant_ops(output_dir)
+    phased = any(op.get("phase") not in (None, "") for op in ops)
+    grouped: dict[str, dict] = {}
+
+    def add(op: dict, proj: dict, *, allow_achieved: bool) -> None:
+        category = classify_kernel(_kernel_name(op))
+        if category is None or category not in proj["summary"]:
+            return
+        kernel = _kernel_name(op)
+        record = _phase_record(
+            op, kernel, category, proj, allow_achieved=allow_achieved
+        )
+        acc = grouped.setdefault(
+            kernel,
+            {
+                "kernel": kernel,
+                "finding_category": op.get("_finding_category"),
+                "roofline_category": category,
+                "phases": [],
+            },
+        )
+        if any(existing.get("phase") == record["phase"] for existing in acc["phases"]):
+            return
+        acc["phases"].append(record)
+
+    if phased:
+        for proj in projections:
+            phase_name = str(proj["regime"].get("phase") or "").lower()
+            phase_ops = [
+                op for op in ops if str(op.get("phase") or "").lower() == phase_name
+            ]
+            for op in _pick_dominant(phase_ops, set(proj["summary"])).values():
+                add(op, proj, allow_achieved=True)
+    else:
+        categories: set[str] = set()
+        for proj in projections:
+            categories |= set(proj["summary"])
+        picked = _pick_dominant(ops, categories)
+        for category, op in picked.items():
+            covering = [proj for proj in projections if category in proj["summary"]]
+            # Achieved % divides one measured time by one phase's FLOPs/bytes.
+            # A kernel scored at two phases has no per-phase measured time.
+            for proj in covering:
+                add(op, proj, allow_achieved=len(covering) == 1)
+
+    entries = [_finalize_entry(acc) for acc in grouped.values()]
+    single = len(projections) == 1
     payload = {
-        "regime": regime,
-        "ridge_flops_per_byte": ridge,
-        "roofline_by_category": summary,
+        "regime": projections[0]["regime"] if single else None,
+        "regimes": [proj["regime"] for proj in projections],
+        "ridge_flops_per_byte": projections[0].get("ridge") if single else None,
+        "roofline_by_category": (
+            projections[0]["summary"]
+            if single
+            else [proj["summary"] for proj in projections]
+        ),
         "entries": entries,
     }
     meta = output_dir / "metadata"
@@ -312,18 +418,60 @@ def augment(
     return payload
 
 
+def augment(
+    output_dir: Path,
+    summary: dict[str, dict],
+    regime: dict,
+    ridge: float | None,
+    arch: dict | None = None,
+) -> dict:
+    """Attach one regime's roofline facts to the dominant unmodeled kernel of
+    each roofline category. See :func:`augment_phases`."""
+    return augment_phases(
+        output_dir,
+        [{"summary": summary, "regime": regime, "ridge": ridge, "arch": arch}],
+    )
+
+
+def _roofline_block(entry: dict, phase: dict | None = None) -> dict:
+    """An additive finding block. ``phase`` selects one regime of a multi-phase
+    entry; otherwise the entry's own (possibly combined) note is used."""
+    source = phase or entry
+    block = {
+        "source": "analytical-model-explorer",
+        "roofline_category": entry["roofline_category"],
+        "bound": source["bound"],
+        "arithmetic_intensity": source["arithmetic_intensity"],
+        "roofline_us_per_gpu": source["roofline_us_per_gpu"],
+        "achieved": source.get("achieved"),
+        "note": source["note"],
+    }
+    if phase is not None and phase.get("phase"):
+        block["phase"] = phase["phase"]
+    elif len(entry.get("phases") or []) > 1:
+        block["phases"] = [
+            {
+                "phase": item.get("phase"),
+                "bound": item["bound"],
+                "arithmetic_intensity": item["arithmetic_intensity"],
+                "roofline_us_per_gpu": item["roofline_us_per_gpu"],
+                "achieved": item.get("achieved"),
+            }
+            for item in entry["phases"]
+        ]
+    return block
+
+
 def merge_into_priority_data(output_dir: Path, entries: list[dict]) -> int:
-    """Deterministically fold each roofline entry into the matching
-    ``priority_data.json`` finding.
+    """Fold each roofline entry into the matching ``priority_data.json`` finding.
 
     Matches an entry to a finding by its kernel name appearing in a member's
-    ``operation`` string, then attaches an additive ``roofline`` block (bound,
-    arithmetic intensity, per-GPU floor, achieved throughput, pre-rendered note).
-    It leaves every existing field untouched -- in particular ``bound_type``,
-    ``efficiency_pct`` and ``estimate_method`` -- so nothing downstream
-    reclassifies the finding or trips the efficiency-anomaly check. Report
-    generation renders ``findings[i].roofline.note`` verbatim; no agent
-    interpretation is involved. Returns the number of findings annotated."""
+    ``operation`` string. A finding that carries a ``phase`` receives only the
+    matching phase; a finding with no phase receives the combined note. The
+    merge attaches an additive ``roofline`` block and leaves every existing
+    field untouched -- in particular ``bound_type``, ``efficiency_pct`` and
+    ``estimate_method``. Report generation renders ``findings[i].roofline.note``
+    verbatim. Returns the number of findings annotated."""
     path = output_dir / "priority_data.json"
     if not path.is_file() or not entries:
         return 0
@@ -332,23 +480,32 @@ def merge_into_priority_data(output_dir: Path, entries: list[dict]) -> int:
     merged = 0
     for entry in entries:
         kernel = entry["kernel"]
-        block = {
-            "source": "analytical-model-explorer",
-            "roofline_category": entry["roofline_category"],
-            "bound": entry["bound"],
-            "arithmetic_intensity": entry["arithmetic_intensity"],
-            "roofline_us_per_gpu": entry["roofline_us_per_gpu"],
-            "achieved": entry.get("achieved"),
-            "note": entry["note"],
-        }
+        phases = entry.get("phases") or []
         for finding in findings:
             if "roofline" in finding:
                 continue
             members = finding.get("members") or []
-            if any(kernel in str(m.get("operation", "")) for m in members):
-                finding["roofline"] = block
-                merged += 1
-                break
+            if not any(
+                kernel in str(member.get("operation", "")) for member in members
+            ):
+                continue
+            finding_phase = finding.get("phase")
+            if finding_phase and phases:
+                match = next(
+                    (
+                        phase
+                        for phase in phases
+                        if str(phase.get("phase") or "").lower()
+                        == str(finding_phase).lower()
+                    ),
+                    None,
+                )
+                if match is None:
+                    continue
+                finding["roofline"] = _roofline_block(entry, match)
+            else:
+                finding["roofline"] = _roofline_block(entry)
+            merged += 1
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return merged
 
@@ -373,6 +530,112 @@ def _ridge(gpu_arch: dict | None) -> float | None:
     return peak * 1e12 / (bw * 1e9)
 
 
+_PHASES = ("prefill", "decode")
+
+
+def phase_argvs(spec: dict) -> list[list[str]]:
+    """One roofline-CLI argv per phase in a ``roofline_augment_args`` spec.
+
+    Returns an empty list when ``source`` is missing or ``phases`` is empty:
+    the caller skips. Raises ``ValueError`` or ``TypeError`` when a present spec
+    is invalid.
+    """
+    source = spec.get("source")
+    phases = spec.get("phases") or []
+    if not source or not phases:
+        return []
+    if not isinstance(phases, list):
+        raise TypeError("phases must be a list")
+    base = [str(source)]
+    if spec.get("code_path"):
+        base += ["--code-path", str(spec["code_path"])]
+    if spec.get("engine"):
+        base += ["--engine", str(spec["engine"])]
+    for key, flag in (("tp", "--tp"), ("pp", "--pp"), ("ep", "--ep")):
+        if spec.get(key) is not None:
+            base += [flag, str(int(spec[key]))]
+    if spec.get("gpu_arch_name"):
+        base += ["--gpu-arch-name", str(spec["gpu_arch_name"])]
+    if spec.get("gpu_arch_json_path"):
+        base += ["--gpu-arch-json-path", str(spec["gpu_arch_json_path"])]
+    argvs = []
+    for phase in phases:
+        if not isinstance(phase, dict):
+            raise TypeError("each phase must be an object")
+        name = str(phase.get("phase") or "")
+        if name not in _PHASES:
+            raise ValueError(f"phase must be prefill or decode, got {name!r}")
+        try:
+            batch = int(phase["batch_size"])
+            seq = int(phase["seq_len"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"phase {name} needs integer batch_size and seq_len"
+            ) from exc
+        argv = base + [
+            "--phase",
+            name,
+            "--batch-size",
+            str(batch),
+            "--seq-len",
+            str(seq),
+        ]
+        dims = phase.get("dims") or {}
+        if not isinstance(dims, dict):
+            raise TypeError("phase dims must be an object")
+        for key, value in dims.items():
+            argv += ["--dim", f"{key}={int(value)}"]
+        argvs.append(argv)
+    return argvs
+
+
+def _projection_record(proj_args, projection, gpu_arch) -> dict:
+    ridge = _ridge(gpu_arch)
+    return {
+        "summary": summarize_projection(projection, proj_args.tp, ridge),
+        "regime": {
+            "phase": proj_args.phase,
+            "batch_size": proj_args.batch_size,
+            "seq_len": proj_args.seq_len,
+            "dims": dict(item.split("=", 1) for item in (proj_args.dim or [])),
+            "tp": proj_args.tp,
+            "pp": proj_args.pp,
+            "ep": proj_args.ep,
+            "engine": proj_args.engine,
+        },
+        "ridge": ridge,
+        "arch": {
+            "peak_tflops": (
+                (gpu_arch.get("max_achievable_tflops") or {}).get("matrix_bf16")
+                if gpu_arch
+                else None
+            ),
+            "mem_bw_gbps": gpu_arch.get("mem_bw_gbps") if gpu_arch else None,
+        },
+    }
+
+
+def _report(output_dir: Path, payload: dict) -> None:
+    categories = payload.get("roofline_by_category")
+    n_categories = len(categories) if isinstance(categories, dict) else 0
+    if not n_categories:
+        n_categories = len({e["roofline_category"] for e in payload["entries"]})
+    print(
+        f"Wrote {output_dir / 'metadata' / 'roofline_augmentation.json'}: "
+        f"{len(payload['entries'])} kernel(s) augmented across "
+        f"{n_categories} roofline categor(ies)."
+    )
+    for entry in payload["entries"]:
+        ai = entry["arithmetic_intensity"]
+        print(
+            f"  {entry['kernel']}: {entry['roofline_category']} {entry['bound']} "
+            f"AI={ai:.1f} FLOP/byte  "
+            f"~{(entry['roofline_us_per_gpu'] or 0) / 1000:.2f} ms/GPU"
+            if ai is not None
+            else f"  {entry['kernel']}: {entry['roofline_category']} {entry['bound']}"
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     # Import here so the heavy Visualizer extra is only needed when augmenting.
     from TraceLens.Visualizer.model_explorer_export.roofline_cli import (
@@ -386,52 +649,56 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Orchestrator output directory (holds category_data/, metadata/).",
     )
-    ns, rest = pre.parse_known_args(argv)
-
-    # The remaining args are the model-source + runtime-regime flags shared with
-    # the roofline-projection CLI (checkpoint, --engine, --tp, --phase, --dim, ...).
-    proj_args = build_parser().parse_args(rest)
-    try:
-        projection, gpu_arch, layout_warnings = run_projection(proj_args)
-    except (ValueError, KeyError, RuntimeError) as exc:
-        print(f"roofline_augment: {exc}", file=sys.stderr)
-        return 1
-    for text in layout_warnings:
-        print(f"Warning: {text}", file=sys.stderr)
-
-    ridge = _ridge(gpu_arch)
-    arch = {
-        "peak_tflops": (
-            (gpu_arch.get("max_achievable_tflops") or {}).get("matrix_bf16")
-            if gpu_arch
-            else None
+    pre.add_argument(
+        "--args-json",
+        type=Path,
+        help=(
+            "roofline_augment_args.json written by the roofline-augment sub-agent. "
+            "Projects every phase in the file. Skips when source or phases is empty."
         ),
-        "mem_bw_gbps": gpu_arch.get("mem_bw_gbps") if gpu_arch else None,
-    }
-    summary = summarize_projection(projection, proj_args.tp, ridge)
-    regime = {
-        "phase": proj_args.phase,
-        "batch_size": proj_args.batch_size,
-        "seq_len": proj_args.seq_len,
-        "dims": dict(d.split("=", 1) for d in (proj_args.dim or [])),
-        "tp": proj_args.tp,
-        "engine": proj_args.engine,
-    }
-    payload = augment(Path(ns.output_dir), summary, regime, ridge, arch)
-
-    n = len(payload["entries"])
-    print(
-        f"Wrote {Path(ns.output_dir) / 'metadata' / 'roofline_augmentation.json'}: "
-        f"{n} kernel(s) augmented across {len(summary)} roofline categor(ies)."
     )
-    for e in payload["entries"]:
-        ai = e["arithmetic_intensity"]
+    ns, rest = pre.parse_known_args(argv)
+    if ns.args_json and rest:
         print(
-            f"  {e['kernel']}: {e['roofline_category']} {e['bound']} "
-            f"AI={ai:.1f} FLOP/byte  ~{(e['roofline_us_per_gpu'] or 0)/1000:.2f} ms/GPU"
-            if ai is not None
-            else f"  {e['kernel']}: {e['roofline_category']} {e['bound']}"
+            "roofline_augment: pass --args-json or projection flags, not both",
+            file=sys.stderr,
         )
+        return 1
+
+    if ns.args_json:
+        try:
+            spec = json.loads(ns.args_json.read_text(encoding="utf-8"))
+            if not isinstance(spec, dict):
+                raise TypeError("roofline_augment_args.json must be an object")
+            argvs = phase_argvs(spec)
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            print(f"roofline_augment: {exc}", file=sys.stderr)
+            return 1
+        if not argvs:
+            reason = spec.get("skipped") or "source or phases unresolved"
+            print(f"roofline_augment: skipped ({reason})")
+            return 0
+        cli_argvs = argvs
+    else:
+        # The remaining args are the model-source + runtime-regime flags shared
+        # with the roofline-projection CLI (checkpoint, --engine, --tp, --phase, ...).
+        cli_argvs = [rest]
+
+    projections = []
+    for cli_argv in cli_argvs:
+        proj_args = build_parser().parse_args(cli_argv)
+        try:
+            projection, gpu_arch, layout_warnings = run_projection(proj_args)
+        except (ValueError, KeyError, RuntimeError) as exc:
+            print(f"roofline_augment: {exc}", file=sys.stderr)
+            return 1
+        for text in layout_warnings:
+            print(f"Warning: {text}", file=sys.stderr)
+        projections.append(_projection_record(proj_args, projection, gpu_arch))
+
+    output_dir = Path(ns.output_dir)
+    payload = augment_phases(output_dir, projections)
+    _report(output_dir, payload)
     return 0
 
 
