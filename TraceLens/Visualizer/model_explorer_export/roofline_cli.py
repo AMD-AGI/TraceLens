@@ -297,6 +297,22 @@ def run_projection(args):
         gpu_arch=gpu_arch,
         checkpoint=checkpoint,
     )
+    # Convolutional models: the graph draws one conv per stage (and the stem /
+    # downsampling convs that lead those stages). Cost each live instance from a
+    # meta-device forward and let it supersede the graph's conv rows so a
+    # repeated stage is not counted twice.
+    if checkpoint is not None:
+        from TraceLens.ModelUtils.meta_trace import trace_meta_conv_ops
+
+        conv_ops = conv_ops_from_meta(
+            trace_meta_conv_ops(checkpoint, batch_size=args.batch_size),
+            dtype=str((spec.raw_config or {}).get("torch_dtype") or "bfloat16"),
+            gpu_arch=gpu_arch,
+        )
+        if conv_ops:
+            projection.ops = [
+                op for op in projection.ops if op.computation not in _CONV_COMPUTATIONS
+            ] + conv_ops
     return projection, gpu_arch, layout_warnings
 
 
@@ -319,23 +335,6 @@ def main(argv: list[str] | None = None) -> int:
 
     for text in layout_warnings:
         print(f"Warning: {text}", file=sys.stderr)
-
-    # Convolutional models: the graph draws one conv per stage (and the stem /
-    # downsampling convs that lead those stages). Cost each live instance from a
-    # meta-device forward and let it supersede the graph's conv rows so a
-    # repeated stage is not counted twice.
-    if checkpoint is not None:
-        from TraceLens.ModelUtils.meta_trace import trace_meta_conv_ops
-
-        conv_ops = conv_ops_from_meta(
-            trace_meta_conv_ops(checkpoint, batch_size=args.batch_size),
-            dtype=str((spec.raw_config or {}).get("torch_dtype") or "bfloat16"),
-            gpu_arch=gpu_arch,
-        )
-        if conv_ops:
-            projection.ops = [
-                op for op in projection.ops if op.computation not in _CONV_COMPUTATIONS
-            ] + conv_ops
 
     print(format_table(projection.ops, top_n=args.top_n))
     print()
