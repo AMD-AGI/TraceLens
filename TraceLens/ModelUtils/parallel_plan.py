@@ -1079,8 +1079,12 @@ def _dtype_bytes(dtype: str | None) -> int | None:
 
 
 def _repeat_count(node: dict[str, Any]) -> int | None:
+    stamped = _attr(node, "repeat_count")
+    if stamped and stamped.isdigit():
+        return int(stamped)
     text = f"{node.get('namespace') or ''}/{node.get('id') or ''}"
-    counts = [int(match) for match in re.findall(r"(?:^|/)(\d+)x_", text)]
+    # ``45x_Decoder`` and a stage container ``s2_27x_ConvNextLayer``.
+    counts = [int(match) for match in re.findall(r"(?:^|/)(?:s\d+_)?(\d+)x_", text)]
     return counts[-1] if counts else None
 
 
@@ -1452,12 +1456,41 @@ def _plan_sources(spec: Any) -> list[Path]:
             candidates.append(
                 path.with_name("configuration_" + path.name[len("modeling_") :])
             )
+        # A model split across a package keeps its parallel-layer classes in
+        # imported siblings.  Do not glob every cached sibling: engine caches
+        # share a directory among many models, so that made a layout depend on
+        # whichever unrelated source had been fetched first.
+        candidates.extend(_imported_sibling_sources(path))
         for candidate in candidates:
             if candidate in seen or not candidate.is_file():
                 continue
             seen.add(candidate)
             found.append(candidate)
     return found
+
+
+def _imported_sibling_sources(path: Path) -> list[Path]:
+    """Return direct relative-import siblings of *path* that exist locally."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return []
+    siblings: list[Path] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or not node.level:
+            continue
+        parent = path.parent
+        for _ in range(max(node.level - 1, 0)):
+            parent = parent.parent
+        if node.module:
+            candidates = [parent.joinpath(*node.module.split(".")).with_suffix(".py")]
+            candidates.append(parent.joinpath(*node.module.split("."), "__init__.py"))
+        else:
+            candidates = [
+                parent.joinpath(alias.name).with_suffix(".py") for alias in node.names
+            ]
+        siblings.extend(candidate for candidate in candidates if candidate.is_file())
+    return siblings
 
 
 def _class_plans(node: ast.ClassDef) -> ClassPlans | None:

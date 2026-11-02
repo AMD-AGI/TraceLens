@@ -77,6 +77,11 @@ reported but no roofline time is computed (no hardware peaks to bound against).
 ## Flags
 
 - `--batch-size`, `--seq-len`: the shape to project at (default: 1, 2048).
+- `--num-predicted-tokens N`: also cost a secondary MTP / speculative draft
+  stack of N tokens (default: 0, backbone only), capped at the depth the
+  checkpoint declares (`mtp_config.num_nextn_predict_layers` /
+  `num_mtp_layers` / `num_nextn_predict_layers`). See
+  [Speculative draft stack](#speculative-draft-stack).
 - `--dim KEY=VALUE` (repeatable): override a specific symbolic dimension
   (e.g. `--dim past_len=1024`); takes precedence over `--batch-size`/`--seq-len`
   for the same key.
@@ -104,33 +109,138 @@ steps — there is no `--stop-at-roofline-ops` flag here because turning it off
 would only replace a correctly-costed op with several the projection has no
 formula for.
 
+## How a cost is chosen
+
+Each row comes from the first source that applies:
+
+1. **The drawn graph.** A leaf with a direct PerfModel formula is costed from
+   that node's shape. A linear already drawn under an attention tile is that
+   tile's projection, so a second analytical QKV row is not added beside it.
+   The same rule skips a router or shared expert the MoE tile already draws.
+2. **The parsed modeling source.** A linear's `(in, out)` comes from the class
+   that assigns it. Two classes that size the same attribute differently each
+   keep their own width; the shared name is used only when every class agrees.
+   An engine parallel linear (`ColumnParallelLinear`, `RowParallelLinear`,
+   `QKVParallelLinear`, `MergedColumnParallelLinear`, `ParallelLMHead`) is
+   sharded on the axis that class shards. A plain `Linear` keeps an axis the
+   formula already reduced to one GPU's share.
+3. **The checkpoint config.** Widths the source did not resolve (heads, hidden
+   size, expert intermediate size, latent ranks) come from `config.json`.
+4. **An explicit fallback.** Used only for a speculative draft when the source
+   has no draft class. Those rows are the fixed template below, not a silent
+   substitute for a parsed layer.
+
+A vLLM or SGLang run whose modeling source did not load, or whose constructors
+did not resolve to widths, records that in the JSON rollup's `notes`. The
+widths then come from the checkpoint.
+
 ## Op coverage and approximations
 
 Costed op families: GEMM (`Linear`/`matmul`/`bmm`, including a vLLM/SGLang
 `*ParallelLinear`/`ReplicatedLinear` class or a model-specific subclass of
 one), SDPA, the Normalization family (RMSNorm, LayerNorm, GroupNorm,
 BatchNorm, InstanceNorm — matched by subclass name, since real checkpoints
-almost always subclass these), Softmax, generic elementwise/reduction ops, and
-MoE expert routing. A vLLM/SGLang `ParallelLMHead`/`FusedMoE` boundary — read
-from the engine's own source, where shape_inference has no rule for either —
-is costed from the architecture's own dims (vocab, hidden,
-experts-per-token, expert intermediate size) instead of its node shape; see
-"Known approximations" below. Everything else — embeddings, convolutions,
-reshapes/transposes — is reported as **unmodeled** rather than silently
-dropped, so the rollup's coverage share tells you how much of the model the
-projection actually accounts for.
+almost always subclass these), Softmax, generic elementwise/reduction ops,
+MoE expert routing, and convolutions whose weight geometry is known.
+Persistent tensors that cross forward calls (for example, recurrent state or
+a cache) are modeled as separate memory-bound reads and writes from each
+boundary's traced shape and dtype. This works for stateful attributes and
+functional buffer mutation without model-specific cache conventions.
+Embeddings and reshapes/transposes are reported as
+**unmodeled** rather than silently dropped, so the rollup's coverage share
+tells you how much of the model the projection actually accounts for.
 
-Known approximations:
+### Attention
 
-- GEMM bias is assumed absent.
-- Every Normalization op is assumed affine; RMSNorm is assumed bias-free, every
-  other norm is assumed to have one.
-- SDPA is assumed causal exactly when the query and key/value sequence lengths
-  resolve equal (a self-attention prefill shape).
-- MoE routing is costed as `experts_per_tok` GEMM passes per token (the
-  gate_up_proj and down_proj of only the selected experts), never
-  `num_experts` passes. The router's own softmax/top-k selection and any
-  shared-expert add are not separately costed.
+An opaque attention tile is the SDPA core plus the projections packed inside
+it. When that class assigns linears and their constructor widths resolve,
+those assignments are the projection rows. Otherwise the tile is one packed
+QKV projection plus the output projection, or the latent projections when the
+checkpoint sets `kv_lora_rank` (and `q_lora_rank` when the query is low-rank
+too).
+
+Latent attention scores against one compressed key of width `kv_lora_rank +
+qk_rope_head_dim`. The query projection width is `qk_nope_head_dim +
+qk_rope_head_dim` when those ranks are set, and the value width is
+`v_head_dim`. `head_dim` is the width only when those ranks are absent.
+
+`index_n_heads` and `index_head_dim` add the indexer query and key GEMMs, a
+score GEMM over the context, and a top-k reduction. `index_topk` is the
+length of that indexed attention. A layer that already has a window keeps the
+window: indices in `local_layer_ids`, paired with `layer_types`, use
+`sliding_window`, and the other layers attend the full context.
+
+QK-norm rows are added when the checkpoint sets `qk_norm` or `use_qk_norm`.
+RoPE is added when the architecture's positional encoding is RoPE. A short
+depthwise convolution packed inside a fused attention leaf is costed when the
+checkpoint sets `sconv_kernel_size` or `conv_kernel_size`.
+
+SDPA follows the checkpoint's causal flag. An explicit `is_causal` or `causal`
+wins. Otherwise a decoder-only model is causal, and an encoder, BERT, T5, or
+vision model is not. The mask applies on cold prefill, when the query length
+is the whole key/value length. A warm cache keeps the unmasked FLOP count.
+
+### Quantized weights
+
+`quantization_config` sets the weight traffic: fp4 / MXFP4 at 4 bits plus the
+block scale, fp8 / int8 at one byte, int4 / NF4 at half a byte. A weight-only
+scheme adds a weight-dequant row beside the GEMM. An fp8 matrix also quantizes
+the activation. Modules named in `modules_to_not_convert`, `ignore`, or
+`exclude_layers` stay at the activation dtype, which is how an LM head listed
+there avoids the quantized weight width. A published fp4 or fp8 matrix peak is
+used only for a GEMM or MoE row, and only when the selected GPU lists that
+peak. Attention stays at the activation dtype.
+
+### MoE and dense MLP
+
+MoE routing is `experts_per_tok` grouped-GEMM passes per token (the gate-up and
+down projections of the selected experts), never one pass per expert. The
+weight traffic uses `G = min(experts on this GPU, active tokens on this GPU)`
+distinct expert matrices. Tensor parallel column-shards each expert's
+intermediate width. Expert parallel gives one GPU the floor of the routed rows
+and adds the dispatch and combine all-to-all as data movement. The router GEMM,
+its softmax, the combine, and a shared expert are separate rows when the graph
+did not already draw them. A dense MLP on the same attribute is a SwiGLU over
+every token at `intermediate_size`, not that routed subset.
+
+GEMM bias is included when the node records it, or when the checkpoint sets
+`attention_bias`, `mlp_bias`, or `lm_head_bias` / `head_bias`. Every
+normalization is assumed affine. RMSNorm is assumed bias-free. Every other norm
+is assumed to have a bias.
+
+### Convolutions
+
+A graph convolution is costed only when the meta-device pass threaded its
+weight geometry onto the node (`conv_weight`, `conv_bias`, `conv_transposed`).
+Input and output shapes alone do not recover the kernel or the groups. With
+`--meta-shapes` (the default when a checkpoint is available), a meta-device
+forward can replace those graph rows with one row per live convolution. A
+convolution with neither threaded geometry nor a declared short-conv kernel
+stays unmodeled.
+
+## Speculative draft stack
+
+`--num-predicted-tokens N` adds one draft depth per predicted token, capped at
+the depth the checkpoint declares. The depth is the speculative class in the
+modeling source (a class or assignment whose name matches MTP, NextN, EAGLE,
+or the other speculative-decoding names the parser already uses):
+
+- its norms and its own linear projections, at that class's constructor widths
+- its attention, including the latent and indexer rows when the checkpoint
+  declares them
+- its feed-forward, dense or MoE, including a feed-forward that differs from
+  the backbone
+- an LM head only when the draft class assigns one
+
+A width that differs from the backbone comes from the draft class. A width that
+matches the backbone stays the checkpoint value.
+
+When the exported graph draws that draft module, the leaves it drew are kept
+and are not costed a second time. An attention core or expert GEMM the graph
+inlined away is still added. When the graph does not draw the draft, the whole
+parsed depth is added. When the source has no draft class, the depth is the
+fixed template: two RMSNorms, a 2H→H projection, one attention, a dense MLP,
+and the LM head.
 
 ## Run from a chat
 

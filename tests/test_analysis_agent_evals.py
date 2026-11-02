@@ -976,6 +976,21 @@ def test_check_marker_top_ops_row_missing_attrs(tmp_path):
     assert "high" in rows[0]["details"]
 
 
+def test_check_marker_top_ops_checks_every_block(tmp_path):
+    text = (
+        "<!-- impact-begin kind=top_ops node=n0 -->\n"
+        "<!-- top-ops-row name=foo low=1 high=3 -->\n"
+        "<!-- impact-end -->\n"
+        "<!-- impact-begin kind=top_ops node=n1 -->\n"
+        "<!-- top-ops-row name=bar low=1 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_top_ops(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "high" in rows[0]["details"]
+
+
 def test_check_marker_top_ops_no_analysis_md(tmp_path):
     rows = workflow._check_marker_top_ops(str(tmp_path))
     assert rows[0]["result"] == "FAIL"

@@ -78,14 +78,15 @@ Generate one report per job from a YAML file. The same entry point is
 |-----|----------|-------------|
 | `analysis_mode` | yes | `default` (calls the `TraceLens_generate_perf_report_pytorch` report) or `inference` (calls the `TraceLens_generate_perf_report_pytorch_inference` report). |
 | `output_dir` | yes | Directory for the reports and `run_config.resolved.yaml`. |
-| `jobs[].name` | more than one job | Output names become `perf_report_<name>.xlsx` and `perf_report_<name>_csvs/`. |
+| `jobs[].name` | more than one job, unless `combine_by_node` | Output names become `perf_report_<name>.xlsx` and `perf_report_<name>_csvs/`. |
 | `jobs[].trace_path` | yes | Trace to analyze. |
 | `jobs[].platform`, `jobs[].gpu_arch_json_path` | exactly one | Architecture name, or path to an architecture JSON file. |
 | `jobs[].capture_folder` | no | Graph-capture folder. `inference` only. |
 | `jobs[].compare_to` | no | `trace_path` and, in `inference`, `capture_folder` of a trace to compare against. |
 | `jobs[].precomputed_diff_stats` | no | `diff_stats.csv` to use instead of TraceDiff. |
 | `jobs[].phase` | when `aggregation` is set | Phase label, for example `prefill` or `decode`. |
-| `aggregation.policy` | no | `combine_only_same_phase` or `combine`. Combines every job's CSVs into `perf_report_aggregated_csvs/`. |
+| `jobs[].node` | when `aggregation.policy` is `combine_by_node` | Index of the node within its phase, a non-negative integer. The node id is `<phase>_<index>`, for example `prefill_0`. Jobs with the same phase and index combine. |
+| `aggregation.policy` | no | `combine_by_node`. Combines every job's CSVs into `perf_report_aggregated_csvs/`. `combine`, `combine_by_phase`, and `combine_stack` are reserved and not supported yet. |
 | any report parameter | no | Top-level, by Python name. Applies to every job. |
 
 **Output:** one report per job, plus the aggregated CSVs when `aggregation` is

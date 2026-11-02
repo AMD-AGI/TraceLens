@@ -31,7 +31,7 @@ from analysis_utils import (
     perf_report_csv_dir,
     write_metrics_json,
 )
-from TraceLens.Reporting.aggregate_perf_reports import PHASE_COL
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 from utils.arch_utils import load_arch
 from utils.classify_kernels import TAXONOMY
 from utils.kernel_fusion import (
@@ -176,6 +176,7 @@ def main():
         (peak_bw_tbs, peak_maf_tflops),
         load_perf_rows(csv_path),
         baseline_ms,
+        display_ms=focus_job_utilization(manifest).get("total_time_ms", 0),
         **trace2_kwargs,
     )
     priced = pricer.price_all(candidates)
@@ -195,7 +196,7 @@ def main():
         "platform": platform,
         "peak_mem_bw_tbs": peak_bw_tbs,
         "baseline_ms": baseline_ms,
-        PHASE_COL: focus_job_utilization(manifest).get(PHASE_COL),
+        NODE_COL: manifest.get("focus_job"),
         "impact_estimates": [e.to_dict() for e in impact_estimates],
         **scope_metrics,
     }

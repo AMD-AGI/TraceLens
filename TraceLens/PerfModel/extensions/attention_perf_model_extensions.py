@@ -1221,3 +1221,80 @@ class mla_decode_v4_asm(InferenceAttention):
         if self.param_details.get("_no_perf"):
             return None
         return super().get_maf_type()
+
+
+class sgl_kernel_fast_topk_transform_fused:
+    """
+    Performance model for sgl_kernel::fast_topk_transform_fused (DSA indexer
+    top-k + page-table transform).
+
+    The score buffer is padded to the max context length, so the number of
+    valid scores per row comes from the step annotation (causal within a
+    request).
+
+    Expected Input Dims from trace:
+        [0] score (rows, L_max)  [1] lengths (rows,)
+        [2] dst_page_table (rows, topk)  [3] src_page_table (B, max_kv)
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            params = {
+                "rows": dims[0][0],
+                "topk": dims[2][1],
+                "dtype_score": types[0],
+                "dtype_page_table": types[2],
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params.update(stats)
+        params["valid_scores"] = sum(
+            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
+            for p in ("c", "g")
+        )
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["valid_scores"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_score = name2bpe(p["dtype_score"])
+        bpe_idx = name2bpe(p["dtype_page_table"])
+        if None in {bpe_score, bpe_idx}:
+            return None
+        rows, topk = p["rows"], p["topk"]
+        gathered = min(topk, p["valid_scores"] / rows) if rows else 0
+        read_scores = p["valid_scores"] * bpe_score
+        return read_scores + rows * (gathered + topk) * bpe_idx
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"

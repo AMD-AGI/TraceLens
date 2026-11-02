@@ -44,6 +44,63 @@ def test_fact_sheet_leads_with_bold_hf_model_name():
     assert viewer["bodyHtml"].startswith("<strong>zai-org/GLM-5.3-Flash</strong>\n")
 
 
+def test_fact_sheet_lists_non_uniform_stages_and_their_leading_pipeline():
+    from TraceLens.ModelUtils.blocks import RepeatedGroup
+
+    downsample = RepeatedGroup(
+        path="stages.*.downsampling_layer",
+        count=2,
+        element_class="ConvNextLayerNorm",
+        label="",
+        element_classes=("ConvNextLayerNorm", "Conv2d"),
+        per_index_counts=[0, 2, 2, 2],
+    )
+    layers = RepeatedGroup(
+        path="stages.*.layers",
+        count=3,
+        element_class="ConvNextLayer",
+        label="",
+        per_index_counts=[3, 3, 27, 3],
+    )
+    spec = ArchitectureSpec(name="ConvNeXt", model_type="convnext")
+    spec.nested_module_groups = [
+        RepeatedGroup(
+            path="stages",
+            count=4,
+            element_class="ConvNextStage",
+            label="",
+            children=[layers, downsample],
+        )
+    ]
+    body = build_fact_sheet_viewer(spec)["body"]
+    assert "Stages: 4× ConvNextStage" in body
+    # Stage 0 has no downsample. Later stages lead with the norm→conv pipeline.
+    assert "stage 0: 3× ConvNextLayer" in body
+    assert "stage 1: ConvNextLayerNorm → Conv2d, 3× ConvNextLayer" in body
+    assert "stage 2: ConvNextLayerNorm → Conv2d, 27× ConvNextLayer" in body
+    assert "stage 3: ConvNextLayerNorm → Conv2d, 3× ConvNextLayer" in body
+
+    resnet_layers = RepeatedGroup(
+        path="stages.*.layers",
+        count=3,
+        element_class="ResNetBottleNeckLayer",
+        label="",
+        per_index_counts=[3, 4, 6, 3],
+    )
+    resnet = ArchitectureSpec(name="ResNet", model_type="resnet")
+    resnet.nested_module_groups = [
+        RepeatedGroup(
+            path="stages",
+            count=4,
+            element_class="ResNetStage",
+            label="",
+            children=[resnet_layers],
+        )
+    ]
+    resnet_body = build_fact_sheet_viewer(resnet)["body"]
+    assert "stage 2: 6× ResNetBottleNeckLayer" in resnet_body
+
+
 def test_fact_sheet_falls_back_to_class_name_without_hf_source():
     spec = ArchitectureSpec(name="CustomNet", model_type="custom")
     viewer = build_fact_sheet_viewer(spec)
