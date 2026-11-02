@@ -35,6 +35,10 @@ from ..utils.trace_extraction import (
 )
 from ...util import get_filename
 
+# Imported last: main.py re-imports the names above from this very
+# package, so importing it any earlier would be circular.
+from .main import split_and_enumerate
+
 __all__ = [
     "ExtractContext",
     "TraceData",
@@ -58,4 +62,5 @@ __all__ = [
     "get_filename",
     "infer_batch_sizes_from_shapes",
     "parse_range",
+    "split_and_enumerate",
 ]
