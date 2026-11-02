@@ -31,6 +31,120 @@ def _export_basic_ops(basic_ops: BasicOpFilter) -> BasicOpFilter:
     return BasicOpFilter(basic_ops.patterns, basic_only=False)
 
 
+# Exact convolution op types -- not a ``startswith("Conv")`` test, which would also
+# catch a model's own ``Conv*``-prefixed module classes (``ConvNextDropPath``).
+_CONV_OP_TYPES = frozenset(
+    {
+        "Conv1d",
+        "Conv2d",
+        "Conv3d",
+        "ConvTranspose1d",
+        "ConvTranspose2d",
+        "ConvTranspose3d",
+    }
+)
+
+
+def _attach_conv_meta_shapes(graph: dict[str, Any], checkpoint: str | Path) -> None:
+    """Overwrite each conv node's shapes with the live per-instance ``[B, C, H, W]``.
+
+    A non-uniform CNN's convolutions are emitted one representative per stage; the
+    symbolic text shape inference sizes them ``[B, S, H]`` because it has no spatial
+    rule. A meta-device forward (fed the model's own ``pixel_values``) captures each
+    conv's concrete in/out shapes keyed by full module path -- the authoritative
+    source. Match a node to its capture by its stamped ``meta_path`` (the stage) plus
+    the conv attr in its id (``dwconv``/``patch_embeddings``), symbolise the batch
+    axis, and stamp ``output_shape``/``input_shapes`` so the viewer and the graph
+    roofline read real spatial dims.
+    """
+    from TraceLens.ModelUtils.meta_trace import trace_meta_conv_ops
+
+    captures = trace_meta_conv_ops(checkpoint)
+    if not captures:
+        return
+
+    def _attr(attrs: list[dict[str, str]], key: str) -> dict[str, str] | None:
+        return next((item for item in attrs if item.get("key") == key), None)
+
+    def _set(attrs: list[dict[str, str]], key: str, value: str) -> None:
+        existing = _attr(attrs, key)
+        if existing is None:
+            attrs.append({"key": key, "value": value})
+        else:
+            existing["value"] = value
+
+    def _dims(shape: list[int]) -> list[str]:
+        # Symbolise the batch axis; keep channels/spatial concrete.
+        return ["B"] + [str(int(extent)) for extent in shape[1:]]
+
+    conv_leaves = ("dwconv", "patch_embeddings", "downsample", "conv")
+
+    def _matches(capture: dict[str, Any], prefix: str | None, leaf: str | None) -> bool:
+        path = str(capture.get("path") or "")
+        if prefix is not None and path != prefix and not path.startswith(prefix + "."):
+            return False
+        # An exact module path is the leading conv itself (a ModuleList element
+        # whose path ends in an index, not in ``dwconv``).
+        if prefix is not None and path == prefix:
+            return True
+        if leaf is not None and path.rsplit(".", 1)[-1] != leaf:
+            return False
+        return prefix is not None or leaf is not None
+
+    for node in graph.get("nodes", []):
+        attrs = node.get("attrs")
+        if not isinstance(attrs, list):
+            continue
+        op_type = _attr(attrs, "op_type")
+        class_name = _attr(attrs, "class_name")
+        # The tile label may be a stage banner ("stage 1 · Conv2d"). The conv
+        # class is what roofline and shape matching key on.
+        kind = None
+        if class_name is not None and class_name.get("value") in _CONV_OP_TYPES:
+            kind = class_name["value"]
+        elif op_type is not None and op_type.get("value") in _CONV_OP_TYPES:
+            kind = op_type["value"]
+        if kind is None:
+            continue
+        node_id = str(node.get("id", "")).lower()
+        leaf = next((name for name in conv_leaves if name in node_id), None)
+        meta_path = _attr(attrs, "meta_path")
+        prefix = meta_path["value"] if meta_path is not None else None
+        match = next(
+            (capture for capture in captures if _matches(capture, prefix, leaf)),
+            None,
+        )
+        if match is None:
+            continue
+        _set(attrs, "op_type", kind)
+        dtype = "float32"
+        current = _attr(attrs, "output_shape")
+        if current is not None and " " in str(current.get("value", "")):
+            # Keep a real float dtype (bf16/fp16); never a token int64 placeholder.
+            existing_dtype = str(current["value"]).rsplit(" ", 1)[-1]
+            if "float" in existing_dtype or existing_dtype.startswith(("bf", "fp")):
+                dtype = existing_dtype
+        _set(
+            attrs,
+            "output_shape",
+            f"[{', '.join(_dims(match['output_shape']))}] {dtype}",
+        )
+        if match.get("input_shape"):
+            _set(attrs, "input_shapes", json.dumps([_dims(match["input_shape"])]))
+        if _attr(attrs, "details") is None and match.get("weight_shape"):
+            weight = ", ".join(str(int(dim)) for dim in match["weight_shape"])
+            bias = 1 if match.get("bias") else 0
+            transposed = 1 if match.get("transposed") else 0
+            _set(
+                attrs,
+                "details",
+                (
+                    f"conv_weight=[{weight}]; conv_bias={bias}; "
+                    f"conv_transposed={transposed}"
+                ),
+            )
+
+
 def build_model_explorer_payload(
     spec: ArchitectureSpec,
     *,
@@ -66,6 +180,11 @@ def build_model_explorer_payload(
         shape_inferencer=inferencer,
         inline_expansion=inline_expansion,
     )
+    if spec.nested_module_groups and meta_shapes_checkpoint is not None:
+        # A non-uniform CNN's convs are emitted per stage, but symbolic [B, S, H]
+        # inference cannot size them. Overwrite with the concrete per-instance
+        # [B, C, H, W] a meta-device forward captures.
+        _attach_conv_meta_shapes(graph, meta_shapes_checkpoint)
     layout = getattr(spec, "parallel_layout", None)
     if layout is not None:
         from TraceLens.ModelUtils.parallel_plan import annotate_parallel_nodes

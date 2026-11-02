@@ -28,14 +28,14 @@ Anything else (embeddings, a conv with no threaded geometry) is reported as
 "unmodeled" rather than silently dropped, so the projection's coverage is always
 visible instead of assumed.
 
-Convolutional models are handled separately. Their non-uniform stages (per-stage
-channels/depths) don't fit the single-repeated-decoder shape the graph expands,
-so their convolutions never become graph nodes at all. :func:`conv_ops_from_meta`
-costs them from the live conv instances a meta-device forward captures (see
+Convolutional models are handled separately. The graph expands a non-uniform
+stage once (one conv node per stage, plus the stem and each stage's leading
+downsampling conv). :func:`conv_ops_from_meta` still costs every live conv
+instance a meta-device forward captures (see
 :func:`TraceLens.ModelUtils.meta_trace.trace_meta_conv_ops`) -- each already
-carries the concrete ``[B, C, H, W]`` shapes and weight geometry CONV needs, with
-no dependence on symbolic spatial shape inference -- and the CLI lets those
-supersede any unmodeled conv node.
+carries the concrete ``[B, C, H, W]`` shapes and weight geometry CONV needs --
+and the CLI lets those supersede the graph's conv rows so a repeated stage is
+not counted twice.
 
 Known approximations, stated once here rather than scattered in comments:
   - GEMM bias is assumed absent (bias FLOPs are O(M*N), negligible next to the
@@ -1028,12 +1028,10 @@ def conv_ops_from_meta(
 
     Each entry is one live ``_ConvNd`` instance from
     :func:`TraceLens.ModelUtils.meta_trace.trace_meta_conv_ops`, carrying the
-    concrete ``[B, C, H, W]`` in/out shapes and weight geometry CONV needs. This
-    is the static roofline's path for convolutional models: their non-uniform
-    stages (per-stage channels/depths) don't fit the single-repeated-decoder
-    shape the graph pipeline expands, so the convs never become graph nodes --
-    but each live instance already carries exactly the geometry to cost it, with
-    no dependence on symbolic spatial shape inference."""
+    concrete ``[B, C, H, W]`` in/out shapes and weight geometry CONV needs. The
+    graph draws one conv per stage; each live instance here carries the geometry
+    to cost that instance, and the CLI uses these rows in place of the graph's
+    conv rows so the repeated stage is not counted twice."""
     bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
     ops: list[RooflineOp] = []
     for conv in meta_convs or []:
