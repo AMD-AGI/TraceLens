@@ -562,13 +562,13 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ## Step 10.2: Analytical Roofline Augmentation (optional) → `<augment_analytical_roofline>`
 
-Skip this step unless `<augment_analytical_roofline>` is set. It runs after Step 8.5 and Step 10.1.
+Skip this step unless `<augment_analytical_roofline>` is set.
 
 ### 10.2.1 Derive projection arguments (subagent)
 
 Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/roofline-augment-agent.md` with context: `<output_dir>`, `<platform>`, `<prefix>`. Wait for completion.
 
-On failure (subagent error, timeout, or `metadata/roofline_augment_args.json` not written), retry once. If the file is still missing, or its `source` is null, or its `phases` is empty, skip the rest of this step.
+On failure (subagent error, timeout, or `metadata/roofline_augment_args.json` not written), retry once. If the file is still missing, skip the rest of this step.
 
 ### 10.2.2 Project and merge
 
@@ -577,8 +577,6 @@ On failure (subagent error, timeout, or `metadata/roofline_augment_args.json` no
   --output-dir <output_dir> \
   --args-json <output_dir>/metadata/roofline_augment_args.json
 ```
-
-Writes `<output_dir>/metadata/roofline_augmentation.json` and merges an additive `roofline` block onto the matching `priority_data.json` finding. Leave every other finding field unchanged.
 
 ---
 
