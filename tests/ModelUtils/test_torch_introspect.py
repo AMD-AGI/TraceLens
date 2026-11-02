@@ -114,6 +114,44 @@ def test_explorer_graph_applies_shapes_and_namespaces():
     assert edge["targetNodeInputId"] == "result"
 
 
+def test_explorer_graph_preserves_structured_persistent_state_metadata():
+    inventory = [
+        FxNodeInfo(
+            name="state",
+            op="placeholder",
+            label="state",
+            shape=(2, 8),
+            dtype="float32",
+            state_reads=("cache.0",),
+        ),
+        FxNodeInfo(
+            name="next_state",
+            op="call_function",
+            label="update",
+            inputs=["state"],
+            shape=(2, 4),
+            dtype="bfloat16",
+            state_writes=("cache.0", "auxiliary"),
+        ),
+        FxNodeInfo(
+            name="out", op="output", label="Output", inputs=["next_state"]
+        ),
+    ]
+
+    nodes = {
+        node["id"]: node
+        for node in explorer_graph_from_fx_inventory(inventory)["nodes"]
+    }
+    assert [
+        attr["value"] for attr in nodes["state"]["attrs"] if attr["key"] == "state_read"
+    ] == ["cache.0"]
+    assert [
+        attr["value"]
+        for attr in nodes["next_state"]["attrs"]
+        if attr["key"] == "state_write"
+    ] == ["cache.0", "auxiliary"]
+
+
 def test_include_shapes_false_omits_shape_attrs():
     graph = explorer_graph_from_fx_inventory(
         _sample_inventory(), graph_id="demo", include_shapes=False

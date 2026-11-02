@@ -97,6 +97,14 @@ def _node_attrs(spec) -> list[dict[str, str]]:
     operand_role = (getattr(spec, "extra_metadata", None) or {}).get("operand_role")
     if operand_role:
         attrs.append(_kv("operand_role", str(operand_role)))
+    metadata = getattr(spec, "extra_metadata", None) or {}
+    for key in ("state_read", "state_write"):
+        values = metadata.get(key, ())
+        if isinstance(values, str):
+            values = (values,)
+        for value in values:
+            if value:
+                attrs.append(_kv(key, str(value)))
     if spec.synthetic:
         attrs.append(_kv("synthetic", spec.synthetic))
     if getattr(spec, "constant", False):
@@ -142,6 +150,12 @@ def _node_attrs(spec) -> list[dict[str, str]]:
             # kernel-port pass (fans one shared producer into per-role ports); it is
             # not a user-facing operand fact, so keep it out of the visible details.
             if sep and name.strip() == "port_split":
+                continue
+            # State identity is machine-readable graph metadata. Keeping it out
+            # of the display-oriented detail string lets consumers use it
+            # without reparsing presentation text.
+            if sep and name.strip() == "stores":
+                attrs.append(_kv("state_write", value.strip()))
                 continue
             visible_details.append(detail)
         if raw_op:

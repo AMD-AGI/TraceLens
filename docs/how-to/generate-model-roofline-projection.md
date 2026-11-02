@@ -142,9 +142,11 @@ one), SDPA, the Normalization family (RMSNorm, LayerNorm, GroupNorm,
 BatchNorm, InstanceNorm — matched by subclass name, since real checkpoints
 almost always subclass these), Softmax, generic elementwise/reduction ops,
 MoE expert routing, and convolutions whose weight geometry is known.
-Persistent tensors that the traced forward writes (for example, recurrent
-state or a cache) are modeled as a memory-bound read + write from their traced
-shape and dtype. Embeddings and reshapes/transposes are reported as
+Persistent tensors that cross forward calls (for example, recurrent state or
+a cache) are modeled as separate memory-bound reads and writes from each
+boundary's traced shape and dtype. This works for stateful attributes and
+functional buffer mutation without model-specific cache conventions.
+Embeddings and reshapes/transposes are reported as
 **unmodeled** rather than silently dropped, so the rollup's coverage share
 tells you how much of the model the projection actually accounts for.
 

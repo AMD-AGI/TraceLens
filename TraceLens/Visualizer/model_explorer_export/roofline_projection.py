@@ -631,30 +631,17 @@ def _persistent_state_ops(
     dims: dict[str, Any],
     gpu_arch: dict[str, Any] | None,
 ) -> list[RooflineOp]:
-    """Cost every tensor the traced model writes into persistent state.
+    """Cost typed persistent-state boundaries recorded by the traced graph.
 
-    The AST graph tags a producer with ``stores: <state name>`` whenever a
-    forward writes into ``self.<state name>``. The producer's output type is
-    the state type at the call boundary: the next forward reads that tensor,
-    then this one replaces it. Model the resulting HBM round trip directly
-    from that traced shape and dtype, with no architecture-name or
-    configuration-field assumptions.
+    A state read and a state write are independent transfers: a stateful
+    forward can replace a state with a different shape or dtype.  This relies
+    only on graph metadata and the tensor at each boundary, not model names,
+    cache conventions, or a presumed read/write symmetry.
     """
     if gpu_arch is None or not gpu_arch.get("mem_bw_gbps"):
         return []
     state_ops: list[RooflineOp] = []
     for node in nodes:
-        details = _attr_text(node.get("attrs"), "details") or ""
-        state_name = next(
-            (
-                part.split(":", 1)[1].strip()
-                for part in details.split(";")
-                if part.strip().startswith("stores:")
-            ),
-            None,
-        )
-        if not state_name:
-            continue
         output_text = _attr_text(node.get("attrs"), "output_shape")
         if not output_text:
             continue
@@ -666,25 +653,29 @@ def _persistent_state_ops(
             elements = prod(resolve_shape(shape_text, dims))
         except DimResolutionError:
             continue
-        bytes_moved = 2 * elements * bpe  # existing state read + replacement write
+        bytes_moved = elements * bpe
         roofline_time_us = bytes_moved / (gpu_arch["mem_bw_gbps"] * 1e9) * 1e6
-        state_ops.append(
-            RooflineOp(
-                name=f"{node.get('id')}:persistent-state:{state_name}",
-                section=str(node.get("namespace") or ""),
-                computation=f"persistent state ({state_name})",
-                operation="",
-                category="Persistent State",
-                modeled=True,
-                reason=None,
-                output_elements=elements,
-                instances=_repeat_count(str(node.get("namespace") or ""), node),
-                flops=0.0,
-                bytes=bytes_moved,
-                roofline_time_us=roofline_time_us,
-                roofline_bound="MEMORY_BOUND",
-            )
-        )
+        for direction, attr in (("read", "state_read"), ("write", "state_write")):
+            for state_name in _attr_values(node.get("attrs"), attr):
+                state_ops.append(
+                    RooflineOp(
+                        name=f"{node.get('id')}:persistent-state-{direction}:{state_name}",
+                        section=str(node.get("namespace") or ""),
+                        computation=f"persistent state {direction} ({state_name})",
+                        operation="",
+                        category="Persistent State",
+                        modeled=True,
+                        reason=None,
+                        output_elements=elements,
+                        instances=_repeat_count(
+                            str(node.get("namespace") or ""), node
+                        ),
+                        flops=0.0,
+                        bytes=bytes_moved,
+                        roofline_time_us=roofline_time_us,
+                        roofline_bound="MEMORY_BOUND",
+                    )
+                )
     return state_ops
 
 
@@ -1036,6 +1027,17 @@ def _attr_text(attrs: Any, key: str) -> str | None:
     return next(
         (item.get("value") for item in attrs if item.get("key") == key),
         None,
+    )
+
+
+def _attr_values(attrs: Any, key: str) -> tuple[str, ...]:
+    """Return every value for repeatable structured graph metadata."""
+    if not isinstance(attrs, list):
+        return ()
+    return tuple(
+        str(item["value"])
+        for item in attrs
+        if item.get("key") == key and item.get("value")
     )
 
 

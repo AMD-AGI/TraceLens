@@ -369,7 +369,7 @@ def test_drop_undrawn_state_reads_cascades_through_an_unread_chain():
     same cascade a dead consumer chained onto it (``concat`` reading
     ``buffered_kv``, its const tile keyed off ``concat``) also goes -- the
     const tile only drops once its owner is actually gone, a second pass of
-    the loop. A ``stores:``/``side_effect:``/synthetic node is kept even
+    the loop. A state-write/``side_effect:``/synthetic node is kept even
     though nothing reads it, and a surviving node's own (unrelated) edge is
     left alone.
     """
@@ -386,7 +386,8 @@ def test_drop_undrawn_state_reads_cascades_through_an_unread_chain():
         {
             "id": "stored_state",
             "attrs": [
-                {"key": "details", "value": "method_params: x; stores: kv_cache"}
+                {"key": "details", "value": "method_params: x"},
+                {"key": "state_write", "value": "kv_cache"},
             ],
         },
         {
@@ -405,6 +406,34 @@ def test_drop_undrawn_state_reads_cascades_through_an_unread_chain():
     assert remaining == {"stored_state", "side_effecting", "synthetic_input"}
     side_effecting = next(node for node in nodes if node["id"] == "side_effecting")
     assert side_effecting["incomingEdges"] == [_edge("stored_state")]
+
+
+def test_state_write_keeps_a_cross_call_sink_when_it_has_local_consumers():
+    nodes = [
+        {
+            "id": "update",
+            "namespace": "block",
+            "attrs": [
+                {"key": "state_write", "value": "cache"},
+                {"key": "output_shape", "value": "[B, 8] float32"},
+            ],
+        },
+        {
+            "id": "local_consumer",
+            "attrs": [],
+            "incomingEdges": [_edge("update")],
+        },
+    ]
+
+    merge._publish_state_stores_through_output_tiles(nodes)
+
+    sink = next(node for node in nodes if node["id"] == "update:@state_out:cache")
+    assert sink["attrs"] == [
+        {"key": "synthetic", "value": "@state_out"},
+        {"key": "state_write", "value": "cache"},
+        {"key": "output_shape", "value": "[B, 8] float32"},
+        {"key": "output_dtype", "value": ""},
+    ]
 
 
 # ---------------------------------------------------------------------------

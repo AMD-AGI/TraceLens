@@ -72,28 +72,41 @@ _ARCH = {
 }
 
 
-def test_persistent_state_ops_cost_the_traced_state_round_trip():
+def test_persistent_state_ops_cost_traced_reads_and_writes_independently():
     nodes = [
+        {
+            "id": "state_input",
+            "namespace": "4x_decoder",
+            "attrs": [
+                {"key": "state_read", "value": "recurrent_state"},
+                {"key": "output_shape", "value": "[B, H, D] float32"},
+            ],
+        },
         {
             "id": "layers.0.recurrence",
             "namespace": "4x_decoder",
             "attrs": [
-                {"key": "details", "value": "stores: recurrent_state"},
-                {"key": "output_shape", "value": "[B, H, D] float32"},
+                {"key": "state_write", "value": "recurrent_state"},
+                {"key": "state_write", "value": "auxiliary_state"},
+                {"key": "output_shape", "value": "[B, H, 2*D] bfloat16"},
             ],
         }
     ]
 
     ops = _persistent_state_ops(nodes, {"B": 2, "H": 8, "D": 16}, _ARCH)
 
-    assert len(ops) == 1
-    op = ops[0]
-    assert op.computation == "persistent state (recurrent_state)"
-    assert op.instances == 4
-    assert op.flops == 0
-    assert op.bytes == 2 * 2 * 8 * 16 * 4
-    assert op.roofline_bound == "MEMORY_BOUND"
-    assert op.roofline_time_us == pytest.approx(op.bytes / 5300e9 * 1e6)
+    assert [op.computation for op in ops] == [
+        "persistent state read (recurrent_state)",
+        "persistent state write (recurrent_state)",
+        "persistent state write (auxiliary_state)",
+    ]
+    assert [op.bytes for op in ops] == [2 * 8 * 16 * 4, 2 * 8 * 32 * 2, 2 * 8 * 32 * 2]
+    assert all(op.instances == 4 for op in ops)
+    assert all(op.flops == 0 for op in ops)
+    assert all(op.roofline_bound == "MEMORY_BOUND" for op in ops)
+    assert all(
+        op.roofline_time_us == pytest.approx(op.bytes / 5300e9 * 1e6) for op in ops
+    )
 
 
 def test_persistent_state_ops_skip_unresolved_or_untyped_state():
@@ -103,6 +116,7 @@ def test_persistent_state_ops_skip_unresolved_or_untyped_state():
             "namespace": "",
             "attrs": [
                 {"key": "details", "value": "stores: state"},
+                {"key": "state_write", "value": "state"},
                 {"key": "output_shape", "value": "[unknown] bfloat16"},
             ],
         },
@@ -111,6 +125,7 @@ def test_persistent_state_ops_skip_unresolved_or_untyped_state():
             "namespace": "",
             "attrs": [
                 {"key": "details", "value": "stores: state"},
+                {"key": "state_write", "value": "state"},
                 {"key": "output_shape", "value": "[4] opaque"},
             ],
         },

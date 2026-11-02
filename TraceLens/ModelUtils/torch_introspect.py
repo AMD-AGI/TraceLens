@@ -108,6 +108,11 @@ class FxNodeInfo:
     shape: tuple[Any, ...] | None = None
     dtype: str | None = None
     reads_sizes: bool = False
+    # Persistent buffers cross calls to ``forward``.  Keep their identities
+    # separate from display labels so downstream consumers can model the
+    # boundary without knowing a model's cache or state naming convention.
+    state_reads: tuple[str, ...] = ()
+    state_writes: tuple[str, ...] = ()
 
 
 def _dotted_prefixes(path: str) -> list[str]:
@@ -145,6 +150,15 @@ def computation_graph_from_fx_inventory(
                 label=info.label or info.name,
                 synthetic=synthetic,
                 constant=synthetic is None and info.name not in varies,
+                extra_metadata={
+                    key: value
+                    for key, value in (
+                        ("state_read", info.state_reads),
+                        ("state_write", info.state_writes),
+                    )
+                    if value
+                }
+                or None,
             )
         )
         index_by_name[info.name] = len(graph.nodes) - 1
@@ -342,6 +356,9 @@ def export_module_inventory(
         for name, buffer in signature.inputs_to_buffers.items()
         if buffer in mutated
     }
+    state_outputs = {
+        output: buffer for output, buffer in signature.buffers_to_mutate.items()
+    }
     placeholders = [
         node
         for node in program.graph.nodes
@@ -404,6 +421,12 @@ def export_module_inventory(
             shape=shape,
             dtype=dtype_name,
             reads_sizes=reads_sizes,
+            state_reads=(state_inputs[node.name],) if node.name in state_inputs else (),
+            state_writes=(
+                state_outputs[node.name],
+            )
+            if node.name in state_outputs
+            else (),
         )
         inventory.append(info)
         traced.append(

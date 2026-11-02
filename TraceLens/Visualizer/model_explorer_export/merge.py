@@ -418,6 +418,15 @@ def _node_attr(node: dict[str, Any], key: str) -> str | None:
     return None
 
 
+def _node_attr_values(node: dict[str, Any], key: str) -> tuple[str, ...]:
+    """All non-empty values for repeatable structured node metadata."""
+    return tuple(
+        str(attr["value"])
+        for attr in node.get("attrs", [])
+        if attr.get("key") == key and attr.get("value")
+    )
+
+
 def _is_generator_source_node(node: dict[str, Any]) -> bool:
     """True for a tensor-*generating* op (``torch.arange``/``torch.zeros``) that
     reads no tensor operand.
@@ -2338,14 +2347,13 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     """A value written into persistent state leaves through a tile of its own.
 
     ``self.overlap_kv[name] = chunk_kv[..., :head_dim].clone()`` publishes into
-    the module's own state: nothing in THIS forward reads it, the NEXT call
-    does. With no consumer the clone reads as a dead node, which is the one
-    thing it is not -- it is the whole point of the statement.
+    the module's own state: the NEXT call reads it. A producer can also feed
+    work in this call, but that does not remove its cross-call boundary.
 
     The graph already says "a value leaves here" with an output tile, so the
     store gets one, named for the state it writes. The reader sees where the
-    value goes instead of a box wired to nothing, and the dead-node check sees
-    a legitimate sink rather than a dropped edge.
+    value goes and the dead-node check sees a legitimate sink rather than a
+    dropped edge.
     """
     consumed = {
         str(edge.get("sourceNodeId"))
@@ -2354,32 +2362,51 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     }
     additions: list[dict[str, Any]] = []
     for node in nodes:
-        if str(node["id"]) in consumed or _node_attr(node, "synthetic"):
+        if _node_attr(node, "synthetic"):
             continue
-        parts = [
-            part.strip()
-            for part in str(_node_attr(node, "details") or "").split(";")
-            if part.strip()
-        ]
-        stored = next(
-            (
-                part.split(":", 1)[1].strip()
-                for part in parts
-                if part.startswith("stores:")
-            ),
-            None,
-        )
+        stored = _node_attr_values(node, "state_write")
+        if str(node["id"]) in consumed and not stored:
+            continue
         side_effect = next(
             (
                 part.split(":", 1)[1].strip()
-                for part in parts
+                for part in str(_node_attr(node, "details") or "").split(";")
                 if part.startswith("side_effect:")
             ),
             None,
         )
         if stored:
-            sink_id = f"{node['id']}:@state_out:{stored}"
-            sink_label = stored
+            # One producer can publish several independent state values.  Each
+            # gets its own sink so graph consumers retain every identity.
+            for state in stored:
+                sink_id = f"{node['id']}:@state_out:{state}"
+                additions.append(
+                    {
+                        "id": sink_id,
+                        "label": state,
+                        "namespace": node.get("namespace", ""),
+                        "attrs": [
+                            {"key": "synthetic", "value": "@state_out"},
+                            {"key": "state_write", "value": state},
+                            {
+                                "key": "output_shape",
+                                "value": _node_attr(node, "output_shape") or "",
+                            },
+                            {
+                                "key": "output_dtype",
+                                "value": _node_attr(node, "output_dtype") or "",
+                            },
+                        ],
+                        "incomingEdges": [
+                            {
+                                "sourceNodeId": node["id"],
+                                "sourceNodeOutputId": "0",
+                                "targetNodeInputId": "0",
+                            }
+                        ],
+                    }
+                )
+            continue
         elif side_effect:
             # A discarded call (a shape check, a log) is the consumer of the
             # tensor it was handed. The call itself is not a tensor op, so the
@@ -2447,7 +2474,7 @@ def _drop_undrawn_state_reads(nodes: list[dict[str, Any]]) -> None:
             if str(node["id"]) not in consumed
             and not _node_attr(node, "synthetic")
             and "method_params:" in str(_node_attr(node, "details") or "")
-            and "stores:" not in str(_node_attr(node, "details") or "")
+            and not _node_attr_values(node, "state_write")
             and "side_effect:" not in str(_node_attr(node, "details") or "")
         }
         # A constant tile belongs to the op that reads it; when that op is not
