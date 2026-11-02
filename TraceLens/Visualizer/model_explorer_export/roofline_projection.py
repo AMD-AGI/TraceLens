@@ -82,8 +82,10 @@ Known approximations, stated once here rather than scattered in comments:
     node uses the threaded ``conv_weight`` geometry instead.
   - ``num_predicted_tokens`` adds a secondary MTP / speculative draft stack:
     one draft depth per predicted token (capped at the depth the config
-    declares), each a full attention + dense MLP + the 2H→H input projection,
-    not a copy of the routed backbone.
+    declares). The draft layer is read from the modeling source — an MTP /
+    NextN class, or the enorm/hnorm/eh_proj block — and its feed-forward
+    follows that layer, dense or MoE. With no such layer in the source, the
+    stack falls back to one attention plus a dense MLP.
 """
 
 from __future__ import annotations
@@ -545,6 +547,7 @@ def project_roofline(
                 num_predicted_tokens,
                 gpu_arch,
                 _activation_bpe(spec),
+                spec=spec,
             )
         )
     return result
@@ -1488,20 +1491,390 @@ def _analytical_op(
     return finished
 
 
+_DRAFT_PROJ_ATTRS = frozenset({"eh_proj", "e_proj", "input_proj", "hidden_proj"})
+
+
+@dataclass(frozen=True)
+class _DraftLayer:
+    """The speculative block read from modeling source, not the fallback template."""
+
+    name: str
+    norms: tuple[str, ...]
+    projections: tuple[tuple[str, int], ...]
+    has_attention: bool
+    ffn_role: str | None
+    convs: tuple[str, ...]
+
+
+def _registry_structures(spec: Any):
+    registry = getattr(spec, "class_registry", None) or {}
+    for structure in registry.values():
+        name = getattr(structure, "name", None)
+        assignments = getattr(structure, "init_assignments", None)
+        if isinstance(name, str) and isinstance(assignments, dict):
+            yield structure
+
+
+def _structure_named(spec: Any, class_name: str | None):
+    if not class_name:
+        return None
+    registry = getattr(spec, "class_registry", None) or {}
+    structure = registry.get(class_name)
+    assignments = getattr(structure, "init_assignments", None)
+    if isinstance(getattr(structure, "name", None), str) and isinstance(
+        assignments, dict
+    ):
+        return structure
+    return None
+
+
+def _assignment_pairs(structure: Any):
+    for attr, class_name in (
+        getattr(structure, "init_assignments", None) or {}
+    ).items():
+        base = str(attr).split("@", 1)[0]
+        if base.startswith("@"):
+            continue
+        yield base, str(class_name or "")
+
+
+def _draft_ffn_role(attr: str, class_name: str) -> str | None:
+    """Dense or MoE for one draft assignment.
+
+    ``self.mlp = FusedMoE(...)`` keeps the attribute name of a dense MLP, so the
+    class name decides. ``_looks_like_moe`` catches the engine wrappers
+    (``FusedMoE``) that the strict MoE-class pattern does not.
+    """
+    from TraceLens.ModelUtils.ast_analyze import ffn_role_for_class
+
+    if _looks_like_moe(class_name):
+        return "moe"
+    role = ffn_role_for_class(attr, class_name)
+    return role if role in ("ffn", "moe") else None
+
+
+def _variant_ffn_role(spec: Any) -> str | None:
+    """The feed-forward the backbone uses on its last layer.
+
+    A draft that reuses the backbone decoder continues that tail: a dense prefix
+    followed by MoE does not make the draft dense.
+    """
+    variants = getattr(spec, "layer_variants", None) or []
+    if not variants:
+        return None
+
+    def _tail(variant: Any) -> int:
+        indices = getattr(variant, "layer_indices", None) or []
+        return max(indices) if indices else 0
+
+    last = max(variants, key=_tail)
+    return _draft_ffn_role(
+        getattr(last, "ffn_attr", None) or "mlp",
+        getattr(last, "ffn_class", None) or "",
+    )
+
+
+def _ffn_roles_of(structure: Any, spec: Any) -> set[str]:
+    roles: set[str] = set()
+    options = getattr(structure, "init_assignment_options", None) or {}
+    for attr, class_name in _assignment_pairs(structure):
+        names = options.get(attr) or [class_name]
+        found = {
+            role
+            for name in names
+            if (role := _draft_ffn_role(attr, str(name or ""))) is not None
+        }
+        if len(found) > 1:
+            variant = _variant_ffn_role(spec)
+            if variant:
+                roles.add(variant)
+            continue
+        roles.update(found)
+    return roles
+
+
+def _is_draft_structure(structure: Any) -> bool:
+    from TraceLens.ModelUtils.ast_analyze import SPECULATIVE_CLASS_RE
+
+    if SPECULATIVE_CLASS_RE.search(structure.name):
+        return True
+    attrs = {attr for attr, _class_name in _assignment_pairs(structure)}
+    return {"enorm", "hnorm", "eh_proj"} <= attrs
+
+
+def _block_children(spec: Any, structure: Any) -> list[Any]:
+    """Decoder-like submodules whose own assignments are the draft's compute."""
+    from TraceLens.ModelUtils.ast_analyze import _classify_role
+
+    children = []
+    for _attr, class_name in _assignment_pairs(structure):
+        child = _structure_named(spec, class_name)
+        if child is None or child is structure:
+            continue
+        pairs = list(_assignment_pairs(child))
+        if any(
+            _classify_role(attr, name) == "attention" or _draft_ffn_role(attr, name)
+            for attr, name in pairs
+        ):
+            children.append(child)
+    return children
+
+
+def _resolve_draft_layer(spec: Any) -> _DraftLayer | None:
+    """The speculative layer declared by the modeling source, if it has one."""
+    from TraceLens.ModelUtils.ast_analyze import _classify_role
+
+    if spec is None:
+        return None
+    candidates = [
+        item for item in _registry_structures(spec) if _is_draft_structure(item)
+    ]
+    if not candidates:
+        return None
+
+    def _score(structure: Any) -> tuple[int, int, int]:
+        children = _block_children(spec, structure)
+        attention = any(
+            _classify_role(attr, name) == "attention"
+            for owner in (structure, *children)
+            for attr, name in _assignment_pairs(owner)
+        )
+        return (
+            int(attention or bool(children)),
+            int(
+                any(
+                    attr in _DRAFT_PROJ_ATTRS
+                    for attr, _name in _assignment_pairs(structure)
+                )
+            ),
+            len(list(_assignment_pairs(structure))),
+        )
+
+    layer = max(candidates, key=_score)
+    for child in _block_children(spec, layer):
+        if _is_draft_structure(child) and _score(child) > _score(layer):
+            layer = child
+    owners = [layer, *_block_children(spec, layer)]
+    norms: list[str] = []
+    projections: list[tuple[str, int]] = []
+    convs: list[str] = []
+    has_attention = False
+    for owner in owners:
+        for attr, class_name in _assignment_pairs(owner):
+            role = _classify_role(attr, class_name)
+            if role == "norm" and attr not in norms:
+                norms.append(attr)
+            elif role == "attention":
+                has_attention = True
+            elif attr in _DRAFT_PROJ_ATTRS or (
+                role == "other" and attr.endswith("_proj")
+            ):
+                factor = 2 if attr in {"eh_proj", "input_proj"} else 1
+                projections.append((attr, factor))
+            elif "conv" in attr.lower() or "conv" in class_name.lower():
+                convs.append(attr)
+    roles = set()
+    for owner in owners:
+        roles.update(_ffn_roles_of(owner, spec))
+    if "moe" in roles:
+        ffn_role: str | None = "moe"
+    elif "ffn" in roles:
+        ffn_role = "ffn"
+    else:
+        ffn_role = None
+    if not (norms or projections) or not (has_attention or ffn_role):
+        return None
+    return _DraftLayer(
+        name=layer.name,
+        norms=tuple(norms),
+        projections=tuple(projections),
+        has_attention=has_attention,
+        ffn_role=ffn_role,
+        convs=tuple(convs),
+    )
+
+
+def _tag_cost_source(ops: list[RooflineOp], cost_source: str) -> list[RooflineOp]:
+    for op in ops:
+        op.cost_source = cost_source
+    return ops
+
+
+def _draft_depth_ops(
+    draft: _DraftLayer,
+    section: str,
+    node_id: str,
+    dims: dict[str, Any],
+    tokens: int,
+    hidden: int,
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+) -> list[RooflineOp]:
+    """One speculative depth whose ops are the parsed draft layer's own modules."""
+    ops: list[RooflineOp] = []
+    norm_elems = tokens * hidden
+    norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
+    norm_bytes = (
+        _rmsnorm_bytes(norm_elems, hidden, True, bpe, bpe) if bpe is not None else None
+    )
+    for name in draft.norms:
+        ops.append(
+            _analytical_op(
+                f"{node_id}.{name}",
+                section,
+                name,
+                1,
+                "Normalization (RMSNorm)",
+                "vector",
+                norm_flops,
+                norm_bytes,
+                norm_elems,
+                dtype,
+                gpu_arch,
+            )
+        )
+    for name, factor in draft.projections:
+        proj_flops = GEMM.flops_func(tokens, hidden, factor * hidden, bias=False)
+        proj_bytes = (
+            GEMM.bytes_func(tokens, hidden, factor * hidden, False, bpe, bpe, bpe, bpe)
+            if bpe is not None
+            else None
+        )
+        ops.append(
+            _analytical_op(
+                f"{node_id}.{name}",
+                section,
+                name,
+                1,
+                "GEMM",
+                "matrix",
+                proj_flops,
+                proj_bytes,
+                tokens * hidden,
+                dtype,
+                gpu_arch,
+            )
+        )
+    if draft.has_attention:
+        attention = _attention_boundary_cost(dims, bpe)
+        if attention is not None:
+            category, maf_type, flops, bytes_moved = attention
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.attn",
+                    section,
+                    "attn",
+                    1,
+                    category,
+                    maf_type,
+                    flops,
+                    bytes_moved,
+                    tokens * hidden,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+            ops.extend(
+                _attention_extra_ops(
+                    section, f"{node_id}.attn", 1, dims, bpe, dtype, gpu_arch
+                )
+            )
+    if draft.ffn_role == "moe":
+        moe = _moe_cost(dims, _RT.moe_top_k, _RT.moe_intermediate, bpe)
+        if moe is not None:
+            category, maf_type, flops, bytes_moved, out_elems = moe
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.mlp",
+                    section,
+                    "mlp",
+                    1,
+                    category,
+                    maf_type,
+                    flops,
+                    bytes_moved,
+                    out_elems,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+            ops.extend(
+                _moe_extra_ops(section, f"{node_id}.mlp", 1, dims, bpe, dtype, gpu_arch)
+            )
+    elif draft.ffn_role == "ffn":
+        dense = _dense_ffn_cost(dims, bpe)
+        if dense is not None:
+            category, maf_type, flops, bytes_moved, out_elems = dense
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.mlp",
+                    section,
+                    "mlp",
+                    1,
+                    category,
+                    maf_type,
+                    flops,
+                    bytes_moved,
+                    out_elems,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+    if _RT.sconv_kernel:
+        channels = _shard(hidden, _RT.tp)
+        for name in draft.convs:
+            ops.append(
+                _short_conv_op(
+                    f"{node_id}.{name}",
+                    section,
+                    name,
+                    1,
+                    tokens,
+                    channels,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+    head = _engine_head_cost(dims, bpe)
+    if head is not None:
+        category, maf_type, flops, bytes_moved, out_elems = head
+        ops.append(
+            _analytical_op(
+                f"{node_id}.lm_head",
+                section,
+                "lm_head",
+                1,
+                category,
+                maf_type,
+                flops,
+                bytes_moved,
+                out_elems,
+                dtype,
+                gpu_arch,
+            )
+        )
+    return _tag_cost_source(ops, "source")
+
+
 def _mtp_stack_ops(
     dims: dict[str, Any],
     num_predicted_tokens: int,
     gpu_arch: dict[str, Any] | None,
     activation: tuple[float | None, str | None],
+    spec: Any = None,
 ) -> list[RooflineOp]:
     """One draft depth per predicted token, as its own stack.
 
     Capped at the depth the checkpoint declares (``mtp_config`` /
-    ``num_mtp_layers``). Each depth is the draft block: dual RMSNorm, a
-    replicated 2H→H input projection, one attention (with its packed
-    projections), a dense MLP — not the routed experts — and, when the arch
-    has a short conv, the residual convs. The shared LM head runs once per
-    draft token.
+    ``num_mtp_layers``). When the modeling source declares a draft layer, each
+    depth costs that layer: its norms, its 2H→H (or H→H) projection, its
+    attention, and its own dense or MoE feed-forward. Those rows are marked
+    ``cost_source="source"``. With no draft layer in the source, the depth is
+    the explicit fallback — dual RMSNorm, a 2H→H projection, one attention, and
+    a dense MLP — marked ``cost_source="fallback"``. The shared LM head runs
+    once per draft token either way.
     """
     if num_predicted_tokens <= 0:
         return []
@@ -1515,11 +1888,28 @@ def _mtp_stack_ops(
         hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
     except (KeyError, DimResolutionError):
         return []
+    draft = _resolve_draft_layer(spec)
     ops: list[RooflineOp] = []
     for index in range(count):
         section = f"mtp/{index}"
         node_id = f"mtp/{index}"
-        # Two RMSNorms (hidden stream and embedding stream) before the fuse.
+        if draft is not None:
+            ops.extend(
+                _draft_depth_ops(
+                    draft,
+                    section,
+                    node_id,
+                    dims,
+                    tokens,
+                    hidden,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+            continue
+        # No draft layer in the source. This template is the explicit fallback:
+        # two RMSNorms, a 2H→H projection, attention, and a dense MLP.
         norm_elems = tokens * hidden
         norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
         norm_bytes = (
@@ -1640,6 +2030,8 @@ def _mtp_stack_ops(
                     gpu_arch,
                 )
             )
+    if draft is None:
+        _tag_cost_source(ops, "fallback")
     return ops
 
 

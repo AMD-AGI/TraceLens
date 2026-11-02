@@ -113,6 +113,14 @@ HEAD_CLASS_RE = re.compile(r"(?:^|_)head$|Head$|LMHead|CausalLMOutput", re.I)
 _MOE_BLOCK_CLASS_RE = re.compile(
     r"(?i)(?:^moe$|sparse_?moe(?:_?block)?$|moe_?block$|experts$)"
 )
+# Speculative-decoding draft blocks. vLLM names the layer
+# ``MultiTokenPredictor``, SGLang names it ``NextN``, and EAGLE keeps "eagle"
+# in the class. Unanchored on purpose: the token sits inside a longer engine
+# class name (``DeepseekV3MultiTokenPredictorLayer``). The enorm/hnorm/eh_proj
+# assignment signature is a separate structural check, not part of this pattern.
+SPECULATIVE_CLASS_RE = re.compile(
+    r"(?i)(?:multi[_ ]?token|mtp|next[_ ]?n|speculative|eagle)"
+)
 
 
 SYNTHETIC_ATTENTION = "@attention"

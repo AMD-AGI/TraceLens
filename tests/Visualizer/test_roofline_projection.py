@@ -1223,6 +1223,202 @@ def test_mtp_stack_is_one_dense_depth_per_predicted_token(_reset_rt):
     )
     assert {op.section for op in capped} == {f"mtp/{index}" for index in range(8)}
     assert _mtp_stack_ops(dims, 0, None, (2, "bfloat16")) == []
+    assert {op.cost_source for op in ops} == {"fallback"}
+
+
+_DRAFT_MOE_SOURCE = """
+class RMSNorm:
+    def __init__(self, hidden_size):
+        pass
+
+class Attention:
+    def __init__(self, config):
+        pass
+
+class FusedMoE:
+    def __init__(self, num_experts):
+        pass
+
+class DecoderLayer:
+    def __init__(self, config):
+        self.self_attn = Attention(config)
+        self.mlp = FusedMoE(num_experts=8)
+
+class MultiTokenPredictorLayer:
+    def __init__(self, config):
+        self.enorm = RMSNorm(config.hidden_size)
+        self.hnorm = RMSNorm(config.hidden_size)
+        self.eh_proj = Linear(config.hidden_size * 2, config.hidden_size)
+        self.mtp_block = DecoderLayer(config)
+
+class Linear:
+    def __init__(self, in_features, out_features):
+        pass
+"""
+
+_DRAFT_DENSE_SOURCE = """
+class RMSNorm:
+    def __init__(self, hidden_size):
+        pass
+
+class Attention:
+    def __init__(self, config):
+        pass
+
+class DenseMLP:
+    def __init__(self, config):
+        pass
+
+class Linear:
+    def __init__(self, in_features, out_features):
+        pass
+
+class NextNLayer:
+    def __init__(self, config):
+        self.enorm = RMSNorm(config.hidden_size)
+        self.hnorm = RMSNorm(config.hidden_size)
+        self.eh_proj = Linear(config.hidden_size * 2, config.hidden_size)
+        self.self_attn = Attention(config)
+        self.mlp = DenseMLP(config)
+"""
+
+
+def _draft_spec(source: str):
+    from types import SimpleNamespace
+
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+
+    analysis = analyze_source(source, config={"hidden_size": 6144})
+    return SimpleNamespace(class_registry=analysis.class_registry, layer_variants=[])
+
+
+def test_speculative_class_pattern_matches_engine_draft_names():
+    from TraceLens.ModelUtils.ast_analyze import SPECULATIVE_CLASS_RE
+
+    assert SPECULATIVE_CLASS_RE.search("DeepseekV3MultiTokenPredictorLayer")
+    assert SPECULATIVE_CLASS_RE.search("NextNLayer")
+    assert SPECULATIVE_CLASS_RE.search("EagleDraft")
+    assert SPECULATIVE_CLASS_RE.search("SpeculativeDecoder")
+    assert not SPECULATIVE_CLASS_RE.search("DecoderLayer")
+
+
+def test_mtp_stack_follows_a_parsed_moe_draft_layer(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 64
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.hidden_size = 6144
+    _RT.dense_intermediate = 24576
+    _RT.moe_intermediate = 1024
+    _RT.moe_top_k = 2
+    _RT.moe_num_experts = 8
+    _RT.n_layers = 1
+    dims = {"B": 1, "S": 1, "H": 6144, "V": 1024}
+    ops = _mtp_stack_ops(
+        dims,
+        num_predicted_tokens=1,
+        gpu_arch=None,
+        activation=(2, "bfloat16"),
+        spec=_draft_spec(_DRAFT_MOE_SOURCE),
+    )
+    by_name = {op.computation: op for op in ops}
+    assert {"enorm", "hnorm", "eh_proj"} <= set(by_name)
+    assert by_name["mlp"].category == "MoE"
+    assert by_name["mlp"].cost_source == "source"
+    assert "input_proj" not in by_name
+    assert "router" in by_name
+
+
+def test_mtp_stack_follows_a_parsed_dense_draft_layer(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 64
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.hidden_size = 6144
+    _RT.dense_intermediate = 24576
+    _RT.moe_intermediate = 1024
+    _RT.moe_top_k = 2
+    _RT.n_layers = 1
+    dims = {"B": 1, "S": 1, "H": 6144, "V": 1024}
+    ops = _mtp_stack_ops(
+        dims,
+        num_predicted_tokens=1,
+        gpu_arch=None,
+        activation=(2, "bfloat16"),
+        spec=_draft_spec(_DRAFT_DENSE_SOURCE),
+    )
+    mlp = next(op for op in ops if op.computation == "mlp")
+    assert mlp.category == "GEMM"
+    assert mlp.cost_source == "source"
+    assert not any(op.category == "MoE" for op in ops)
+
+
+def test_mtp_draft_reuses_the_backbone_tail_variant_when_the_ffn_is_ambiguous(
+    _reset_rt,
+):
+    from types import SimpleNamespace
+
+    _RT.reset()
+    _RT.attn_heads = 8
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 64
+    _RT.hidden_size = 1024
+    _RT.dense_intermediate = 2048
+    _RT.moe_intermediate = 512
+    _RT.moe_top_k = 2
+    _RT.moe_num_experts = 4
+    _RT.n_layers = 1
+    decoder = SimpleNamespace(
+        name="DecoderLayer",
+        init_assignments={"self_attn": "Attention", "mlp": "FusedMoE"},
+        init_assignment_options={"mlp": ["DenseMLP", "FusedMoE"]},
+    )
+    draft = SimpleNamespace(
+        name="MultiTokenPredictorLayer",
+        init_assignments={
+            "enorm": "RMSNorm",
+            "hnorm": "RMSNorm",
+            "eh_proj": "Linear",
+            "mtp_block": "DecoderLayer",
+        },
+        init_assignment_options={},
+    )
+    spec = SimpleNamespace(
+        class_registry={
+            "MultiTokenPredictorLayer": draft,
+            "DecoderLayer": decoder,
+        },
+        layer_variants=[
+            LayerVariant(
+                label="dense",
+                count=2,
+                attention_label="Attn",
+                ffn_label="DenseMLP",
+                ffn_class="DenseMLP",
+                ffn_attr="mlp",
+                layer_indices=[0, 1],
+            ),
+            LayerVariant(
+                label="moe",
+                count=2,
+                attention_label="Attn",
+                ffn_label="FusedMoE",
+                ffn_class="FusedMoE",
+                ffn_attr="mlp",
+                layer_indices=[2, 3],
+            ),
+        ],
+    )
+    ops = _mtp_stack_ops(
+        {"B": 1, "S": 1, "H": 1024, "V": 128},
+        num_predicted_tokens=1,
+        gpu_arch=None,
+        activation=(2, "bfloat16"),
+        spec=spec,
+    )
+    mlp = next(op for op in ops if op.computation == "mlp")
+    assert mlp.category == "MoE"
+    assert mlp.cost_source == "source"
 
 
 def test_attention_boundary_cost_shards_heads_by_tp(_reset_rt):
