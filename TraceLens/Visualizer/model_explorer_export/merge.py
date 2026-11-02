@@ -6533,17 +6533,6 @@ def _resolve_section_tree_for_component(
             )
             if resolved is not None:
                 return resolved
-            # The variant's own class was not parsed into the registry (both MLP
-            # classes live in sibling modules the entry file never defines). Falling
-            # through to the attribute's default tree would draw — and cost — the
-            # OTHER class for this layer. Leave it unresolved so the caller emits
-            # one summary tile named for the class this layer actually builds.
-            if (
-                variant.ffn_class
-                and variant.ffn_class != component.class_name
-                and (spec.class_registry or {}).get(variant.ffn_class) is None
-            ):
-                return None
             if variant.ffn_attr:
                 resolved = _resolve_section_tree(
                     spec,
@@ -6551,6 +6540,22 @@ def _resolve_section_tree_for_component(
                     component_label=variant.ffn_label,
                     basic_ops=basic_ops,
                 )
+                # The variant's own class was not parsed into the registry (both
+                # MLP classes live in sibling modules the entry file never
+                # defines). The attribute lookup then returns the component's
+                # own tree — the other class, the one the constructor assigned
+                # last. Leave that unresolved so the caller emits one summary
+                # tile named for the class this layer actually builds. A tree
+                # the label selected, whose class is not the component's, still
+                # stands.
+                if (
+                    resolved is not None
+                    and variant.ffn_class
+                    and variant.ffn_class != component.class_name
+                    and resolved[1].class_name == component.class_name
+                    and (spec.class_registry or {}).get(variant.ffn_class) is None
+                ):
+                    return None
                 if resolved is not None:
                     return resolved
     return _resolve_section_tree(
