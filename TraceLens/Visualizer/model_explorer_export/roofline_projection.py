@@ -436,7 +436,70 @@ def project_roofline(
                 role,
             )
         )
+    result.ops.extend(_persistent_state_ops(nodes, dims, gpu_arch))
     return result
+
+
+def _persistent_state_ops(
+    nodes: list[dict[str, Any]],
+    dims: dict[str, Any],
+    gpu_arch: dict[str, Any] | None,
+) -> list[RooflineOp]:
+    """Cost every tensor the traced model writes into persistent state.
+
+    The AST graph tags a producer with ``stores: <state name>`` whenever a
+    forward writes into ``self.<state name>``. The producer's output type is
+    the state type at the call boundary: the next forward reads that tensor,
+    then this one replaces it. Model the resulting HBM round trip directly
+    from that traced shape and dtype, with no architecture-name or
+    configuration-field assumptions.
+    """
+    if gpu_arch is None or not gpu_arch.get("mem_bw_gbps"):
+        return []
+    state_ops: list[RooflineOp] = []
+    for node in nodes:
+        details = _attr_text(node.get("attrs"), "details") or ""
+        state_name = next(
+            (
+                part.split(":", 1)[1].strip()
+                for part in details.split(";")
+                if part.strip().startswith("stores:")
+            ),
+            None,
+        )
+        if not state_name:
+            continue
+        output_text = _attr_text(node.get("attrs"), "output_shape")
+        if not output_text:
+            continue
+        shape_text, dtype = _split_shape_text(output_text)
+        bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+        if bpe is None:
+            continue
+        try:
+            elements = prod(resolve_shape(shape_text, dims))
+        except DimResolutionError:
+            continue
+        bytes_moved = 2 * elements * bpe  # existing state read + replacement write
+        roofline_time_us = bytes_moved / (gpu_arch["mem_bw_gbps"] * 1e9) * 1e6
+        state_ops.append(
+            RooflineOp(
+                name=f"{node.get('id')}:persistent-state:{state_name}",
+                section=str(node.get("namespace") or ""),
+                computation=f"persistent state ({state_name})",
+                operation="",
+                category="Persistent State",
+                modeled=True,
+                reason=None,
+                output_elements=elements,
+                instances=_repeat_count(str(node.get("namespace") or "")),
+                flops=0.0,
+                bytes=bytes_moved,
+                roofline_time_us=roofline_time_us,
+                roofline_bound="MEMORY_BOUND",
+            )
+        )
+    return state_ops
 
 
 def _repeat_count(namespace: str) -> int:

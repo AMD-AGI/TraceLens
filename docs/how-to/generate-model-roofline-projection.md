@@ -111,7 +111,10 @@ Costed op families: GEMM (`Linear`/`matmul`/`bmm`, including a vLLM/SGLang
 one), SDPA, the Normalization family (RMSNorm, LayerNorm, GroupNorm,
 BatchNorm, InstanceNorm — matched by subclass name, since real checkpoints
 almost always subclass these), Softmax, generic elementwise/reduction ops, and
-MoE expert routing. A vLLM/SGLang `ParallelLMHead`/`FusedMoE` boundary — read
+MoE expert routing. Persistent tensors that the traced forward writes (for
+example, recurrent state or a cache) are modeled as a memory-bound read +
+write from their traced shape and dtype. A vLLM/SGLang
+`ParallelLMHead`/`FusedMoE` boundary — read
 from the engine's own source, where shape_inference has no rule for either —
 is costed from the architecture's own dims (vocab, hidden,
 experts-per-token, expert intermediate size) instead of its node shape; see

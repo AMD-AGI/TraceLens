@@ -30,6 +30,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _introspect_weight_bpe,
     _moe_cost,
     _parse_op_node,
+    _persistent_state_ops,
     _project_op,
     _split_shape_text,
     build_projection_dims,
@@ -51,6 +52,53 @@ _ARCH = {
         "vector_bf16": 163,
     },
 }
+
+
+def test_persistent_state_ops_cost_the_traced_state_round_trip():
+    nodes = [
+        {
+            "id": "layers.0.recurrence",
+            "namespace": "4x_decoder",
+            "attrs": [
+                {"key": "details", "value": "stores: recurrent_state"},
+                {"key": "output_shape", "value": "[B, H, D] float32"},
+            ],
+        }
+    ]
+
+    ops = _persistent_state_ops(nodes, {"B": 2, "H": 8, "D": 16}, _ARCH)
+
+    assert len(ops) == 1
+    op = ops[0]
+    assert op.computation == "persistent state (recurrent_state)"
+    assert op.instances == 4
+    assert op.flops == 0
+    assert op.bytes == 2 * 2 * 8 * 16 * 4
+    assert op.roofline_bound == "MEMORY_BOUND"
+    assert op.roofline_time_us == pytest.approx(op.bytes / 5300e9 * 1e6)
+
+
+def test_persistent_state_ops_skip_unresolved_or_untyped_state():
+    nodes = [
+        {
+            "id": "unknown-shape",
+            "namespace": "",
+            "attrs": [
+                {"key": "details", "value": "stores: state"},
+                {"key": "output_shape", "value": "[unknown] bfloat16"},
+            ],
+        },
+        {
+            "id": "unknown-type",
+            "namespace": "",
+            "attrs": [
+                {"key": "details", "value": "stores: state"},
+                {"key": "output_shape", "value": "[4] opaque"},
+            ],
+        },
+    ]
+
+    assert _persistent_state_ops(nodes, {}, _ARCH) == []
 
 
 # resolve_dim / resolve_shape
