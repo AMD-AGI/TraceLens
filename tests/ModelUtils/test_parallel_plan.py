@@ -1441,3 +1441,40 @@ def test_partition_flags_default_to_one_and_reject_zero(capsys):
     with pytest.raises(SystemExit):
         cli.main(["org/model", "--ep", "0"])
     assert "--ep" in capsys.readouterr().err
+
+
+def test_plan_sources_follow_imports_not_cached_siblings(tmp_path):
+    from TraceLens.ModelUtils.parallel_plan import _plan_sources
+
+    package = tmp_path / "model"
+    package.mkdir()
+    (package / "attention.py").write_text("class Attention: pass\n", encoding="utf-8")
+    (package / "unrelated.py").write_text("class Other: pass\n", encoding="utf-8")
+    (package / "model.py").write_text(
+        "from .attention import Attention\n", encoding="utf-8"
+    )
+    found = {
+        path.name
+        for path in _plan_sources(SimpleNamespace(code_paths=[package / "model.py"]))
+    }
+    assert found == {"model.py", "attention.py"}
+
+
+def test_offline_engine_fixtures_resolve_imported_parallel_layers():
+    from pathlib import Path
+
+    from TraceLens.ModelUtils.parallel_plan import _plan_sources, parse_engine_class_plans
+
+    root = Path(__file__).resolve().parents[1] / "fixtures" / "engine_layers"
+    cases = {
+        root / "vllm_llama" / "model.py": {"qkv_proj", "o_proj"},
+        root / "sglang_qwen" / "model.py": {"experts"},
+    }
+    for entry, attrs in cases.items():
+        sources = _plan_sources(SimpleNamespace(code_paths=[entry]))
+        assert entry in sources
+        assert len(sources) == 2
+        plans = []
+        for source in sources:
+            plans.extend(parse_engine_class_plans(source.read_text(encoding="utf-8")))
+        assert attrs <= {name for plan in plans for name in (plan.tp or {}) | (plan.ep or {})}

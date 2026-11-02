@@ -186,6 +186,11 @@ class ModuleConvSpec:
     kernel_size: tuple[int, ...] | None = None
     stride: tuple[int, ...] | None = None
     padding: tuple[int, ...] | None = None
+    dilation: tuple[int, ...] | None = None
+    groups: int = 1
+    bias: bool = True
+    transposed: bool = False
+    output_padding: tuple[int, ...] | None = None
 
 
 def _conv_out_dim(in_dim: DimExpr, kernel: int, stride: int, padding: int) -> DimExpr:
@@ -9547,7 +9552,13 @@ def _parse_module_ctor(
         )
         # positional kernel_size/stride/padding: nn.Conv2d(in, out, k, stride, pad)
         geometry: dict[str, ast.AST] = {}
-        for name, idx in (("kernel_size", 2), ("stride", 3), ("padding", 4)):
+        for name, idx in (
+            ("kernel_size", 2),
+            ("stride", 3),
+            ("padding", 4),
+            ("dilation", 5),
+            ("groups", 6),
+        ):
             if len(args) > idx:
                 geometry[name] = args[idx]
         for keyword in node.keywords:
@@ -9559,7 +9570,14 @@ def _parse_module_ctor(
                 out_channels = _resolve_dim_expr(
                     keyword.value, config=config, local_vars=local_vars, context=context
                 )
-            if keyword.arg in {"kernel_size", "stride", "padding"}:
+            if keyword.arg in {
+                "kernel_size",
+                "stride",
+                "padding",
+                "dilation",
+                "groups",
+                "output_padding",
+            }:
                 geometry[keyword.arg] = keyword.value
         if out_channels is not None:
             kernel = _resolve_int_tuple(
@@ -9585,12 +9603,42 @@ def _parse_module_ctor(
                 local_vars=local_vars,
                 context=context,
             )
+            dilation = _resolve_int_tuple(
+                geometry.get("dilation"),
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            output_padding = _resolve_int_tuple(
+                geometry.get("output_padding"),
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            groups_expr = _resolve_dim_expr(
+                geometry.get("groups", ast.Constant(value=1)),
+                config=config,
+                local_vars=local_vars,
+                context=context,
+            )
+            groups = (
+                groups_expr if isinstance(groups_expr, int) and groups_expr > 0 else 1
+            )
+            bias = True
+            for keyword in node.keywords:
+                if keyword.arg == "bias" and isinstance(keyword.value, ast.Constant):
+                    bias = bool(keyword.value.value)
             return ModuleConvSpec(
                 in_channels=in_channels,
                 out_channels=out_channels,
                 kernel_size=kernel,
                 stride=stride,
                 padding=padding,
+                dilation=dilation,
+                groups=groups,
+                bias=bias,
+                transposed="ConvTranspose" in class_name,
+                output_padding=output_padding,
             )
     if class_name == "ParallelLMHead":
         # vLLM/SGLang's LM head: ``(num_embeddings, embedding_dim, ...)``, the

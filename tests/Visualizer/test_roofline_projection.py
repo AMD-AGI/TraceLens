@@ -998,6 +998,41 @@ def test_attention_extra_ops_costs_packed_qkv_and_o_projections(_reset_rt):
     assert all(op.modeled and op.category == "GEMM" for op in ops)
 
 
+def test_attention_extra_ops_uses_latent_ranks_when_declared(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 8
+    _RT.attn_kv_heads = 1
+    _RT.attn_head_dim = 128
+    _RT.hidden_size = 1024
+    _RT.q_lora_rank = 256
+    _RT.kv_lora_rank = 512
+    ops = _attention_extra_ops(
+        "decoder",
+        "decoder/attn",
+        instances=1,
+        dims={"B": 1, "S": 1},
+        bpe=2,
+        dtype="bfloat16",
+        gpu_arch=None,
+    )
+    names = {op.computation for op in ops}
+    assert {"q_a_proj", "q_b_proj", "kv_a_proj", "kv_b_proj", "o_proj"} <= names
+    assert "qkv_proj" not in names
+
+
+def test_attention_boundary_uses_model_causal_policy_for_cold_prefill(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 8
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 64
+    _RT.n_layers = 1
+    _RT.causal_attention = True
+    causal = _attention_boundary_cost({"B": 1, "S": 16}, bpe=2)[2]
+    _RT.causal_attention = False
+    bidirectional = _attention_boundary_cost({"B": 1, "S": 16}, bpe=2)[2]
+    assert causal < bidirectional
+
+
 def test_attention_extra_ops_emits_relative_attention_rows_when_declared(_reset_rt):
     _RT.reset()
     _RT.attn_heads = 64
@@ -1095,6 +1130,29 @@ def test_unparsed_dense_mlp_is_not_costed_as_moe(_reset_rt):
     assert moe.modeled and moe.category == "MoE"
     assert dense.flops == _dense_ffn_cost(dims, 2)[2]
     assert dense.flops != moe.flops
+
+
+def test_moe_role_is_costed_without_an_ffn_alias(_reset_rt):
+    _RT.reset()
+    _RT.moe_top_k = 2
+    _RT.moe_intermediate = 1024
+    _RT.hidden_size = 4096
+    op = _project_op(
+        "decoder/experts",
+        "decoder",
+        "SparseMoeBlock",
+        "SparseMoeBlock",
+        "",
+        "[B, S, H] bfloat16",
+        [],
+        {"B": 1, "S": 1, "H": 4096},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=2,
+        moe_intermediate_size=1024,
+        role="moe",
+    )
+    assert op.modeled and op.category == "MoE"
 
 
 def test_short_conv_leaf_uses_the_declared_kernel(_reset_rt):
