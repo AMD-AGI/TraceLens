@@ -849,8 +849,13 @@ def test_attention_extra_ops_costs_packed_qkv_and_o_projections(_reset_rt):
     _RT.attn_head_dim = 128
     _RT.hidden_size = 6144
     ops = _attention_extra_ops(
-        "decoder", "decoder/attn", instances=1, dims={"B": 1, "S": 1}, bpe=2,
-        dtype="bfloat16", gpu_arch=None,
+        "decoder",
+        "decoder/attn",
+        instances=1,
+        dims={"B": 1, "S": 1},
+        bpe=2,
+        dtype="bfloat16",
+        gpu_arch=None,
     )
     names = {op.computation for op in ops}
     assert names == {"qkv_proj", "o_proj"}  # no d_rel -> no relative rows
@@ -869,8 +874,13 @@ def test_attention_extra_ops_emits_relative_attention_rows_when_declared(_reset_
     _RT.d_rel = 16
     _RT.rel_extent = 1024
     ops = _attention_extra_ops(
-        "decoder", "decoder/attn", instances=1, dims={"B": 1, "S": 1}, bpe=2,
-        dtype="bfloat16", gpu_arch=None,
+        "decoder",
+        "decoder/attn",
+        instances=1,
+        dims={"B": 1, "S": 1},
+        bpe=2,
+        dtype="bfloat16",
+        gpu_arch=None,
     )
     names = {op.computation for op in ops}
     assert {"rel_r_proj", "rel_bias"} <= names
@@ -880,9 +890,9 @@ def test_attention_extra_ops_emits_relative_attention_rows_when_declared(_reset_
 
 def test_attention_extra_ops_needs_attention_dims(_reset_rt):
     _RT.reset()  # no attn_heads/head_dim/hidden -> nothing to cost
-    assert _attention_extra_ops(
-        "s", "n", 1, {"B": 1, "S": 1}, 2, "bfloat16", None
-    ) == []
+    assert (
+        _attention_extra_ops("s", "n", 1, {"B": 1, "S": 1}, 2, "bfloat16", None) == []
+    )
 
 
 def test_moe_cost_shards_intermediate_by_tp_and_tokens_by_ep(_reset_rt):

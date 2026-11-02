@@ -742,7 +742,9 @@ def _populate_introspection(spec):
     d_rel = tcfg.get("d_rel")
     _RT.d_rel = d_rel if isinstance(d_rel, int) and d_rel > 0 else None
     rel_extent = tcfg.get("rel_extent")
-    _RT.rel_extent = rel_extent if isinstance(rel_extent, int) and rel_extent > 0 else None
+    _RT.rel_extent = (
+        rel_extent if isinstance(rel_extent, int) and rel_extent > 0 else None
+    )
     sw = tcfg.get("sliding_window_size") or tcfg.get("sliding_window")
     _RT.sliding_window = sw if isinstance(sw, int) and sw > 0 else None
     lli = tcfg.get("local_layer_ids")
@@ -918,7 +920,9 @@ def _attention_extra_ops(
                 else None
             )
             ops.append(
-                _finish_op(bias, "BinaryElementwise", "vector", flops, byt, dtype, gpu_arch)
+                _finish_op(
+                    bias, "BinaryElementwise", "vector", flops, byt, dtype, gpu_arch
+                )
             )
     return ops
 

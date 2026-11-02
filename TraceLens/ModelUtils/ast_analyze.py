@@ -1496,9 +1496,7 @@ def _augmented_param_values(
     each parameter's literal default (``force_dense_mlp: bool = False``) so a
     branch over it folds instead of stalling on an unknown name."""
     params = dict(param_values or {})
-    idx_val = next(
-        (params[k] for k in _LAYER_INDEX_PARAM_NAMES if k in params), None
-    )
+    idx_val = next((params[k] for k in _LAYER_INDEX_PARAM_NAMES if k in params), None)
     args = getattr(init, "args", None)
     if args is None:
         return params
@@ -1511,7 +1509,9 @@ def _augmented_param_values(
                 params[arg.arg] = idx_val
     defaults = list(getattr(args, "defaults", []) or [])
     if defaults:
-        for arg, default in zip(positional[len(positional) - len(defaults) :], defaults):
+        for arg, default in zip(
+            positional[len(positional) - len(defaults) :], defaults
+        ):
             if arg.arg not in params and isinstance(default, ast.Constant):
                 params[arg.arg] = default.value
     for arg, default in zip(
@@ -1541,6 +1541,7 @@ def _assigned_value_for_attr(
     else: self.mlp = MoE`` gives Dense for the early layers and MoE for the rest.
     Returns ``None`` when no assignment to the attr is found down a resolvable
     path (the caller then falls back to the structural first-match)."""
+
     def _targets_self_attr(target: ast.expr) -> bool:
         return (
             isinstance(target, ast.Attribute)
