@@ -1382,6 +1382,33 @@ def test_ast_compact_expression_and_provenance_helpers():
         aa.SYNTHETIC_ATTENTION,
     ]
 
+
+def test_extract_self_calls_ordered_resolves_a_submodule_alias_call():
+    """``ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp``
+    leaves ``submodule_aliases`` mapping ``ffn`` to the chosen attr; a later
+    bare ``ffn(x)`` must resolve through it exactly as ``self.block_sparse_moe(x)``
+    would."""
+    expression = ast.parse("ffn(hidden_states)", mode="eval").body
+    calls: list[str] = []
+    aa._extract_self_calls_ordered(
+        expression, calls, submodule_aliases={"ffn": "block_sparse_moe"}
+    )
+    assert calls == ["block_sparse_moe"]
+
+
+def test_extract_self_calls_ordered_suffixes_a_repeated_aliased_attr():
+    # A ternary-aliased attr called more than once in this forward still needs
+    # its own call-site suffix, the same as a direct self.<attr>(...) call.
+    expression = ast.parse("ffn(hidden_states)", mode="eval").body
+    calls: list[str] = []
+    aa._extract_self_calls_ordered(
+        expression,
+        calls,
+        repeated_attrs=frozenset({"block_sparse_moe"}),
+        submodule_aliases={"ffn": "block_sparse_moe"},
+    )
+    assert calls == [aa.submodule_callsite_attr("block_sparse_moe", 1)]
+
     assert aa._call_undoes_rotation(ast.parse("rope(q, k, True)", mode="eval").body)
     assert not aa._call_undoes_rotation(
         ast.parse("rope(q, k, inverse=False)", mode="eval").body

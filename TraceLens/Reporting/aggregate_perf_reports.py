@@ -6,21 +6,23 @@
 
 """Combine the perf report CSVs of several traces into one report.
 
-Each input is a ``(phase, csv_dir)`` pair written by the perf report. Rows that
-share a table's row key are combined: times and counts add up, means and
-standard deviations are recomputed from the per-report counts, and min / max
-take the overall extreme. Percentages are recomputed from the combined totals,
-so they are shares of all reports together.
+Each input is a ``ReportInput`` (phase, node, CSV directory) written by the
+perf report. Rows that share a table's row key are combined: times and counts
+add up, means and standard deviations are recomputed from the per-report
+counts, and min / max take the overall extreme.
 
 Policies:
 
-* ``combine_only_same_phase`` — the phase is part of the row key. Reports of
-  the same phase combine; rows of different phases sit side by side.
-* ``combine`` — the phase is ignored and matching rows combine across all
-  reports. The ``phase`` column lists every contributing phase.
+* ``combine_by_node`` — reports of the same node combine; nodes never merge.
+  Each table is one block per node, in report order, and every block reads like
+  that node's own report: rows sorted by time and ``Percentage (%)`` a share of
+  the node's kernel time. ``gpu_timeline`` adds a final ``all`` block summed
+  over every report.
+* ``combine``, ``combine_by_phase``, ``combine_stack`` — reserved, not
+  supported yet.
 
-``gpu_timeline`` is always one timeline summed over every report, so its
-``busy_time`` is the denominator for shares of the whole run.
+The ``node`` and ``phase`` columns tag every row; a block that combined several
+phases lists them joined with ``+``.
 
 Medians and per-kernel summaries can't be combined exactly; they come from the
 contributing row with the most instances. A column or CSV without a rule
@@ -29,7 +31,8 @@ raises ``AggregationError`` instead of being dropped.
 
 import ast
 import os
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -37,10 +40,16 @@ import pandas as pd
 from TraceLens.TreePerf.tree_perf import PERF_PARAM_PREFIX, UNIQUE_ARGS_GROUPING_COLS
 
 # Constants
-POLICY_SAME_PHASE = "combine_only_same_phase"
 POLICY_COMBINE = "combine"
-POLICIES = (POLICY_SAME_PHASE, POLICY_COMBINE)
+POLICY_BY_PHASE = "combine_by_phase"
+POLICY_BY_NODE = "combine_by_node"
+POLICY_STACK = "combine_stack"
+POLICIES = (POLICY_COMBINE, POLICY_BY_PHASE, POLICY_BY_NODE, POLICY_STACK)
+SUPPORTED_POLICIES = (POLICY_BY_NODE,)
 PHASE_COL = "phase"
+NODE_COL = "node"
+ALL_NODES = "all"
+_TAG_COLS = (NODE_COL, PHASE_COL)
 _PHASE_JOIN = "+"
 
 _GPU_TIMELINE = "gpu_timeline"
@@ -130,12 +139,21 @@ class AggregationError(ValueError):
     """The reports can't be combined: unknown input or invalid arguments."""
 
 
+@dataclass(frozen=True)
+class ReportInput:
+    """One perf report to combine: its phase, node, and CSV directory."""
+
+    phase: str
+    node: Optional[str]
+    csv_dir: str
+
+
 def aggregate_perf_report_csvs(
-    reports: Sequence[Tuple[str, str]],
+    reports: Sequence[ReportInput],
     policy: str,
     output_dir: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
-    """Combine ``reports`` (``(phase, csv_dir)`` pairs) under ``policy``.
+    """Combine ``reports`` under ``policy``.
 
     Returns one DataFrame per CSV name and writes them to ``output_dir`` when
     it is given. Reports are read in order; ``first`` columns take the first
@@ -147,22 +165,40 @@ def aggregate_perf_report_csvs(
             + ", ".join(POLICIES)
             + "."
         )
+    if policy not in SUPPORTED_POLICIES:
+        raise AggregationError(
+            f"aggregation policy {policy!r} is not supported yet; supported: "
+            + ", ".join(SUPPORTED_POLICIES)
+            + "."
+        )
     if not reports:
         raise AggregationError("at least one report is required.")
+    for report in reports:
+        if not isinstance(report.node, str) or not report.node.strip():
+            raise AggregationError(
+                f"{policy} needs a node for every report; {report.csv_dir} has none."
+            )
+        if report.node == ALL_NODES:
+            raise AggregationError(
+                f"node {ALL_NODES!r} is reserved for the gpu_timeline total."
+            )
 
-    tables: Dict[str, List[Tuple[str, pd.DataFrame]]] = {}
-    for phase, csv_dir in reports:
-        if not os.path.isdir(csv_dir):
-            raise AggregationError(f"report CSV directory not found: {csv_dir}")
-        for file_name in sorted(os.listdir(csv_dir)):
+    tables: Dict[str, List[pd.DataFrame]] = {}
+    for report in reports:
+        if not os.path.isdir(report.csv_dir):
+            raise AggregationError(f"report CSV directory not found: {report.csv_dir}")
+        for file_name in sorted(os.listdir(report.csv_dir)):
             if not file_name.endswith(".csv"):
                 continue
             table = file_name[: -len(".csv")]
-            df = _read_table(table, os.path.join(csv_dir, file_name))
-            tables.setdefault(table, []).append((phase, df))
+            df = _read_table(table, os.path.join(report.csv_dir, file_name))
+            df = df.drop(columns=list(_TAG_COLS), errors="ignore")
+            df[NODE_COL] = report.node
+            df[PHASE_COL] = report.phase
+            tables.setdefault(table, []).append(df)
 
     result = {
-        table: _aggregate_table(table, frames, policy)
+        table: _aggregate_by_node(table, pd.concat(frames, ignore_index=True))
         for table, frames in tables.items()
     }
     if output_dir is not None:
@@ -199,8 +235,8 @@ def _column_rule(column: str) -> Optional[str]:
 
 
 def _read_table(table: str, path: str) -> pd.DataFrame:
-    # An aggregated report has a phase column; the caller's phase replaces it.
-    columns = [c for c in pd.read_csv(path, nrows=0).columns if c != PHASE_COL]
+    # An aggregated report has node / phase columns; the caller's values replace them.
+    columns = [c for c in pd.read_csv(path, nrows=0).columns if c not in _TAG_COLS]
     keys = _row_keys(table, columns)
     unknown = [c for c in columns if c not in keys and _column_rule(c) is None]
     if unknown:
@@ -213,31 +249,38 @@ def _read_table(table: str, path: str) -> pd.DataFrame:
     return pd.read_csv(path, dtype={k: str for k in keys})
 
 
-def _aggregate_table(
-    table: str, frames: List[Tuple[str, pd.DataFrame]], policy: str
-) -> pd.DataFrame:
-    tagged = []
-    for phase, df in frames:
-        df = df.drop(columns=[PHASE_COL], errors="ignore").copy()
-        df[PHASE_COL] = phase
-        tagged.append(df)
-    combined = pd.concat(tagged, ignore_index=True)
-    columns = [c for c in combined.columns if c != PHASE_COL]
+def _aggregate_by_node(table: str, combined: pd.DataFrame) -> pd.DataFrame:
+    columns = [c for c in combined.columns if c not in _TAG_COLS]
     keys = _row_keys(table, columns)
-    split_phases = policy == POLICY_SAME_PHASE and table != _GPU_TIMELINE
-    group_keys = keys + ([PHASE_COL] if split_phases else [])
     count_col = next((c for c in _COUNT_COLS if c in columns), None)
-
     rules = {c: _column_rule(c) for c in columns if c not in keys}
     if count_col is None and any(r in (_MEAN, _STD) for r in rules.values()):
         raise AggregationError(f"{table}.csv has means but no instance count column.")
 
+    blocks = [
+        _merge_rows(combined[combined[NODE_COL] == node], node, keys, rules, count_col)
+        for node in pd.unique(combined[NODE_COL])
+    ]
+    if table == _GPU_TIMELINE:
+        blocks.append(_merge_rows(combined, ALL_NODES, keys, rules, count_col))
+        blocks = [_with_timeline_percent(block) for block in blocks]
+    else:
+        blocks = [_with_percentages(block) for block in blocks]
+    return pd.concat(blocks, ignore_index=True)[list(_TAG_COLS) + columns]
+
+
+def _merge_rows(
+    df: pd.DataFrame,
+    node: str,
+    keys: List[str],
+    rules: Dict[str, Optional[str]],
+    count_col: Optional[str],
+) -> pd.DataFrame:
     rows = []
-    for _, positions in combined.groupby(
-        group_keys, dropna=False, sort=False
-    ).indices.items():
-        group = combined.iloc[positions]
+    for _, positions in df.groupby(keys, dropna=False, sort=False).indices.items():
+        group = df.iloc[positions]
         row = {c: group[c].iloc[0] for c in keys}
+        row[NODE_COL] = node
         row[PHASE_COL] = _PHASE_JOIN.join(sorted(set(group[PHASE_COL])))
         weights = group[count_col].astype(float) if count_col else None
         rep = (
@@ -248,11 +291,7 @@ def _aggregate_table(
         for col, rule in rules.items():
             row[col] = _combine(col, rule, group, weights, rep)
         rows.append(row)
-
-    out = pd.DataFrame(rows, columns=[PHASE_COL] + columns)
-    if table == _GPU_TIMELINE:
-        return _with_timeline_percent(out)
-    return _with_percentages(out)
+    return pd.DataFrame(rows, columns=list(_TAG_COLS) + keys + list(rules))
 
 
 def _combine(col, rule, group, weights, rep):

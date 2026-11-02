@@ -21,6 +21,7 @@ from TraceLens.ModelUtils.block_tree import (
     prepare_diagram_section_trees,
     subgraph_warrants_export,
 )
+from TraceLens.ModelUtils.ast_analyze import displays_as_linear
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
 from TraceLens.ModelUtils.extract import ArchitectureSpec, architecture_section_trees
 
@@ -87,11 +88,15 @@ def _ordered_decoder_components(spec: ArchitectureSpec) -> list[BlockComponent]:
 def _display_label(component: BlockComponent, spec: ArchitectureSpec) -> str:
     if component.role == "norm":
         return spec.norm_type or component.label or "RMSNorm"
-    if component.role == "head" and component.class_name == "Linear":
-        # The lm_head is a real Linear projection (matmul, learned weight hidden);
-        # render it as the ``Linear`` op it is, like every other Linear, rather
-        # than as an opaque ``Logits`` box. ``logits`` stays the output tensor's
-        # name (see ``shapes.py`` output handling), but the node reads as Linear.
+    if component.role == "head" and displays_as_linear(
+        component.attr_name, component.class_name
+    ):
+        # The lm_head is a real Linear projection (matmul, learned weight hidden),
+        # whether it is literally ``nn.Linear`` or an engine's sharded wrapper
+        # (``ParallelLMHead``); render it as the ``Linear`` op it is, like every
+        # other Linear, rather than as an opaque ``Logits`` box. ``logits`` stays
+        # the output tensor's name (see ``shapes.py`` output handling), but the
+        # node reads as Linear.
         return "Linear"
     if component.role == "embedding":
         return component.label

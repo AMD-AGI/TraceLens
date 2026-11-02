@@ -27,13 +27,14 @@ from TraceLens.ModelUtils.ast_analyze import (
 )
 from TraceLens.ModelUtils.block_tree import (
     BlockNode,
+    build_block_node,
     collect_nested_diagrams,
     expand_block_tree_inplace,
     is_transparent_inline_expansion,
     resolved_phi_arms,
     subgraph_warrants_json_export,
 )
-from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
+from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant, RepeatedGroup
 from TraceLens.ModelUtils.computation_graph import (
     ComputationGraph,
     build_computation_graph,
@@ -42,6 +43,9 @@ from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
     architecture_section_trees,
     image_placeholder_token_id,
+    ordered_repeated_children,
+    repeated_child_attr,
+    repeated_group_is_pipeline,
     vision_tower_component,
     vision_tower_passthrough_inputs,
 )
@@ -412,6 +416,15 @@ def _node_attr(node: dict[str, Any], key: str) -> str | None:
             if isinstance(value, str):
                 return value
     return None
+
+
+def _node_attr_values(node: dict[str, Any], key: str) -> tuple[str, ...]:
+    """All non-empty values for repeatable structured node metadata."""
+    return tuple(
+        str(attr["value"])
+        for attr in node.get("attrs", [])
+        if attr.get("key") == key and attr.get("value")
+    )
 
 
 def _is_generator_source_node(node: dict[str, Any]) -> bool:
@@ -2334,14 +2347,13 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     """A value written into persistent state leaves through a tile of its own.
 
     ``self.overlap_kv[name] = chunk_kv[..., :head_dim].clone()`` publishes into
-    the module's own state: nothing in THIS forward reads it, the NEXT call
-    does. With no consumer the clone reads as a dead node, which is the one
-    thing it is not -- it is the whole point of the statement.
+    the module's own state: the NEXT call reads it. A producer can also feed
+    work in this call, but that does not remove its cross-call boundary.
 
     The graph already says "a value leaves here" with an output tile, so the
     store gets one, named for the state it writes. The reader sees where the
-    value goes instead of a box wired to nothing, and the dead-node check sees
-    a legitimate sink rather than a dropped edge.
+    value goes and the dead-node check sees a legitimate sink rather than a
+    dropped edge.
     """
     consumed = {
         str(edge.get("sourceNodeId"))
@@ -2350,32 +2362,54 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     }
     additions: list[dict[str, Any]] = []
     for node in nodes:
-        if str(node["id"]) in consumed or _node_attr(node, "synthetic"):
+        if _node_attr(node, "synthetic"):
             continue
-        parts = [
-            part.strip()
-            for part in str(_node_attr(node, "details") or "").split(";")
-            if part.strip()
-        ]
-        stored = next(
-            (
-                part.split(":", 1)[1].strip()
-                for part in parts
-                if part.startswith("stores:")
-            ),
-            None,
-        )
+        stored = _node_attr_values(node, "state_write")
+        if str(node["id"]) in consumed and not stored:
+            continue
         side_effect = next(
             (
                 part.split(":", 1)[1].strip()
-                for part in parts
+                for part in str(_node_attr(node, "details") or "").split(";")
                 if part.startswith("side_effect:")
             ),
             None,
         )
         if stored:
-            sink_id = f"{node['id']}:@state_out:{stored}"
-            sink_label = stored
+            # One producer can publish several independent state values.  Each
+            # gets its own sink so graph consumers retain every identity.
+            for state in stored:
+                sink_id = f"{node['id']}:@state_out:{state}"
+                additions.append(
+                    {
+                        "id": sink_id,
+                        "label": state,
+                        "namespace": node.get("namespace", ""),
+                        "attrs": [
+                            {"key": "synthetic", "value": "@state_out"},
+                            # This is a visual boundary for a write already
+                            # represented on its producer.  Keep its identity
+                            # without making it a second costed write.
+                            {"key": "state_boundary", "value": state},
+                            {
+                                "key": "output_shape",
+                                "value": _node_attr(node, "output_shape") or "",
+                            },
+                            {
+                                "key": "output_dtype",
+                                "value": _node_attr(node, "output_dtype") or "",
+                            },
+                        ],
+                        "incomingEdges": [
+                            {
+                                "sourceNodeId": node["id"],
+                                "sourceNodeOutputId": "0",
+                                "targetNodeInputId": "0",
+                            }
+                        ],
+                    }
+                )
+            continue
         elif side_effect:
             # A discarded call (a shape check, a log) is the consumer of the
             # tensor it was handed. The call itself is not a tensor op, so the
@@ -2443,7 +2477,7 @@ def _drop_undrawn_state_reads(nodes: list[dict[str, Any]]) -> None:
             if str(node["id"]) not in consumed
             and not _node_attr(node, "synthetic")
             and "method_params:" in str(_node_attr(node, "details") or "")
-            and "stores:" not in str(_node_attr(node, "details") or "")
+            and not _node_attr_values(node, "state_write")
             and "side_effect:" not in str(_node_attr(node, "details") or "")
         }
         # A constant tile belongs to the op that reads it; when that op is not
@@ -6540,6 +6574,22 @@ def _resolve_section_tree_for_component(
                     component_label=variant.ffn_label,
                     basic_ops=basic_ops,
                 )
+                # The variant's own class was not parsed into the registry (both
+                # MLP classes live in sibling modules the entry file never
+                # defines). The attribute lookup then returns the component's
+                # own tree — the other class, the one the constructor assigned
+                # last. Leave that unresolved so the caller emits one summary
+                # tile named for the class this layer actually builds. A tree
+                # the label selected, whose class is not the component's, still
+                # stands.
+                if (
+                    resolved is not None
+                    and variant.ffn_class
+                    and variant.ffn_class != component.class_name
+                    and resolved[1].class_name == component.class_name
+                    and (spec.class_registry or {}).get(variant.ffn_class) is None
+                ):
+                    return None
                 if resolved is not None:
                     return resolved
     return _resolve_section_tree(
@@ -6619,6 +6669,30 @@ def _single_op_attrs(node: BlockNode) -> list[dict[str, str]]:
             attrs.append({"key": "raw_op", "value": value.strip()})
             break
     return attrs
+
+
+def _stamp_variant_ffn_identity(
+    summary: dict[str, Any],
+    component: BlockComponent,
+    variant: LayerVariant | None,
+) -> None:
+    """Name a collapsed FFN tile after the class THIS layer builds.
+
+    The decoder component keeps whichever class the constructor assigned last
+    (the MoE arm, for a ``dense if layer_id < threshold else MoE`` block). A
+    variant whose class was never parsed still has to say so, or every layer —
+    including the dense ones — is costed as that last class.
+    """
+    if not _component_uses_variant_ffn_class(component, variant):
+        return
+    class_name = variant.ffn_class if variant is not None else None
+    if not class_name or class_name == component.class_name:
+        return
+    from TraceLens.ModelUtils.ast_analyze import ffn_role_for_class
+
+    _set_node_attr(summary, "class_name", class_name)
+    _set_node_attr(summary, "role", ffn_role_for_class(component.attr_name, class_name))
+    summary["label"] = variant.ffn_label or class_name
 
 
 def _summary_node(
@@ -6730,6 +6804,8 @@ def _append_section(
             previous_exits,
             shape_inferencer,
         )
+        if collapsed_op is None:
+            _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -6761,6 +6837,7 @@ def _append_section(
             previous_exits,
             shape_inferencer,
         )
+        _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -7379,6 +7456,29 @@ def _bind_named_section_inputs(
     return True
 
 
+def _step_boundary_sources(
+    step: str,
+    boundary_params: dict[str, tuple[str, ...]],
+    refs: dict[str, SourceRef],
+) -> list[SourceRef]:
+    """A step's sources from the method's own parameters, for a step with no listed
+    chained predecessor.
+
+    ``forward_step_predecessors`` is empty for a call whose first read of a tensor is a
+    bare forward parameter (``self.input_layernorm(hidden_states)`` as a model's very
+    first statement) rather than another step's output -- that fact is recorded in
+    ``forward_step_boundary_params`` instead. Leaving such a step without an input would
+    drop it, and everything chained after it, from the rendered graph even though it is
+    the model's actual entry point.
+    """
+    sources = []
+    for param in boundary_params.get(step, ()):
+        source = refs.get(f"@method_input:{param}") or refs.get("@method_input")
+        if source is not None:
+            sources.append(source)
+    return sources
+
+
 def _append_source_decoder_layer(
     merged_nodes: list[dict[str, Any]],
     *,
@@ -7421,6 +7521,12 @@ def _append_source_decoder_layer(
                 for predecessor in phi_live_arms.get(step, operation.predecessors)
                 if predecessor in refs
             ]
+            if not sources:
+                sources = _step_boundary_sources(
+                    step,
+                    getattr(decoder, "forward_step_boundary_params", None) or {},
+                    refs,
+                )
             if not sources:
                 continue
             if (operation.class_name or "") == PHI_CLASS and len(sources) == 1:
@@ -7465,6 +7571,12 @@ def _append_source_decoder_layer(
         inputs = [
             refs[predecessor] for predecessor in predecessors if predecessor in refs
         ]
+        if not inputs:
+            inputs = _step_boundary_sources(
+                step,
+                getattr(decoder, "forward_step_boundary_params", None) or {},
+                refs,
+            )
         if not inputs:
             continue
         section_prefix = _merge_node_id(id_prefix, component.attr_name)
@@ -8231,6 +8343,11 @@ def _tag_secondary_module_groups(
     namespace/attribute rewrite — no new nodes or edges, so it cannot create a
     cycle. Degrades to a no-op when the live tree is unavailable or no rendered
     namespace matches a secondary group's element class."""
+    # The nested-stage path already emitted each position with its own count and
+    # label. Re-tagging those ModuleLists (a downsample list's first class, say)
+    # would rename a single leading node into a fake N× group.
+    if getattr(spec, "nested_module_groups", None):
+        return
     groups = getattr(spec, "meta_module_groups", None)
     if not groups:
         return
@@ -10066,6 +10183,687 @@ def _synthesize_repeat_loop_boundaries(nodes: list[dict[str, Any]]) -> None:
         _wrap_container_loop_carried(nodes, container)
 
 
+def _repeat_group_config(namespace: str) -> dict[str, Any]:
+    """The red collapsible-group styling every N× repeated container shares."""
+    return {
+        "namespaceRegex": f"^{re.escape(namespace)}$",
+        "backgroundColor": "#fff5f4",
+        "borderColor": "#c0392b",
+        "textColor": "#1a1a1a",
+        "layoutDirection": "TOP_BOTTOM",
+    }
+
+
+def _container_class_overrides(
+    descriptors: tuple[tuple[tuple[str, str], ...], ...],
+) -> dict[str, str] | None:
+    """``layer.0`` → class for a Sequential the representative element contains.
+
+    The representative is the first element. Its ``layer`` Sequential lists the
+    bottleneck convs the AST draws as one opaque tile.
+    """
+    if not descriptors:
+        return None
+    paths = dict(descriptors[0])
+    overrides: dict[str, str] = {}
+    for path, class_name in paths.items():
+        parent, _, leaf = path.rpartition(".")
+        if (
+            parent
+            and leaf.isdigit()
+            and paths.get(parent) in {"Sequential", "ModuleList"}
+        ):
+            overrides[path] = class_name
+    return overrides or None
+
+
+def _attrs_only_on_first_element(
+    descriptors: tuple[tuple[tuple[str, str], ...], ...],
+) -> frozenset[str]:
+    """Top-level attrs whose class differs between the first element and the next.
+
+    ResNet's projection shortcut exists on the first block of a stage. The
+    graph draws that representative once, so those nodes repeat once per stage,
+    not once per block.
+    """
+    if len(descriptors) < 2:
+        return frozenset()
+
+    def tops(desc: tuple[tuple[str, str], ...]) -> dict[str, str]:
+        return {path: class_name for path, class_name in desc if "." not in path}
+
+    first, second = tops(descriptors[0]), tops(descriptors[1])
+    return frozenset(
+        attr for attr, class_name in first.items() if second.get(attr) != class_name
+    )
+
+
+def _ensure_nested_element_trees(
+    spec: ArchitectureSpec, basic_ops: BasicOpFilter
+) -> None:
+    """Register a detail tree for each leaf element class of the nested groups.
+
+    Mirrors :func:`extract._append_vision_section_tree`: a non-uniform model's
+    stage-element classes (``ConvNextLayer``) are fully parsed in the registry but
+    are not among the top-level export sections, so build each once and append it
+    so :func:`_append_section` can expand it by class.
+    """
+
+    def walk(group: RepeatedGroup):
+        yield group
+        for child in group.children:
+            yield from walk(child)
+
+    existing = {tree.class_name for _label, tree in spec.export_block_trees}
+    for root in spec.nested_module_groups:
+        for group in walk(root):
+            # Only classes we actually expand. A parent stage is a container,
+            # not a tile; its leaf body and each pipeline member are.
+            if group.children:
+                class_names: list[str] = []
+            elif group.element_classes:
+                class_names = list(group.element_classes)
+            elif group.element_class:
+                class_names = [group.element_class]
+            else:
+                class_names = []
+            overrides = _container_class_overrides(group.descriptors)
+            for class_name in class_names:
+                if class_name in existing:
+                    continue
+                tree = build_block_node(
+                    attr_name=class_name,
+                    class_name=class_name,
+                    registry=spec.class_registry,
+                    basic_ops=basic_ops,
+                    infer_init_steps=True,
+                    class_overrides=overrides,
+                )
+                spec.export_block_trees.append((class_name, tree))
+                existing.add(class_name)
+            # A stage module that is not itself a repeated group (Swin patch
+            # merging) still needs a detail tree so the side tile expands.
+            child_attrs = {
+                repeated_child_attr(group, child) for child in group.children
+            }
+            for desc in group.descriptors:
+                for path, class_name in desc:
+                    if "." in path or path in child_attrs or class_name in existing:
+                        continue
+                    if class_name in {"Sequential", "ModuleList", "Identity"}:
+                        continue
+                    if class_name not in spec.class_registry:
+                        continue
+                    tree = build_block_node(
+                        attr_name=class_name,
+                        class_name=class_name,
+                        registry=spec.class_registry,
+                        basic_ops=basic_ops,
+                        infer_init_steps=True,
+                    )
+                    spec.export_block_trees.append((class_name, tree))
+                    existing.add(class_name)
+
+
+def _child_meta_path(parent: RepeatedGroup, pos: int, child: RepeatedGroup) -> str:
+    """Live module path of *child* at parent position *pos* (fills the collapsed ``*``)."""
+    suffix = child.path[len(parent.path) :]  # ".*.layers"
+    if suffix.startswith(".*"):
+        return f"{parent.path}.{pos}{suffix[2:]}"
+    return child.path
+
+
+def _stamp_meta_path(
+    nodes: list[dict[str, Any]], first_index: int, meta_path: str
+) -> None:
+    """Tag every node just emitted with its live module path.
+
+    The path carries the stage index. Shape attachment matches a node to the
+    captured module whose dotted suffix appears in the node id, so a boundary
+    tile and the conv next to it share one concrete ``[B, C, H, W]``.
+    """
+    if not meta_path:
+        return
+    for node in nodes[first_index:]:
+        attrs = node.setdefault("attrs", [])
+        if not isinstance(attrs, list):
+            continue
+        if any(item.get("key") == "meta_path" for item in attrs):
+            continue
+        attrs.append({"key": "meta_path", "value": meta_path})
+
+
+def _stamp_repeat_count(
+    nodes: list[dict[str, Any]],
+    first_index: int,
+    count: int,
+    once_attrs: frozenset[str] = frozenset(),
+) -> None:
+    """Record how many live modules this drawn node stands for.
+
+    The stage namespace is ``s2_27x_...`` so a parser that only accepts a
+    segment starting with ``{N}x_`` would count the stage once. The attr is the
+    count those parsers read. An attr that exists only on the first element
+    (the projection shortcut) is drawn on the representative and counted once.
+    """
+    for node in nodes[first_index:]:
+        ident = f"{node.get('id', '')} {node.get('namespace', '')}".lower()
+        value = "1" if any(attr.lower() in ident for attr in once_attrs) else str(count)
+        attrs = node.setdefault("attrs", [])
+        if not isinstance(attrs, list):
+            continue
+        current = next(
+            (item for item in attrs if item.get("key") == "repeat_count"), None
+        )
+        if current is None:
+            attrs.append({"key": "repeat_count", "value": value})
+        else:
+            current["value"] = value
+
+
+def _stage_banner(stage_index: tuple[int, ...], text: str) -> str:
+    """Prefix a repeated-body or leading-node label with its stage index."""
+    if not stage_index:
+        return text
+    index = ".".join(str(part) for part in stage_index)
+    return f"stage {index} · {text}"
+
+
+def _append_pipeline_members(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    count: int,
+    meta_path: str,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Emit a mixed-class list as individual leading nodes, in element order.
+
+    ConvNeXt's downsampling list is LayerNorm then Conv2d. Each element is one
+    node threaded ahead of the stage's N× body, labeled with the stage index.
+    The conv carries the live module path (``...downsampling_layer.1``) so the
+    meta-shape pass can stamp its ``[B, C, H, W]``.
+    """
+    attr = group.path.split(".")[-1]
+    exits = previous_exits
+    for index, class_name in enumerate(group.element_classes[:count]):
+        slug = _sanitize_namespace_segment(f"{position_tag}{attr}_{index}_{class_name}")
+        prefix = _merge_node_id(id_prefix, slug)
+        # A private namespace per element. Sharing the parent namespace lets
+        # each stage's leading norm overwrite the previous stage's group label.
+        namespace = _join_namespace(namespace_prefix, slug)
+        component = BlockComponent(
+            attr_name=class_name,
+            class_name=class_name,
+            role="other",
+            label=_stage_banner(stage_index, class_name),
+        )
+        first_node_index = len(merged_nodes)
+        exits = _append_section(
+            merged_nodes,
+            spec=spec,
+            component=component,
+            id_prefix=prefix,
+            namespace_prefix=namespace,
+            basic_ops=basic_ops,
+            previous_exits=exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
+        element_path = f"{meta_path}.{index}" if meta_path else ""
+        if element_path:
+            _stamp_meta_path(merged_nodes, first_node_index, element_path)
+        # A leading norm/conv runs once per stage, not once per block.
+        _stamp_repeat_count(merged_nodes, first_node_index, 1)
+    return exits
+
+
+def _stage_position_steps(
+    spec: ArchitectureSpec, group: RepeatedGroup, pos: int
+) -> list[tuple[str, Any]]:
+    """Repeated children and one-off stage modules, in forward order.
+
+    Patch merging on a Swin stage is a plain submodule, not a ``ModuleList``,
+    so the repeated-group walk does not record it. Leaving it out connects the
+    next stage to the pre-downsample tensor.
+    """
+    children = ordered_repeated_children(spec, group)
+    child_attrs = {repeated_child_attr(group, child) for child in children}
+    owner = (getattr(spec, "class_registry", None) or {}).get(group.element_class)
+    calls = list(getattr(owner, "forward_calls", None) or [])
+    steps: list[tuple[int, int, str, Any]] = []
+    for index, child in enumerate(children):
+        attr = repeated_child_attr(group, child)
+        order = calls.index(attr) if attr in calls else index
+        steps.append((order, index, "child", child))
+    if pos < len(group.descriptors):
+        seen: set[str] = set()
+        for path, class_name in group.descriptors[pos]:
+            if "." in path or path in child_attrs or path in seen:
+                continue
+            if class_name in {"Sequential", "ModuleList", "Identity", "NoneType"}:
+                continue
+            seen.add(path)
+            order = calls.index(path) if path in calls else len(calls) + len(seen)
+            steps.append((order, len(calls) + len(seen), "side", (path, class_name)))
+    steps.sort()
+    return [(kind, payload) for _order, _index, kind, payload in steps]
+
+
+def _append_stage_side(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    attr: str,
+    class_name: str,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Draw one non-repeated stage module (Swin patch merging) once."""
+    slug = _sanitize_namespace_segment(f"{position_tag}{attr}_{class_name}")
+    namespace = _join_namespace(namespace_prefix, slug)
+    prefix = _merge_node_id(id_prefix, slug)
+    banner = _stage_banner(stage_index, class_name)
+    component = BlockComponent(
+        attr_name=class_name,
+        class_name=class_name,
+        role="other",
+        label=banner,
+    )
+    first_node_index = len(merged_nodes)
+    exits = _append_section(
+        merged_nodes,
+        spec=spec,
+        component=component,
+        id_prefix=prefix,
+        namespace_prefix=namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": "1",
+        "operation": class_name,
+    }
+    meta_path = f"{group.path}.{pos}.{attr}" if group.path else ""
+    if meta_path:
+        _stamp_meta_path(merged_nodes, first_node_index, meta_path)
+    _stamp_repeat_count(merged_nodes, first_node_index, 1)
+    return exits
+
+
+def _append_stage_position(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Emit one stage index: its repeated children and any one-off modules."""
+    exits = previous_exits
+    for kind, payload in _stage_position_steps(spec, group, pos):
+        if kind == "child":
+            child = payload
+            child_count = (
+                child.per_index_counts[pos]
+                if child.per_index_counts is not None
+                else child.count
+            )
+            if child_count == 0:
+                continue
+            exits = _append_nested_repeated_group(
+                merged_nodes,
+                spec=spec,
+                group=child,
+                namespace_prefix=namespace_prefix,
+                id_prefix=id_prefix,
+                basic_ops=basic_ops,
+                previous_exits=exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+                count=child_count,
+                meta_path=_child_meta_path(group, pos, child),
+                position_tag=f"{position_tag}s{pos}_",
+                stage_index=(*stage_index, pos),
+            )
+            continue
+        attr, class_name = payload
+        exits = _append_stage_side(
+            merged_nodes,
+            spec=spec,
+            group=group,
+            pos=pos,
+            attr=attr,
+            class_name=class_name,
+            namespace_prefix=namespace_prefix,
+            id_prefix=id_prefix,
+            basic_ops=basic_ops,
+            previous_exits=exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+            position_tag=f"{position_tag}s{pos}_",
+            stage_index=(*stage_index, pos),
+        )
+    return exits
+
+
+def _stage_position_steps(
+    spec: ArchitectureSpec, group: RepeatedGroup, pos: int
+) -> list[tuple[str, Any]]:
+    """Repeated children and one-off stage modules, in forward order.
+
+    Patch merging on a Swin stage is a plain submodule, not a ``ModuleList``,
+    so the repeated-group walk does not record it. Leaving it out connects the
+    next stage to the pre-downsample tensor.
+    """
+    children = ordered_repeated_children(spec, group)
+    child_attrs = {repeated_child_attr(group, child) for child in children}
+    owner = (getattr(spec, "class_registry", None) or {}).get(group.element_class)
+    calls = list(getattr(owner, "forward_calls", None) or [])
+    steps: list[tuple[int, int, str, Any]] = []
+    for index, child in enumerate(children):
+        attr = repeated_child_attr(group, child)
+        order = calls.index(attr) if attr in calls else index
+        steps.append((order, index, "child", child))
+    if pos < len(group.descriptors):
+        seen: set[str] = set()
+        for path, class_name in group.descriptors[pos]:
+            if "." in path or path in child_attrs or path in seen:
+                continue
+            if class_name in {"Sequential", "ModuleList", "Identity", "NoneType"}:
+                continue
+            seen.add(path)
+            order = calls.index(path) if path in calls else len(calls) + len(seen)
+            steps.append((order, len(calls) + len(seen), "side", (path, class_name)))
+    steps.sort()
+    return [(kind, payload) for _order, _index, kind, payload in steps]
+
+
+def _append_stage_side(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    attr: str,
+    class_name: str,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Draw one non-repeated stage module (Swin patch merging) once."""
+    slug = _sanitize_namespace_segment(f"{position_tag}{attr}_{class_name}")
+    namespace = _join_namespace(namespace_prefix, slug)
+    prefix = _merge_node_id(id_prefix, slug)
+    banner = _stage_banner(stage_index, class_name)
+    component = BlockComponent(
+        attr_name=class_name,
+        class_name=class_name,
+        role="other",
+        label=banner,
+    )
+    first_node_index = len(merged_nodes)
+    exits = _append_section(
+        merged_nodes,
+        spec=spec,
+        component=component,
+        id_prefix=prefix,
+        namespace_prefix=namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": "1",
+        "operation": class_name,
+    }
+    meta_path = f"{group.path}.{pos}.{attr}" if group.path else ""
+    if meta_path:
+        _stamp_meta_path(merged_nodes, first_node_index, meta_path)
+    _stamp_repeat_count(merged_nodes, first_node_index, 1)
+    return exits
+
+
+def _append_stage_position(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Emit one stage index: its repeated children and any one-off modules."""
+    exits = previous_exits
+    for kind, payload in _stage_position_steps(spec, group, pos):
+        if kind == "child":
+            child = payload
+            child_count = (
+                child.per_index_counts[pos]
+                if child.per_index_counts is not None
+                else child.count
+            )
+            if child_count == 0:
+                continue
+            exits = _append_nested_repeated_group(
+                merged_nodes,
+                spec=spec,
+                group=child,
+                namespace_prefix=namespace_prefix,
+                id_prefix=id_prefix,
+                basic_ops=basic_ops,
+                previous_exits=exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+                count=child_count,
+                meta_path=_child_meta_path(group, pos, child),
+                position_tag=f"{position_tag}s{pos}_",
+                stage_index=(*stage_index, pos),
+            )
+            continue
+        attr, class_name = payload
+        exits = _append_stage_side(
+            merged_nodes,
+            spec=spec,
+            group=group,
+            pos=pos,
+            attr=attr,
+            class_name=class_name,
+            namespace_prefix=namespace_prefix,
+            id_prefix=id_prefix,
+            basic_ops=basic_ops,
+            previous_exits=exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+            position_tag=f"{position_tag}s{pos}_",
+            stage_index=(*stage_index, pos),
+        )
+    return exits
+
+
+def _append_nested_repeated_group(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    count: int | None = None,
+    meta_path: str = "",
+    position_tag: str = "",
+    stage_index: tuple[int, ...] = (),
+) -> list[SourceRef]:
+    """Emit one repeated group (and its nested children) as graph nodes.
+
+    A non-uniform PARENT (ConvNeXt's ``stages``) is a SEQUENCE of distinct positions,
+    not an N× repeat: it emits each position's children in series, pipeline members
+    (the downsampling conv) first, then the uniform body. A LEAF group
+    (``ConvNextLayer``) is an ``N×`` container whose element-class body is expanded
+    once via :func:`_append_section`, labeled with its stage index. Leaf containers
+    are emitted FLAT under one namespace and threaded in series -- the known-good
+    decoder-variant shape -- rather than nested in per-stage boxes, which would
+    need boundary tiles at every level.
+    """
+    effective = group.count if count is None else count
+
+    if not group.children and repeated_group_is_pipeline(group):
+        return _append_pipeline_members(
+            merged_nodes,
+            spec=spec,
+            group=group,
+            namespace_prefix=namespace_prefix,
+            id_prefix=id_prefix,
+            basic_ops=basic_ops,
+            previous_exits=previous_exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+            count=effective,
+            meta_path=meta_path,
+            position_tag=position_tag,
+            stage_index=stage_index,
+        )
+
+    if group.children:
+        exits = previous_exits
+        for pos in range(effective):
+            exits = _append_stage_position(
+                merged_nodes,
+                spec=spec,
+                group=group,
+                pos=pos,
+                namespace_prefix=namespace_prefix,
+                id_prefix=id_prefix,
+                basic_ops=basic_ops,
+                previous_exits=exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+                position_tag=position_tag,
+                stage_index=stage_index,
+            )
+        return exits
+
+    slug = _sanitize_namespace_segment(
+        f"{position_tag}{effective}x_{group.element_class}"
+    )
+    namespace = _join_namespace(namespace_prefix, slug)
+    prefix = _merge_node_id(id_prefix, slug)
+    banner = _stage_banner(stage_index, f"{effective}× {group.element_class}")
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": str(effective),
+    }
+    group_node_configs.append(_repeat_group_config(namespace))
+    component = BlockComponent(
+        attr_name=group.element_class,
+        class_name=group.element_class,
+        role="other",
+        label=banner,
+    )
+    first_node_index = len(merged_nodes)
+    exits = _append_section(
+        merged_nodes,
+        spec=spec,
+        component=component,
+        id_prefix=prefix,
+        namespace_prefix=namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+    # ``_append_section`` replaces this namespace's attributes with the tile
+    # label. Put the stage banner and the trip count back.
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": str(effective),
+        "operation": group.element_class,
+    }
+    exits = _wrap_actual_group_boundary(
+        merged_nodes,
+        namespace=namespace,
+        id_prefix=prefix,
+        inputs=previous_exits,
+        outputs=exits,
+        first_node_index=first_node_index,
+    )
+    if meta_path:
+        # The container path is the ModuleList/Sequential. Shapes belong to its
+        # representative element (index 0), including the boundaries wrap adds.
+        _stamp_meta_path(merged_nodes, first_node_index, f"{meta_path}.0")
+    _stamp_repeat_count(
+        merged_nodes,
+        first_node_index,
+        effective,
+        _attrs_only_on_first_element(group.descriptors),
+    )
+    return exits
+
+
 def build_merged_model_graph(
     spec: ArchitectureSpec,
     *,
@@ -10201,17 +10999,40 @@ def build_merged_model_graph(
         previous_exits = vision_combine_exits
 
     decoder_namespace = _decoder_namespace(spec)
-    previous_exits = _append_decoder_layers(
-        nodes,
-        spec=spec,
-        decoder_namespace=decoder_namespace,
-        basic_ops=resolved_basic_ops,
-        previous_exits=previous_exits,
-        group_node_configs=group_node_configs,
-        group_node_attributes=group_node_attributes,
-        shape_inferencer=shape_inferencer,
-        inline_expansion=inline_expansion,
-    )
+    if spec.nested_module_groups:
+        # A non-uniform nesting (a CNN's per-stage channels/depths) the single uniform
+        # decoder stack cannot express: emit it recursively from the reconstructed tree.
+        # stack_pre (the stem / patch embedding) is already on ``previous_exits``, so
+        # it leads the encoder; each stage then leads with its downsampling pipeline.
+        # Use a fixed "encoder" namespace -- a CNN has no decoder stack, so the
+        # decoder-derived namespace is meaningless (and ill-formed) here.
+        _ensure_nested_element_trees(spec, resolved_basic_ops)
+        for group in spec.nested_module_groups:
+            previous_exits = _append_nested_repeated_group(
+                nodes,
+                spec=spec,
+                group=group,
+                namespace_prefix="encoder",
+                id_prefix="encoder",
+                basic_ops=resolved_basic_ops,
+                previous_exits=previous_exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+            )
+    else:
+        previous_exits = _append_decoder_layers(
+            nodes,
+            spec=spec,
+            decoder_namespace=decoder_namespace,
+            basic_ops=resolved_basic_ops,
+            previous_exits=previous_exits,
+            group_node_configs=group_node_configs,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
 
     for component in _stack_tail_components(spec):
         expands = component_has_detail_section(component, spec)

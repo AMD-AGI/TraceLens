@@ -1767,7 +1767,7 @@ def test_subagent_budget_gates_cpu_idle_on_focus_job(tmp_path):
         "focus_job": "decode",
         "gpu_utilization": {
             "idle_time_percent": 5,
-            "jobs": {"decode": {"phase": "decode", "idle_time_percent": 20}},
+            "nodes": {"decode": {"idle_time_percent": 20}},
         },
         "categories": [{"name": "cpu_idle", "tier": "system"}],
     }
