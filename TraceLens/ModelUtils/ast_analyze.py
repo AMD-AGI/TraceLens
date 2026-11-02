@@ -17625,6 +17625,35 @@ def build_stack_components(
                 )
             )
 
+    # A speculative draft (MTP / NextN / EAGLE) hangs off the model, outside the
+    # decoder ModuleList. Leaving it off the tail dropped it from the graph, so
+    # the roofline could only invent that stack.
+    seen_drafts: set[tuple[str, str]] = set()
+    for owner in (stack_model, causal_lm):
+        if owner is None:
+            continue
+        order = {attr: idx for idx, attr in enumerate(owner.forward_calls)}
+        for attr, class_name in owner.init_assignments.items():
+            if class_name in _SKIP_INIT_CLASS_NAMES:
+                continue
+            if (attr, class_name) in seen_drafts:
+                continue
+            if not (
+                SPECULATIVE_CLASS_RE.search(class_name)
+                or SPECULATIVE_CLASS_RE.search(attr)
+            ):
+                continue
+            seen_drafts.add((attr, class_name))
+            tail.append(
+                _stack_component(
+                    attr_name=attr,
+                    class_name=class_name,
+                    role="other",
+                    forward_order=order.get(attr),
+                    details=owner.init_details.get(attr, []),
+                )
+            )
+
     # Collect the output head(s). A ForCausalLM / ForConditionalGeneration wrapper
     # owns the vocab projection (``lm_head``); the stack model may ALSO own its own
     # head-role reduction (e.g. a hyper-connection head that runs inside the stack

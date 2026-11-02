@@ -1329,7 +1329,7 @@ def test_mtp_stack_follows_a_parsed_moe_draft_layer(_reset_rt):
     by_name = {op.computation: op for op in ops}
     assert {"enorm", "hnorm", "eh_proj"} <= set(by_name)
     assert by_name["mlp"].category == "MoE"
-    assert by_name["mlp"].cost_source == "source"
+    assert by_name["mlp"].cost_source == "config"
     assert "input_proj" not in by_name
     assert "router" in by_name
 
@@ -1354,7 +1354,7 @@ def test_mtp_stack_follows_a_parsed_dense_draft_layer(_reset_rt):
     )
     mlp = next(op for op in ops if op.computation == "mlp")
     assert mlp.category == "GEMM"
-    assert mlp.cost_source == "source"
+    assert mlp.cost_source == "config"
     assert not any(op.category == "MoE" for op in ops)
 
 
@@ -1423,7 +1423,7 @@ def test_mtp_draft_reuses_the_backbone_tail_variant_when_the_ffn_is_ambiguous(
     )
     mlp = next(op for op in ops if op.computation == "mlp")
     assert mlp.category == "MoE"
-    assert mlp.cost_source == "source"
+    assert mlp.cost_source == "config"
 
 
 def test_attention_boundary_cost_shards_heads_by_tp(_reset_rt):
@@ -1541,6 +1541,21 @@ def test_functional_matmul_charges_weight_bytes_on_the_parameter(_reset_rt):
         weight_bpe=0.5,
     )
     assert narrow < wide
+    _category, _maf, _flops, left = _dispatch_op_cost(
+        "MatMul",
+        [(64, 128), (2, 128, 10)],
+        (2, 64, 10),
+        2,
+        weight_bpe=0.5,
+    )
+    _category, _maf, _flops, both = _dispatch_op_cost(
+        "MatMul",
+        [(2, 64, 128), (2, 128, 10)],
+        (2, 64, 10),
+        2,
+        weight_bpe=0.5,
+    )
+    assert left < both
 
 
 def test_linear_bias_flag_adds_the_bias_flops():
@@ -1710,14 +1725,13 @@ def test_offline_draft_models_project_from_their_parsed_layers():
     projected = project_roofline(
         deepseek, batch_size=1, seq_len=4, num_predicted_tokens=2
     )
-    draft = [op for op in projected.ops if op.section.startswith("mtp/")]
-    # The checkpoint declares one draft depth, so a request for two tokens stops there.
-    assert {op.section for op in draft} == {"mtp/0"}
-    assert {op.cost_source for op in draft} == {"source"}
-    assert any(op.computation == "mlp" and op.category == "MoE" for op in draft)
-    assert any(op.computation == "indexer_score" for op in draft)
+    # The graph draws the draft, so the synthetic stack is not added beside it.
+    assert not any(op.section.startswith("mtp/") for op in projected.ops)
+    assert any("eh_proj" in op.name for op in projected.ops)
+    assert any(op.computation == "indexer_score" for op in projected.ops)
     assert any(op.section.endswith("sliding_attention") for op in projected.ops)
     assert any(op.section.endswith("full_attention") for op in projected.ops)
+    assert any(op.category == "MoE" for op in projected.ops)
     assert projected.notes == []
 
     nextn = load_architecture(
@@ -1728,9 +1742,7 @@ def test_offline_draft_models_project_from_their_parsed_layers():
     )
     nextn.engine = "sglang"
     projected = project_roofline(nextn, batch_size=1, seq_len=4, num_predicted_tokens=1)
-    draft = [op for op in projected.ops if op.section == "mtp/0"]
-    mlp = next(op for op in draft if op.computation == "mlp")
-    assert mlp.category == "GEMM" and mlp.cost_source == "source"
-    assert not any(
-        op.category == "MoE" and op.section.startswith("mtp/") for op in draft
-    )
+    assert not any(op.section.startswith("mtp/") for op in projected.ops)
+    draft = [op for op in projected.ops if op.section.startswith("nextn")]
+    assert draft and all(op.category != "MoE" for op in draft)
+    assert any(op.category == "GEMM" for op in draft)
