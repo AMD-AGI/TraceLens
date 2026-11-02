@@ -38,6 +38,7 @@ from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 from .jax_analyses import JaxAnalyses
 from ..PerfModel.op_projections import (
     add_op_projection_outputs,
+    compute_roofline_time_and_bound,  # noqa: F401  re-exported for the model explorer
     default_op_projections,
     get_compute_spec,
     op_projection_columns,
