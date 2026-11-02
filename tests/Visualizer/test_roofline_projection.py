@@ -14,7 +14,11 @@ from pathlib import Path
 import pytest
 
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
+from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
 from TraceLens.ModelUtils.extract import load_architecture
+from TraceLens.Visualizer.model_explorer_export.merge import (
+    _stamp_variant_ffn_identity,
+)
 from TraceLens.Visualizer.model_explorer_export import roofline_cli
 from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     DimResolutionError,
@@ -23,6 +27,8 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _RT,
     _attention_boundary_cost,
     _attention_extra_ops,
+    _dense_ffn_cost,
+    _mtp_stack_ops,
     _attr_text,
     _classify_normalization,
     _dispatch_op_cost,
@@ -810,6 +816,20 @@ def test_cli_tp_1_does_not_build_a_parallel_layout(monkeypatch):
     assert called == []
 
 
+def test_cli_num_predicted_tokens_is_accepted():
+    exit_code = roofline_cli.main(
+        [
+            str(FIXTURES / "custom_model"),
+            "--no-meta-shapes",
+            "--num-predicted-tokens",
+            "2",
+            "--seq-len",
+            "8",
+        ]
+    )
+    assert exit_code == 0
+
+
 def test_cli_rejects_unknown_engine(capsys):
     with pytest.raises(SystemExit):
         roofline_cli.main(
@@ -908,6 +928,132 @@ def test_moe_cost_shards_intermediate_by_tp_and_tokens_by_ep(_reset_rt):
     assert ep_only == pytest.approx(whole / 2)
 
 
+def test_dense_ffn_costs_every_token_at_the_dense_width(_reset_rt):
+    _RT.reset()
+    _RT.dense_intermediate = 24576
+    dims = {"B": 1, "S": 1, "H": 6144}
+    flops = _dense_ffn_cost(dims, bpe=2)[2]
+    # SwiGLU: gate_up is 2·intermediate wide, down projects back. Every token,
+    # not a top-k subset of them.
+    assert flops == 2 * (2 * 24576) * 6144 + 2 * 6144 * 24576
+
+
+def test_unparsed_dense_mlp_is_not_costed_as_moe(_reset_rt):
+    # Both MLP classes are absent from the registry, so each is one opaque tile.
+    # The dense tile must use the dense width over every token; the MoE tile
+    # keeps the routed-expert formula.
+    _RT.reset()
+    _RT.moe_top_k = 6
+    _RT.moe_intermediate = 3072
+    _RT.dense_intermediate = 24576
+    _RT.hidden_size = 6144
+    dims = {"B": 1, "S": 1, "H": 6144}
+    dense = _project_op(
+        "decoder/mlp",
+        "decoder",
+        "InklingDenseMLP",
+        "InklingDenseMLP",
+        "",
+        "[B, S, H] bfloat16",
+        [],
+        dims,
+        instances=2,
+        gpu_arch=None,
+        moe_top_k=6,
+        moe_intermediate_size=3072,
+        role="ffn",
+    )
+    moe = _project_op(
+        "decoder/mlp",
+        "decoder",
+        "InklingMoE",
+        "InklingMoE",
+        "",
+        "[B, S, H] bfloat16",
+        [],
+        dims,
+        instances=64,
+        gpu_arch=None,
+        moe_top_k=6,
+        moe_intermediate_size=3072,
+        role="ffn",
+    )
+    assert dense.modeled and dense.category == "GEMM"
+    assert moe.modeled and moe.category == "MoE"
+    assert dense.flops == _dense_ffn_cost(dims, 2)[2]
+    assert dense.flops != moe.flops
+
+
+def test_short_conv_leaf_uses_the_declared_kernel(_reset_rt):
+    _RT.reset()
+    _RT.sconv_kernel = 4
+    _RT.hidden_size = 6144
+    op = _project_op(
+        "decoder/attn_sconv",
+        "decoder",
+        "InklingShortConv",
+        "InklingShortConv",
+        "",
+        "[B, S, 768] bfloat16",
+        [],
+        {"B": 1, "S": 2, "H": 6144},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled and op.category == "Conv1d"
+    # Depthwise: 2 * tokens * channels * kernel, channels from the node shape.
+    assert op.flops == 2 * (1 * 2) * 768 * 4
+
+
+def test_fused_attention_adds_the_packed_kv_short_convs(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 64
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.hidden_size = 6144
+    _RT.sconv_kernel = 4
+    ops = _attention_extra_ops(
+        "decoder",
+        "decoder/attn",
+        instances=1,
+        dims={"B": 1, "S": 1},
+        bpe=2,
+        dtype="bfloat16",
+        gpu_arch=None,
+    )
+    by_name = {op.computation: op for op in ops}
+    assert {"k_sconv", "v_sconv"} <= set(by_name)
+    # KV channels are the (unsharded) kv heads times head dim.
+    assert by_name["k_sconv"].flops == 2 * 1 * (8 * 128) * 4
+
+
+def test_mtp_stack_is_one_dense_depth_per_predicted_token(_reset_rt):
+    _RT.reset()
+    _RT.attn_heads = 64
+    _RT.attn_kv_heads = 8
+    _RT.attn_head_dim = 128
+    _RT.hidden_size = 6144
+    _RT.dense_intermediate = 24576
+    _RT.sconv_kernel = 4
+    _RT.mtp_layers = 8
+    _RT.n_layers = 1
+    dims = {"B": 1, "S": 1, "H": 6144, "V": 1024}
+    ops = _mtp_stack_ops(
+        dims, num_predicted_tokens=3, gpu_arch=None, activation=(2, "bfloat16")
+    )
+    assert {op.section for op in ops} == {"mtp/0", "mtp/1", "mtp/2"}
+    assert any(op.computation == "mlp" and op.category == "GEMM" for op in ops)
+    assert any(op.computation == "input_proj" for op in ops)
+    assert not any(op.category == "MoE" for op in ops)
+    capped = _mtp_stack_ops(
+        dims, num_predicted_tokens=100, gpu_arch=None, activation=(2, "bfloat16")
+    )
+    assert {op.section for op in capped} == {f"mtp/{index}" for index in range(8)}
+    assert _mtp_stack_ops(dims, 0, None, (2, "bfloat16")) == []
+
+
 def test_attention_boundary_cost_shards_heads_by_tp(_reset_rt):
     _RT.reset()
     _RT.attn_heads = 64
@@ -918,3 +1064,28 @@ def test_attention_boundary_cost_shards_heads_by_tp(_reset_rt):
     _RT.tp = 8
     sharded = _attention_boundary_cost({"B": 1, "S": 1}, bpe=2)[2]
     assert sharded == pytest.approx(whole / 8)
+
+
+def test_unparsed_dense_variant_tile_is_named_for_the_dense_class():
+    component = BlockComponent("mlp", "InklingMoE", "ffn", "MoE")
+    variant = LayerVariant(
+        label="dense",
+        count=2,
+        attention_label="Attn",
+        ffn_label="InklingDenseMLP",
+        ffn_class="InklingDenseMLP",
+        ffn_attr="mlp",
+    )
+    node = {
+        "id": "mlp",
+        "label": "MoE",
+        "attrs": [
+            {"key": "class_name", "value": "InklingMoE"},
+            {"key": "role", "value": "ffn"},
+        ],
+    }
+    _stamp_variant_ffn_identity(node, component, variant)
+    attrs = {item["key"]: item["value"] for item in node["attrs"]}
+    assert node["label"] == "InklingDenseMLP"
+    assert attrs["class_name"] == "InklingDenseMLP"
+    assert attrs["role"] == "ffn"

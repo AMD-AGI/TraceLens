@@ -6533,6 +6533,17 @@ def _resolve_section_tree_for_component(
             )
             if resolved is not None:
                 return resolved
+            # The variant's own class was not parsed into the registry (both MLP
+            # classes live in sibling modules the entry file never defines). Falling
+            # through to the attribute's default tree would draw — and cost — the
+            # OTHER class for this layer. Leave it unresolved so the caller emits
+            # one summary tile named for the class this layer actually builds.
+            if (
+                variant.ffn_class
+                and variant.ffn_class != component.class_name
+                and (spec.class_registry or {}).get(variant.ffn_class) is None
+            ):
+                return None
             if variant.ffn_attr:
                 resolved = _resolve_section_tree(
                     spec,
@@ -6619,6 +6630,30 @@ def _single_op_attrs(node: BlockNode) -> list[dict[str, str]]:
             attrs.append({"key": "raw_op", "value": value.strip()})
             break
     return attrs
+
+
+def _stamp_variant_ffn_identity(
+    summary: dict[str, Any],
+    component: BlockComponent,
+    variant: LayerVariant | None,
+) -> None:
+    """Name a collapsed FFN tile after the class THIS layer builds.
+
+    The decoder component keeps whichever class the constructor assigned last
+    (the MoE arm, for a ``dense if layer_id < threshold else MoE`` block). A
+    variant whose class was never parsed still has to say so, or every layer —
+    including the dense ones — is costed as that last class.
+    """
+    if not _component_uses_variant_ffn_class(component, variant):
+        return
+    class_name = variant.ffn_class if variant is not None else None
+    if not class_name or class_name == component.class_name:
+        return
+    from TraceLens.ModelUtils.ast_analyze import ffn_role_for_class
+
+    _set_node_attr(summary, "class_name", class_name)
+    _set_node_attr(summary, "role", ffn_role_for_class(component.attr_name, class_name))
+    summary["label"] = variant.ffn_label or class_name
 
 
 def _summary_node(
@@ -6730,6 +6765,8 @@ def _append_section(
             previous_exits,
             shape_inferencer,
         )
+        if collapsed_op is None:
+            _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -6761,6 +6798,7 @@ def _append_section(
             previous_exits,
             shape_inferencer,
         )
+        _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 

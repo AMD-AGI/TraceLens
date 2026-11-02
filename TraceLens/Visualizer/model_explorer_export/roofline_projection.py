@@ -21,8 +21,8 @@ expert routing -- exactly the leaf granularity
 :func:`TraceLens.ModelUtils.build_roofline_basic_ops` stops AST expansion at,
 plus the vLLM/SGLang engine boundaries (``ParallelLMHead``, ``FusedMoEFactory``)
 that never expand at all (see "Known approximations" below). Anything else
-(embeddings, convolutions -- CONV needs kernel/stride geometry the graph does
-not carry) is reported as "unmodeled" rather than silently dropped, so the
+(embeddings, convolutions other than a depthwise short conv whose kernel the
+config declares) is reported as "unmodeled" rather than silently dropped, so the
 projection's coverage is always visible instead of assumed.
 
 Known approximations, stated once here rather than scattered in comments:
@@ -52,7 +52,18 @@ Known approximations, stated once here rather than scattered in comments:
     ``num_experts / experts_per_tok``. The router's own softmax/top-k
     selection and the shared-expert add are not separately costed (both are
     O(tokens), negligible next to the O(tokens*hidden*intermediate) expert
-    GEMMs).
+    GEMMs). A dense MLP that shares the same attribute (the layers below a
+    ``dense_mlp_idx`` threshold) is costed as a SwiGLU over every token at the
+    dense intermediate width, not as that routed subset.
+  - A depthwise short convolution is costed when the config declares its kernel
+    (``sconv_kernel_size`` / ``conv_kernel_size``): ``2 * tokens * channels *
+    kernel``. Channels come from the node's own shape, else the hidden width.
+    K and V short convs packed inside a fused attention leaf are added beside
+    the projection GEMMs, since that leaf has no conv node of its own.
+  - ``num_predicted_tokens`` adds a secondary MTP / speculative draft stack:
+    one draft depth per predicted token (capped at the depth the config
+    declares), each a full attention + dense MLP + the 2H→H input projection,
+    not a copy of the routed backbone.
 """
 
 from __future__ import annotations
@@ -388,6 +399,7 @@ def project_roofline(
     seq_len: int,
     extra_dims: dict[str, int] | None = None,
     gpu_arch: dict[str, Any] | None = None,
+    num_predicted_tokens: int = 0,
 ) -> RooflineProjection:
     """Project a kernel-by-kernel roofline for *spec* at a concrete batch/seq length.
 
@@ -395,6 +407,10 @@ def project_roofline(
     expansion stopped at roofline-formula ops (:func:`build_roofline_basic_ops`)
     and, when ``spec.parallel_layout`` is set, the same ``--tp``/``--pp``/``--ep``
     split and per-GPU local shapes the visualizer would show for that layout.
+
+    ``num_predicted_tokens`` appends a secondary MTP / speculative draft stack,
+    one depth per token, capped at the depth the checkpoint declares. ``0``
+    (the default) costs only the backbone.
     """
     dims = build_projection_dims(
         spec, batch_size=batch_size, seq_len=seq_len, extra_dims=extra_dims
@@ -448,6 +464,15 @@ def project_roofline(
                     section, node_id, instances, dims, bpe, dtype, gpu_arch
                 )
             )
+    if num_predicted_tokens > 0:
+        result.ops.extend(
+            _mtp_stack_ops(
+                dims,
+                num_predicted_tokens,
+                gpu_arch,
+                _activation_bpe(spec),
+            )
+        )
     return result
 
 
@@ -548,10 +573,35 @@ def _project_op(
             return _finish_op(
                 base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
             )
-    if role == "ffn" and _RT.moe_top_k and "moe" in class_name.lower():
+    if role == "ffn" and _RT.moe_top_k and _looks_like_moe(class_name):
         moe = _moe_cost(dims, _RT.moe_top_k, _RT.moe_intermediate, bpe)
         if moe is not None:
             category, maf_type, flops, bytes_moved, output_elements = moe
+            base.output_elements = output_elements
+            return _finish_op(
+                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
+            )
+    # A dense MLP that shares the MoE attribute but was not parsed (both classes
+    # live outside the registry) is one opaque tile. Cost the SwiGLU at the dense
+    # width over every token; the MoE formula above would charge the routed
+    # subset instead, which is the wrong layer.
+    if (
+        role == "ffn"
+        and class_name
+        and not _looks_like_moe(class_name)
+        and not _is_leaf_computation(computation)
+    ):
+        dense = _dense_ffn_cost(dims, bpe)
+        if dense is not None:
+            category, maf_type, flops, bytes_moved, output_elements = dense
+            base.output_elements = output_elements
+            return _finish_op(
+                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
+            )
+    if _is_short_conv(computation, class_name):
+        conv = _short_conv_cost(dims, _dims_only, bpe)
+        if conv is not None:
+            category, maf_type, flops, bytes_moved, output_elements = conv
             base.output_elements = output_elements
             return _finish_op(
                 base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
@@ -674,6 +724,9 @@ class _RuntimeIntrospection:
         "n_layers",
         "tp",
         "ep",
+        "sconv_kernel",
+        "dense_intermediate",
+        "mtp_layers",
     )
 
     def __init__(self):
@@ -694,6 +747,9 @@ class _RuntimeIntrospection:
         self.n_layers = None
         self.tp = 1
         self.ep = 1
+        self.sconv_kernel = None
+        self.dense_intermediate = None
+        self.mtp_layers = None
 
 
 _RT = _RuntimeIntrospection()
@@ -760,6 +816,80 @@ def _populate_introspection(spec):
     ep = getattr(degree, "ep", 1)
     _RT.tp = tp if isinstance(tp, int) and tp > 0 else 1
     _RT.ep = ep if isinstance(ep, int) and ep > 0 else 1
+    _RT.sconv_kernel = _config_int(
+        tcfg, "sconv_kernel_size", "conv_kernel_size", "short_conv_kernel_size"
+    )
+    # The dense MLP's width, when the checkpoint distinguishes it from the
+    # routed experts' width. Absent, the model's intermediate size is the
+    # dense one (a non-MoE model has nothing else).
+    _RT.dense_intermediate = _config_int(tcfg, "dense_intermediate_size") or (
+        spec.intermediate_size
+    )
+    mtp_cfg = tcfg.get("mtp_config") if isinstance(tcfg.get("mtp_config"), dict) else {}
+    _RT.mtp_layers = _config_int(
+        mtp_cfg, "num_nextn_predict_layers", "num_mtp_layers"
+    ) or _config_int(tcfg, "num_mtp_layers", "num_nextn_predict_layers")
+
+
+def _config_int(config: dict[str, Any], *keys: str) -> int | None:
+    """The first positive int among *keys* in *config*, else ``None``."""
+    for key in keys:
+        value = config.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _activation_bpe(spec: ArchitectureSpec) -> tuple[float | None, str | None]:
+    """``(bytes per element, dtype name)`` from the checkpoint's torch dtype."""
+    cfg = getattr(spec, "raw_config", None) or {}
+    text = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else {}
+    raw = text.get("torch_dtype") or cfg.get("torch_dtype")
+    if not isinstance(raw, str):
+        return 2.0, "bfloat16"
+    mapped = torch_dtype_map(raw)
+    return _BYTES_PER_ELEMENT.get(mapped), raw
+
+
+def _looks_like_moe(class_name: str) -> bool:
+    return "moe" in (class_name or "").lower()
+
+
+def _is_short_conv(computation: str, class_name: str) -> bool:
+    """A depthwise 1D short / causal conv, not a spatial Conv2d/Conv3d."""
+    text = f"{computation} {class_name}".lower().replace("_", "")
+    if "conv2d" in text or "conv3d" in text:
+        return False
+    return any(
+        token in text for token in ("shortconv", "sconv", "causalconv", "conv1d")
+    )
+
+
+def _is_leaf_computation(computation: str) -> bool:
+    """True when *computation* is an op the PerfModel dispatch already costs.
+
+    An opaque module tile is named for its class (``DenseMLP``); costing that
+    tile analytically must not also fire on a ``Linear`` or a norm that happens
+    to carry an FFN role.
+    """
+    if computation in _GEMM_NN_MODULE_COMPUTATIONS:
+        return True
+    label = computation.lower()
+    if (
+        label
+        in _GEMM_FUNCTIONAL_LABELS
+        | _UNARY_POINTWISE_COMPUTATIONS
+        | (_BINARY_POINTWISE_COMPUTATIONS)
+        | _REDUCTION_COMPUTATIONS
+    ):
+        return True
+    if computation in (_SDPA_COMPUTATION, _SOFTMAX_COMPUTATION):
+        return True
+    if _classify_normalization(computation) is not None:
+        return True
+    return _is_short_conv(computation, "")
 
 
 def _shard(n: int, degree: int) -> int:
@@ -887,6 +1017,26 @@ def _attention_extra_ops(
     )
     ops.append(_gemm_row("o_proj", hidden, q_out, tokens * hidden))
 
+    # K and V short convs live inside the fused attention leaf (the residual
+    # short convs are sibling modules and show up as their own nodes). A leaf
+    # has no conv node, so the depthwise GEMM is dropped unless it is added here.
+    if _RT.sconv_kernel:
+        kv_channels = h_kv * d_h
+        for suffix in ("k_sconv", "v_sconv"):
+            ops.append(
+                _short_conv_op(
+                    f"{node_id}.{suffix}",
+                    section,
+                    suffix,
+                    instances,
+                    tokens,
+                    kv_channels,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+
     # Relative-attention: a d_rel-wide r-projection GEMM plus a relative-bias add
     # over the attended span (bounded by rel_extent). Costed as its own rows so it
     # is visible rather than folded into the SDPA core.
@@ -922,6 +1072,286 @@ def _attention_extra_ops(
             ops.append(
                 _finish_op(
                     bias, "BinaryElementwise", "vector", flops, byt, dtype, gpu_arch
+                )
+            )
+    return ops
+
+
+def _short_conv_cost(
+    dims: dict[str, Any],
+    shape_dims: list[str],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None, int] | None:
+    """Depthwise causal conv: ``2 * tokens * channels * kernel``.
+
+    Channels come from the node's own trailing dim when it resolves, else the
+    per-GPU hidden width. ``None`` when the config declares no kernel.
+    """
+    kernel = _RT.sconv_kernel
+    if not kernel:
+        return None
+    try:
+        tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError):
+        return None
+    channels: int | None = None
+    if shape_dims:
+        try:
+            shape = resolve_shape(shape_dims, dims)
+        except DimResolutionError:
+            shape = ()
+        if shape:
+            channels = shape[-1]
+            tokens = prod(shape[:-1]) if len(shape) > 1 else tokens
+    if not channels:
+        if not _RT.hidden_size:
+            return None
+        channels = _shard(_RT.hidden_size, _RT.tp)
+    flops = 2.0 * tokens * channels * kernel
+    bytes_moved = None
+    if bpe is not None:
+        bytes_moved = (2 * tokens * channels + channels * kernel) * bpe
+    return "Conv1d", "matrix", flops, bytes_moved, tokens * channels
+
+
+def _short_conv_op(
+    name: str,
+    section: str,
+    computation: str,
+    instances: int,
+    tokens: int,
+    channels: int,
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+) -> RooflineOp:
+    kernel = _RT.sconv_kernel or 1
+    op = RooflineOp(
+        name=name,
+        section=section,
+        computation=computation,
+        operation="",
+        category=None,
+        modeled=False,
+        reason=None,
+        output_elements=tokens * channels,
+        instances=instances,
+    )
+    flops = 2.0 * tokens * channels * kernel
+    bytes_moved = None
+    if bpe is not None:
+        bytes_moved = (2 * tokens * channels + channels * kernel) * bpe
+    return _finish_op(op, "Conv1d", "matrix", flops, bytes_moved, dtype, gpu_arch)
+
+
+def _dense_ffn_cost(
+    dims: dict[str, Any], bpe: float | None
+) -> tuple[str, str, float, float | None, int] | None:
+    """SwiGLU GEMMs of a dense MLP: gate_up (2·intermediate) + down, every token.
+
+    Not the routed-expert formula. Expert-parallel does not apply (there is one
+    MLP, not a routed set); tensor-parallel column-shards the intermediate width.
+    """
+    intermediate = _RT.dense_intermediate
+    if not intermediate:
+        return None
+    try:
+        tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
+        hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
+    except (KeyError, DimResolutionError):
+        return None
+    intermediate = _shard(intermediate, _RT.tp)
+    wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
+    gate_up_flops = GEMM.flops_func(tokens, 2 * intermediate, hidden, bias=False)
+    gate_up_bytes = GEMM.bytes_func(
+        tokens, 2 * intermediate, hidden, False, wbpe, wbpe, bpe, bpe
+    )
+    down_flops = GEMM.flops_func(tokens, hidden, intermediate, bias=False)
+    down_bytes = GEMM.bytes_func(
+        tokens, hidden, intermediate, False, wbpe, wbpe, bpe, bpe
+    )
+    flops = gate_up_flops + down_flops
+    bytes_moved = None if bpe is None else gate_up_bytes + down_bytes
+    return "GEMM", "matrix", flops, bytes_moved, tokens * hidden
+
+
+def _analytical_op(
+    name: str,
+    section: str,
+    computation: str,
+    instances: int,
+    category: str,
+    maf_type: str,
+    flops: float,
+    bytes_moved: float | None,
+    output_elements: int,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+) -> RooflineOp:
+    op = RooflineOp(
+        name=name,
+        section=section,
+        computation=computation,
+        operation="",
+        category=None,
+        modeled=False,
+        reason=None,
+        output_elements=output_elements,
+        instances=instances,
+    )
+    return _finish_op(op, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+
+
+def _mtp_stack_ops(
+    dims: dict[str, Any],
+    num_predicted_tokens: int,
+    gpu_arch: dict[str, Any] | None,
+    activation: tuple[float | None, str | None],
+) -> list[RooflineOp]:
+    """One draft depth per predicted token, as its own stack.
+
+    Capped at the depth the checkpoint declares (``mtp_config`` /
+    ``num_mtp_layers``). Each depth is the draft block: dual RMSNorm, a
+    replicated 2H→H input projection, one attention (with its packed
+    projections), a dense MLP — not the routed experts — and, when the arch
+    has a short conv, the residual convs. The shared LM head runs once per
+    draft token.
+    """
+    if num_predicted_tokens <= 0:
+        return []
+    depth = _RT.mtp_layers
+    count = min(num_predicted_tokens, depth) if depth else num_predicted_tokens
+    if count <= 0 or not _RT.hidden_size:
+        return []
+    bpe, dtype = activation
+    try:
+        tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
+        hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
+    except (KeyError, DimResolutionError):
+        return []
+    ops: list[RooflineOp] = []
+    for index in range(count):
+        section = f"mtp/{index}"
+        node_id = f"mtp/{index}"
+        # Two RMSNorms (hidden stream and embedding stream) before the fuse.
+        norm_elems = tokens * hidden
+        norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
+        norm_bytes = (
+            _rmsnorm_bytes(norm_elems, hidden, True, bpe, bpe)
+            if bpe is not None
+            else None
+        )
+        for suffix in ("hidden_norm", "embed_norm"):
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.{suffix}",
+                    section,
+                    suffix,
+                    1,
+                    "Normalization (RMSNorm)",
+                    "vector",
+                    norm_flops,
+                    norm_bytes,
+                    norm_elems,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+        # Replicated 2H → H projection of the concatenated normed streams.
+        proj_flops = GEMM.flops_func(tokens, hidden, 2 * hidden, bias=False)
+        proj_bytes = (
+            GEMM.bytes_func(tokens, hidden, 2 * hidden, False, bpe, bpe, bpe, bpe)
+            if bpe is not None
+            else None
+        )
+        ops.append(
+            _analytical_op(
+                f"{node_id}.input_proj",
+                section,
+                "input_proj",
+                1,
+                "GEMM",
+                "matrix",
+                proj_flops,
+                proj_bytes,
+                tokens * hidden,
+                dtype,
+                gpu_arch,
+            )
+        )
+        attention = _attention_boundary_cost(dims, bpe)
+        if attention is not None:
+            category, maf_type, flops, bytes_moved = attention
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.attn",
+                    section,
+                    "attn",
+                    1,
+                    category,
+                    maf_type,
+                    flops,
+                    bytes_moved,
+                    tokens * hidden,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+            ops.extend(
+                _attention_extra_ops(
+                    section, f"{node_id}.attn", 1, dims, bpe, dtype, gpu_arch
+                )
+            )
+        dense = _dense_ffn_cost(dims, bpe)
+        if dense is not None:
+            category, maf_type, flops, bytes_moved, out_elems = dense
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.mlp",
+                    section,
+                    "mlp",
+                    1,
+                    category,
+                    maf_type,
+                    flops,
+                    bytes_moved,
+                    out_elems,
+                    dtype,
+                    gpu_arch,
+                )
+            )
+        if _RT.sconv_kernel:
+            channels = _shard(hidden, _RT.tp)
+            for suffix in ("attn_sconv", "mlp_sconv"):
+                ops.append(
+                    _short_conv_op(
+                        f"{node_id}.{suffix}",
+                        section,
+                        suffix,
+                        1,
+                        tokens,
+                        channels,
+                        bpe,
+                        dtype,
+                        gpu_arch,
+                    )
+                )
+        head = _engine_head_cost(dims, bpe)
+        if head is not None:
+            category, maf_type, flops, bytes_moved, out_elems = head
+            ops.append(
+                _analytical_op(
+                    f"{node_id}.lm_head",
+                    section,
+                    "lm_head",
+                    1,
+                    category,
+                    maf_type,
+                    flops,
+                    bytes_moved,
+                    out_elems,
+                    dtype,
+                    gpu_arch,
                 )
             )
     return ops

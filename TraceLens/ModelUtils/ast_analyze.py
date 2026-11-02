@@ -7901,6 +7901,14 @@ class _ForwardOperationExtractor:
         # misses these because there is no local for the sliced value.
         self.return_producer_order: list[str] = []
         self.return_producer_slots: dict[str, str] = {}
+        # Every ``return`` this body actually walks, in source order, as
+        # ``(statement, [(slot label, producer or None), ...])``. A helper that
+        # returns a tuple from more than one arm (``return None, hidden + full``
+        # in one, ``return add_rmsnorm(...)`` — itself a 2-tuple — in the other)
+        # has no single bare-name tuple for the name-based pass to read, so the
+        # arms are merged positionally afterwards. Without that merge the add and
+        # the forwarded call are extracted and then left with no consumer.
+        self.return_arms: list[tuple[ast.Return, list[tuple[str, str | None]]]] = []
         # ``hidden_shape = (a, b, -1, self.head_dim)`` — a local tuple used as a
         # reshape target. Record the literal so ``view(hidden_shape)`` expands to
         # its dims rather than the un-resolvable variable name.
@@ -8532,6 +8540,46 @@ class _ForwardOperationExtractor:
                 return None, []
             return None, [node.attr]
         return None, []
+
+    def _return_arm_slots(self, value: ast.AST) -> list[tuple[str, str | None]]:
+        """One return arm as ``(label, producer)`` per tuple position.
+
+        A bare ``return callee(...)`` whose callee itself returns a tuple
+        forwards that tuple: every position is produced by this one call, so a
+        caller unpacking ``normed, hidden = helper(...)`` docks both slots
+        instead of the call (and the value it computed) reading as unconsumed.
+        An element with no name of its own (``None``, or ``hidden + full``)
+        still occupies its position, under a synthetic ``out{i}`` label, so the
+        ordinals stay aligned with the caller's unpack.
+        """
+        forwarded = self._forwarded_tuple_slots(value)
+        if forwarded is not None:
+            return forwarded
+        elements = value.elts if isinstance(value, ast.Tuple) else [value]
+        slots: list[tuple[str, str | None]] = []
+        for index, element in enumerate(elements):
+            producer, _ = self.expression(element)
+            label = self._return_element_label(element) or f"_slot{index}"
+            slots.append((label, producer))
+        return slots
+
+    def _forwarded_tuple_slots(
+        self, value: ast.AST
+    ) -> list[tuple[str, str | None]] | None:
+        """``return callee(...)`` expanded to *callee*'s own tuple return, or
+        ``None`` when *value* is not such a forward."""
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+            return None
+        callee = self.module_functions.get(value.func.id)
+        if callee is None:
+            return None
+        names = _static_tuple_return_names(callee, self.module_functions)
+        if len(names) < 2:
+            return None
+        producer, _ = self.expression(value)
+        if not producer:
+            return None
+        return [(name, producer) for name in names]
 
     def _return_element_label(self, node: ast.AST) -> str | None:
         """Base name of a return element, seeing through a trailing subscript
@@ -11579,15 +11627,19 @@ class _ForwardOperationExtractor:
                         self.var_producer[owner.id] = producer
                 continue
             if isinstance(stmt, ast.Return) and stmt.value is not None:
-                elements = (
-                    stmt.value.elts
-                    if isinstance(stmt.value, ast.Tuple)
-                    else [stmt.value]
-                )
-                for element in elements:
-                    producer, _ = self.expression(element)
-                    label = self._return_element_label(element)
-                    if label and producer and label not in self.return_producer_slots:
+                slots = self._return_arm_slots(stmt.value)
+                self.return_arms.append((stmt, slots))
+                # A synthetic ``_slotN`` only holds a tuple position for the
+                # positional merge. Recording it here would append a second
+                # output next to a return the name-based pass already named
+                # (a ``ModelOutput(...)`` call is one value, not a tuple slot).
+                for label, producer in slots:
+                    if (
+                        label
+                        and producer
+                        and not label.startswith("_slot")
+                        and label not in self.return_producer_slots
+                    ):
                         self.return_producer_slots[label] = producer
                         self.return_producer_order.append(label)
                 continue
@@ -12246,6 +12298,127 @@ def _return_value_names(value: ast.AST) -> list[str]:
                 names.append(keyword.value.id)
         return names
     return []
+
+
+def _static_tuple_return_names(
+    func: ast.FunctionDef,
+    module_functions: dict[str, ast.FunctionDef],
+    seen: set[str] | None = None,
+) -> list[str]:
+    """Positional names of *func*'s tuple return, or ``[]`` when it returns one value.
+
+    The last ``return`` in source order wins, and ``return other(...)`` forwards
+    *other*'s tuple when that function is in *module_functions*. A tuple element
+    that is not a bare name keeps its position as ``out{i}`` so a caller unpack
+    still lines up (``return None, hidden + full`` is two positions, not one).
+    """
+    seen = set(seen or ())
+    if func.name in seen:
+        return []
+    seen.add(func.name)
+    found: list[str] = []
+
+    def _walk(body: list[ast.stmt]) -> None:
+        nonlocal found
+        for stmt in body:
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                found = _tuple_names_of(stmt.value, module_functions, seen)
+            elif isinstance(stmt, ast.If):
+                _walk(stmt.body)
+                _walk(stmt.orelse)
+            elif isinstance(stmt, (ast.For, ast.While, ast.With)):
+                _walk(list(stmt.body))
+
+    _walk(list(func.body))
+    return found
+
+
+def _tuple_names_of(
+    value: ast.AST,
+    module_functions: dict[str, ast.FunctionDef],
+    seen: set[str],
+) -> list[str]:
+    if isinstance(value, ast.Tuple) and len(value.elts) >= 2:
+        names: list[str] = []
+        for index, element in enumerate(value.elts):
+            if isinstance(element, ast.Name):
+                names.append(element.id)
+            else:
+                names.append(f"_slot{index}")
+        return names
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        callee = module_functions.get(value.func.id)
+        if callee is not None:
+            return _static_tuple_return_names(callee, module_functions, seen)
+    return []
+
+
+def _publish_branched_tuple_return(
+    extractor: "_ForwardOperationExtractor",
+    return_slots: dict[str, str],
+    return_order: list[str],
+    primary_return_slot: str | None,
+) -> tuple[dict[str, str], list[str], str | None]:
+    """Publish a multi-value return the name-based pass could not.
+
+    One arm (``return y, res``) is already named and left alone. A helper whose
+    arms disagree — one ``return None, hidden + full``, the other
+    ``return add_rmsnorm(...)`` which itself returns ``(y, res)`` — otherwise
+    publishes no aligned tuple, and both the add and the forwarded call are
+    dead nodes inside the helper. Slots merge by position: one producer is used
+    as-is, two become a branch merge so each arm stays consumed.
+    """
+    arms = extractor.return_arms
+    if not arms:
+        return return_slots, return_order, primary_return_slot
+    width = max(len(slots) for _stmt, slots in arms)
+    if width < 2:
+        return return_slots, return_order, primary_return_slot
+    if len(arms) == 1:
+        labels = [label for label, _producer in arms[0][1]]
+        if labels == return_order and all(
+            producer is None or return_slots.get(label) == producer
+            for label, producer in arms[0][1]
+        ):
+            return return_slots, return_order, primary_return_slot
+    labels = [f"_slot{index}" for index in range(width)]
+    for _stmt, slots in arms:
+        if len(slots) == width and any(
+            not label.startswith("_slot") for label, _producer in slots
+        ):
+            labels = [label for label, _producer in slots]
+            break
+    merged: list[str | None] = []
+    anchor = arms[-1][0]
+    for index in range(width):
+        producers: list[str] = []
+        for _stmt, slots in arms:
+            if index >= len(slots):
+                continue
+            producer = slots[index][1]
+            if producer and producer not in producers:
+                producers.append(producer)
+        if not producers:
+            merged.append(None)
+        elif len(producers) == 1:
+            merged.append(producers[0])
+        else:
+            acc = producers[0]
+            for other in producers[1:]:
+                acc = extractor._emit_branch_select(
+                    anchor, acc, other, "return", variable=labels[index]
+                )
+            merged.append(acc)
+    new_slots = {
+        labels[index]: producer for index, producer in enumerate(merged) if producer
+    }
+    new_primary = primary_return_slot if primary_return_slot in new_slots else None
+    if new_primary is None:
+        for label in reversed(labels):
+            if label in new_slots:
+                new_primary = label
+                break
+    return new_slots, list(labels), new_primary
 
 
 def _extract_forward_return_metadata(
@@ -12941,6 +13114,9 @@ def _forward_operations_from_forward(
                 primary_return_slot = submodule_call_slot
     if primary_return_slot is None and return_order:
         primary_return_slot = return_order[-1]
+    return_slots, return_order, primary_return_slot = _publish_branched_tuple_return(
+        extractor, return_slots, return_order, primary_return_slot
+    )
     extractor._drop_unconsumed_merges(set(return_slots.values()))
     _release_extent_only_params(extractor.operations)
     return ForwardAnalysis(

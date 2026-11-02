@@ -77,6 +77,11 @@ reported but no roofline time is computed (no hardware peaks to bound against).
 ## Flags
 
 - `--batch-size`, `--seq-len`: the shape to project at (default: 1, 2048).
+- `--num-predicted-tokens N`: also cost a secondary MTP / speculative draft
+  stack of N tokens (default: 0, backbone only). Each token is one draft depth
+  (attention, a dense MLP, and the 2H→H input projection), capped at the depth
+  the checkpoint declares (`mtp_config.num_nextn_predict_layers` /
+  `num_mtp_layers`).
 - `--dim KEY=VALUE` (repeatable): override a specific symbolic dimension
   (e.g. `--dim past_len=1024`); takes precedence over `--batch-size`/`--seq-len`
   for the same key.

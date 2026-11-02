@@ -91,6 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sequence length to project at (default: 2048)",
     )
     parser.add_argument(
+        "--num-predicted-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Speculative / MTP draft tokens to cost as a secondary stack "
+            "(default: 0, backbone only). Each token is one draft depth — "
+            "attention, dense MLP, and the 2H→H input projection — capped at "
+            "the depth the checkpoint declares."
+        ),
+    )
+    parser.add_argument(
         "--dim",
         action="append",
         default=[],
@@ -302,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         seq_len=args.seq_len,
         extra_dims=extra_dims,
         gpu_arch=gpu_arch,
+        num_predicted_tokens=args.num_predicted_tokens,
     )
 
     print(format_table(projection.ops, top_n=args.top_n))
