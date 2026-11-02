@@ -10,7 +10,7 @@ This document is the detailed specification for the TraceLens **analysis-orchest
 
 ## Workflow overview
 
-The orchestrator runs a staged pipeline (Steps 0–12): collect inputs and environment prefix, generate perf reports, prepare category data via `orchestrator_prepare.py`, run system-level and compute-kernel subagents in parallel, aggregate and validate findings, identify the model, render plots when no extension is present, and write `analysis.md` via remote `tee` heredocs. Only Steps 7, 8, and 10 delegate to Task subagents; all other steps run in the main agent.
+The orchestrator runs a staged pipeline (Steps 0–12): collect inputs and environment prefix, generate perf reports, prepare category data via `orchestrator_prepare.py`, run system-level and compute-kernel subagents in parallel, aggregate and validate findings, identify the model, optionally augment unmodeled kernels with a config-derived roofline, render plots when no extension is present, and write `analysis.md` via remote `tee` heredocs. Only Steps 7, 8, 10, and 10.2 delegate to Task subagents; all other steps run in the main agent.
 
 ---
 
@@ -34,12 +34,13 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
    8.5. Aggregate per-category category_findings[] → priority_data.json::findings[] (globally sorted)
 9. Validate Subagent Outputs (system_findings/ + category_findings/)
 10. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
+    10.2. Analytical Roofline Augmentation (optional; only when <augment_analytical_roofline> is set)
 11. Render performance PNG IF agent_extension.py is absent
 12. Generate Final Report (composable System + Compute sections), validate it,
     optionally invoke agent_extension.py (when present), then embed the PNG into the report.
 ```
 
-**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Step 1 pre-processing semantic diff, Steps 7, 8, 10). All other steps (including Step 8.5) must be performed directly by the orchestrator using the command prefix.
+**Subagent usage:** Only invoke Task subagents in steps that explicitly say "subagent" (Step 1 pre-processing semantic diff, Steps 7, 8, 10, and 10.2). All other steps (including Step 8.5) must be performed directly by the orchestrator using the command prefix.
 
 ---
 
@@ -47,7 +48,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 
 The prompt selects the input mode:
 
-- **YAML mode**: the prompt says "from config `<config_path>`", optionally with a scope (`standalone`, `comparative`, `semantic` or `multi_trace`). Resolve `<config_path>` to an absolute path. Read `output_dir` from the file and ask only the environment questions (item 5), unless the prompt answers them. Skip the other items.
+- **YAML mode**: the prompt says "from config `<config_path>`", optionally with a scope (`standalone`, `comparative`, `semantic` or `multi_trace`). Resolve `<config_path>` to an absolute path. Read `output_dir` from the file and ask only the environment questions (item 5), unless the prompt answers them. Skip the other items. Item 8 is not asked; apply its YAML-mode rule.
 - **Interactive mode**: the prompt names no config.
 
 **In Interactive mode, when this skill is invoked, immediately ask the user for:**
@@ -123,6 +124,12 @@ The prompt selects the input mode:
    - Ask: "Do you have a TraceLens extension file to apply? Press Enter to skip."
    - If provided, resolve to an absolute path and assign to `<extension_file>`.
    - If skipped, set `<extension_file>` to empty (no `extension_file` is set in the config).
+
+8. **Analytical Roofline Augmentation** (Optional) → `<augment_analytical_roofline>`
+   - Ask: "Would you like to augment the roofline with one derived from the model config? Note this will involve additional runtime. Press Enter to skip."
+   - If the user agrees, set `<augment_analytical_roofline>`.
+   - If skipped, leave `<augment_analytical_roofline>` empty. Step 10.2 does not run.
+   - In YAML mode, do not ask. Set `<augment_analytical_roofline>` only when the invoking prompt requests this augmentation; otherwise leave it empty. Do not put this flag in the run YAML.
 
 ### Build and Cache Command Prefix
 
@@ -553,6 +560,28 @@ Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Wor
 
 ---
 
+## Step 10.2: Analytical Roofline Augmentation (optional) → `<augment_analytical_roofline>`
+
+Skip this step unless `<augment_analytical_roofline>` is set. It runs after Step 8.5 and Step 10.1.
+
+### 10.2.1 Derive projection arguments (subagent)
+
+Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/roofline-augment-agent.md` with context: `<output_dir>`, `<platform>`, `<prefix>`. Wait for completion.
+
+On failure (subagent error, timeout, or `metadata/roofline_augment_args.json` not written), retry once. If the file is still missing, or its `source` is null, or its `phases` is empty, skip the rest of this step.
+
+### 10.2.2 Project and merge
+
+```bash
+<prefix> python3 -m TraceLens.Visualizer.model_explorer_export.roofline_augment \
+  --output-dir <output_dir> \
+  --args-json <output_dir>/metadata/roofline_augment_args.json
+```
+
+Writes `<output_dir>/metadata/roofline_augmentation.json` and merges an additive `roofline` block onto the matching `priority_data.json` finding. Leave every other finding field unchanged.
+
+---
+
 ## Step 11: Render Plot (conditional)
 
 **Important:** Plot data is sourced from `priority_data.json` (written in Step 8.5). This step only renders the PNG when `agent_extension.py` is absent.
@@ -606,6 +635,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
    e. **Detailed Analysis** — append `## Detailed Analysis` with `### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights` subsections. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - Data sources: copy the `## Detailed Analysis` blocks verbatim from each `*_findings.md` file. Follow the template for formatting.
       - `category_data/*_metrics.json` (per-op tables, impact estimates).
+      - When a finding has `roofline.note`, emit it as a blockquote under that finding's `**Identification:**` line, and rephrase any "no performance model" or "cannot compute a roofline" wording for that finding (including its Executive Summary line and card Insight) to "no trace-based perf model".
 
    f. **Appendix** — append `## Appendix` with `### Model Architecture` and `### Hardware Reference`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
       - `metadata/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
