@@ -496,17 +496,29 @@ jobs:
           python -m pip install --upgrade pip coverage
           python -m coverage combine coverage-data-*/.coverage
           # A skipped suite leaves its package at 0% and pulls the 95% gate
-          # down. Pass --omit so coverage report/xml exclude those files.
-          # A push still runs both suites so OMIT_FLAGS is empty.
-          OMIT_FLAGS=""
+          # down. coverage.py keeps a single --omit value, so a second flag
+          # replaces the first and that package stays in the total. Pass every
+          # skipped package in one comma-separated value, and quote it so the
+          # shell does not expand the globs. A push runs both suites and
+          # passes no flag.
+          OMIT=""
           if [ "$MODELUTILS" != "true" ]; then
-            OMIT_FLAGS="$OMIT_FLAGS --omit=TraceLens/ModelUtils/*"
+            OMIT="TraceLens/ModelUtils/*"
           fi
           if [ "$VISUALIZER" != "true" ]; then
-            OMIT_FLAGS="$OMIT_FLAGS --omit=TraceLens/Visualizer/*"
+            if [ -n "$OMIT" ]; then
+              OMIT="$OMIT,TraceLens/Visualizer/*"
+            else
+              OMIT="TraceLens/Visualizer/*"
+            fi
           fi
-          python -m coverage xml $OMIT_FLAGS
-          python -m coverage report --fail-under=95 $OMIT_FLAGS
+          if [ -n "$OMIT" ]; then
+            python -m coverage xml --omit="$OMIT"
+            python -m coverage report --fail-under=95 --omit="$OMIT"
+          else
+            python -m coverage xml
+            python -m coverage report --fail-under=95
+          fi
 
       - name: Upload coverage to Codecov
         if: success() && needs.select-pr-tests.outputs.mode == 'all'
