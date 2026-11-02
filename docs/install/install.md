@@ -72,7 +72,7 @@ python -m pytest tests/ -v
 (produced by `rocprofv3 --output-format pftrace`) to one of the pftrace report
 tools (`TraceLens_generate_perf_report_pftrace_hip_activity`, `..._hip_api`, or
 `..._memory_copy`); it converts the `.pftrace` to JSON. The other report tools
-(PyTorch, JAX, rocprofv3 JSON) don't use it. TraceLens looks for `traceconv` on your `PATH`; if it isn't found, it
+(PyTorch, JAX, rocprofv3 JSON) do not use it. TraceLens looks for `traceconv` on your `PATH`; if it isn't found, it
 downloads it automatically from `https://get.perfetto.dev` into the trace
 file's directory (network access required). To use a specific binary instead,
 pass `--traceconv /path/to/traceconv` to any pftrace tool.
