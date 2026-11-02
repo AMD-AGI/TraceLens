@@ -620,9 +620,63 @@ def project_roofline(
                 drawn=draft_nodes or None,
             )
         )
+    result.ops.extend(_persistent_state_ops(nodes, dims, gpu_arch))
     if _RT.engine_miss:
         result.notes.append(_RT.engine_miss)
     return result
+
+
+def _persistent_state_ops(
+    nodes: list[dict[str, Any]],
+    dims: dict[str, Any],
+    gpu_arch: dict[str, Any] | None,
+) -> list[RooflineOp]:
+    """Cost typed persistent-state boundaries recorded by the traced graph.
+
+    A state read and a state write are independent transfers: a stateful
+    forward can replace a state with a different shape or dtype.  This relies
+    only on graph metadata and the tensor at each boundary, not model names,
+    cache conventions, or a presumed read/write symmetry.
+    """
+    if gpu_arch is None or not gpu_arch.get("mem_bw_gbps"):
+        return []
+    state_ops: list[RooflineOp] = []
+    for node in nodes:
+        if _attr_text(node.get("attrs"), "synthetic"):
+            continue
+        output_text = _attr_text(node.get("attrs"), "output_shape")
+        if not output_text:
+            continue
+        shape_text, dtype = _split_shape_text(output_text)
+        bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+        if bpe is None:
+            continue
+        try:
+            elements = prod(resolve_shape(shape_text, dims))
+        except DimResolutionError:
+            continue
+        bytes_moved = elements * bpe
+        roofline_time_us = bytes_moved / (gpu_arch["mem_bw_gbps"] * 1e9) * 1e6
+        for direction, attr in (("read", "state_read"), ("write", "state_write")):
+            for state_name in _attr_values(node.get("attrs"), attr):
+                state_ops.append(
+                    RooflineOp(
+                        name=f"{node.get('id')}:persistent-state-{direction}:{state_name}",
+                        section=str(node.get("namespace") or ""),
+                        computation=f"persistent state {direction} ({state_name})",
+                        operation="",
+                        category="Persistent State",
+                        modeled=True,
+                        reason=None,
+                        output_elements=elements,
+                        instances=_repeat_count(str(node.get("namespace") or ""), node),
+                        flops=0.0,
+                        bytes=bytes_moved,
+                        roofline_time_us=roofline_time_us,
+                        roofline_bound="MEMORY_BOUND",
+                    )
+                )
+    return state_ops
 
 
 def _attention_has_projection_leaves(
@@ -973,6 +1027,17 @@ def _attr_text(attrs: Any, key: str) -> str | None:
     return next(
         (item.get("value") for item in attrs if item.get("key") == key),
         None,
+    )
+
+
+def _attr_values(attrs: Any, key: str) -> tuple[str, ...]:
+    """Return every value for repeatable structured graph metadata."""
+    if not isinstance(attrs, list):
+        return ()
+    return tuple(
+        str(item["value"])
+        for item in attrs
+        if item.get("key") == key and item.get("value")
     )
 
 

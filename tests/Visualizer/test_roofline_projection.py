@@ -42,6 +42,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _moe_cost,
     _moe_extra_ops,
     _parse_op_node,
+    _persistent_state_ops,
     _populate_introspection,
     _project_op,
     _LinearWidths,
@@ -69,6 +70,68 @@ _ARCH = {
         "vector_bf16": 163,
     },
 }
+
+
+def test_persistent_state_ops_cost_traced_reads_and_writes_independently():
+    nodes = [
+        {
+            "id": "state_input",
+            "namespace": "4x_decoder",
+            "attrs": [
+                {"key": "state_read", "value": "recurrent_state"},
+                {"key": "output_shape", "value": "[B, H, D] float32"},
+            ],
+        },
+        {
+            "id": "layers.0.recurrence",
+            "namespace": "4x_decoder",
+            "attrs": [
+                {"key": "state_write", "value": "recurrent_state"},
+                {"key": "state_write", "value": "auxiliary_state"},
+                {"key": "output_shape", "value": "[B, H, 2*D] bfloat16"},
+            ],
+        },
+    ]
+
+    ops = _persistent_state_ops(nodes, {"B": 2, "H": 8, "D": 16}, _ARCH)
+
+    assert [op.computation for op in ops] == [
+        "persistent state read (recurrent_state)",
+        "persistent state write (recurrent_state)",
+        "persistent state write (auxiliary_state)",
+    ]
+    assert [op.bytes for op in ops] == [2 * 8 * 16 * 4, 2 * 8 * 32 * 2, 2 * 8 * 32 * 2]
+    assert all(op.instances == 4 for op in ops)
+    assert all(op.flops == 0 for op in ops)
+    assert all(op.roofline_bound == "MEMORY_BOUND" for op in ops)
+    assert all(
+        op.roofline_time_us == pytest.approx(op.bytes / 5300e9 * 1e6) for op in ops
+    )
+
+
+def test_persistent_state_ops_skip_unresolved_or_untyped_state():
+    nodes = [
+        {
+            "id": "unknown-shape",
+            "namespace": "",
+            "attrs": [
+                {"key": "details", "value": "stores: state"},
+                {"key": "state_write", "value": "state"},
+                {"key": "output_shape", "value": "[unknown] bfloat16"},
+            ],
+        },
+        {
+            "id": "unknown-type",
+            "namespace": "",
+            "attrs": [
+                {"key": "details", "value": "stores: state"},
+                {"key": "state_write", "value": "state"},
+                {"key": "output_shape", "value": "[4] opaque"},
+            ],
+        },
+    ]
+
+    assert _persistent_state_ops(nodes, {}, _ARCH) == []
 
 
 # resolve_dim / resolve_shape

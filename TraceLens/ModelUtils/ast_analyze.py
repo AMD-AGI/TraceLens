@@ -10575,8 +10575,10 @@ class _ForwardOperationExtractor:
         return names
 
     @staticmethod
-    def _stored_self_attr(stmt: ast.Assign | ast.AnnAssign) -> str | None:
-        """The ``self.<attr>`` a statement STORES into, through any subscript.
+    def _stored_self_attrs(
+        stmt: ast.Assign | ast.AnnAssign | ast.AugAssign,
+    ) -> tuple[str, ...]:
+        """Every persistent ``self`` destination a statement writes.
 
         ``self.overlap_kv[name] = chunk_kv[...].clone()`` publishes a value into
         persistent state. Nothing in THIS forward reads it -- the next call
@@ -10585,6 +10587,7 @@ class _ForwardOperationExtractor:
         of its own.
         """
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        stored: list[str] = []
         for target in targets:
             node = target
             while isinstance(node, ast.Subscript):
@@ -10594,25 +10597,34 @@ class _ForwardOperationExtractor:
                 and isinstance(node.value, ast.Name)
                 and node.value.id == "self"
             ):
-                return node.attr
-        return None
+                # Preserve nested and keyed destinations so separate cache
+                # entries do not collapse into one state identity.
+                stored.append(ast.unparse(target).removeprefix("self."))
+        return tuple(dict.fromkeys(stored))
 
     def _record_state_store(
-        self, stmt: ast.Assign | ast.AnnAssign, producer: str | None
+        self, stmt: ast.Assign | ast.AnnAssign | ast.AugAssign, producer: str | None
     ) -> None:
         """Mark the op behind a store to persistent state with what it writes."""
         if producer is None:
             return
-        attr = self._stored_self_attr(stmt)
-        if attr is None:
+        attrs = self._stored_self_attrs(stmt)
+        if not attrs:
             return
         for index, operation in enumerate(self.operations):
             if operation.attr_name != producer:
                 continue
-            if any(str(d).startswith("stores:") for d in operation.details):
-                return
+            existing = {
+                str(detail).split(":", 1)[1].strip()
+                for detail in operation.details
+                if str(detail).startswith("stores:")
+            }
             self.operations[index] = dataclasses.replace(
-                operation, details=(*operation.details, f"stores: {attr}")
+                operation,
+                details=(
+                    *operation.details,
+                    *(f"stores: {attr}" for attr in attrs if attr not in existing),
+                ),
             )
             return
 
@@ -11567,6 +11579,7 @@ class _ForwardOperationExtractor:
                     )
                     if isinstance(stmt.target, ast.Name):
                         self.var_producer[stmt.target.id] = producer
+                    self._record_state_store(stmt, producer)
                 continue
             if isinstance(stmt, ast.Expr):
                 value = stmt.value
