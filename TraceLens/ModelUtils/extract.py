@@ -35,7 +35,12 @@ from TraceLens.ModelUtils.block_tree import (
     build_full_detailed_block_trees,
     is_method_wrapper,
 )
-from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis, LayerVariant
+from TraceLens.ModelUtils.blocks import (
+    BlockComponent,
+    CodeAnalysis,
+    LayerVariant,
+    RepeatedGroup,
+)
 from TraceLens.ModelUtils.config_resolve import (
     apply_config_attribute_aliases,
     declared_config_aliases,
@@ -119,6 +124,11 @@ class ArchitectureSpec:
 
     # Live meta-tree structure (repeated ModuleLists), when instantiation succeeds.
     meta_module_groups: list[MetaModuleGroup] = field(default_factory=list)
+    # Reconstructed nesting tree of the repeated ModuleLists, populated only for a
+    # NON-uniform model (a CNN's per-stage channels/depths that the single uniform
+    # decoder stack cannot express). Empty for a uniform LLM, so the single-stack
+    # path is reached and its output is byte-identical. See reconcile_live_module_groups.
+    nested_module_groups: list[RepeatedGroup] = field(default_factory=list)
 
     # AST-derived block graph
     block_components: list[BlockComponent] = field(default_factory=list)
@@ -1609,27 +1619,44 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
     if decoder is None or not depth or not config:
         return []
 
-    varying: list[tuple[str, str, Any]] = []
+    # A multimodal checkpoint nests the text model's keys under ``text_config``;
+    # the decoder reads those directly (``config.dense_mlp_idx``), so flatten them
+    # up for the per-instance branch resolution (text keys win on conflict).
+    text_config = config.get("text_config")
+    resolve_config = (
+        {**config, **text_config} if isinstance(text_config, dict) else config
+    )
+
+    # ``(override_attr, resolve_cls, resolve_attr, override_key)``: which component
+    # attr this variant swaps, the class to ask + the attr to ask it about, and the
+    # override key ("" swaps the component's OWN class; a nested name swaps a child).
+    varying: list[tuple[str, Any, str, str]] = []
+    # The decoder's OWN conditional components: ``self.mlp = Dense if layer_id <
+    # dense_mlp_idx else MoE`` makes one attr build two different CLASSES by layer.
+    for attr, options in (decoder.init_assignment_options or {}).items():
+        if len(options) > 1:
+            varying.append((attr, decoder, attr, ""))
+    # A child component's own nested conditional (DeepSeek's per-layer compressor).
     for comp_attr, comp_class in (decoder.init_assignments or {}).items():
         comp = registry.get(comp_class)
         if comp is None:
             continue
         for nested, options in (comp.init_assignment_options or {}).items():
             if len(options) > 1:
-                varying.append((comp_attr, nested, comp))
+                varying.append((comp_attr, comp, nested, nested))
     if not varying:
         return []
 
     signatures: list[tuple[tuple[str, str, str], ...]] = []
     for layer_idx in range(depth):
         chosen: list[tuple[str, str, str]] = []
-        for comp_attr, nested, comp in varying:
+        for override_attr, resolve_cls, resolve_attr, override_key in varying:
             picked = instance_submodule_class(
-                comp, nested, config, {"layer_idx": layer_idx}
+                resolve_cls, resolve_attr, resolve_config, {"layer_idx": layer_idx}
             )
             if picked is None:
                 return []  # one unknown and the whole split is a guess
-            chosen.append((comp_attr, nested, picked))
+            chosen.append((override_attr, override_key, picked))
         signatures.append(tuple(chosen))
 
     if len(set(signatures)) <= 1:
@@ -1641,6 +1668,7 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
 
     basic_ops = spec.basic_ops or BasicOpFilter.for_detailed()
     components = {comp.attr_name: comp for comp in spec.block_components}
+    comp_roles = {attr: comp.role for attr, comp in components.items()}
     variants: list[LayerVariant] = []
     for signature, layers in sorted(
         indices.items(), key=lambda item: (-len(item[1]), item[1][0])
@@ -1661,18 +1689,175 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
             layer_indices=list(layers),
         )
         for comp_attr, rel_overrides in sorted(overrides.items()):
+            # A ``""`` override swaps the component's OWN class (``self.mlp`` is
+            # Dense here, MoE there). That is a top-level swap the merge renders
+            # from ``ffn_class``/``attention_class`` by role -- set those; the
+            # prebuilt-tree path below is for NESTED (deep-submodule) swaps only.
+            swapped = rel_overrides.get("")
+            if isinstance(swapped, str) and swapped != SUBMODULE_OMITTED:
+                role = comp_roles.get(comp_attr)
+                if role in ("ffn", "moe"):
+                    variant.ffn_class = swapped
+                    variant.ffn_attr = comp_attr
+                    variant.ffn_label = swapped
+                elif role == "attention":
+                    variant.attention_class = swapped
+                    variant.attention_label = swapped
+            nested_overrides = {k: v for k, v in rel_overrides.items() if k != ""}
+            if not nested_overrides:
+                continue
             built = _build_variant_component_tree(
                 spec,
                 components.get(comp_attr),
                 comp_attr,
                 (decoder.init_assignments or {}).get(comp_attr),
-                rel_overrides,
+                nested_overrides,
                 basic_ops,
             )
             if built is not None:
                 variant.component_trees[comp_attr] = built
         variants.append(variant)
     return variants
+
+
+def _build_nested_groups(groups: list[MetaModuleGroup]) -> list[RepeatedGroup]:
+    """Reconstruct the nesting tree of repeated ModuleLists from the flat live list.
+
+    ``walk_meta_module_tree`` returns a flat list whose nesting is encoded only in the
+    dotted ``path``. Rebuild parent/child by path containment, collapsing a numeric
+    segment that indexes into a parent group to ``*`` (``stages.2.layers`` ->
+    ``stages.*.layers``) so the per-stage ``layers`` lists fold into ONE logical child
+    carrying each parent position's own length in ``per_index_counts`` (ConvNeXt:
+    ``[3, 3, 27, 3]``). Returns the top-level (no-ancestor) groups.
+    """
+    from collections import Counter
+
+    group_paths = {group.path for group in groups}
+    collapsed: dict[str, list[tuple[int | None, MetaModuleGroup]]] = {}
+    for group in groups:
+        segments = group.path.split(".")
+        normalized: list[str] = []
+        parent_index: int | None = None
+        for i, segment in enumerate(segments):
+            if (
+                segment.isdigit()
+                and normalized
+                and ".".join(segments[:i]) in group_paths
+            ):
+                normalized.append("*")
+                parent_index = int(segment)  # last collapsed index = immediate parent's
+            else:
+                normalized.append(segment)
+        collapsed.setdefault(".".join(normalized), []).append((parent_index, group))
+
+    built: dict[str, RepeatedGroup] = {}
+    lengths_by_index: dict[str, dict[int, int]] = {}
+    for key, members in collapsed.items():
+        by_index = {idx: grp.length for idx, grp in members if idx is not None}
+        lengths_by_index[key] = by_index
+        representative = members[0][1]
+        counts = [grp.length for _, grp in members]
+        modal = Counter(counts).most_common(1)[0][0]
+        built[key] = RepeatedGroup(
+            path=key,
+            count=modal,
+            element_class=representative.element_class,
+            label="",
+            signatures=representative.signatures,
+            element_classes=representative.element_classes,
+            descriptors=representative.descriptors,
+        )
+
+    roots: list[RepeatedGroup] = []
+    for key in sorted(built, key=lambda k: len(k.split("."))):
+        segments = key.split(".")
+        parent_key = next(
+            (
+                ".".join(segments[:cut])
+                for cut in range(len(segments) - 1, 0, -1)
+                if ".".join(segments[:cut]) in built
+            ),
+            None,
+        )
+        group = built[key]
+        by_index = lengths_by_index[key]
+        if by_index and parent_key is not None:
+            # Size the per-position counts to the parent's own repeat count, so an
+            # absent child at a trailing parent index reads as 0, not a short list.
+            span = built[parent_key].count
+            group.per_index_counts = [by_index.get(i, 0) for i in range(span)]
+        elif by_index:
+            group.per_index_counts = [
+                by_index.get(i, 0) for i in range(max(by_index) + 1)
+            ]
+        if parent_key is None:
+            roots.append(group)
+        else:
+            built[parent_key].children.append(group)
+    return roots
+
+
+def repeated_group_is_pipeline(group: RepeatedGroup) -> bool:
+    """True when the group's elements are more than one class.
+
+    ConvNeXt's ``downsampling_layer`` is ``[LayerNorm, Conv2d]``. Emitting that as
+    ``2× LayerNorm`` drops the convolution. A pipeline is drawn element by element,
+    in order, ahead of the stage's uniform repeated body.
+    """
+    return len(set(group.element_classes)) > 1
+
+
+def repeated_child_attr(parent: RepeatedGroup, child: RepeatedGroup) -> str:
+    """Attribute a child group occupies on its parent (``downsampling_layer``)."""
+    suffix = child.path[len(parent.path) :].lstrip(".")
+    if suffix.startswith("*."):
+        suffix = suffix[2:]
+    return suffix.split(".", 1)[0]
+
+
+def ordered_repeated_children(
+    spec: ArchitectureSpec, parent: RepeatedGroup
+) -> list[RepeatedGroup]:
+    """Children of one stage, in the order the parent forward runs them.
+
+    When the parent's class records every child attribute in ``forward_calls``,
+    that order wins. Otherwise a mixed-class pipeline (the downsampling convs)
+    leads the uniform repeated body — the arrangement a stage uses when the
+    parse did not name the calls.
+    """
+    registry = getattr(spec, "class_registry", None) or {}
+    owner = registry.get(parent.element_class)
+    calls = list(getattr(owner, "forward_calls", None) or [])
+    children = list(parent.children)
+    attrs = [repeated_child_attr(parent, child) for child in children]
+    if calls and all(attr in calls for attr in attrs):
+        return sorted(
+            children, key=lambda child: calls.index(repeated_child_attr(parent, child))
+        )
+    return sorted(
+        children,
+        key=lambda child: 0 if repeated_group_is_pipeline(child) else 1,
+    )
+
+
+def _is_non_uniform(nested: list[RepeatedGroup]) -> bool:
+    """True when a repeated group's per-position counts genuinely diverge (a CNN).
+
+    Fires only on differing POSITIVE counts (ConvNeXt's ``[3, 3, 27, 3]``): the one
+    signal a uniform transformer -- even an MoE one -- cannot produce. A standard MoE
+    stack has a uniform expert count per layer, and a dense-replace MoE (experts absent
+    in the first *k* layers) gives ``[0, 0, 256, 256, ...]`` whose non-zero counts are
+    all equal, so neither is misread as non-uniform.
+    """
+
+    def diverges(group: RepeatedGroup) -> bool:
+        if group.per_index_counts is not None:
+            nonzero = {count for count in group.per_index_counts if count > 0}
+            if len(nonzero) > 1:
+                return True
+        return any(diverges(child) for child in group.children)
+
+    return any(diverges(group) for group in nested)
 
 
 def reconcile_live_module_groups(
@@ -1695,6 +1880,16 @@ def reconcile_live_module_groups(
             _finalize_layer_repeat_lines(spec)
         return
     spec.meta_module_groups = list(groups)
+
+    # A non-uniform nesting (a CNN's per-stage channels/depths) cannot be expressed as
+    # the single uniform decoder stack the rest of this function reconciles. Reconstruct
+    # the real tree and hand it to the graph builder instead, leaving the single-stack
+    # fields untouched so a uniform LLM reaches the code below byte-for-byte unchanged.
+    nested = _build_nested_groups(groups)
+    if _is_non_uniform(nested) and find_vision_tower(spec) is None:
+        spec.nested_module_groups = nested
+        _finalize_layer_repeat_lines(spec)
+        return
 
     primary = _select_primary_group(spec, groups)
     if primary is None:
@@ -1985,6 +2180,15 @@ def _merge_code_analysis(spec: ArchitectureSpec, analysis: CodeAnalysis) -> None
             class_registry=spec.class_registry,
             decoder_class=spec.decoder_class,
         )
+        # The config/string path reads per-layer TYPE lists (``layer_types``,
+        # ``moe_layer_freq``); it does not resolve a plain ``if layer_id <
+        # config.dense_mlp_idx: self.mlp = Dense else MoE`` that picks the
+        # component CLASS by an integer threshold. When it found no split, fall
+        # back to the AST per-instance resolver, which does.
+        if len(spec.layer_variants or []) <= 1:
+            static = _static_layer_variants(spec)
+            if len(static) > 1:
+                spec.layer_variants = static
     _finalize_layer_repeat_lines(spec)
 
     if analysis.attention_type:

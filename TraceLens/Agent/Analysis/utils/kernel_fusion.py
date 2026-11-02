@@ -453,6 +453,25 @@ class OpResolver:
         return {"op_uid": op.get("UID", uid), "perf_key": self.perf_key(op)}
 
 
+def _efficiency_parts(eff: dict) -> tuple:
+    """(pct, peak, unit, bound) of a ``calculate_efficiency`` result.
+
+    ``bound`` reads ``compute-bound`` / ``memory-bound``; pct, peak and unit are
+    None when the row has no efficiency or no bound to pick the peak from.
+    """
+    bound = eff["bound_type"]
+    bound_label = f"{bound}-bound" if bound else None
+    pct = eff["efficiency_percent"]
+    if pct is None or bound is None:
+        return None, None, None, bound_label
+    peak, unit = (
+        (eff["resolved_peak_maf"], "TFLOPS")
+        if bound == "compute"
+        else (eff["resolved_peak_mem_bw"], "TB/s")
+    )
+    return pct, peak, unit, bound_label
+
+
 @dataclass
 class _Group:
     """The instances of one module (or sibling parent) found in the trace.
@@ -920,13 +939,15 @@ class FusionPricer:
         perf_rows: dict,
         baseline_ms: float,
         *,
+        display_ms: float | None = None,
         perf_rows2: dict | None = None,
         baseline2_ms: float = 0,
         same_platform: bool = False,
     ):
         """``peaks`` is (peak_bw_tbs, peak_maf_tflops); the trace 2 arguments price
         comparative candidates. Trace 2 Efficiency and Bound are filled only when
-        ``same_platform``."""
+        ``same_platform``. ``display_ms`` is the denominator of the detail rows'
+        %E2E (default ``baseline_ms``); multi_trace passes the focus node's time."""
         self.forms = forms
         self.peak_bw_tbs, self.peak_maf_tflops = peaks
         self.peak_bw_bytes_s = self.peak_bw_tbs * 1e12
@@ -934,6 +955,7 @@ class FusionPricer:
         self.vector_maf = self.peak_maf_tflops.get("vector_bf16", self.matrix_maf)
         self.perf_rows = perf_rows
         self.baseline_ms = baseline_ms
+        self.display_ms = baseline_ms if display_ms is None else display_ms
         self.perf_rows2 = perf_rows2
         self.baseline2_ms = baseline2_ms
         self.same_platform = same_platform
@@ -1030,7 +1052,7 @@ class FusionPricer:
             confidence=c.confidence,
             fusion_kind=c.fusion_kind,
             fusion_type=FUSION_TYPE_MATRIX if has_matrix_ops else FUSION_TYPE_MEMORY,
-            rows_trace1=self.build_rows(c.ops_trace1, self.perf_rows, self.baseline_ms),
+            rows_trace1=self.build_rows(c.ops_trace1, self.perf_rows, self.display_ms),
             rows_trace2=self.build_rows(
                 c.ops_trace2,
                 self.perf_rows2,
@@ -1141,7 +1163,7 @@ class FusionPricer:
                 if unmodeled_count > 0
                 else None
             ),
-            rows=self.build_rows(c.ops, self.perf_rows, self.baseline_ms),
+            rows=self.build_rows(c.ops, self.perf_rows, self.display_ms),
             op_keys=[g["perf_key"] for g in c.ops if g["perf_key"]],
         )
 
@@ -1223,16 +1245,10 @@ class FusionPricer:
 
     def _efficiency_cells(self, eff: dict) -> tuple:
         """(Efficiency, Bound) table cells from a ``calculate_efficiency`` result."""
-        bound = eff["bound_type"]
-        bound_cell = f"{bound}-bound" if bound else NO_VALUE
-        pct = eff["efficiency_percent"]
-        if pct is None or bound is None:
+        pct, peak, unit, bound = _efficiency_parts(eff)
+        bound_cell = bound or NO_VALUE
+        if pct is None:
             return NO_VALUE, bound_cell
-        peak, unit = (
-            (eff["resolved_peak_maf"], "TFLOPS")
-            if bound == "compute"
-            else (eff["resolved_peak_mem_bw"], "TB/s")
-        )
         return f"{pct:.2f}% of {peak:g} {unit}", bound_cell
 
     def build_rows(
