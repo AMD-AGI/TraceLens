@@ -93,10 +93,18 @@ image and patch file automatically:
 | `v23` | `vllm/vllm-openai-rocm:v0.23.0` | v0.23.0 | `config_vllm_v0.23.0.patch` |
 | `v24` | `vllm/vllm-openai-rocm:v0.24.0` | v0.24.0 | `config_vllm_v0.24.0.patch` |
 | `v25` | `vllm/vllm-openai-rocm:v0.25.0` | v0.25.0 | `config_vllm_v0.25.0.patch` |
+| `v26` | `vllm/vllm-openai-rocm:v0.26.0` | v0.26.0 | `config_vllm_v0.26.0.patch` |
+| `v27` | `vllm/vllm-openai-rocm:v0.27.0` | v0.27.0 | `config_vllm_v0.27.0.patch` |
+| `v28` | `vllm/vllm-openai-rocm:v0.28.0` | v0.28.0 | `config_vllm_v0.28.0.patch` |
+| `v29` | `vllm/vllm-openai-rocm:v0.29.0` | v0.29.0 | `config_vllm_v0.29.0.patch` |
+| `v30` | `vllm/vllm-openai-rocm:v0.30.0` | v0.30.0 | `config_vllm_v0.30.0.patch` |
+| `v31` | `vllm/vllm-openai-rocm:v0.31.0` | v0.31.0 | `config_vllm_v0.31.0.patch` |
+| `v32` | `vllm/vllm-openai-rocm:v0.32.0` | v0.32.0 | `config_vllm_v0.32.0.patch` |
+| `v33` | `vllm/vllm-openai-rocm:v0.33.0-rocm100` | v0.33.0 | `config_vllm_v0.33.0.patch` |
 
 ```{note}
 The profiler options these patches add
-([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)) were merged into upstream vLLM and ship in **v0.26.0 and later**, so those versions need no patched image at all.
+([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)) were merged into upstream vLLM and ship in **v0.26.0 and later**. The v26–v33 patches still add graph-capture tracing for the V2 model runner and the V1 encoder, which upstream leaves untraced. The v31, v32, and v33 patches also add one `sample_*` span around the complete speculative-drafter serving step. A stock image is enough when you only need V1 decoder capture traces.
 ```
 
 ```bash
@@ -256,8 +264,10 @@ To apply them:
 
 **vLLM.** Two `ProfilerConfig` flags control graph-capture tracing and roofline
 annotations. They are added by the `config_vllm_v*.patch` patches on **v0.14-v0.25**
-and are built into upstream vLLM from **v0.26.0** onwards. Pass them as server
-arguments:
+and are built into upstream vLLM from **v0.26.0** onwards. On **v0.26-v0.33** the
+same patches still trace CUDA-graph capture for the V2 model runner and the V1
+encoder; v0.31, v0.32, and v0.33 also annotate the complete speculative-drafter
+serving step. Pass the flags as server arguments:
 
 | Flag                                            | Type     | Default   | Description                                                                                                                                                                                                                              |
 | ----------------------------------------------- | -------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
