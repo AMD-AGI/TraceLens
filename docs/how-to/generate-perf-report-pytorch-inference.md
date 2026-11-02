@@ -472,8 +472,6 @@ analysis. Each `execution_details.json` entry lists the following fields for eac
 | `token` | The most common leading dimension across the input tensors. Meant to be proxy for token-level batch size. |
 | `num_captures` | The number of `StreamBeginCapture` runtime events in the file; one or fewer is `FULL`, and more than one is `PIECEWISE`. |
 
-Captures from the same rank as the replay trace are preferred.
-
 ### Speculative decoding
 
 In non-speculative inference, every execution root is a **target** model forward pass that merges with a single set of target capture traces. Speculative decoding adds a **drafter** model that proposes multiple output tokens per iteration. The drafter model has its own capture traces, so the merge must correctly match every replay root with the correct capture root for both target and drafter models.
