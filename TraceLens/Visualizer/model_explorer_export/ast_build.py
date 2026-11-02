@@ -78,28 +78,45 @@ def _attach_conv_meta_shapes(graph: dict[str, Any], checkpoint: str | Path) -> N
         return ["B"] + [str(int(extent)) for extent in shape[1:]]
 
     conv_leaves = ("dwconv", "patch_embeddings", "downsample", "conv")
+
+    def _matches(capture: dict[str, Any], prefix: str | None, leaf: str | None) -> bool:
+        path = str(capture.get("path") or "")
+        if prefix is not None and path != prefix and not path.startswith(prefix + "."):
+            return False
+        # An exact module path is the leading conv itself (a ModuleList element
+        # whose path ends in an index, not in ``dwconv``).
+        if prefix is not None and path == prefix:
+            return True
+        if leaf is not None and path.rsplit(".", 1)[-1] != leaf:
+            return False
+        return prefix is not None or leaf is not None
+
     for node in graph.get("nodes", []):
         attrs = node.get("attrs")
         if not isinstance(attrs, list):
             continue
         op_type = _attr(attrs, "op_type")
-        if op_type is None or op_type.get("value") not in _CONV_OP_TYPES:
+        class_name = _attr(attrs, "class_name")
+        # The tile label may be a stage banner ("stage 1 · Conv2d"). The conv
+        # class is what roofline and shape matching key on.
+        kind = None
+        if class_name is not None and class_name.get("value") in _CONV_OP_TYPES:
+            kind = class_name["value"]
+        elif op_type is not None and op_type.get("value") in _CONV_OP_TYPES:
+            kind = op_type["value"]
+        if kind is None:
             continue
         node_id = str(node.get("id", "")).lower()
         leaf = next((name for name in conv_leaves if name in node_id), None)
         meta_path = _attr(attrs, "meta_path")
         prefix = meta_path["value"] if meta_path is not None else None
         match = next(
-            (
-                capture
-                for capture in captures
-                if (prefix is None or capture["path"].startswith(prefix))
-                and (leaf is None or capture["path"].rsplit(".", 1)[-1] == leaf)
-            ),
+            (capture for capture in captures if _matches(capture, prefix, leaf)),
             None,
         )
         if match is None:
             continue
+        _set(attrs, "op_type", kind)
         dtype = "float32"
         current = _attr(attrs, "output_shape")
         if current is not None and " " in str(current.get("value", "")):
@@ -114,6 +131,18 @@ def _attach_conv_meta_shapes(graph: dict[str, Any], checkpoint: str | Path) -> N
         )
         if match.get("input_shape"):
             _set(attrs, "input_shapes", json.dumps([_dims(match["input_shape"])]))
+        if _attr(attrs, "details") is None and match.get("weight_shape"):
+            weight = ", ".join(str(int(dim)) for dim in match["weight_shape"])
+            bias = 1 if match.get("bias") else 0
+            transposed = 1 if match.get("transposed") else 0
+            _set(
+                attrs,
+                "details",
+                (
+                    f"conv_weight=[{weight}]; conv_bias={bias}; "
+                    f"conv_transposed={transposed}"
+                ),
+            )
 
 
 def build_model_explorer_payload(

@@ -351,6 +351,10 @@ class MetaModuleGroup:
     element_class: str
     signatures: tuple[str, ...]
     descriptors: tuple[tuple[tuple[str, str], ...], ...] = ()
+    # Class of each element, in order. A homogeneous list repeats one class; a
+    # heterogeneous one (LayerNorm then Conv2d) is a pipeline, not an N× repeat
+    # of ``element_class`` (which is only the first element).
+    element_classes: tuple[str, ...] = ()
 
 
 def _element_descriptor(element: Any) -> tuple[tuple[str, str], ...]:
@@ -388,13 +392,63 @@ def _element_signature(element: Any) -> str:
     )
 
 
-def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | None:
-    """Read the repeated-``ModuleList`` structure off the instantiated meta tree.
+def _is_stage_repeat(mod: Any, container: Any) -> bool:
+    """True when *mod* is a repeated stage body worth recording.
 
-    Instantiates the model on the ``meta`` device and walks ``named_modules()`` for
-    every non-empty ``nn.ModuleList``, recording its path, ``len()``, element class
-    name, and per-element structural signature. Returns *None* when torch /
-    transformers are unavailable or the model cannot be instantiated.
+    Every non-empty ``ModuleList`` is one. A ``Sequential`` is one only when it is
+    homogeneous and its parent module is an element of a ``ModuleList`` — that is
+    the stage, and the Sequential is the stage's repeated body (ResNet's
+    ``stage.layers``). A Sequential nested inside that body (a bottleneck's own
+    conv stack) belongs to the element class, and a heterogeneous Sequential is a
+    pipeline rather than a repeat, so neither is recorded here.
+    """
+    import torch
+
+    if isinstance(mod, torch.nn.ModuleList):
+        return len(mod) > 0
+    if not isinstance(mod, torch.nn.Sequential) or len(mod) == 0:
+        return False
+    if not isinstance(container, torch.nn.ModuleList):
+        return False
+    return len({type(child).__name__ for child in mod}) == 1
+
+
+def repeated_module_groups(model: Any) -> list[MetaModuleGroup]:
+    """Repeated stage bodies on an already-instantiated module tree.
+
+    See :func:`walk_meta_module_tree`. Split out so a test can hand a tiny module
+    in place of a checkpoint instantiation.
+    """
+    modules = dict(model.named_modules())
+    groups: list[MetaModuleGroup] = []
+    for path, mod in modules.items():
+        parent_path, _, _ = path.rpartition(".")
+        grand_path, _, _ = parent_path.rpartition(".")
+        if not _is_stage_repeat(mod, modules.get(grand_path)):
+            continue
+        classes = tuple(type(child).__name__ for child in mod)
+        groups.append(
+            MetaModuleGroup(
+                path=path,
+                length=len(mod),
+                element_class=classes[0],
+                signatures=tuple(_element_signature(element) for element in mod),
+                descriptors=tuple(_element_descriptor(element) for element in mod),
+                element_classes=classes,
+            )
+        )
+    return groups
+
+
+def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | None:
+    """Read the repeated-stage structure off the instantiated meta tree.
+
+    Instantiates the model on the ``meta`` device and records every non-empty
+    ``nn.ModuleList``, plus a homogeneous ``nn.Sequential`` that is itself a
+    stage body (ResNet). Each record carries its path, ``len()``, element class
+    name, per-element class sequence, and per-element structural signature.
+    Returns *None* when torch / transformers are unavailable or the model cannot
+    be instantiated.
 
     Unlike :func:`trace_meta_shapes` this runs **no forward pass** and applies **no
     rotary patch**: building the module tree on the meta device allocates no storage,
@@ -403,7 +457,7 @@ def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | Non
     structure needs only the reliable instantiation half.
     """
     try:
-        import torch
+        import torch  # noqa: F401 — availability probe; grouping is below
     except ImportError:
         _log.info(
             "torch and/or transformers not installed; "
@@ -419,19 +473,7 @@ def walk_meta_module_tree(checkpoint: str | Path) -> list[MetaModuleGroup] | Non
     model, _config = result
 
     try:
-        groups: list[MetaModuleGroup] = []
-        for path, mod in model.named_modules():
-            if not isinstance(mod, torch.nn.ModuleList) or len(mod) == 0:
-                continue
-            groups.append(
-                MetaModuleGroup(
-                    path=path,
-                    length=len(mod),
-                    element_class=type(mod[0]).__name__,
-                    signatures=tuple(_element_signature(element) for element in mod),
-                    descriptors=tuple(_element_descriptor(element) for element in mod),
-                )
-            )
+        groups = repeated_module_groups(model)
     finally:
         del model
 
@@ -631,13 +673,11 @@ def trace_meta_conv_ops(
     CONCRETE ``[B, C, H, W]`` shapes the forward produced -- or ``None`` when
     torch/transformers are unavailable or the model cannot run.
 
-    This exists because the static graph pipeline models a checkpoint as a single
-    uniform repeated decoder stack (``num_hidden_layers`` + one ``decoder_class``);
-    a CNN's non-uniform stages (per-stage channels/depths) don't fit that, so its
-    convolutions never become graph nodes. Walking the live conv instances with a
-    real forward sidesteps that entirely: every conv is captured directly, with
-    the exact shapes/geometry :class:`TraceLens.PerfModel.perf_model.CONV` needs,
-    and with no dependence on symbolic spatial shape inference."""
+    The graph expands a non-uniform stage once and stamps these concrete shapes
+    onto that node. Walking every live conv still supplies the per-instance
+    geometry :class:`TraceLens.PerfModel.perf_model.CONV` needs — including a
+    stem or downsampling conv the stage body does not repeat — with no dependence
+    on symbolic spatial shape inference."""
     try:
         import torch
         from torch.nn.modules.conv import _ConvNd

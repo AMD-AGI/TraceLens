@@ -43,6 +43,8 @@ from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
     architecture_section_trees,
     image_placeholder_token_id,
+    ordered_repeated_children,
+    repeated_group_is_pipeline,
     vision_tower_component,
     vision_tower_passthrough_inputs,
 )
@@ -8267,6 +8269,11 @@ def _tag_secondary_module_groups(
     namespace/attribute rewrite — no new nodes or edges, so it cannot create a
     cycle. Degrades to a no-op when the live tree is unavailable or no rendered
     namespace matches a secondary group's element class."""
+    # The nested-stage path already emitted each position with its own count and
+    # label. Re-tagging those ModuleLists (a downsample list's first class, say)
+    # would rename a single leading node into a fake N× group.
+    if getattr(spec, "nested_module_groups", None):
+        return
     groups = getattr(spec, "meta_module_groups", None)
     if not groups:
         return
@@ -10124,27 +10131,31 @@ def _ensure_nested_element_trees(
     so :func:`_append_section` can expand it by class.
     """
 
-    def leaves(group: RepeatedGroup):
-        if group.children:
-            for child in group.children:
-                yield from leaves(child)
-        else:
-            yield group
+    def classes_of(group: RepeatedGroup):
+        # Only classes we actually expand: a repeated body, or each member of a
+        # leading pipeline. The parent stage class is a container, not a tile.
+        if not group.children:
+            if group.element_classes:
+                yield from group.element_classes
+            elif group.element_class:
+                yield group.element_class
+        for child in group.children:
+            yield from classes_of(child)
 
     existing = {tree.class_name for _label, tree in spec.export_block_trees}
     for group in spec.nested_module_groups:
-        for leaf in leaves(group):
-            if leaf.element_class in existing:
+        for class_name in classes_of(group):
+            if class_name in existing:
                 continue
             tree = build_block_node(
-                attr_name=leaf.element_class,
-                class_name=leaf.element_class,
+                attr_name=class_name,
+                class_name=class_name,
                 registry=spec.class_registry,
                 basic_ops=basic_ops,
                 infer_init_steps=True,
             )
-            spec.export_block_trees.append((leaf.element_class, tree))
-            existing.add(leaf.element_class)
+            spec.export_block_trees.append((class_name, tree))
+            existing.add(class_name)
 
 
 def _child_meta_path(parent: RepeatedGroup, pos: int, child: RepeatedGroup) -> str:
@@ -10166,10 +10177,79 @@ def _stamp_meta_path(
     is used rather than the label so a ``ConvNextDropPath`` tile is not mistaken for
     a convolution."""
     for node in nodes[first_index:]:
-        if "conv" in str(node.get("id", "")).lower():
-            attrs = node.setdefault("attrs", [])
-            if isinstance(attrs, list):
-                attrs.append({"key": "meta_path", "value": meta_path})
+        if "conv" not in str(node.get("id", "")).lower():
+            continue
+        attrs = node.setdefault("attrs", [])
+        if not isinstance(attrs, list):
+            continue
+        if any(item.get("key") == "meta_path" for item in attrs):
+            continue
+        attrs.append({"key": "meta_path", "value": meta_path})
+
+
+def _stage_banner(stage_index: tuple[int, ...], text: str) -> str:
+    """Prefix a repeated-body or leading-node label with its stage index."""
+    if not stage_index:
+        return text
+    index = ".".join(str(part) for part in stage_index)
+    return f"stage {index} · {text}"
+
+
+def _append_pipeline_members(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    count: int,
+    meta_path: str,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Emit a mixed-class list as individual leading nodes, in element order.
+
+    ConvNeXt's downsampling list is LayerNorm then Conv2d. Each element is one
+    node threaded ahead of the stage's N× body, labeled with the stage index.
+    The conv carries the live module path (``...downsampling_layer.1``) so the
+    meta-shape pass can stamp its ``[B, C, H, W]``.
+    """
+    attr = group.path.split(".")[-1]
+    exits = previous_exits
+    for index, class_name in enumerate(group.element_classes[:count]):
+        slug = _sanitize_namespace_segment(f"{position_tag}{attr}_{index}_{class_name}")
+        prefix = _merge_node_id(id_prefix, slug)
+        # A private namespace per element. Sharing the parent namespace lets
+        # each stage's leading norm overwrite the previous stage's group label.
+        namespace = _join_namespace(namespace_prefix, slug)
+        component = BlockComponent(
+            attr_name=class_name,
+            class_name=class_name,
+            role="other",
+            label=_stage_banner(stage_index, class_name),
+        )
+        first_node_index = len(merged_nodes)
+        exits = _append_section(
+            merged_nodes,
+            spec=spec,
+            component=component,
+            id_prefix=prefix,
+            namespace_prefix=namespace,
+            basic_ops=basic_ops,
+            previous_exits=exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
+        element_path = f"{meta_path}.{index}" if meta_path else ""
+        if element_path:
+            _stamp_meta_path(merged_nodes, first_node_index, element_path)
+    return exits
 
 
 def _append_nested_repeated_group(
@@ -10188,22 +10268,43 @@ def _append_nested_repeated_group(
     count: int | None = None,
     meta_path: str = "",
     position_tag: str = "",
+    stage_index: tuple[int, ...] = (),
 ) -> list[SourceRef]:
     """Emit one repeated group (and its nested children) as graph nodes.
 
     A non-uniform PARENT (ConvNeXt's ``stages``) is a SEQUENCE of distinct positions,
-    not an N× repeat: it emits each position's children in series. A LEAF group
+    not an N× repeat: it emits each position's children in series, pipeline members
+    (the downsampling conv) first, then the uniform body. A LEAF group
     (``ConvNextLayer``) is an ``N×`` container whose element-class body is expanded
-    once via :func:`_append_section`. Leaf containers are emitted FLAT under one
-    namespace and threaded in series -- the known-good decoder-variant shape -- rather
-    than nested in per-stage boxes, which would need boundary tiles at every level.
+    once via :func:`_append_section`, labeled with its stage index. Leaf containers
+    are emitted FLAT under one namespace and threaded in series -- the known-good
+    decoder-variant shape -- rather than nested in per-stage boxes, which would
+    need boundary tiles at every level.
     """
     effective = group.count if count is None else count
+
+    if not group.children and repeated_group_is_pipeline(group):
+        return _append_pipeline_members(
+            merged_nodes,
+            spec=spec,
+            group=group,
+            namespace_prefix=namespace_prefix,
+            id_prefix=id_prefix,
+            basic_ops=basic_ops,
+            previous_exits=previous_exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+            count=effective,
+            meta_path=meta_path,
+            position_tag=position_tag,
+            stage_index=stage_index,
+        )
 
     if group.children:
         exits = previous_exits
         for pos in range(effective):
-            for child in group.children:
+            for child in ordered_repeated_children(spec, group):
                 child_count = (
                     child.per_index_counts[pos]
                     if child.per_index_counts is not None
@@ -10226,6 +10327,7 @@ def _append_nested_repeated_group(
                     count=child_count,
                     meta_path=_child_meta_path(group, pos, child),
                     position_tag=f"{position_tag}s{pos}_",
+                    stage_index=(*stage_index, pos),
                 )
         return exits
 
@@ -10234,8 +10336,9 @@ def _append_nested_repeated_group(
     )
     namespace = _join_namespace(namespace_prefix, slug)
     prefix = _merge_node_id(id_prefix, slug)
+    banner = _stage_banner(stage_index, f"{effective}× {group.element_class}")
     group_node_attributes[namespace] = {
-        "label": f"{effective}× {group.element_class}",
+        "label": banner,
         "count": str(effective),
     }
     group_node_configs.append(_repeat_group_config(namespace))
@@ -10243,7 +10346,7 @@ def _append_nested_repeated_group(
         attr_name=group.element_class,
         class_name=group.element_class,
         role="other",
-        label=group.element_class,
+        label=banner,
     )
     first_node_index = len(merged_nodes)
     exits = _append_section(
@@ -10258,6 +10361,13 @@ def _append_nested_repeated_group(
         shape_inferencer=shape_inferencer,
         inline_expansion=inline_expansion,
     )
+    # ``_append_section`` replaces this namespace's attributes with the tile
+    # label. Put the stage banner and the trip count back.
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": str(effective),
+        "operation": group.element_class,
+    }
     if meta_path:
         _stamp_meta_path(merged_nodes, first_node_index, meta_path)
     return _wrap_actual_group_boundary(
@@ -10408,6 +10518,8 @@ def build_merged_model_graph(
     if spec.nested_module_groups:
         # A non-uniform nesting (a CNN's per-stage channels/depths) the single uniform
         # decoder stack cannot express: emit it recursively from the reconstructed tree.
+        # stack_pre (the stem / patch embedding) is already on ``previous_exits``, so
+        # it leads the encoder; each stage then leads with its downsampling pipeline.
         # Use a fixed "encoder" namespace -- a CNN has no decoder stack, so the
         # decoder-derived namespace is meaningless (and ill-formed) here.
         _ensure_nested_element_trees(spec, resolved_basic_ops)

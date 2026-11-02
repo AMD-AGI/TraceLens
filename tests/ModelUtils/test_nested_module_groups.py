@@ -17,18 +17,31 @@ transformer as non-uniform.
 
 from __future__ import annotations
 
+import types
+
 from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
     _build_nested_groups,
     _is_non_uniform,
+    ordered_repeated_children,
     reconcile_live_module_groups,
+    repeated_group_is_pipeline,
 )
 from TraceLens.ModelUtils.meta_trace import MetaModuleGroup
 
 
-def _grp(path: str, length: int, element_class: str) -> MetaModuleGroup:
+def _grp(
+    path: str,
+    length: int,
+    element_class: str,
+    element_classes: tuple[str, ...] = (),
+) -> MetaModuleGroup:
     return MetaModuleGroup(
-        path=path, length=length, element_class=element_class, signatures=()
+        path=path,
+        length=length,
+        element_class=element_class,
+        signatures=(),
+        element_classes=element_classes,
     )
 
 
@@ -39,9 +52,35 @@ CONVNEXT_GROUPS = [
     _grp("convnext.encoder.stages.1.layers", 3, "ConvNextLayer"),
     _grp("convnext.encoder.stages.2.layers", 27, "ConvNextLayer"),
     _grp("convnext.encoder.stages.3.layers", 3, "ConvNextLayer"),
-    _grp("convnext.encoder.stages.1.downsampling_layer", 2, "ConvNextLayerNorm"),
-    _grp("convnext.encoder.stages.2.downsampling_layer", 2, "ConvNextLayerNorm"),
-    _grp("convnext.encoder.stages.3.downsampling_layer", 2, "ConvNextLayerNorm"),
+    _grp(
+        "convnext.encoder.stages.1.downsampling_layer",
+        2,
+        "ConvNextLayerNorm",
+        ("ConvNextLayerNorm", "Conv2d"),
+    ),
+    _grp(
+        "convnext.encoder.stages.2.downsampling_layer",
+        2,
+        "ConvNextLayerNorm",
+        ("ConvNextLayerNorm", "Conv2d"),
+    ),
+    _grp(
+        "convnext.encoder.stages.3.downsampling_layer",
+        2,
+        "ConvNextLayerNorm",
+        ("ConvNextLayerNorm", "Conv2d"),
+    ),
+]
+
+
+# ResNet-50: four stages whose depths live in a Sequential, not a ModuleList.
+# depths [3, 4, 6, 3] — the second non-uniform model the ConvNeXt path has to cover.
+RESNET_GROUPS = [
+    _grp("resnet.encoder.stages", 4, "ResNetStage"),
+    _grp("resnet.encoder.stages.0.layers", 3, "ResNetBottleNeckLayer"),
+    _grp("resnet.encoder.stages.1.layers", 4, "ResNetBottleNeckLayer"),
+    _grp("resnet.encoder.stages.2.layers", 6, "ResNetBottleNeckLayer"),
+    _grp("resnet.encoder.stages.3.layers", 3, "ResNetBottleNeckLayer"),
 ]
 
 
@@ -64,10 +103,50 @@ def test_build_nested_groups_reconstructs_the_convnext_tree():
     # own repeat count (4).
     downs = children["convnext.encoder.stages.*.downsampling_layer"]
     assert downs.per_index_counts == [0, 2, 2, 2]
+    # The list is LayerNorm then Conv2d, not 2× the first class.
+    assert downs.element_classes == ("ConvNextLayerNorm", "Conv2d")
+    assert repeated_group_is_pipeline(downs) is True
+    assert repeated_group_is_pipeline(layers) is False
 
 
 def test_is_non_uniform_fires_for_convnext():
     assert _is_non_uniform(_build_nested_groups(CONVNEXT_GROUPS)) is True
+
+
+def test_resnet_stage_depths_are_a_second_non_uniform_tree():
+    roots = _build_nested_groups(RESNET_GROUPS)
+    assert _is_non_uniform(roots) is True
+    layers = roots[0].children[0]
+    assert layers.path == "resnet.encoder.stages.*.layers"
+    assert layers.element_class == "ResNetBottleNeckLayer"
+    assert layers.per_index_counts == [3, 4, 6, 3]
+
+
+def test_downsampling_pipeline_leads_the_repeated_body_without_a_forward():
+    stages = _build_nested_groups(CONVNEXT_GROUPS)[0]
+    # Discovery order is layers then downsample; the pipeline still leads.
+    ordered = ordered_repeated_children(
+        ArchitectureSpec(name="c", model_type="c"), stages
+    )
+    assert [child.path.split(".")[-1] for child in ordered] == [
+        "downsampling_layer",
+        "layers",
+    ]
+
+
+def test_forward_calls_override_the_pipeline_first_heuristic():
+    stages = _build_nested_groups(CONVNEXT_GROUPS)[0]
+    spec = ArchitectureSpec(name="c", model_type="c")
+    spec.class_registry = {
+        "ConvNextStage": types.SimpleNamespace(
+            forward_calls=["layers", "downsampling_layer"]
+        )
+    }
+    ordered = ordered_repeated_children(spec, stages)
+    assert [child.path.split(".")[-1] for child in ordered] == [
+        "layers",
+        "downsampling_layer",
+    ]
 
 
 def test_is_non_uniform_ignores_a_uniform_llm():

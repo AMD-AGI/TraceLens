@@ -1729,6 +1729,7 @@ def _build_nested_groups(groups: list[MetaModuleGroup]) -> list[RepeatedGroup]:
             element_class=representative.element_class,
             label="",
             signatures=representative.signatures,
+            element_classes=representative.element_classes,
         )
 
     roots: list[RepeatedGroup] = []
@@ -1758,6 +1759,49 @@ def _build_nested_groups(groups: list[MetaModuleGroup]) -> list[RepeatedGroup]:
         else:
             built[parent_key].children.append(group)
     return roots
+
+
+def repeated_group_is_pipeline(group: RepeatedGroup) -> bool:
+    """True when the group's elements are more than one class.
+
+    ConvNeXt's ``downsampling_layer`` is ``[LayerNorm, Conv2d]``. Emitting that as
+    ``2× LayerNorm`` drops the convolution. A pipeline is drawn element by element,
+    in order, ahead of the stage's uniform repeated body.
+    """
+    return len(set(group.element_classes)) > 1
+
+
+def repeated_child_attr(parent: RepeatedGroup, child: RepeatedGroup) -> str:
+    """Attribute a child group occupies on its parent (``downsampling_layer``)."""
+    suffix = child.path[len(parent.path) :].lstrip(".")
+    if suffix.startswith("*."):
+        suffix = suffix[2:]
+    return suffix.split(".", 1)[0]
+
+
+def ordered_repeated_children(
+    spec: ArchitectureSpec, parent: RepeatedGroup
+) -> list[RepeatedGroup]:
+    """Children of one stage, in the order the parent forward runs them.
+
+    When the parent's class records every child attribute in ``forward_calls``,
+    that order wins. Otherwise a mixed-class pipeline (the downsampling convs)
+    leads the uniform repeated body — the arrangement a stage uses when the
+    parse did not name the calls.
+    """
+    registry = getattr(spec, "class_registry", None) or {}
+    owner = registry.get(parent.element_class)
+    calls = list(getattr(owner, "forward_calls", None) or [])
+    children = list(parent.children)
+    attrs = [repeated_child_attr(parent, child) for child in children]
+    if calls and all(attr in calls for attr in attrs):
+        return sorted(
+            children, key=lambda child: calls.index(repeated_child_attr(parent, child))
+        )
+    return sorted(
+        children,
+        key=lambda child: 0 if repeated_group_is_pipeline(child) else 1,
+    )
 
 
 def _is_non_uniform(nested: list[RepeatedGroup]) -> bool:

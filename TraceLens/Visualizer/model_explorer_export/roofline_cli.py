@@ -306,10 +306,10 @@ def main(argv: list[str] | None = None) -> int:
         gpu_arch=gpu_arch,
     )
 
-    # Convolutional models: their non-uniform stages (per-stage channels/depths)
-    # don't fit the single-repeated-decoder shape the graph expands, so their
-    # convolutions never become graph nodes. Cost each live conv instance from a
-    # meta-device forward instead and let it supersede any unmodeled conv node.
+    # Convolutional models: the graph draws one conv per stage (and the stem /
+    # downsampling convs that lead those stages). Cost each live instance from a
+    # meta-device forward and let it supersede the graph's conv rows so a
+    # repeated stage is not counted twice.
     if checkpoint is not None:
         from TraceLens.ModelUtils.meta_trace import trace_meta_conv_ops
 

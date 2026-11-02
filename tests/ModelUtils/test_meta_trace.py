@@ -1192,3 +1192,50 @@ def test_trace_meta_conv_ops_captures_live_conv_instances(monkeypatch):
     assert by_path["dw"]["weight_shape"] == [8, 1, 3, 3]
     assert by_path["dw"]["bias"] is False
     assert by_path["dw"]["input_shape"] == [1, 8, 4, 4]
+
+
+def test_repeated_module_groups_records_resnet_stages_not_inner_stacks():
+    # ResNet keeps each stage's residual blocks in a Sequential (not a ModuleList),
+    # with a different depth per stage. That Sequential is the stage body. The
+    # bottleneck's own conv Sequential, and a mixed stem Sequential, are not.
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = nn.Sequential(nn.Conv2d(1, 1, 1), nn.Conv2d(1, 1, 1))
+
+    class Stage(nn.Module):
+        def __init__(self, depth: int, downsample: bool):
+            super().__init__()
+            if downsample:
+                self.downsampling_layer = nn.ModuleList(
+                    [nn.Identity(), nn.Conv2d(1, 1, 1)]
+                )
+            else:
+                self.downsampling_layer = nn.ModuleList()
+            self.layers = nn.Sequential(*(Block() for _ in range(depth)))
+            self.stem = nn.Sequential(nn.Conv2d(1, 1, 1), nn.ReLU())
+
+    class Encoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.stages = nn.ModuleList(
+                [Stage(3, False), Stage(4, True), Stage(6, True), Stage(3, True)]
+            )
+
+    groups = mt.repeated_module_groups(Encoder())
+    by_path = {group.path: group for group in groups}
+    assert by_path["stages"].element_class == "Stage"
+    assert [by_path[f"stages.{index}.layers"].length for index in range(4)] == [
+        3,
+        4,
+        6,
+        3,
+    ]
+    assert by_path["stages.1.downsampling_layer"].element_classes == (
+        "Identity",
+        "Conv2d",
+    )
+    assert "stages.0.downsampling_layer" not in by_path
+    assert not any(
+        path.endswith(".layer") or path.endswith(".stem") for path in by_path
+    )

@@ -74,6 +74,12 @@ class RepeatedGroup:
     # Per-parent-position child lengths when they diverge (ConvNeXt [3,3,27,3]);
     # None when every parent position repeats this child uniformly.
     per_index_counts: list[int] | None = None
+    # Class of every element at one position, in forward order. A single distinct
+    # class is an N× repeat (``element_class``). More than one is a pipeline that
+    # leads the repeated body — ConvNeXt's downsample is LayerNorm then Conv2d —
+    # and must be emitted element by element, not as N× the first class. Empty
+    # when the walk only recorded ``element_class``; those groups stay uniform.
+    element_classes: tuple[str, ...] = ()
 
 
 @dataclass
