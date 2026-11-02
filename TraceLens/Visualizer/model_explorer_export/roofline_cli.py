@@ -60,8 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Project a kernel-by-kernel roofline for a model checkpoint from its "
             "config and modeling source alone, with no trace or GPU run. Ops are "
             "costed with TraceLens.PerfModel's analytical FLOPs/bytes formulas; "
-            "ops with no direct formula (embeddings, MoE routing, convolutions, "
-            "...) are reported as unmodeled rather than silently dropped."
+            "ops with no direct formula (embeddings, reshapes, a convolution with "
+            "no weight geometry) are reported as unmodeled rather than silently "
+            "dropped."
         ),
     )
     parser.add_argument(
@@ -99,9 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "Speculative / MTP draft tokens to cost as a secondary stack "
-            "(default: 0, backbone only). Each token is one draft depth — "
-            "attention, dense MLP, and the 2H→H input projection — capped at "
-            "the depth the checkpoint declares."
+            "(default: 0, backbone only). Each token is one draft depth from "
+            "the parsed draft class (its own norms, projections, attention, "
+            "and dense or MoE feed-forward), capped at the depth the "
+            "checkpoint declares. With no draft class, the depth is the fixed "
+            "attention-plus-dense template. Leaves the graph already draws "
+            "are not costed again."
         ),
     )
     parser.add_argument(

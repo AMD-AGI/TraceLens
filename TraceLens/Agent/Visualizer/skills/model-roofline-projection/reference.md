@@ -42,6 +42,7 @@ Take every value the user already gave. Ask only for the gaps.
 | --- | --- | --- |
 | Model source | yes | Hugging Face id, local checkpoint directory, or `--github` plus a whitelisted repo |
 | Batch size / sequence length | no | `--batch-size 1 --seq-len 2048` |
+| Speculative / MTP draft tokens | no | `--num-predicted-tokens 0` (backbone only). Pass the count the user named; the tool caps it at the checkpoint's draft depth |
 | A specific dimension (e.g. a decode cache length) | no | `--dim KEY=VALUE`, repeatable; wins over `--batch-size`/`--seq-len` for the same key |
 | GPU architecture | no | none — FLOPs/bytes only, no roofline time. Ask if the user wants a time projection and did not name a GPU |
 | Sharding source | no | Hugging Face plans on the checkpoint. `--engine` only when the user names vLLM or SGLang |
@@ -180,9 +181,11 @@ Same flags and precedence rules as the model visualizer: `--config-override KEY=
 ## Footguns
 
 - **No GPU arch means no time, not an error.** A run with neither `--gpu-arch-name` nor `--gpu-arch-json-path` exits 0 and prints FLOPs/bytes with an explicit "no roofline time" line. That is expected, not a bug to retry.
-- **Unmodeled is not a failure mode.** Embeddings, convolutions, reshapes, and anything else with no direct `TraceLens.PerfModel` formula are reported, not silently skipped. A low "% of output elements modeled" is a real statement about coverage for that architecture, not a tool error — surface it rather than chasing 100%.
-- **MoE routing is approximated as `experts_per_tok` GEMM passes**, never `num_experts`; the router's own softmax/top-k and any shared-expert add are not separately costed. State this when a MoE model's rollup is the headline number.
+- **Unmodeled is not a failure mode.** Embeddings, reshapes, and a convolution with no threaded weight geometry are reported, not silently skipped. A convolution whose meta-device pass recorded `conv_weight` is costed. A low "% of output elements modeled" is a real statement about coverage for that architecture, not a tool error — surface it rather than chasing 100%.
+- **MoE routing is the selected experts only.** It is `experts_per_tok` grouped-GEMM passes, never `num_experts`. The router GEMM, its softmax, the combine, and a shared expert are separate rows when the graph did not already draw them. State this when a MoE model's rollup is the headline number.
+- **A speculative draft is `--num-predicted-tokens`.** The depth is the parsed MTP / NextN / EAGLE class, dense or MoE, capped at the checkpoint's draft depth. Leaves the graph already draws are not repeated; an inlined attention core or expert GEMM still is. With no draft class, the depth is the fixed attention-plus-dense template. Do not invent a second stack by hand.
+- **A missing engine source is a note, not a silent success.** With `--engine vllm` or `--engine sglang`, a modeling file that did not load is recorded in the JSON rollup's `notes`, and the widths then come from the checkpoint. Say so when that note is present.
 - **`--device` is not the host.** As with the visualizer, the default `hip` means the drawing follows HIP branches in the modeling source. The projection still runs on CPU regardless of this flag.
 - **`--engine` and a named source do different jobs.** `--code-path` or `--github` picks the modeling file; `--engine` still picks the plan parser for the partition counts. Omit `--engine` for a Hugging Face plan; pass it for vLLM or SGLang even when the file is local.
 - **This is not a trace tool.** No `.json`/`.pftrace` profiler trace is read here. A request to analyze a trace that already exists is the analysis orchestrator, not this skill.
-- **GEMM bias, norm affine-ness, and SDPA causality are assumed**, not read from the checkpoint in every case (GEMM bias assumed absent; every norm assumed affine, RMSNorm bias-free; SDPA assumed causal exactly when query and key/value sequence lengths resolve equal). See the how-to guide's "Known approximations" for the full list before treating a number as exact.
+- **Norm affine-ness is assumed.** Every norm is treated as affine, RMSNorm as bias-free, and every other norm as having a bias. GEMM bias follows the node or `attention_bias` / `mlp_bias` / `lm_head_bias`. SDPA follows the checkpoint's causal flag. See the how-to guide's "How a cost is chosen" before treating a number as exact.
