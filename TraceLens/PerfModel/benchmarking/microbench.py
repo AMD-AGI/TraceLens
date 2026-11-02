@@ -41,6 +41,7 @@ Examples:
 import argparse
 import json
 import logging
+import math
 import re
 import time
 from pathlib import Path
@@ -95,6 +96,9 @@ except Exception:  # pragma: no cover
 
 WARMUP = 30
 REP = 200
+
+# Unroll depth of the vector FMA chain's inner loop.
+VECTOR_FMA_UNROLL = 16
 
 # Resolved once per process by :func:`_resolve_fp8_dtype` (mutable container avoids
 # module-level global reassignment).
@@ -485,6 +489,12 @@ if triton is None or tl is None:
 else:
 
     @triton.jit
+    def _pin_to_vgpr(v):
+        return tl.inline_asm_elementwise(
+            "v_mov_b32 $0, $1", "=v,v", [v], dtype=tl.float32, is_pure=True, pack=1
+        )
+
+    @triton.jit
     def _fma_chain_kernel(
         x_ptr,
         y_ptr,
@@ -494,24 +504,32 @@ else:
         BLOCK_SIZE: tl.constexpr,
         REPEAT: tl.constexpr,
         ACC_FP32: tl.constexpr,
+        UNROLL: tl.constexpr,
+        PIN_VGPR: tl.constexpr,
     ):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < n_elements
 
-        # Load once, then reuse in registers to raise arithmetic intensity.
-        x = tl.load(x_ptr + offs, mask=mask, other=0)
-        y = tl.load(y_ptr + offs, mask=mask, other=0)
+        # Uniform multiplier and addend: per-element operands put several FMA
+        # sources in one VGPR bank on RDNA and stall the issue.
+        x = tl.load(x_ptr)
+        y = tl.load(y_ptr)
         acc = tl.load(z_ptr + offs, mask=mask, other=0)
         if ACC_FP32:
             x = x.to(tl.float32)
             y = y.to(tl.float32)
             acc = acc.to(tl.float32)
+            if PIN_VGPR:
+                # A VALU op reading two SGPRs issues at half rate on gfx11.
+                x = _pin_to_vgpr(x + tl.zeros_like(acc))
+                y = _pin_to_vgpr(y + tl.zeros_like(acc))
 
         # Dependency chain prevents the compiler from collapsing the loop into
-        # a single multiply-by-constant.
-        for _ in tl.static_range(REPEAT):
-            acc = tl.math.fma(acc, x, y)  # acc = acc * x + y
+        # a single multiply-by-constant. The rolled outer loop bounds code size.
+        for _ in range(REPEAT // UNROLL):
+            for _ in tl.static_range(UNROLL):
+                acc = tl.math.fma(acc, x, y)  # acc = acc * x + y
 
         tl.store(out_ptr + offs, acc, mask=mask)
 
@@ -581,6 +599,8 @@ else:
                 BLOCK_SIZE=block,
                 REPEAT=repeat,
                 ACC_FP32=(1 if acc_fp32 else 0),
+                UNROLL=math.gcd(repeat, VECTOR_FMA_UNROLL),
+                PIN_VGPR=torch.version.hip is not None,
                 num_warps=8,
             ),
             warmup=WARMUP,
@@ -629,7 +649,8 @@ else:
         n_elements: int,
         repeat: int,
         device: int = 0,
-        block: int = 1024,
+        # 8 independent FMA chains per thread at num_warps=8 on wave32.
+        block: int = 2048,
         mem_every: int = 0,
         acc_fp32: bool = False,
     ) -> Dict[str, float]:
