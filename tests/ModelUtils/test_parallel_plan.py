@@ -1463,7 +1463,10 @@ def test_plan_sources_follow_imports_not_cached_siblings(tmp_path):
 def test_offline_engine_fixtures_resolve_imported_parallel_layers():
     from pathlib import Path
 
-    from TraceLens.ModelUtils.parallel_plan import _plan_sources, parse_engine_class_plans
+    from TraceLens.ModelUtils.parallel_plan import (
+        _plan_sources,
+        parse_engine_class_plans,
+    )
 
     root = Path(__file__).resolve().parents[1] / "fixtures" / "engine_layers"
     cases = {
@@ -1477,4 +1480,6 @@ def test_offline_engine_fixtures_resolve_imported_parallel_layers():
         plans = []
         for source in sources:
             plans.extend(parse_engine_class_plans(source.read_text(encoding="utf-8")))
-        assert attrs <= {name for plan in plans for name in (plan.tp or {}) | (plan.ep or {})}
+        assert attrs <= {
+            name for plan in plans for name in (plan.tp or {}) | (plan.ep or {})
+        }
