@@ -223,26 +223,53 @@ def add_op_projection_outputs(
         )
 
 
+def compute_roofline_time_and_bound(gflops, bytes_moved, peak_tflops, mem_bw_gbps):
+    """Roofline-bounded time (µs) and bound type from FLOPs, bytes, and arch peaks.
+
+    The lower bound an op could achieve: whichever of compute time (flops /
+    peak TFLOPS) or memory time (bytes / peak bandwidth) is larger. Returns
+    ``(None, None)`` when any input is missing or there is no work to bound.
+
+    Args:
+        gflops: GFLOPs performed by the op.
+        bytes_moved: Bytes read + written by the op.
+        peak_tflops: Max achievable TFLOPS for the op's compute spec.
+        mem_bw_gbps: Peak HBM bandwidth in GB/s.
+
+    Returns:
+        ``(roofline_time_us, roofline_bound)`` where ``roofline_bound`` is
+        ``"COMPUTE_BOUND"`` or ``"MEMORY_BOUND"``.
+    """
+    if (
+        peak_tflops is None
+        or mem_bw_gbps is None
+        or bytes_moved is None
+        or not gflops
+        or gflops <= 0
+    ):
+        return None, None
+    # Compute time: flops / (peak_tflops * 1e12) gives seconds, convert to µs
+    compute_time_us = (gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
+    # Memory time: bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
+    memory_time_us = (bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
+    roofline_bound = (
+        "COMPUTE_BOUND" if compute_time_us >= memory_time_us else "MEMORY_BOUND"
+    )
+    return max(compute_time_us, memory_time_us), roofline_bound
+
+
 def roofline_op_projection(work, arch):
     """Roofline time: the larger of peak-compute time and peak-bandwidth time."""
     if arch is None or work.compute_spec is None:
         return None
     maf_specs = arch.get("max_achievable_tflops")
     peak_tflops = maf_specs.get(work.compute_spec) if maf_specs is not None else None
-    mem_bw_gbps = arch.get("mem_bw_gbps")
-    if (
-        peak_tflops is None
-        or mem_bw_gbps is None
-        or work.bytes_moved is None
-        or not work.gflops > 0
-    ):
+    time_us, bound = compute_roofline_time_and_bound(
+        work.gflops, work.bytes_moved, peak_tflops, arch.get("mem_bw_gbps")
+    )
+    if time_us is None:
         return None
-    # flops / (peak_tflops * 1e12) gives seconds, convert to µs
-    compute_time_us = (work.gflops * 1e9 / (peak_tflops * 1e12)) * 1e6
-    # bytes / (bandwidth_gbps * 1e9) gives seconds, convert to µs
-    memory_time_us = (work.bytes_moved / (mem_bw_gbps * 1e9)) * 1e6
-    bound = "COMPUTE_BOUND" if compute_time_us >= memory_time_us else "MEMORY_BOUND"
-    return {TIME_KEY: max(compute_time_us, memory_time_us), "Bound": bound}
+    return {TIME_KEY: time_us, "Bound": bound}
 
 
 def _time_output(time_us):
