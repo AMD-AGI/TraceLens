@@ -64,6 +64,7 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "_moe_C::topk_softplus_sqrt",
     "aiter::moe_sorting_opus_fwd",
     "pseudo_vllm_sparse_attn_decode",
+    "sgl_kernel::fast_topk_transform_fused",
 ]
 
 
