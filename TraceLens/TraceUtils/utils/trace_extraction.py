@@ -17,6 +17,7 @@ from ...util import GPU_EVENT_CATEGORIES
 from .annotation_utils import (
     ITERATION_BACKUP_PATTERNS,
     ITERATION_PATTERNS,
+    ITERATION_PREFERRED_PATTERNS,
     find_phase_from_window,
     has_context,
     has_generation,
@@ -237,7 +238,9 @@ def extract_and_save_split(
         return extraction_summary
     cpu_idx = build_cpu_event_index(trace.events)
     is_annotation = "iteration" in prefix
-    known_patterns = ITERATION_PATTERNS + ITERATION_BACKUP_PATTERNS
+    known_patterns = (
+        ITERATION_PREFERRED_PATTERNS + ITERATION_PATTERNS + ITERATION_BACKUP_PATTERNS
+    )
     for idx, root in enumerate(selected, start):
         iter_details = iteration_details(root)
         iter_trace, batch_list, num_gpu_events, gpu_dur, gpu_busy = extract_iteration(
