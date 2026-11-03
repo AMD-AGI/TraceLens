@@ -26,17 +26,23 @@ Checks:
    input shapes. Other frameworks skip this check.
 5. CPU call stacks are on (``python_function`` events).
 6. ``cpu_op`` events carry input shapes (``Input Dims``).
+7. The trace has GPU kernel events, so device activity was recorded.
+8. When capture traces exist, the trace has graph launches to merge them into.
+9. ``benchmark_report.json`` says the benchmark succeeded. This check only
+   warns: agentic runs can report a failure after the trace was written.
 
 Speculative decoding is read from ``config.yaml`` next to ``torch_trace``
 (``--speculative-algorithm``, ``--spec-method``, ``--method eagle``,
 ``--draft-model``, ``--num-speculative-tokens``). ``SPEC_NUM_TOKENS_OVERRIDE: 0``
 turns it off. ``--speculative`` / ``--no-speculative`` override the file.
+``--json-out`` writes the results for the run record.
 """
 
 from __future__ import annotations
 
 import argparse
 import gzip
+import json
 import re
 import sys
 from collections import Counter
@@ -92,9 +98,16 @@ USER_ANN_RE = re.compile(
 )
 CPU_OP_MARK = b'"cat": "cpu_op"'
 PYTHON_FUNCTION_MARK = b'"cat": "python_function"'
+KERNEL_MARK = b'"cat": "kernel"'
 INPUT_DIMS_MARK = b'"Input Dims"'
 NAME_RE = re.compile(rb'"name": "([^"]*)"')
+GRAPH_LAUNCH_RE = re.compile(rb'"name": "(?:hip|cuda)GraphLaunch\w*"')
 SHAPE_DIGIT_RE = re.compile(rb"\d")
+
+BENCHMARK_REPORT = "benchmark_report.json"
+ERROR_LINE_RE = re.compile(
+    r"Error\b|Exception\b|Traceback|died|Killed|out of memory", re.IGNORECASE
+)
 
 
 class Check:
@@ -106,6 +119,9 @@ class Check:
     @property
     def failed(self):
         return self.status == "FAIL"
+
+    def to_dict(self):
+        return {"name": self.name, "status": self.status, "detail": self.detail}
 
 
 def resolve_torch_trace(path):
@@ -257,13 +273,21 @@ def scan_trace(path):
             phase = PHASE_RE.match(name)
             if phase:
                 phases[phase.group(1).upper()] += 1
-        position = 0
-        while True:
-            found = data.find(PYTHON_FUNCTION_MARK, position)
-            if found < 0 or found >= limit:
+        for mark, key in (
+            (PYTHON_FUNCTION_MARK, "python_function"),
+            (KERNEL_MARK, "kernel"),
+        ):
+            position = 0
+            while True:
+                found = data.find(mark, position)
+                if found < 0 or found >= limit:
+                    break
+                stats[key] += 1
+                position = found + len(mark)
+        for match in GRAPH_LAUNCH_RE.finditer(data):
+            if match.start() >= limit:
                 break
-            stats["python_function"] += 1
-            position = found + len(PYTHON_FUNCTION_MARK)
+            stats["graph_launch"] += 1
         position = 0
         while True:
             found = data.find(CPU_OP_MARK, position)
@@ -397,8 +421,11 @@ def check_trace(torch_trace, framework, speculative, expected_steps):
             "kernel shape profiler",
             "cpu call stack",
             "cpu_op shapes",
+            "gpu kernels",
+            "graph launches",
         ):
             checks.append(Check(name, "FAIL", "no single rank-0 trace to scan"))
+        checks.append(check_benchmark_report(torch_trace.parent))
         return checks
 
     trace_path = traces[0]
@@ -527,7 +554,66 @@ def check_trace(torch_trace, framework, speculative, expected_steps):
                 "(record_shapes / SGLANG_PROFILE_RECORD_SHAPES / ATOM_PROFILER_MORE)",
             )
         )
+
+    checks.append(
+        Check(
+            "gpu kernels",
+            "PASS" if stats["kernel"] else "FAIL",
+            f"{stats['kernel']} GPU kernel event(s) in {trace_path.name}",
+        )
+    )
+
+    launches = stats["graph_launch"]
+    if not captures:
+        checks.append(Check("graph launches", "SKIP", "no capture traces to merge"))
+    else:
+        checks.append(
+            Check(
+                "graph launches",
+                "PASS" if launches else "FAIL",
+                f"{launches} graph launch(es) in {trace_path.name}"
+                + ("" if launches else "; capture traces have nothing to merge into"),
+            )
+        )
+    checks.append(check_benchmark_report(torch_trace.parent))
     return checks
+
+
+def check_benchmark_report(benchmark_dir):
+    """Warn when Magpie marked the benchmark failed; the trace checks decide."""
+    path = benchmark_dir / BENCHMARK_REPORT
+    if not path.is_file():
+        return Check("benchmark report", "SKIP", f"no {BENCHMARK_REPORT}")
+    report = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if report.get("success"):
+        throughput = report.get("throughput") or {}
+        latency = report.get("latency") or {}
+        return Check(
+            "benchmark report",
+            "PASS",
+            f"output {throughput.get('output_throughput')} tok/s, "
+            f"TTFT {(latency.get('ttft') or {}).get('median_ms')} ms, "
+            f"TPOT {(latency.get('tpot') or {}).get('median_ms')} ms (median)",
+        )
+    return Check(
+        "benchmark report",
+        "WARN",
+        f"marked failed: {_failure_reason(report.get('errors') or [])}",
+    )
+
+
+def _failure_reason(errors):
+    """Last error-looking line across the recorded errors (stderr is verbose)."""
+    lines = [
+        line.strip()
+        for error in errors
+        for line in str(error).splitlines()
+        if line.strip()
+    ]
+    flagged = [line for line in lines if ERROR_LINE_RE.search(line)]
+    if flagged:
+        return flagged[-1]
+    return lines[0] if lines else "no error recorded"
 
 
 def _format_report(label, framework, speculative, checks):
@@ -569,10 +655,16 @@ def main(argv=None):
         choices=("vllm", "sglang", "atom"),
         help="override the framework read from config.yaml",
     )
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        help="write every result to this JSON file",
+    )
     args = parser.parse_args(argv)
 
     all_ok = True
     reports = []
+    results = []
     for raw_path in args.paths:
         torch_trace, config_text = resolve_torch_trace(raw_path)
         framework = args.framework or detect_framework(config_text, torch_trace)
@@ -591,8 +683,20 @@ def main(argv=None):
         label = torch_trace.parent.name
         report, ok = _format_report(label, framework, speculative, checks)
         reports.append(report)
+        results.append(
+            {
+                "benchmark_dir": str(torch_trace.parent),
+                "framework": framework,
+                "speculative": speculative,
+                "status": "PASS" if ok else "FAIL",
+                "checks": [check.to_dict() for check in checks],
+            }
+        )
         all_ok = all_ok and ok
     print("\n\n".join(reports))
+    if args.json_out is not None:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     return 0 if all_ok else 1
 
 

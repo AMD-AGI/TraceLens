@@ -747,6 +747,11 @@ def merge_capture_trace_into_graph(
             )
             continue
         filepath = capture_map[str_key]
+        print(
+            "Capture trace for execution root {}: {} ({})".format(
+                execution_root["name"], os.path.basename(filepath), str_key
+            )
+        )
         key = (str_key, os.path.abspath(filepath))
         capture_tree, capture_roots, capture_root_data = _get_cached_capture_tree(
             key, filepath

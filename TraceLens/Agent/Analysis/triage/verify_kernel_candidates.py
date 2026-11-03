@@ -442,6 +442,39 @@ def check_top_rows(
     }
 
 
+def check_candidate_kernels(
+    payload: dict[str, Any] | None,
+    trace_kernels: dict[str, dict[str, float]],
+) -> dict[str, Any]:
+    """Each candidate must name a device kernel in the trace and a source file."""
+    items = [
+        item
+        for item in (payload or {}).get("hot_kernels") or []
+        if isinstance(item, dict)
+    ]
+    absent: list[str] = []
+    unresolved: list[str] = []
+    for item in items:
+        name = str(item.get("name") or "")
+        device_names = list(item.get("device_kernel_names") or [])
+        device_names.append(item.get("device_kernel_name") or "")
+        if not any(device in trace_kernels for device in device_names if device):
+            absent.append(name)
+        if not item.get("source_file"):
+            unresolved.append(name)
+    status = "pass"
+    if payload is None or absent or unresolved:
+        status = "fail"
+    return {
+        "name": "candidate_kernels",
+        "status": status,
+        "candidates_present": payload is not None,
+        "candidate_count": len(items),
+        "absent_from_trace": absent,
+        "source_unresolved": unresolved,
+    }
+
+
 def check_csv_quality(rows: list[dict[str, str]], time_col: str) -> dict[str, Any]:
     """Measure unified rows that lack shapes or a perf model."""
     total = sum(_float_cell(row, time_col) for row in rows)
@@ -593,7 +626,7 @@ def verify(
     kernel_candidates: Path | None,
     recorded_trace: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the five checks and return a JSON-serializable report."""
+    """Run the six checks and return a JSON-serializable report."""
     rows, time_col = load_unified_rows(unified)
     timeline = load_gpu_timeline(timeline_path)
     events = _events_of(_load_trace_json(str(trace)))
@@ -613,6 +646,7 @@ def verify(
             candidates_present=payload is not None,
         ),
         check_top_rows(rows, time_col, by_op, candidates_present=payload is not None),
+        check_candidate_kernels(payload, trace_kernels),
         check_csv_quality(rows, time_col),
     ]
     failing = [item["name"] for item in checks if item["status"] == "fail"]
@@ -720,6 +754,16 @@ def format_report(report: dict[str, Any]) -> str:
                     f"missing_shapes={len(item['missing_shapes'])} "
                     f"input_dims_missing={item['input_dims_missing']}"
                 )
+        elif name == "candidate_kernels":
+            absent = check["absent_from_trace"]
+            unresolved = check["source_unresolved"]
+            lines.append(
+                f"  candidates {check['candidate_count']}, "
+                f"absent from trace {len(absent)}, source unresolved {len(unresolved)}"
+            )
+            for label, names in (("absent", absent), ("no source", unresolved)):
+                for item in names[:DISPLAY_TOP_KERNELS]:
+                    lines.append(f"    [{label}] {_short_name(item)}")
         elif name == "csv_quality":
             shapes = check["missing_shapes"]
             models = check["missing_perf_model"]

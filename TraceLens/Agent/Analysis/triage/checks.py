@@ -121,6 +121,27 @@ _HIGH_IDLE_PCT = 15
 _MIN_CPU_OP_SHAPES = 10
 # Zero-byte file count above which disk exhaustion is suspected.
 _MAX_ZERO_BYTE_FILES = 3
+# Graph capture merge log lines (trace_capture_merge_experimental / perf report wrapper).
+_MERGE_REPORT_RE = re.compile(r"^\[\d+/\d+\] report: (\S+)")
+_MERGE_ROOT_RE = re.compile(r"^Processing execution root: (.+)$")
+_MERGE_CAPTURE_RE = re.compile(
+    r"^Capture trace for execution root .+: (\S+) \((\w+)\)$"
+)
+_MERGE_PAIRED_RE = re.compile(r"^Found \d+ capture roots and \d+ graph roots")
+_MERGE_NO_GRAPH_RE = re.compile(r"^No graph roots found for execution root")
+_MERGE_FAILURE_RES = (
+    ("batch size unknown", re.compile(r"could not determine batch size")),
+    ("no capture batch size", re.compile(r"no capture batch size found")),
+    ("no capture trace", re.compile(r"no capture trace for batch size")),
+    ("root count mismatch", re.compile(r"number of capture roots .* does not match")),
+    ("no kernel events", re.compile(r"no kernel events in graph root")),
+    ("multistream alignment", re.compile(r"multistream alignment failed")),
+    ("capture kernel names absent", re.compile(r"capture kernel names are absent")),
+    ("subtree verification", re.compile(r"subtree events verification failed")),
+)
+_MERGE_ABORT_RE = re.compile(r"^Graph capture merge failed; returning None")
+_RANK_RE = re.compile(r"(?:rank[_-]?|TP-)(\d+)", re.IGNORECASE)
+_ROOT_NUMBER_RE = re.compile(r"\d+")
 
 
 def _path_remaps():
@@ -275,6 +296,101 @@ def stream_find(stream_file, pattern):
         if regex.search(line):
             return line.strip()[:200]
     return None
+
+
+def _rank_of(path):
+    match = _RANK_RE.search(os.path.basename(path or ""))
+    return int(match.group(1)) if match else None
+
+
+def summarize_graph_merge(stream_file):
+    """Summarize the graph capture merge from a perf report log.
+
+    Returns None when the log has no merge. Otherwise one ``mapping`` row per
+    (replay trace, annotation root with digits replaced by N, capture file,
+    capture key), with how many roots used it and how many merged.
+    """
+    rows = {}
+    failures = {}
+    counts = {"execution_roots": 0, "merged": 0, "no_graph_roots": 0}
+    aborted = False
+    trace = None
+    block = None
+
+    def close(current):
+        if current is None:
+            return
+        if current["status"] == "merged":
+            counts["merged"] += 1
+        elif current["status"] == "no_graph_roots":
+            counts["no_graph_roots"] += 1
+            return
+        key = (trace, current["root"], current["capture"], current["key"])
+        row = rows.setdefault(
+            key,
+            {
+                "replay_trace": os.path.basename(trace or ""),
+                "annotation_root": current["root"],
+                "capture_file": current["capture"],
+                "capture_key": current["key"],
+                "roots": 0,
+                "merged": 0,
+                "rank_mismatch": (
+                    current["capture"] is not None
+                    and _rank_of(current["capture"]) != _rank_of(trace)
+                ),
+            },
+        )
+        row["roots"] += 1
+        row["merged"] += current["status"] == "merged"
+
+    for raw in stream_lines(stream_file):
+        line = raw.strip()
+        report = _MERGE_REPORT_RE.match(line)
+        if report:
+            close(block)
+            block, trace = None, report.group(1)
+            continue
+        root = _MERGE_ROOT_RE.match(line)
+        if root:
+            close(block)
+            counts["execution_roots"] += 1
+            block = {
+                "root": _ROOT_NUMBER_RE.sub("N", root.group(1)),
+                "capture": None,
+                "key": None,
+                "status": "unmerged",
+            }
+            continue
+        if _MERGE_ABORT_RE.match(line):
+            aborted = True
+            continue
+        if block is None:
+            continue
+        capture = _MERGE_CAPTURE_RE.match(line)
+        if capture:
+            block["capture"], block["key"] = capture.groups()
+        elif _MERGE_NO_GRAPH_RE.match(line):
+            block["status"] = "no_graph_roots"
+        elif _MERGE_PAIRED_RE.match(line) and block["status"] == "unmerged":
+            block["status"] = "merged"
+        else:
+            for reason, regex in _MERGE_FAILURE_RES:
+                if regex.search(line):
+                    block["status"] = "failed"
+                    failures[reason] = failures.get(reason, 0) + 1
+                    break
+    close(block)
+    if not counts["execution_roots"]:
+        return None
+    with_graphs = counts["execution_roots"] - counts["no_graph_roots"]
+    return {
+        **counts,
+        "unmerged": with_graphs - counts["merged"],
+        "merge_aborted": aborted,
+        "failures": failures,
+        "mapping": sorted(rows.values(), key=lambda row: -row["roots"]),
+    }
 
 
 def _load_manifest(run_dir):
@@ -1179,8 +1295,41 @@ def check_hipgraph_launch_in_report(run_dir, _stream_file):
     )
 
 
-def check_capture_graph_merge_fail(_run_dir, _stream_file):
-    return None
+def check_capture_graph_merge_fail(_run_dir, stream_file):
+    summary = summarize_graph_merge(stream_file)
+    if not summary or not (summary["merge_aborted"] or summary["unmerged"]):
+        return None
+    reasons = ", ".join(f"{k} x{v}" for k, v in summary["failures"].items())
+    aborted = (
+        "; merge aborted, report is unaugmented" if summary["merge_aborted"] else ""
+    )
+    return FindingDraft(
+        "Graph capture merge did not connect every graph launch",
+        f"{summary['unmerged']} of "
+        f"{summary['execution_roots'] - summary['no_graph_roots']} execution roots "
+        f"with graph launches unmerged ({reasons or 'no reason logged'}){aborted}",
+        "Check the capture folder covers every replayed batch size; for "
+        "multistream graphs the profiler must record kernel names on capture launches",
+    )
+
+
+def check_capture_rank_mismatch(_run_dir, stream_file):
+    summary = summarize_graph_merge(stream_file)
+    if not summary:
+        return None
+    mismatched = [row for row in summary["mapping"] if row["rank_mismatch"]]
+    if not mismatched:
+        return None
+    examples = "; ".join(
+        f"{row['annotation_root'][:60]} -> {row['capture_file']} x{row['roots']}"
+        for row in mismatched[:3]
+    )
+    return FindingDraft(
+        "Annotation roots merged with another rank's capture trace",
+        f"{sum(row['roots'] for row in mismatched)} roots use a capture from a "
+        f"different rank than the replay trace: {examples}",
+        "Pass a capture folder holding only the replay trace's rank",
+    )
 
 
 def check_synthetic_op_significant(run_dir, _stream_file):
@@ -1380,6 +1529,7 @@ ALL_CHECKS = [
     CheckSpec("3f", "TBS_TFLOPS_MISSING", "perf_model", check_tbs_tflops_missing),
     CheckSpec("3g", "ROOFLINE_PCT_MISSING", "perf_model", check_roofline_pct_missing),
     CheckSpec("3h", "ZERO_PCT_OPS", "perf_model", check_zero_pct_ops),
+    CheckSpec("3i", "CAPTURE_RANK_MISMATCH", "perf_model", check_capture_rank_mismatch),
     # -- 4x: tracelens_agent_workflow ----------------------------------------
     CheckSpec(
         "4a",

@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+# Model bringup inputs. Analysis inputs (trace, platform, capture folder) go in the
+# orchestrator run config that Stage 1 builds with config_utils.
+
+model: <hf model id>
+image: <serving container image>
+framework: sglang # sglang | vllm | atom
+platform: MI300X # an arch config_utils knows
+workload: # passed to the Magpie profiling skill
+  tp: 8
+  input_len: 1024
+  output_len: 1024
+  concurrency: 8
+workspace: <abs path> # worktrees, drafts, stage outputs
+hyperloom_repo: <abs path>
+min_share: 0.02 # Stage 6 --threshold, fraction of total kernel time
+max_profile_retries: 2 # Stage 3 failures before stopping
