@@ -625,6 +625,19 @@ class TestPerfModelExtensions:
         assert tiled_model.flops() == 16 * 2 * 32 * 1024 * 4096
         assert tiled_model.bytes() == model.bytes()
 
+        strided = dict(event)
+        strided["args"] = dict(
+            event["args"],
+            **{"Input Strides": [[131072, 8192, 1], [], [], [], []]},
+        )
+        assert pext.batched_gemm_a8w8_mxscale_bpreshuffle(strided).bytes() is None
+        unknown = dict(event)
+        unknown["args"] = dict(
+            event["args"],
+            **{"Input type": ["opaque"] + event["args"]["Input type"][1:]},
+        )
+        assert pext.batched_gemm_a8w8_mxscale_bpreshuffle(unknown).bytes() is None
+
         assert (
             get_pseudo_op_mappings()["aiter::batched_gemm_a8w8_mxscale_bpreshuffle"]
             is pext.batched_gemm_a8w8_mxscale_bpreshuffle
@@ -706,6 +719,19 @@ class TestPerfModelExtensions:
         odd_model = pext.mxfp8_mxfp8_gemm_asm(odd)
         # 8 decode rows still run a full 256-row tile.
         assert odd_model.flops() == 2 * 256 * 8192 * 1536
+
+        strided = dict(event)
+        strided["args"] = dict(
+            event["args"],
+            **{"Input Strides": [[32768, 1]] + event["args"]["Input Strides"][1:]},
+        )
+        assert pext.mxfp8_mxfp8_gemm_asm(strided).bytes() is None
+        unknown = dict(event)
+        unknown["args"] = dict(
+            event["args"],
+            **{"Input type": ["opaque"] + event["args"]["Input type"][1:]},
+        )
+        assert pext.mxfp8_mxfp8_gemm_asm(unknown).bytes() is None
 
         assert (
             get_pseudo_op_mappings()["aiter::_mxfp8_mxfp8_gemm_asm"]
