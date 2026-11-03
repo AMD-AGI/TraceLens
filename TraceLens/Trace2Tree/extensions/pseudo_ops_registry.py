@@ -119,6 +119,12 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
         extensions.append(("V4_Paged_Decode", create_pseudo_ops_v4_paged_decode))
         if verbose:
             logger.info("Auto-detected DeepSeek-V4 sparse paged-decode operations")
+    if "aiter::mla_sparse_prefill_fp8_asm_fwd" in tree.name2event_uids:
+        from .v4_paged_decode_pseudo_ops import stamp_v4_sparse_mla_mode
+
+        extensions.append(("V4_Sparse_MLA_Mode", stamp_v4_sparse_mla_mode))
+        if verbose:
+            logger.info("Auto-detected DeepSeek-V4 sparse MLA; stamping layer modes")
     has_vllm_sparse_decode = any(
         "_sparse_attn_decode_gfx950_partial_kernel" in name
         for name in tree.name2event_uids
