@@ -84,7 +84,7 @@ def perf_report_from_platform(tmp_path_factory):
         output_xlsx_path=None,
         output_csvs_dir=csv_dir,
         gpu_arch_platform="MI300X",
-        enable_origami=True,
+        enable_origami_gemm=True,
     )
     return csv_dir
 
