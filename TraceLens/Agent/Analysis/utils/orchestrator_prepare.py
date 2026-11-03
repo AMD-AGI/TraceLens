@@ -44,25 +44,39 @@ from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
 
 CATEGORY_SKILL_MAP = {
-    "cpu_idle": "cpu-idle-analyzer",
     "gemm": "gemm-analyzer",
     "groupedgemm_fwd": "gemm-analyzer",
     "groupedgemm_bwd": "gemm-analyzer",
     "moe_fused": "moe-analyzer",
     "moe_unfused": "moe-analyzer",
+    "moe_aux": "moe-analyzer",
     "sdpa_fwd": "sdpa-analyzer",
     "sdpa_bwd": "sdpa-analyzer",
     "inferenceattention": "sdpa-analyzer",
     "elementwise": "elementwise-analyzer",
+    "groupquant": "elementwise-analyzer",
+    "rope_fwd": "elementwise-analyzer",
+    "rope_bwd": "elementwise-analyzer",
+    "fusedrope": "elementwise-analyzer",
+    "multi_tensor_apply": "elementwise-analyzer",
     "reduce": "reduce-analyzer",
+    "crossentropy_fwd": "reduce-analyzer",
+    "crossentropy_bwd": "reduce-analyzer",
     "triton": "triton-analyzer",
-    "norm": "norm-analyzer",
     "norm_fwd": "norm-analyzer",
     "norm_bwd": "norm-analyzer",
     "rmsnorm": "norm-analyzer",
-    "convolution": "convolution-analyzer",
     "conv_fwd": "convolution-analyzer",
     "conv_bwd": "convolution-analyzer",
+    "other": "generic-op-analyzer",
+    "mhc": "generic-op-analyzer",
+    "gaussiansplat": "generic-op-analyzer",
+    "ssm_fwd": "generic-op-analyzer",
+    "ssm_bwd": "generic-op-analyzer",
+    "customcollective": "generic-op-analyzer",
+    "record_param_comms": "generic-op-analyzer",
+    "moe_comm_fwd": "generic-op-analyzer",
+    "moe_comm_bwd": "generic-op-analyzer",
 }
 
 
@@ -79,9 +93,8 @@ def ops_summary_by_enhanced_category(csv_dir: str) -> list:
     """Roll a perf report's unified_perf_summary.csv up by enhanced category.
 
     Rows are sorted by GPU kernel time, descending. Categories come from
-    _normalize_category, so e.g. CONV_fwd + CONV_bwd merge into 'convolution'
-    and NORM_fwd + NORM_bwd into 'norm'. Falls back to ops_summary_by_category.csv
-    if unified_perf_summary.csv is not available.
+    _normalize_category. Falls back to ops_summary_by_category.csv if
+    unified_perf_summary.csv is not available.
     """
     unified_path = os.path.join(csv_dir, "unified_perf_summary.csv")
     if not os.path.isfile(unified_path):

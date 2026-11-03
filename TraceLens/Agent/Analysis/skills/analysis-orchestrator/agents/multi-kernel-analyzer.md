@@ -98,12 +98,11 @@ Before drafting recommendations, map each candidate to a specific gate:
 - **Overlap gate:** Recommend overlap tuning only when `overlap_assessment.flagged == true` or exposed communication is clearly on the critical path.
 - **Blocking gate:** Recommend communication-blocking fixes only when `nccl_blocking_assessment.flagged == true` and exposed communication is material in absolute or percentage terms.
 - **Memcpy gate:** Recommend direction-specific transfer fixes only when that direction has clear evidence (time share and/or count pattern) in `memcpy_assessment`.
-- **Synchronization gate:** Recommend sync cleanup only when metrics or detected patterns indicate barrier-like behavior; do not speculate.
 - **Merge gate:** If two candidates prescribe the same mechanism/action, emit one merged card with combined evidence.
 
 ### Step 3: Analyze Memory Copy Patterns
 
-Examine `memcpy_assessment` for D2H and H2D issues. `memcpy_assessment.flagged` is `true` when any direction exceeds thresholds (>5% of total time or >10 transfers).
+Examine `memcpy_assessment` for D2H, H2D and D2D issues. `memcpy_assessment.flagged` is `true` when any direction exceeds thresholds (>5% of total time; for D2H and H2D also >10 transfers).
 
 **D2H (Device-to-Host) Issues:**
 - Frequent D2H copies suggest unnecessary data movement back to host
@@ -120,23 +119,13 @@ Examine `memcpy_assessment` for D2H and H2D issues. `memcpy_assessment.flagged` 
 - Common causes: Explicit `.to(device)` on already-resident tensors, contiguous() calls, format conversions
 - Solution: Eliminate redundant copies; use in-place operations or aliased tensors where possible
 
-### Step 4: Analyze Communication Blocking and Synchronization
+### Step 4: Analyze Communication Blocking
 
 Examine `nccl_blocking_assessment`. `nccl_blocking_assessment.flagged` is `true` when exposed communication exceeds 5% of total GPU time.
 
 **Blocking indicators:**
 - High `exposed_comm_time_ms` means communication is on the critical path
 - This time is NOT overlapped with compute -- GPU is waiting
-
-**Synchronization barriers:**
-- Explicit device-level synchronization or stream-level syncs stall the GPU pipeline
-- Common causes: Debug synchronization left in production code, unnecessary sync between independent operations
-- Solution: Remove unnecessary device/stream syncs; use stream events for fine-grained ordering instead of full device sync
-
-**Redundant collective operations:**
-- Multiple allreduce/allgather on the same or overlapping data within a single iteration
-- Common causes: Framework layers issuing separate collectives that could be fused, duplicate gradient syncs
-- Solution: Deduplicate or fuse collectives; reduce collective frequency per iteration
 
 **Selection rule for this step:**
 - If `nccl_blocking_assessment.flagged` is false and exposed communication is not material, do not emit a standalone "communication blocking" recommendation.
@@ -184,6 +173,7 @@ Recommendation quality requirements (apply before writing):
 | Total Memcpy Events | X | true/false |
 | D2H Transfers | X (Y ms) | true/false |
 | H2D Transfers | X (Y ms) | true/false |
+| D2D Transfers | X (Y ms) | true/false |
 | Exposed Communication | X% of total | true/false |
 | Compute/Comm Overlap | X% | true/false |
 
@@ -196,6 +186,12 @@ Recommendation quality requirements (apply before writing):
 - **Root Cause**: [analysis based on count and time patterns]
 
 ### H2D (Host-to-Device) Transfers
+- **Count**: X transfers
+- **Total Time**: Y ms (Z% of total GPU time)
+- **Flagged**: true/false
+- **Root Cause**: [analysis]
+
+### D2D (Device-to-Device) Transfers
 - **Count**: X transfers
 - **Total Time**: Y ms (Z% of total GPU time)
 - **Flagged**: true/false

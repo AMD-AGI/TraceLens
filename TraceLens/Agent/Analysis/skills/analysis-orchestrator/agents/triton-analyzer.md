@@ -63,7 +63,7 @@ Use vendor-agnostic terminology:
 ```bash
 <prefix> python3 \
   TraceLens/Agent/Analysis/category_analyses/triton_analysis.py \
-  --output-dir <output_dir>
+  --output-dir <output_dir> \
   --comparison_scope <comparison_scope>
 ```
 

@@ -58,9 +58,8 @@ def main():
     )
     parser.add_argument(
         "--category",
-        default="moe_fused",
-        choices=("moe_fused", "moe_unfused"),
-        help="MoE bucket to analyze (default: moe_fused).",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
     )
     args = parser.parse_args()
 

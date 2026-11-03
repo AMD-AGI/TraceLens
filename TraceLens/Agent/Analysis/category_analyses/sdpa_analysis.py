@@ -147,8 +147,8 @@ def parse_perf_params(perf_params_str: str) -> dict:
         result["causal"] = params.get("causal")
         result["flash_impl"] = params.get("flash_impl")
 
-        ctx_tokens = params.get("sum_ctx_tokens", 0)
-        gen_tokens = params.get("sum_gen_tokens", 0)
+        ctx_tokens = params.get("c_sq", 0)
+        gen_tokens = params.get("g_sq", 0)
         result["sum_ctx_tokens"] = ctx_tokens
         result["sum_gen_tokens"] = gen_tokens
 
@@ -341,11 +341,9 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
         "--category",
-        default="sdpa_fwd",
-        choices=["sdpa_fwd", "sdpa_bwd", "inferenceattention"],
-        help="SDPA category to analyze (default: sdpa_fwd)",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
     )
-
     parser.add_argument(
         "--comparison_scope",
         choices=("standalone", "comparative"),

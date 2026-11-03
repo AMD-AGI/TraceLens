@@ -252,7 +252,7 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | Field | Use |
 |-------|-----|
 | `rank` | Card order within your category (1 = highest impact). Also the `rank=` value in `<!-- reasoning-candidate -->`. |
-| `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
+| `bound_type` | `compute`, `memory`, or `unmodeled`. `compute` and `memory` select the matching Action Prose Guidance row; `unmodeled` has none. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
 | `node` | Multi-trace standalone runs only. |
 | `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |

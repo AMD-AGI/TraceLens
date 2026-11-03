@@ -37,7 +37,11 @@ def extract_category_specific(ops_df, metadata) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Analyze reduce operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
-
+    parser.add_argument(
+        "--category",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
+    )
     parser.add_argument(
         "--comparison_scope",
         choices=("standalone", "comparative"),
@@ -50,7 +54,7 @@ def main():
     args = parser.parse_args()
 
     run_category_analysis(
-        category="reduce",
+        category=args.category,
         output_dir=args.output_dir,
         config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,

@@ -301,11 +301,11 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | Agent | Purpose |
 |-------|---------|
 | `gemm-analyzer` | Analyzes matrix multiplication operations (mm, bmm, addmm) |
-| `sdpa-analyzer` | Analyzes scaled dot-product attention (Flash, Paged) |
-| `elementwise-analyzer` | Analyzes elementwise operations |
-| `reduce-analyzer` | Analyzes reduction operations |
+| `sdpa-analyzer` | Analyzes scaled dot-product attention (training Flash, inference attention) |
+| `elementwise-analyzer` | Analyzes elementwise, group quantization, RoPE and multi-tensor apply operations |
+| `reduce-analyzer` | Analyzes reduction and cross-entropy operations |
 | `triton-analyzer` | Analyzes Triton-compiled kernels |
-| `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
+| `moe-analyzer` | Analyzes Mixture-of-Experts fused and routing operations |
 | `norm-analyzer` | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
 | `convolution-analyzer` | Analyzes convolution operations |
 | `generic-op-analyzer` | Analyzes uncategorized operations or operations without dedicated sub-agent |

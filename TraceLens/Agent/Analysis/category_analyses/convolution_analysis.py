@@ -61,12 +61,11 @@ def main():
             "standalone: roofline efficiency in operations[].efficiency; "
             "comparative: 100*t2/t1 (needs TraceDiff CSV columns)"
         ),
-    ),
-
+    )
     parser.add_argument(
         "--category",
-        default="convolution",
-        help="Category name prefix used for input/output files (default: convolution)",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
     )
     args = parser.parse_args()
 

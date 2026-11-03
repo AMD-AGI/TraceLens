@@ -98,6 +98,7 @@ from TraceLens.Agent.Analysis.category_analyses import (
     analysis_utils as au,
     kernel_fusion_analysis as kfa,
 )
+from TraceLens.PerfModel import torch_op_mapping
 from TraceLens.Reporting import tracediff_comparison_extension as tde
 from TraceLens.TreePerf import GPUEventAnalyser
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
@@ -786,6 +787,7 @@ def test_other_analysis_customcollective_keeps_communication_classified_ops(
     assert m.get("category") == "customcollective"
     assert len(m.get("operations", [])) == 1
     assert m["operations"][0]["name"] == "ncclKernel_AllReduce_RING_LL"
+    assert m["category_specific"]["communication_count"] == 1
     assert "communication_ops_skipped" not in m.get("category_specific", {})
 
 
@@ -842,7 +844,14 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     env = os.environ.copy()
     env["PYTHONPATH"] = REPO_ROOT
     result = subprocess.run(
-        [sys.executable, script, "--output-dir", output_dir_with_category_data],
+        [
+            sys.executable,
+            script,
+            "--output-dir",
+            output_dir_with_category_data,
+            "--category",
+            "gemm",
+        ],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
@@ -2102,6 +2111,22 @@ def test_normalize_category_empty_is_other():
 
 def test_normalize_category_missing_key_is_other():
     assert _normalize_category({}) == ("other", "Other")
+
+
+def test_category_skill_map_matches_core_emittable_labels():
+    """Every label core can emit routes explicitly; no map key is dead."""
+    classes = set(torch_op_mapping.op_to_perf_model_class_map.values())
+    raw_labels = (
+        set(torch_op_mapping.OP_CATEGORY_REGISTRY.values())
+        | {getattr(cls, "bwd_category", None) for cls in classes}
+        | {label for _, label in torch_op_mapping.OP_CATEGORY_PATTERNS}
+        | {label for _, label in torch_op_mapping._KERNEL_NAME_FALLBACK_RULES}
+        | {"other"}
+    )
+    emittable = {
+        _normalize_category({"op category": label})[0] for label in raw_labels - {None}
+    }
+    assert set(op.CATEGORY_SKILL_MAP) == emittable
 
 
 # ----- FusionCandidateBuilder: names, chains, grouping -----
