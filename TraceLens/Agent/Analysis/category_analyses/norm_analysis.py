@@ -30,8 +30,8 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
         "--category",
-        default="norm",
-        help="Category name prefix used for input/output files (default: norm)",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
     )
     parser.add_argument(
         "--comparison_scope",

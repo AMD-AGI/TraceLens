@@ -840,6 +840,18 @@ def test_memcpy_flagged_by_count():
     assert r["issues"][0]["direction"] == "H2D"
 
 
+def test_memcpy_d2d_flagged_by_percent():
+    summary = {
+        "total_time_us": 100_000,
+        "total_count": 3,
+        "by_direction": {
+            "D2D": {"count": 3, "total_time_us": 100_000, "avg_bytes": 1024},
+        },
+    }
+    r = classify_memcpy_severity(summary, total_time_ms=1000.0)
+    assert [i["direction"] for i in r["issues"]] == ["D2D"]
+
+
 def test_memcpy_not_flagged_below_thresholds():
     summary = {
         "total_time_us": 1_000,
@@ -998,17 +1010,17 @@ def test_cross_validate_both_zero_pass():
     ],
 )
 def test_parse_perf_params_workload_type(ctx, gen, expected):
-    params = {"sum_ctx_tokens": ctx, "sum_gen_tokens": gen}
+    params = {"c_sq": ctx, "g_sq": gen}
     r = parse_perf_params(str(params))
     assert r["workload_type"] == expected
 
 
 def test_parse_perf_params_workload_type_boundaries():
     """Boundary values 0.8 and 0.2 fall into the 'mixed' band (strict >/<)."""
-    at_high = parse_perf_params(str({"sum_ctx_tokens": 800, "sum_gen_tokens": 200}))
+    at_high = parse_perf_params(str({"c_sq": 800, "g_sq": 200}))
     assert at_high["ctx_ratio"] == 0.8
     assert at_high["workload_type"] == "mixed"
-    at_low = parse_perf_params(str({"sum_ctx_tokens": 200, "sum_gen_tokens": 800}))
+    at_low = parse_perf_params(str({"c_sq": 200, "g_sq": 800}))
     assert at_low["ctx_ratio"] == 0.2
     assert at_low["workload_type"] == "mixed"
 
@@ -1309,29 +1321,30 @@ def test_triton_extract_tallies_and_merges_specs():
 
 
 @pytest.mark.parametrize(
-    "name,quantized",
+    "compute_spec,quantized",
     [
-        ("gemm_w8a8", True),
-        ("fp8_matmul", True),
-        ("mxfp4_gemm", True),
-        ("Cijk_regular", False),
+        ("matrix_fp8", True),
+        ("matrix_fp4", True),
+        ("matrix_int8", True),
+        ("matrix_bf16", False),
     ],
 )
-def test_detect_quantized_gemm(name, quantized):
-    assert detect_quantized_gemm(name) is quantized
+def test_detect_quantized_gemm(compute_spec, quantized):
+    assert detect_quantized_gemm(compute_spec) is quantized
 
 
 def test_classify_gemm_operation():
-    q = classify_gemm_operation("gemm_int8", None)
+    q = classify_gemm_operation("gemm_a", {"Compute Spec": "matrix_fp8"})
     assert q == {"is_quantized": True, "gemm_type": "quantized"}
-    r = classify_gemm_operation("Cijk_plain", None)
+    r = classify_gemm_operation("gemm_b", {"Compute Spec": "matrix_bf16"})
     assert r == {"is_quantized": False, "gemm_type": "regular"}
 
 
 def test_gemm_extract_counts_quant_and_missing_perf():
     df = pd.DataFrame(
         {
-            "name": ["gemm_fp8", "Cijk_plain", "gemm_w4a16"],
+            "name": ["gemm_a", "gemm_b", "gemm_c"],
+            "Compute Spec": ["matrix_fp8", "matrix_bf16", "matrix_fp4"],
             "TFLOPS/s_mean": [100.0, float("nan"), float("nan")],
         }
     )
@@ -1341,7 +1354,7 @@ def test_gemm_extract_counts_quant_and_missing_perf():
 
 
 def test_gemm_extract_missing_tflops_column():
-    df = pd.DataFrame({"name": ["Cijk_plain"]})
+    df = pd.DataFrame({"name": ["gemm_a"], "Compute Spec": ["matrix_bf16"]})
     r = gemm_extract(df, _metadata())
     assert r["quantized_count"] == 0
     assert r["missing_perf_model_count"] == 0
@@ -1478,7 +1491,7 @@ def test_sdpa_extract_paged_breakdown_and_workload():
         {
             "name": ["paged_attention_2d"],
             "kernel_details_summary": [kd],
-            "perf_params": [str({"sum_ctx_tokens": 100, "sum_gen_tokens": 900})],
+            "perf_params": [str({"c_sq": 100, "g_sq": 900})],
         }
     )
     r = sdpa_extract(df, _metadata())
@@ -1496,7 +1509,7 @@ def test_sdpa_extract_mixed_workload():
     df = pd.DataFrame(
         {
             "name": ["flash_attn::fwd"],
-            "perf_params": [str({"sum_ctx_tokens": 500, "sum_gen_tokens": 500})],
+            "perf_params": [str({"c_sq": 500, "g_sq": 500})],
         }
     )
     r = sdpa_extract(df, _metadata())
@@ -1543,6 +1556,7 @@ def _simple_ops():
         {
             "name": ["op_a", "op_b"],
             "count": [1, 2],
+            "Compute Spec": ["matrix_bf16", "matrix_fp8"],
             "Kernel Time (µs)_sum": [500.0, 300.0],
         }
     )
@@ -1551,9 +1565,9 @@ def _simple_ops():
 @pytest.mark.parametrize(
     "mod,category",
     [
-        (convolution_analysis, "convolution"),
+        (convolution_analysis, "conv_fwd"),
         (elementwise_analysis, "elementwise"),
-        (norm_analysis, "norm"),
+        (norm_analysis, "norm_fwd"),
         (reduce_analysis, "reduce"),
         (triton_analysis, "triton"),
         (gemm_analysis, "gemm"),
@@ -1563,7 +1577,8 @@ def _simple_ops():
 def test_driver_main_writes_ok_metrics(mod, category, tmp_path, monkeypatch):
     base = str(tmp_path)
     _write_category_inputs(base, category, _simple_ops())
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    category_args = [] if mod is triton_analysis else ["--category", category]
+    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base, *category_args])
     mod.main()
     metrics = _read_metrics(base, category)
     assert metrics["status"] == "OK"
@@ -1581,7 +1596,9 @@ def test_driver_other_main_writes_ok(tmp_path, monkeypatch):
         }
     )
     _write_category_inputs(base, "other", df)
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "other"]
+    )
     other_analysis.main()
     metrics = _read_metrics(base, "other")
     assert metrics["status"] == "OK"
@@ -1592,7 +1609,9 @@ def test_driver_other_main_writes_ok(tmp_path, monkeypatch):
 def test_driver_other_main_missing_csv_errors(tmp_path, monkeypatch):
     base = str(tmp_path)
     os.makedirs(os.path.join(base, "category_data"), exist_ok=True)
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "other"]
+    )
     with pytest.raises(SystemExit):
         other_analysis.main()
     metrics = _read_metrics(base, "other")
@@ -1602,7 +1621,9 @@ def test_driver_other_main_missing_csv_errors(tmp_path, monkeypatch):
 def test_driver_moe_main_no_data(tmp_path, monkeypatch):
     base = str(tmp_path)
     os.makedirs(os.path.join(base, "category_data"), exist_ok=True)
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "moe_fused"]
+    )
     moe_analysis.main()
     metrics = _read_metrics(base, "moe_fused")
     assert metrics["status"] == "NO_DATA"
@@ -1611,7 +1632,9 @@ def test_driver_moe_main_no_data(tmp_path, monkeypatch):
 def test_driver_moe_main_with_data(tmp_path, monkeypatch):
     base = str(tmp_path)
     _write_category_inputs(base, "moe_fused", _simple_ops())
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "moe_fused"]
+    )
     moe_analysis.main()
     metrics = _read_metrics(base, "moe_fused")
     assert metrics["status"] == "OK"
@@ -1784,7 +1807,8 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
             "total_time_us": 100_000,
             "total_count": 5,
             "by_direction": {
-                "D2H": {"count": 3, "total_time_us": 100_000, "avg_bytes": 1024}
+                "D2H": {"count": 3, "total_time_us": 100_000, "avg_bytes": 1024},
+                "D2D": {"count": 11, "total_time_us": 1_000, "avg_bytes": 64},
             },
         },
         "overlap_analysis": {
@@ -1812,6 +1836,8 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
     assert metrics["memcpy_assessment"]["flagged"] is True
     assert metrics["overlap_assessment"]["flagged"] is True
     assert len(metrics["patterns_detected"]) >= 1
+    # 11 D2D copies at 0.5% of total time: count alone does not flag D2D
+    assert "high_d2d_memcpy" not in {p["pattern"] for p in metrics["patterns_detected"]}
 
 
 class TestArchUtils:
@@ -1846,14 +1872,19 @@ class TestCategoryAnalysisHelpers:
     _META = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp16": 654}}
 
     def test_gemm_classifiers(self):
-        assert gemm_analysis.detect_quantized_gemm("aten::w8a8_mm")
-        info = gemm_analysis.classify_gemm_operation("aten::mm", None)
+        assert gemm_analysis.detect_quantized_gemm("matrix_fp8")
+        info = gemm_analysis.classify_gemm_operation(
+            "aten::mm", {"Compute Spec": "matrix_bf16"}
+        )
         assert info["gemm_type"] == "regular"
-        qinfo = gemm_analysis.classify_gemm_operation("aten::fp8_mm", None)
+        qinfo = gemm_analysis.classify_gemm_operation(
+            "aten::fp8_mm", {"Compute Spec": "matrix_fp8"}
+        )
         assert qinfo["is_quantized"] is True
         ops = pd.DataFrame(
             {
                 "name": ["aten::mm", "aten::fp8_mm"],
+                "Compute Spec": ["matrix_bf16", "matrix_fp8"],
                 "TFLOPS/s_mean": [100.0, None],
             }
         )

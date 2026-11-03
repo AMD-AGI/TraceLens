@@ -26,9 +26,8 @@ When invoked by the orchestrator, you will receive the following context:
 - `comparison_scope`: `standalone` (default) or `comparative`
 
 **Input files (pre-computed by orchestrator):**
-1. `<output_dir>/category_data/cpu_idle_ops.csv` - Timeline data for idle analysis
-2. `<output_dir>/metadata/cpu_idle_metadata.json` - GPU utilization breakdown
-3. `<output_dir>/category_data/category_manifest.json` - Contains gpu_utilization metrics
+1. `gpu_timeline.csv` and `ops_summary.csv` in the perf report CSV directory - Timeline and kernel data for idle analysis
+2. `<output_dir>/category_data/category_manifest.json` - gpu_utilization metrics
 
 **Output file you must write:**
 - `<output_dir>/system_findings/cpu_idle_findings.md`
@@ -38,7 +37,7 @@ When invoked by the orchestrator, you will receive the following context:
 ## Error Handling
 
 **If category data files are missing:**
-1. Read gpu_utilization from metadata/cpu_idle_metadata.json (focus job only on multi-trace)
+1. Read gpu_utilization from category_data/category_manifest.json (focus job only on multi-trace)
 2. Provide analysis based on available data
 3. Note limitations in findings
 

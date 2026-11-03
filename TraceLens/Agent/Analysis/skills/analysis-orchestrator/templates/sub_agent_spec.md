@@ -252,7 +252,7 @@ The set of P-items is decided by `category_findings[]` alone — `MIN_PITEM_IMPA
 | Field | Use |
 |-------|-----|
 | `rank` | Card order within your category (1 = highest impact). Also the `rank=` value in `<!-- reasoning-candidate -->`. |
-| `bound_type` | `compute` \| `memory`. Selects the matching Action Prose Guidance row. |
+| `bound_type` | `compute`, `memory`, or `unmodeled` (heuristic findings, see § Heuristic findings). `compute` and `memory` select the matching Action Prose Guidance row; `unmodeled` has none. |
 | `library` | One per finding. Drives the `(<Library>)` title suffix. |
 | `node` | Multi-trace standalone runs only. |
 | `eff_bucket` | Roofline-efficiency band: `"0-30"`, `"30-60"`, `"60-100"`, or `"unknown"` (standalone); `"all"` (comparative). Members within a finding share the same band. |
@@ -274,7 +274,7 @@ recoverable fraction of its E2E share (`percent_of_total`, summed across shapes)
 and ranked alongside quantified findings.
 
 Render like a normal P-item card (numeric `low`/`mid`/`high` on `kind=p_item`,
-normal `kind=detail_estimate` bullets) with two additions:
+normal `kind=detail_estimate` bullets) with three additions:
 - Immediately **after** the `kind=p_item` impact marker block (i.e. *outside* the `impact-begin`/`impact-end` markers), add a warning line, substituting the finding's `percent_of_total`:
 
 ```markdown
@@ -284,6 +284,7 @@ normal `kind=detail_estimate` bullets) with two additions:
 When the finding has a `node`, write `its share of all nodes' GPU time` in place of `its E2E GPU-time share`.
 
 - In the `## Detailed Analysis` `**Data:**` row, render `—` for `Efficiency` and `Bound`.
+- Identify what the op does from its name and `module_chain` and recommend a library or fused replacement; cite no efficiency figure.
 
 ### Rendering in `## Detailed Analysis` (compute tier)
 

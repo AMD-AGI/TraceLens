@@ -7,7 +7,7 @@
 
 """
 TraceLens Agent - Multi-Kernel Issue Analysis
-Analyzes cross-cutting multi-kernel patterns: memcpy (D2H/H2D), NCCL blocking,
+Analyzes cross-cutting multi-kernel patterns: memcpy (D2H/H2D/D2D), NCCL blocking,
 and compute/communication overlap deficiency.
 
 Reads pre-computed multi_kernel_data.json from utils/orchestrator_prepare.py.
@@ -18,7 +18,6 @@ import argparse
 import json
 import os
 import sys
-import argparse
 
 import pandas as pd
 
@@ -42,7 +41,7 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
 
     by_direction = memcpy_summary.get("by_direction", {})
 
-    for direction in ["D2H", "H2D"]:
+    for direction in ["D2H", "H2D", "D2D"]:
         dir_info = by_direction.get(direction, {})
         count = dir_info.get("count", 0)
         dir_time_ms = dir_info.get("total_time_us", 0) / 1000
@@ -51,7 +50,8 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         if count == 0:
             continue
 
-        flagged = dir_pct > 5 or count > 10
+        # On-device copies are routine in a step, so only their time share flags.
+        flagged = dir_pct > 5 or (direction != "D2D" and count > 10)
 
         if flagged:
             overall_flagged = True

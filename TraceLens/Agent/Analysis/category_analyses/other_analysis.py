@@ -14,18 +14,11 @@ This script handles Communication, Graph, and miscellaneous operations.
 import argparse
 import sys
 import os
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import (
-    get_peak_specs,
-    load_category_data,
-    calculate_time_metrics,
-    build_operation_metrics,
-    build_category_findings,
-    compute_impact_estimates,
-    write_metrics_json,
-)
+from analysis_utils import get_peak_specs, run_category_analysis
 
 
 def classify_other_operation(op_name: str) -> str:
@@ -58,20 +51,12 @@ def _classify_other_op(op_name: str, row) -> dict:
 
 def extract_category_specific(ops_df, metadata, skipped_comm_ops=None) -> dict:
     """Extract other-specific aggregate metrics."""
-    graph_count = 0
-    misc_count = 0
-
-    for name in ops_df["name"]:
-        category = classify_other_operation(str(name))
-        if category == "graph":
-            graph_count += 1
-        else:
-            misc_count += 1
+    counts = Counter(classify_other_operation(str(name)) for name in ops_df["name"])
 
     result = {
-        "communication_count": 0,
-        "graph_count": graph_count,
-        "miscellaneous_count": misc_count,
+        "communication_count": counts["communication"],
+        "graph_count": counts["graph"],
+        "miscellaneous_count": counts["miscellaneous"],
         **get_peak_specs(metadata),
     }
 
@@ -81,11 +66,35 @@ def extract_category_specific(ops_df, metadata, skipped_comm_ops=None) -> dict:
     return result
 
 
+def _split_communication_ops(ops_df):
+    """Return ``ops_df`` without communication kernels, and a record of the dropped ones."""
+    comm_mask = ops_df["name"].apply(
+        lambda n: classify_other_operation(str(n)) == "communication"
+    )
+    comm_ops_df = ops_df[comm_mask]
+    skipped_comm_ops = {
+        "count": len(comm_ops_df),
+        "op_names": comm_ops_df["name"].tolist(),
+        "message": (
+            "Communication kernels detected. Use TraceLens's NCCL Analyzer "
+            "for detailed collective communication analysis (see TraceLens/NcclAnalyser/)."
+        ),
+    }
+    if skipped_comm_ops["count"] > 0:
+        print(
+            f"Skipping {skipped_comm_ops['count']} communication kernel(s) — "
+            f"use TraceLens's NCCL Analyzer instead."
+        )
+    return ops_df[~comm_mask], skipped_comm_ops
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze other/generic operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
-        "--category", default="other", help="Category to analyze (default: other)"
+        "--category",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
     )
 
     parser.add_argument(
@@ -99,78 +108,28 @@ def main():
     )
     args = parser.parse_args()
 
-    category = args.category
-
-    try:
-        ops_df, metadata = load_category_data(args.output_dir, category)
-    except FileNotFoundError as e:
-        error_metrics = {"category": category, "status": "ERROR", "error": str(e)}
-        write_metrics_json(error_metrics, args.output_dir, category)
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Strip communication kernels from the "other" bucket only; other categories
-    # (e.g. customcollective) reuse this script and must keep those ops.
     skipped_comm_ops = None
-    if category == "other":
-        comm_mask = ops_df["name"].apply(
-            lambda n: classify_other_operation(str(n)) == "communication"
-        )
-        comm_ops_df = ops_df[comm_mask]
-        skipped_comm_ops = {
-            "count": len(comm_ops_df),
-            "op_names": comm_ops_df["name"].tolist(),
-            "message": (
-                "Communication kernels detected. Use TraceLens's NCCL Analyzer "
-                "for detailed collective communication analysis (see TraceLens/NcclAnalyser/)."
-            ),
-        }
-        if skipped_comm_ops["count"] > 0:
-            print(
-                f"Skipping {skipped_comm_ops['count']} communication kernel(s) — "
-                f"use TraceLens's NCCL Analyzer instead."
-            )
-        ops_df = ops_df[~comm_mask]
 
-    config = {
-        "extra_fields": ["Input Dims", "Input type"],
-        "operation_classifier": _classify_other_op,
-    }
+    def strip_communication_ops(ops_df, metadata):
+        nonlocal skipped_comm_ops
+        ops_df, skipped_comm_ops = _split_communication_ops(ops_df)
+        return ops_df, {}
 
-    time_metrics = calculate_time_metrics(ops_df, metadata)
-
-    operations = build_operation_metrics(
-        ops_df,
-        metadata,
-        config,
+    run_category_analysis(
+        category=args.category,
+        output_dir=args.output_dir,
+        config={
+            "extra_fields": ["Input Dims", "Input type"],
+            "operation_classifier": _classify_other_op,
+        },
+        extract_fn=lambda ops_df, metadata: extract_category_specific(
+            ops_df, metadata, skipped_comm_ops
+        ),
+        # Strip communication kernels from the "other" bucket only; other categories
+        # (e.g. customcollective) reuse this script and must keep those ops.
+        pre_process_fn=strip_communication_ops if args.category == "other" else None,
         comparison_scope=args.comparison_scope,
     )
-    category_specific = extract_category_specific(ops_df, metadata, skipped_comm_ops)
-
-    baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-    impact_estimates = compute_impact_estimates(
-        operations,
-        category,
-        baseline_ms=baseline_ms,
-        comparison_scope=args.comparison_scope,
-    )
-    category_findings = build_category_findings(
-        impact_estimates, comparison_scope=args.comparison_scope
-    )
-
-    metrics = {
-        "category": category,
-        "status": "OK",
-        "comparison_scope": args.comparison_scope,
-        **time_metrics,
-        "operations": operations,
-        "category_specific": category_specific,
-        "impact_estimates": impact_estimates,
-        "category_findings": category_findings,
-    }
-
-    output_path = write_metrics_json(metrics, args.output_dir, category)
-    print(f"Metrics written to: {output_path}")
 
 
 if __name__ == "__main__":
