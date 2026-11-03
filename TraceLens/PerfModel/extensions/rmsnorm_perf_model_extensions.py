@@ -38,9 +38,9 @@ class aiter_rms_norm(RMSNorm):
     flops/bytes are inherited from RMSNorm (affine=True, training=False).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         # Normalization.__init__ calls self.get_param_details and sets all attrs
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch)
 
     @staticmethod
     def get_param_details(event):
@@ -129,8 +129,8 @@ class aiter_fused_qk_rmsnorm(RMSNorm):
     get_param_details uses Q at [0]/[1]; K shape/channels from [3]/[4] in __init__.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         dims = event["args"]["Input Dims"]
         self.k_shape = tuple(dims[3])
         self.k_num_channels = int(dims[4][0])
@@ -247,8 +247,8 @@ class aiter_rmsnorm_quant(RMSNorm):
     Bytes: read input (BF16) + weight (BF16), write out (FP8) + per-group FP32 scales.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         try:
             self.group_size = int(event["args"]["Concrete Inputs"][5])
         except (KeyError, IndexError, ValueError, TypeError):
@@ -334,8 +334,8 @@ class fused_rms_mxfp4_quant(RMSNorm):
     via quant; bandwidth uses 0.5 B/elem for the FP4 packed tensor.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         input_dims = event["args"]["Input Dims"]
 
         self.has_res1 = False
@@ -421,9 +421,9 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
     Concrete Inputs[3] = group_size (e.g. '128')
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         # Normalization.__init__ sets num_elems, num_channels, bpe_in, etc.
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch)
         self.group_size = int(event["args"]["Concrete Inputs"][3])
 
     @staticmethod
@@ -559,8 +559,8 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
     Concrete Inputs[4] = group_size (e.g. '128')
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.group_size = int(event["args"]["Concrete Inputs"][4])
 
     @staticmethod
@@ -642,9 +642,9 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         Read x + residual + weight; write padded output + updated residual.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.x_pad_to_multiple = int(event["args"]["Concrete Inputs"][4])
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch)
 
         N = self.num_channels
         if self.x_pad_to_multiple > 0:
