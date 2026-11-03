@@ -56,6 +56,8 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_preshuffle",
     "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded",
     "aiter::_opus_bmm_a8w8_mxscale_raw",
+    "aiter::batched_gemm_a8w8_mxscale_bpreshuffle",
+    "aiter::_mxfp8_mxfp8_gemm_asm",
     "aiter::topk_gating_fwd",
     "aiter::mla_decode_v4_asm",
     "sglang_profiler::moe_sorting_small__run_small_sort",
