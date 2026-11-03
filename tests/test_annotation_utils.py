@@ -342,6 +342,36 @@ SGLANG_CASES = [
         ),
         {},
     ),
+    (  # spec-decode target verify -> generation, like MTP DECODE
+        "step[VERIFY bs=2 g_sq=16 g_sqsq=128 g_sqsk=670032 g_sk=83754]",
+        "sglang_detailed",
+        dict(
+            batch_size=16,
+            context_requests=0,
+            generation_requests=2,
+            generation_sum=16,
+            g_sq=16,
+            g_sk=83754,
+            g_sqsq=128,
+            g_sqsk=670032,
+            has_sqsk=True,
+        ),
+        {},
+    ),
+    (  # draft-model decode step; forward_id is not an aggregate
+        "step[DRAFT bs=2 g_sq=16 g_sqsq=128 g_sqsk=22944 g_sk=2868 forward_id=14960]",
+        "sglang_detailed",
+        dict(
+            batch_size=16,
+            context_requests=0,
+            generation_requests=2,
+            generation_sum=16,
+            g_sq=16,
+            g_sk=2868,
+            has_sqsk=True,
+        ),
+        {},
+    ),
     (  # MIXED -> c=/g= are per-group request counts
         "step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40 "
         "g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]",
@@ -849,6 +879,22 @@ def test_find_known_annotations_falls_back_to_the_native_tier():
     events = [_event(NATIVE_DECODE, ts=20), _event("step[DECODE bs=64]", ts=10)]
     roots = find_known_annotations(events)
     assert [e["ts"] for e in roots] == [10, 20]
+
+
+def test_speculative_decode_steps_are_decode_iterations():
+    extend = "step[EXTEND bs=1 toks=3542 c_sq=3542 c_sqsq=12545764 c_sqsk=293752228 c_sk=82934]"
+    draft = "step[DRAFT bs=2 g_sq=16 g_sqsq=128 g_sqsk=22944 g_sk=2868]"
+    verify = "step[VERIFY bs=2 g_sq=16 g_sqsq=128 g_sqsk=670032 g_sk=83754]"
+    events = [_event(extend, ts=10), _event(draft, ts=20), _event(verify, ts=30)]
+
+    roots = find_known_annotations(events)
+
+    assert [e["name"] for e in roots] == [extend, draft, verify]
+    assert [classify_phase(d) for d in iteration_details(roots)] == [
+        PHASE_PREFILL_ONLY,
+        PHASE_DECODE_ONLY,
+        PHASE_DECODE_ONLY,
+    ]
 
 
 def test_find_known_annotations_on_no_match():

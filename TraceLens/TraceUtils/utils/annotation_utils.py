@@ -39,9 +39,16 @@ VLLM_NATIVE_PATTERN = re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d
 # step[DECODE bs=64 g_sq=128 g_sqsq=256 g_sqsk=262144 g_sk=131072]  <- MTP: g_sq > bs
 # step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40
 #     g_sq=1 g_sk=12 g_sqsq=1 g_sqsk=12]
+# step[DRAFT bs=2 g_sq=16 g_sqsq=128 g_sqsk=22944 g_sk=2868 forward_id=14960]
+# step[VERIFY bs=2 g_sq=16 g_sqsq=128 g_sqsk=670032 g_sk=83754]
 # Case-insensitive: some builds emit lowercase phases (``step[decode bs=1]``).
+# Speculative decoding splits each decode round into a draft-model step and a
+# target verify step; both serve running requests, so both are generation.
+SGLANG_SPECULATIVE_MODES = ("DRAFT", "VERIFY")
 SGLANG_DETAILED_PATTERN = re.compile(
-    r"step\[(?:EXTEND|DECODE|MIXED)\b[^\]]*sqsq=\d+[^\]]*\]", re.IGNORECASE
+    rf"step\[(?:EXTEND|DECODE|MIXED|{'|'.join(SGLANG_SPECULATIVE_MODES)})\b"
+    r"[^\]]*sqsq=\d+[^\]]*\]",
+    re.IGNORECASE,
 )
 # step[EXTEND bs=2 toks=14721]
 # step[DECODE bs=64]
@@ -162,7 +169,7 @@ def _fill_sglang_detailed(ann, name):
     ann.g_sqsq, ann.g_sqsk = _safe_int(kv.get("g_sqsq", 0)), _safe_int(
         kv.get("g_sqsk", 0)
     )
-    if mode == "DECODE":
+    if mode in ("DECODE", *SGLANG_SPECULATIVE_MODES):
         ann.generation_requests, ann.generation_sum = bs, ann.g_sq
     elif mode == "EXTEND":
         ann.context_requests, ann.context_sum = bs, ann.c_sq
