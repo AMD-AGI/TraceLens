@@ -14,11 +14,12 @@ Usage:
 import argparse
 import csv
 import glob
+import json
 import os
 import sys
 from pathlib import Path
 
-from .checks import ALL_CHECKS, Finding
+from .checks import ALL_CHECKS, Finding, summarize_graph_merge
 
 _GEAK_SPECS = [s for s in ALL_CHECKS if s.category == "geak_interface"]
 
@@ -137,6 +138,14 @@ def write_detail_csv(findings, run_dir):
             )
 
 
+def write_graph_merge_json(stream_file, run_dir):
+    summary = summarize_graph_merge(stream_file)
+    if summary is None:
+        return
+    with open(os.path.join(run_dir, "graph_merge_check.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+
+
 def run_geak_triage(session_dir):
     """Run GEAK interface checks against a Hyperloom session directory."""
     if not os.path.isdir(session_dir):
@@ -198,6 +207,7 @@ def main():
         if os.access(args.run_dir, os.W_OK | os.X_OK):
             write_detail_csv(findings, args.run_dir)
             write_diag_txt(findings, args.run_dir)
+            write_graph_merge_json(args.stream_file, args.run_dir)
         else:
             print(
                 f"Warning: run dir is not writable; triage_details.csv / "
