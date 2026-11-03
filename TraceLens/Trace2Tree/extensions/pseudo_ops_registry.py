@@ -82,6 +82,19 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
         if verbose:
             logger.info("Auto-detected flydsl MoE operations under aiter::fused_moe_")
 
+    # MoE: expert-parallel mega-MoE (dispatch, expert GEMMs, combine)
+    if (
+        "aiter::moe_forward" in tree.name2event_uids
+        and "aiter::fused_moe_" in tree.name2event_uids
+    ):
+        from .moe_mega_ep_pseudo_ops import create_pseudo_ops_moe_mega_ep
+
+        extensions.append(("MoE_Mega_EP", create_pseudo_ops_moe_mega_ep))
+        if verbose:
+            logger.info(
+                "Auto-detected expert-parallel mega-MoE under aiter::moe_forward"
+            )
+
     # MLA Decode: AITER implementation
     if "aiter::mla_decode_stage1_asm_fwd" in tree.name2event_uids:
         has_mla_python_func = any(
