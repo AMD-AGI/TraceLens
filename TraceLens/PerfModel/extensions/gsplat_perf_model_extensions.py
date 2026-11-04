@@ -60,10 +60,9 @@ class _GsplatBase:
     bwd_category = None
     sheet_category = "GaussianSplat"
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.dtype = self.param_details.get("dtype", "float")
         self.bpe = name2bpe(self.dtype) or 4

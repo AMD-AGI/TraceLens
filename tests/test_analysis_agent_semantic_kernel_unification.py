@@ -10,6 +10,8 @@ import json
 import os
 import sys
 
+import pytest
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SEM = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis", "semantic_analyses")
 sys.path.insert(0, SEM)
@@ -328,3 +330,73 @@ def test_apply_side_with_stem_map():
     assert blocks == ["GEMM_UNIFIED", "plain"]
     # gemm_v1 was stemmed (base != raw); plain was not
     assert stats == {"kernels": 2, "mapped": 1, "stemmed": 1}
+
+
+# ---------------------------------------------------------------------------
+# _build_context id stamping
+# ---------------------------------------------------------------------------
+def test_build_context_stamps_candidate_ids():
+    agg_a = kernel_unification.aggregate_names(
+        _labels([{"name": "onlyA0", "dur": 2.0}, {"name": "onlyA1", "dur": 1.0}])
+    )
+    agg_b = kernel_unification.aggregate_names(
+        _labels([{"name": "onlyB0", "dur": 1.0}])
+    )
+    ctx = kernel_unification._build_context(agg_a, agg_b, "A", "B", "raw_name")
+    assert [e["id"] for e in ctx["only_in_A"]] == ["a0", "a1"]
+    assert [e["id"] for e in ctx["only_in_B"]] == ["b0"]
+    # id is stamped alongside the original fields
+    assert ctx["only_in_A"][0]["name"] == "onlyA0"
+
+
+# ---------------------------------------------------------------------------
+# expand_unification_map
+# ---------------------------------------------------------------------------
+def _id_context():
+    return {
+        "name_a": "A",
+        "name_b": "B",
+        "only_in_A": [
+            {"id": "a0", "name": "gemmA"},
+            {"id": "a1", "name": "normA"},
+        ],
+        "only_in_B": [
+            {"id": "b0", "name": "gemmB"},
+            {"id": "b1", "name": "normB"},
+        ],
+        "in_both": [],
+    }
+
+
+def test_expand_map_pairs_and_renames():
+    ctx = _id_context()
+    dec = {
+        "pairs": [{"a": "a0", "b": "b0", "label": "gemm"}],
+        "renames_a": [{"id": "a1", "label": "norm"}],
+        "renames_b": [{"id": "b1", "label": "norm"}],
+    }
+    doc = kernel_unification.expand_unification_map(dec, ctx)
+    assert doc == {
+        "name_a": "A",
+        "name_b": "B",
+        "map_a": {"gemmA": "gemm", "normA": "norm"},
+        "map_b": {"gemmB": "gemm", "normB": "norm"},
+    }
+
+
+def test_expand_map_round_trips_via_apply_side():
+    # expand -> the same name-keyed map apply-map consumes
+    ctx = _id_context()
+    dec = {"pairs": [{"a": "a0", "b": "b0", "label": "gemm"}]}
+    doc = kernel_unification.expand_unification_map(dec, ctx)
+    labels = _labels([{"name": "gemmA", "dur": 1.0}, {"name": "normA", "dur": 1.0}])
+    kernel_unification._apply_side(labels, doc["map_a"], None)
+    assert [k["semantic_block"] for k in labels["labeled_kernels"]] == ["gemm", "normA"]
+
+
+def test_expand_map_unknown_id_raises():
+    ctx = _id_context()
+    with pytest.raises(KeyError):
+        kernel_unification.expand_unification_map(
+            {"pairs": [{"a": "a9", "b": "b0", "label": "x"}]}, ctx
+        )

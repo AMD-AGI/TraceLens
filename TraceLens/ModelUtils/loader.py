@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
-from TraceLens.ModelUtils.basic_ops import COMMON_LEAF_PATTERNS, BasicOpFilter
+from TraceLens.ModelUtils.basic_ops import (
+    COMMON_LEAF_PATTERNS,
+    ROOFLINE_LEAF_PATTERNS,
+    BasicOpFilter,
+)
 from TraceLens.ModelUtils.extract import ArchitectureSpec, load_architecture
 
 
@@ -33,6 +37,26 @@ def build_detailed_basic_ops(
     """Basic-op filter used by ``--detailed`` Model Explorer export."""
     extra_add = list(add or [])
     for pattern in COMMON_LEAF_PATTERNS:
+        if pattern not in extra_add:
+            extra_add.append(pattern)
+    return BasicOpFilter.from_cli(add=extra_add, remove=remove or [])
+
+
+def build_roofline_basic_ops(
+    *,
+    add: list[str] | None = None,
+    remove: list[str] | None = None,
+) -> BasicOpFilter:
+    """Basic-op filter that stops expansion at ops with a PerfModel formula.
+
+    Like :func:`build_detailed_basic_ops`, but the leaf set additionally covers
+    the full Normalization family (GroupNorm, BatchNorm, InstanceNorm) and
+    Softmax, so every exported op corresponds to a roofline-costable unit
+    (GEMM, CONV, Normalization, Softmax) instead of stopping only at the
+    handful of module classes :data:`COMMON_LEAF_PATTERNS` names.
+    """
+    extra_add = list(add or [])
+    for pattern in ROOFLINE_LEAF_PATTERNS:
         if pattern not in extra_add:
             extra_add.append(pattern)
     return BasicOpFilter.from_cli(add=extra_add, remove=remove or [])

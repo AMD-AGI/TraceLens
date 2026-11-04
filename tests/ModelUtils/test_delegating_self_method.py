@@ -139,6 +139,34 @@ class Model(torch.nn.Module):
 """
 
 
+_CHAIN_WITH_ORDINAL_SLOTS = """
+import torch
+
+
+class Attn(torch.nn.Module):
+    def forward(self, q, k, v):
+        return q
+
+
+class Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = Attn()
+
+    def real_core(self, inner_state):
+        q, k, v = inner_state
+        attended = self.attn(q, k, v)
+        scaled = attended * 2
+        return scaled + 1
+
+    def bridge(self, state):
+        return self.real_core(state)
+
+    def forward(self, hidden_states):
+        return self.bridge(hidden_states)
+"""
+
+
 def _model(source: str, name: str = "Model"):
     return analyze_source(textwrap.dedent(source)).class_registry[name]
 
@@ -250,6 +278,28 @@ class TestAChainOfForwardsRebindsToTheOuterArguments:
         assert any("video_grid_thw" in op.param_inputs for op in video)
         assert not any("image_grid_thw" in op.param_inputs for op in video)
         assert not any("grid" in op.param_inputs for op in video)
+
+
+class TestAChainCarriesTheTargetsOwnOrdinalSlots:
+    """The ordinal map a chained target earns for its own boundary-bound
+    arguments survives being copied onto the alias.
+
+    ``real_core``'s ``q``/``k``/``v`` all trace to its own sole parameter
+    (``inner_state``, unpacked), so it earns a per-argument ordinal map the
+    same way MiniMax's pruned ``forward_core`` does. ``bridge`` only forwards
+    to it, so the alias mechanism copies ``real_core``'s subgraph onto
+    ``bridge`` -- and that ordinal map must come along, or the caller loses
+    the only evidence that tells ``k``/``v`` apart from ``q``.
+    """
+
+    def test_the_alias_keeps_the_targets_ordinal_map(self) -> None:
+        cls = _model(_CHAIN_WITH_ORDINAL_SLOTS)
+        assert (
+            "real_core" not in cls.multi_op_methods
+        ), "only reached via the chain, not called from forward"
+        ordinals = cls.multi_op_method_step_predecessor_ordinals.get("bridge", {})
+        attn_step = next(step for step in ordinals if "attn" in step)
+        assert ordinals[attn_step] == {"q": 0, "k": 1, "v": 2}
 
 
 class TestAOneOperationForwardBecomesThatOperation:

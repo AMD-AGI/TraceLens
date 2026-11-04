@@ -20,8 +20,11 @@ the tightened I2 no-source check is clean across the built + render-filtered gra
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from TraceLens.Visualizer.model_explorer_export import merge
 from TraceLens.Visualizer.model_explorer_export.merge import _loop_trip_count
 from TraceLens.Visualizer.model_explorer_export.type_check import (
     integrity_check_graph_nodes,
@@ -92,6 +95,87 @@ def _publishing_op(by_id, node_id):
             return node_id
         node_id = str(edges[0]["sourceNodeId"])
     return node_id
+
+
+def _edge(source: str, target_input: str = "0") -> dict[str, str]:
+    return {
+        "sourceNodeId": source,
+        "sourceNodeOutputId": "0",
+        "targetNodeInputId": target_input,
+    }
+
+
+def test_thread_loop_invariant_inputs_mirrors_a_floating_bare_input(monkeypatch):
+    """A bare ``.../@input`` tile mirrored deep into a nested submodule (an
+    attention indexer's own input, re-surfaced by the merge) has no edge of
+    its own; it must mirror the nearest enclosing ``@input`` boundary that
+    already carries the SAME name, not some other same-named tile further up.
+    """
+    from TraceLens.ModelUtils.extract import ArchitectureSpec
+
+    cls = SimpleNamespace(init_assignments={}, forward_step_predecessor_args={})
+    monkeypatch.setattr(merge, "_pick_stack_model_class", lambda registry, name: cls)
+    monkeypatch.setattr(merge, "_stack_primary_input_name", lambda c: None)
+    monkeypatch.setattr(merge, "_forward_param_producer_map", lambda c: {})
+    monkeypatch.setattr(merge, "_loop_param_producer_map", lambda c: {})
+    monkeypatch.setattr(merge, "stack_entry_dataflow", lambda c: None)
+
+    nodes = [
+        {
+            "id": "attn/@input",
+            "label": "hidden_states",
+            "namespace": "attn",
+            "incomingEdges": [_edge("ext_source")],
+        },
+        {
+            "id": "attn/indexer/@input",
+            "label": "hidden_states",
+            "namespace": "attn/indexer",
+        },
+    ]
+    spec = ArchitectureSpec(
+        name="T", model_type="test", hidden_size=16, class_registry={}
+    )
+    merge._thread_loop_invariant_inputs(nodes, spec=spec, shape_inferencer=None)
+
+    mirrored = next(n for n in nodes if n["id"] == "attn/indexer/@input")
+    assert mirrored["incomingEdges"][0]["sourceNodeId"] == "attn/@input"
+
+
+def test_thread_loop_invariant_inputs_leaves_a_bare_input_floating_without_a_match(
+    monkeypatch,
+):
+    """No enclosing boundary carries the same name (or is itself sourced): the
+    bare tile is left floating rather than guessing at a producer."""
+    from TraceLens.ModelUtils.extract import ArchitectureSpec
+
+    cls = SimpleNamespace(init_assignments={}, forward_step_predecessor_args={})
+    monkeypatch.setattr(merge, "_pick_stack_model_class", lambda registry, name: cls)
+    monkeypatch.setattr(merge, "_stack_primary_input_name", lambda c: None)
+    monkeypatch.setattr(merge, "_forward_param_producer_map", lambda c: {})
+    monkeypatch.setattr(merge, "_loop_param_producer_map", lambda c: {})
+    monkeypatch.setattr(merge, "stack_entry_dataflow", lambda c: None)
+
+    nodes = [
+        {
+            "id": "attn/@input",
+            "label": "a_different_name",
+            "namespace": "attn",
+            "incomingEdges": [_edge("ext_source")],
+        },
+        {
+            "id": "attn/indexer/@input",
+            "label": "hidden_states",
+            "namespace": "attn/indexer",
+        },
+    ]
+    spec = ArchitectureSpec(
+        name="T", model_type="test", hidden_size=16, class_registry={}
+    )
+    merge._thread_loop_invariant_inputs(nodes, spec=spec, shape_inferencer=None)
+
+    unmatched = next(n for n in nodes if n["id"] == "attn/indexer/@input")
+    assert not unmatched.get("incomingEdges")
 
 
 def test_deepseek_v4_attention_invariant_inputs_are_sourced(graph_builder):

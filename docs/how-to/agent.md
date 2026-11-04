@@ -122,7 +122,7 @@ two jobs with `compare_to` on the first job run as `comparative`, and a config w
 | `standalone` | One job. |
 | `comparative` | Two jobs, each with an optional `capture_folder`. `compare_to` on the first job can name the second job instead of repeating its paths. |
 | `semantic` | Two graph-replay-only jobs with `analysis_mode: inference` and no `capture_folder`. |
-| `multi_trace` | Two or more named jobs on the same platform, each with a `phase`, and an `aggregation` block with policy `combine_only_same_phase`. Jobs that share a phase are combined in the report, and the first job is the one that kernel fusion and system analysis focus on. |
+| `multi_trace` | Two or more jobs on the same platform, each with a `phase` and a `node` (its index within the phase), and an `aggregation` block with policy `combine_by_node`. Each job is one node, `<phase>_<index>`, and the first job is the one that kernel fusion and system analysis focus on. |
 
 For example, a `multi_trace` config for a prefill trace and a decode trace:
 
@@ -130,14 +130,14 @@ For example, a `multi_trace` config for a prefill trace and a decode trace:
 analysis_mode: inference
 output_dir: /abs/path/analysis_output
 aggregation:
-  policy: combine_only_same_phase
+  policy: combine_by_node
 jobs:
-  - name: prefill_0
-    phase: prefill
+  - phase: prefill
+    node: 0
     trace_path: /abs/path/prefill_0.json.gz
     platform: MI300X
-  - name: decode
-    phase: decode
+  - phase: decode
+    node: 0
     trace_path: /abs/path/decode.json.gz
     platform: MI300X
 ```

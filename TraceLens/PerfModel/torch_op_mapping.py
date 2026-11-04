@@ -45,7 +45,6 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "FusedRoPEFuncBackward": "RoPE_bwd",
     "CrossEntropyFunctionBackward": "CrossEntropy_bwd",
     # MoE auxiliary ops.
-    "aiter::moe_sorting_opus_fwd": "MoE_aux",
     "aiter::moe_align_block_size": "MoE_aux",
     "_moe_C::moe_align_block_size": "MoE_aux",
     "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)": "MoE_aux",

@@ -717,6 +717,99 @@ class Model:
     assert dataflow.operations[2].predecessors == (dataflow.operations[1].attr_name,)
 
 
+def test_stack_entry_dataflow_skips_malformed_loops_before_the_real_one():
+    """Two decoys precede the real decoder loop: a plain ``range`` loop with no
+    submodule call at all, and a submodule loop called all-keyword with no
+    assignment capturing its result -- neither names a carried tensor, so the
+    search must move past both and still find the loop that does."""
+    source = """
+class Model:
+    def __init__(self, config):
+        self.embed = Embedding()
+        self.extra = ModuleList([Extra() for _ in range(2)])
+        self.layers = ModuleList([Layer() for _ in range(config.depth)])
+
+    def forward(self, input_ids):
+        hidden = self.embed(input_ids)
+        for i in range(3):
+            print(i)
+        for extra_layer in self.extra:
+            extra_layer(hidden_states=hidden)
+        for layer in self.layers:
+            hidden = layer(hidden)
+        return hidden
+"""
+    classes = aa.build_class_registry(
+        source,
+        filename="stack_dataflow_skip.py",
+        config={"depth": 2},
+        all_tensor_ops=False,
+    )
+    dataflow = aa.stack_entry_dataflow(classes["Model"])
+
+    assert dataflow is not None
+    assert dataflow.output_producer == "embed"
+
+
+def test_stack_entry_dataflow_finds_a_loop_wrapped_in_an_if():
+    """``if self.pp_group.is_first_rank:`` around the decoder loop is exactly
+    the kind of wrapper ``_statements_before`` flattens: the loop sits one
+    level deeper than ``forward``'s own top-level statements, so finding it
+    takes the recursive branch, not the direct one."""
+    source = """
+class Model:
+    def __init__(self, config):
+        self.embed = Embedding()
+        self.layers = ModuleList([Layer() for _ in range(config.depth)])
+
+    def forward(self, input_ids):
+        hidden = self.embed(input_ids)
+        if self.pp_group.is_first_rank:
+            for layer in self.layers:
+                hidden = layer(hidden)
+        return hidden
+"""
+    classes = aa.build_class_registry(
+        source,
+        filename="stack_dataflow_if.py",
+        config={"depth": 2},
+        all_tensor_ops=False,
+    )
+    dataflow = aa.stack_entry_dataflow(classes["Model"])
+
+    assert dataflow is not None
+    assert dataflow.output_producer == "embed"
+
+
+def test_stack_entry_dataflow_misses_a_loop_hidden_in_an_except_handler():
+    """``_statements_before`` flattens if/for/while/with wrappers but not a
+    ``try``'s exception handlers, so a decoder loop nested inside one is not
+    reachable as a straight-line prefix and the function correctly bails out
+    instead of fabricating a prefix."""
+    source = """
+class Model:
+    def __init__(self, config):
+        self.embed = Embedding()
+        self.layers = ModuleList([Layer() for _ in range(config.depth)])
+
+    def forward(self, input_ids):
+        hidden = self.embed(input_ids)
+        try:
+            hidden = risky(hidden)
+        except Exception:
+            for layer in self.layers:
+                hidden = layer(hidden)
+        return hidden
+"""
+    classes = aa.build_class_registry(
+        source,
+        filename="stack_dataflow_except.py",
+        config={"depth": 2},
+        all_tensor_ops=False,
+    )
+    assert aa.stack_entry_dataflow(classes["Model"]) is None
+
+
 def test_registry_finalization_refines_tuple_return_dependencies():
     source = """
 class SparseMoeGate:
@@ -1288,6 +1381,33 @@ def test_ast_compact_expression_and_provenance_helpers():
         aa.positional_synthetic_attr("apply_rotary_emb", 1),
         aa.SYNTHETIC_ATTENTION,
     ]
+
+
+def test_extract_self_calls_ordered_resolves_a_submodule_alias_call():
+    """``ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp``
+    leaves ``submodule_aliases`` mapping ``ffn`` to the chosen attr; a later
+    bare ``ffn(x)`` must resolve through it exactly as ``self.block_sparse_moe(x)``
+    would."""
+    expression = ast.parse("ffn(hidden_states)", mode="eval").body
+    calls: list[str] = []
+    aa._extract_self_calls_ordered(
+        expression, calls, submodule_aliases={"ffn": "block_sparse_moe"}
+    )
+    assert calls == ["block_sparse_moe"]
+
+
+def test_extract_self_calls_ordered_suffixes_a_repeated_aliased_attr():
+    # A ternary-aliased attr called more than once in this forward still needs
+    # its own call-site suffix, the same as a direct self.<attr>(...) call.
+    expression = ast.parse("ffn(hidden_states)", mode="eval").body
+    calls: list[str] = []
+    aa._extract_self_calls_ordered(
+        expression,
+        calls,
+        repeated_attrs=frozenset({"block_sparse_moe"}),
+        submodule_aliases={"ffn": "block_sparse_moe"},
+    )
+    assert calls == [aa.submodule_callsite_attr("block_sparse_moe", 1)]
 
     assert aa._call_undoes_rotation(ast.parse("rope(q, k, True)", mode="eval").body)
     assert not aa._call_undoes_rotation(

@@ -84,11 +84,51 @@ _POSITION_ORDER_SOURCE = textwrap.dedent("""
             scores = torch.matmul(q.float(), compressed_kv.transpose(-1, -2))
             weights = self.weights_proj(hidden_states)
             return scores * weights
+
+    class Attention:
+        def forward(self, positions, hidden_states, forward_batch):
+            if use_npu:
+                s = self.forward_prepare_npu(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    forward_batch=forward_batch,
+                )
+            else:
+                s = self.forward_prepare(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    forward_batch=forward_batch,
+                )
+            return self.forward_core(s)
+
+        def forward_prepare_npu(self, positions, hidden_states, forward_batch):
+            scaled = positions.reshape(-1)
+            qkv = self.qkv_proj(hidden_states)
+            return qkv
+
+        def forward_prepare(self, positions, hidden_states, forward_batch):
+            qkv = self.qkv_proj(hidden_states)
+            q, k = apply_rotary(positions, qkv)
+            return q, k
+
+        def forward_core(self, intermediate_state):
+            return self.o_proj(intermediate_state)
 """)
 
 _DECODER_INIT_ASSIGNMENTS = {"self_attn": "Attention"}
 _ROPE_INIT_ASSIGNMENTS = {"rotary_emb": "RotaryEmbedding"}
 _INDEXER_INIT_ASSIGNMENTS = {"weights_proj": "Linear"}
+_ATTENTION_INIT_ASSIGNMENTS = {"qkv_proj": "Linear", "o_proj": "Linear"}
+
+
+def _class_methods(
+    class_name: str, source: str = _SOURCE
+) -> dict[str, ast.FunctionDef]:
+    tree = ast.parse(source)
+    cls = next(
+        c for c in tree.body if isinstance(c, ast.ClassDef) and c.name == class_name
+    )
+    return {item.name: item for item in cls.body if isinstance(item, ast.FunctionDef)}
 
 
 def _method(
@@ -180,3 +220,38 @@ class TestALeaderOperatedOnDirectlyIsNeverDemoted:
         """``q.float()`` is a real use, not a bare pass-through argument."""
         func = _method("forward", _POSITION_ORDER_SOURCE, "IndexerScorer")
         assert "q" not in _merely_forwarded_names(func)
+
+
+class TestASiblingDelegateBreaksTheTieWhenEveryCandidateIsAPassthrough:
+    """vLLM/SGLang split attention into prepare/core stages:
+    ``forward(positions, hidden_states, forward_batch)`` is nothing but a call
+    to ``self.forward_prepare(...)``/``self.forward_core(...)``, so nothing at
+    that level touches a submodule directly and ``class_methods`` is needed to
+    see through the delegation."""
+
+    def test_hidden_states_wins_via_the_delegate(self) -> None:
+        func = _method("forward", _POSITION_ORDER_SOURCE, "Attention")
+        methods = _class_methods("Attention", _POSITION_ORDER_SOURCE)
+        assert (
+            _primary_forward_input_name(func, _ATTENTION_INIT_ASSIGNMENTS, methods)
+            == "hidden_states"
+        )
+
+    def test_without_class_methods_the_tie_falls_back_to_signature_order(self) -> None:
+        func = _method("forward", _POSITION_ORDER_SOURCE, "Attention")
+        assert (
+            _primary_forward_input_name(func, _ATTENTION_INIT_ASSIGNMENTS)
+            == "positions"
+        )
+
+    def test_the_npu_siblings_incidental_touch_does_not_win(self) -> None:
+        """``forward_prepare_npu`` touches ``positions`` too (``.reshape()``),
+        but its own submodule call still reads ``hidden_states``; visiting it
+        first must not flip the answer every variant's real call agrees on."""
+        methods = _class_methods("Attention", _POSITION_ORDER_SOURCE)
+        npu_func = methods["forward_prepare_npu"]
+        touches = _names_touched_by_submodule_calls(
+            npu_func, _ATTENTION_INIT_ASSIGNMENTS
+        )
+        assert "hidden_states" in touches
+        assert "positions" not in touches

@@ -661,6 +661,51 @@ def test_build_block_node_skip_init_class():
     assert built.children == []
 
 
+def test_build_block_node_skips_a_buffer_predecessor_of_a_sibling_methods_op():
+    """``y = x * self.scale`` inside a helper method, with ``self.scale`` a
+    plain ``nn.Buffer`` -- the embedded-call resolution loop must not
+    materialise it as a submodule child; a buffer is not a child block."""
+    owner = structure(
+        "Owner", assignments={"proj": "Proj", "scale": "Buffer"}, calls=["helper"]
+    )
+    owner.multi_op_methods["helper"] = [
+        aa.ForwardOperation(
+            attr_name="op1",
+            label="Multiply",
+            class_name="Multiply",
+            predecessors=("x", "scale"),
+        ),
+    ]
+    proj = structure("Proj")
+    built = bt.build_block_node(
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": owner, "Proj": proj},
+        basic_ops=_basic(),
+    )
+    helper_node = built.children[0]
+    op_node = helper_node.children[0]
+    assert op_node.attr_name == "op1"
+    assert op_node.children == []
+
+
+def test_build_block_node_skips_a_buffer_predecessor_of_a_dispatch_only_method():
+    """A helper pruned down to pure dispatch reads its step predecessors from
+    ``multi_op_method_step_predecessors`` instead of ``multi_op_methods`` (it
+    has no tensor op of its own) -- the same Buffer skip must apply there too."""
+    owner = structure("Owner", assignments={"scale": "Buffer"}, calls=["helper"])
+    owner.multi_op_method_step_predecessors["helper"] = {"scale": ("x",)}
+    built = bt.build_block_node(
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": owner},
+        basic_ops=_basic(),
+    )
+    helper_node = built.children[0]
+    assert helper_node.attr_name == "helper"
+    assert helper_node.children == []
+
+
 def test_build_block_node_attention_child_kernel_pipeline():
     cls = structure("Owner", calls=[aa.SYNTHETIC_ATTENTION])
     cls.forward_step_details[aa.SYNTHETIC_ATTENTION] = [

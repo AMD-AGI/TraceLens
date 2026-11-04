@@ -133,6 +133,8 @@ This adds:
   `vector_fp32`).
 - `Roofline Time (µs):` theoretical minimum time from the GPU's peak
   capabilities.
+- `Roofline TFLOPS/s:` throughput from dividing modeled FLOPs by that time.
+- `Roofline TB/s:` bandwidth from dividing modeled bytes by that time.
 - `Roofline Bound:` `COMPUTE_BOUND` or `MEMORY_BOUND`.
 - `Pct Roofline:` how close the measured kernel time runs to the roofline.
 
@@ -150,8 +152,11 @@ This adds:
   Equivalently, operations whose arithmetic intensity (FLOPs/byte) sits below the
   roofline knee point (peak FLOPS / peak bandwidth) are memory-bound; those above
   it are compute-bound.
-- Add `--enable-origami` to use Origami-simulated GEMM/SDPA times when a GPU arch
-  spec is provided.
+- Add `--enable-origami-gemm` for Origami GEMM times when a GPU arch spec is
+  provided.
+- Add `--enable-origami-sdpa-tile` for attention times from TraceLens's SDPA
+  tile model, with Origami timing each tile GEMM (see below).
+- To add your own model, see [Add an op projection](#add-an-op-projection).
 
 The arch JSON specifies Max Achievable FLOPS (MAF) per compute type and
 precision; see the
@@ -208,12 +213,163 @@ can define any of:
 | `tree_postprocess_extension` | `Callable` | Called with `perf_analyzer.tree`; update the tree post-construction. |
 | `perf_model_extension` | `dict` | Map op name → custom perf-model class; overrides or extends built-in models. |
 | `op_category_extension` | `dict` | Map category-only op names to final categories, so an op appears in unified reports without a perf model. |
+| `op_projections` | `dict` | Map a label → op projection `fn(work, arch)`; see [Add an op projection](#add-an-op-projection). |
+| `external_op_projection` | `Callable` | Same signature; registered under the label `External`. |
+| `kernel_filters` | `dict` | Map a label → `fn(kernel_event)` returning whether to count the kernel. Each label fills `<label> Kernel Time (µs)` and `<label> TFLOPS/s` with the busy time of the op's kept kernels. |
 
 ```bash
 TraceLens_generate_perf_report_pytorch \
     --profile_json_path path/to/trace.json \
     --extension_file my_extension.py
 ```
+
+### Add an op projection
+
+A *perf model* describes the work an op does: its parameters, FLOPs, and
+bytes. An *op projection* predicts how that work runs, usually as a time, and
+can report other per-op values, such as the kernel tile a library would pick.
+Each op projection has a label, and its columns appear next to the measured
+metrics and the roofline.
+
+An op projection is a function of the op's work and the GPU arch:
+
+```python
+def my_op_projection(work, arch):
+    ...
+    return None                                     # op not covered
+    return {"time_us": 12.5}                        # predicted time in µs
+    return {"time_us": 12.5, "Tile": "256x128x64"}  # time plus extra columns
+```
+
+The returned dict decides which columns the op gets. For an op projection
+labeled `MyModel`:
+
+| Return value | Columns added |
+| --- | --- |
+| `None` | None |
+| A dict with `time_us` | `MyModel Time (µs)`, `MyModel TFLOPS/s`, `MyModel TB/s`, `Pct MyModel` |
+| Any other dict key, such as `Tile` | `MyModel Tile` |
+
+`Pct MyModel` is the predicted time as a percentage of the measured kernel
+time. `time_us` is optional: a dict without it leaves the time columns empty
+and fills only its other keys. Only numbers, strings, and bools are written.
+
+The inputs are:
+
+- `work`: the op's `OpWork`, with these fields:
+  - `category`: the perf-model category, such as `"GEMM"` or `"SDPA_fwd"`. A
+    backward op gets its backward category, such as `"SDPA_bwd"`, or `None`
+    if it has none, as for GEMM backward.
+  - `params`: a copy of the op's `param:` columns. Any key can be missing;
+    `transpose`, for example, is set only when the GEMM kernel name parses.
+    Dtypes are trace strings such as `"c10::BFloat16"`;
+    `TraceLens.PerfModel.utils.torch_dtype_map` converts them to `"bf16"`.
+  - `gflops` and `bytes_moved`: the op's FLOPs, in GFLOPs, and bytes, with
+    the backward values for a backward op. `bytes_moved` can be `None`.
+  - `compute_spec`: the op's compute type and precision, such as
+    `"matrix_bf16"`, which keys the arch's `max_achievable_tflops`; or `None`.
+  - `bwd`: whether this is the backward pass.
+  - `perf_model`: the perf-model object, for an op projection that needs
+    more than the fields above.
+- `arch`: the report's GPU arch dict, or `None`. An op projection can
+  ignore it and target another GPU.
+
+The op projection runs once per op launch, so the same shape arrives many
+times; cache slow calls. If the op projection raises or returns anything
+other than a dict or `None`, its columns stay empty for that op, the op's
+other metrics are kept, and TraceLens warns once per op projection,
+category, and error type. Return `None` to skip an op on purpose.
+
+Register op projections in the extension file in an `op_projections` dict:
+
+```python
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def _gemm_time(M, N, K, B, transpose):
+    return my_library.gemm(M, N, K, B, transpose)
+
+def gemm_op_projection(work, arch):
+    if work.category != "GEMM":
+        return None
+    params = work.params
+    result = _gemm_time(
+        params["M"], params["N"], params["K"], params.get("B", 1),
+        str(params.get("transpose")),
+    )
+    return {"time_us": result.time_us, "Tile": result.tile}
+
+op_projections = {"MyModel": gemm_op_projection}
+```
+
+Every per-op sheet gets the `MyModel` columns from the table above, and the
+summary sheets pick up the label on their own (see the
+[column reference](../reference/perf-report-columns.md#op-projection-columns)).
+Keep proprietary library calls in the extension file.
+`examples/external_op_projection_stub.py` is a placeholder to start from.
+
+An op projection can also cover every op from its FLOPs and bytes. This one
+assumes compute and memory traffic don't overlap:
+
+```python
+def no_overlap(work, arch):
+    if arch is None or work.compute_spec is None or work.bytes_moved is None:
+        return None
+    peak_tflops = arch["max_achievable_tflops"].get(work.compute_spec)
+    if not peak_tflops:
+        return None
+    compute_us = work.gflops * 1e3 / peak_tflops
+    memory_us = work.bytes_moved / (arch["mem_bw_gbps"] * 1e3)
+    return {"time_us": compute_us + memory_us}
+
+op_projections = {"No Overlap": no_overlap}
+```
+
+From Python, register an op projection with
+`TreePerfAnalyzer.register_op_projection(label, fn)`, then
+`compute_perf_metrics(event)` runs every registered op projection on one
+op, which is handy when iterating on one:
+
+```python
+from TraceLens import TreePerfAnalyzer
+
+analyzer = TreePerfAnalyzer.from_file("trace.json", arch=arch)
+analyzer.register_op_projection("MyModel", gemm_op_projection)
+gemm = next(e for e in analyzer.tree.events if e["name"] == "aten::mm")
+metrics = analyzer.compute_perf_metrics(gemm)  # param: ..., MyModel Time (µs), ...
+```
+
+Behind this, TraceLens builds the op's perf model from the event, describes
+its work with `TraceLens.PerfModel.op_projections.op_work(perf_model)`, and
+calls each op projection on that work. Roofline and the Origami op
+projections are written the same way, in
+`TraceLens/PerfModel/op_projections.py`.
+
+Origami models GEMMs only. For attention, `--enable-origami-sdpa-tile` adds
+TraceLens's SDPA tile model: it times one Q·Kᵀ tile and one P·V tile on one
+CU with Origami, scales them by the number of waves, and adds softmax and
+memory terms. Its columns are labeled `SDPA Tile Origami`. It needs
+`num_cus`, `gemm_units_per_cu`, and `mem_bw_gbps` in the arch, and
+`l1_bw_gbps` for backward. The tile model, in
+`TraceLens/PerfModel/sdpa_tile.py`, times its tiles with whatever GEMM model
+it's given as `gemm_time`; the op projection passes Origami's. To use another
+GEMM model, write an op projection that returns
+`{"time_us": sdpa_tile_time_us(work.perf_model, arch, your_gemm_time, bwd=work.bwd)}`.
+
+### Add a kernel filter
+
+A kernel filter reports the op's throughput over a subset of its kernels, for
+example without copy and transpose kernels. `examples/kernel_filter_example.py`
+defines one:
+
+```python
+def non_data_mov_filter(kernel):
+    return not any(p in kernel["name"] for p in ("direct_copy_kernel", "transpose_"))
+
+kernel_filters = {"Non-Data-Mov": non_data_mov_filter}
+```
+
+From Python, use `TreePerfAnalyzer.register_kernel_filter(label, fn)`.
 
 See the example extension file for MegatronLM in the
 [`examples/`](https://github.com/AMD-AGI/TraceLens/tree/main/examples) directory.
@@ -228,9 +384,10 @@ The following table describes all optional arguments.
 | `--output_csvs_dir DIR` | `None` | Write each sheet as a CSV in this directory. |
 | `--gpu_arch_platform NAME` | `None` | Bundled GPU arch for roofline classification (`MI300X`, `MI325X`). |
 | `--gpu_arch_json_path PATH` | `None` | Custom GPU arch JSON (mutually exclusive with `--gpu_arch_platform`). |
-| `--enable-origami` | `False` | Use Origami-simulated GEMM/SDPA times when an arch is provided. |
+| `--enable-origami-gemm` | `False` | Add `Origami` GEMM times when an arch is provided. |
+| `--enable-origami-sdpa-tile` | `False` | Add `SDPA Tile Origami` attention times from TraceLens's tile model, with Origami timing each tile GEMM. |
 | `--detect_recompute` | `False` | Add an `is_recompute` column for activation checkpointing (see above). |
-| `--extension_file PATH` | `None` | Custom tree / perf-model / op-category hooks (see above). |
+| `--extension_file PATH` | `None` | Custom tree, perf-model, op-category, op-projection, and kernel-filter hooks (see above). |
 | `--enable_kernel_summary` | `False` | Add the `kernel_summary` sheet. |
 | `--short_kernel_study` | `False` | Add the short-kernel study sheets. |
 | `--short_kernel_threshold_us X` | `10` | Threshold (µs) to classify a kernel as "short". |

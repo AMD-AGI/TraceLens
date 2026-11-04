@@ -47,6 +47,48 @@ class LayerVariant:
 
 
 @dataclass
+class RepeatedGroup:
+    """A node in the reconstructed repeated-``ModuleList`` nesting tree.
+
+    Unlike :class:`LayerVariant` (sub-variants of the ONE uniform decoder stack a
+    transformer has), this models an arbitrary NON-uniform nesting: a CNN's stages,
+    each a ``ModuleList`` of a different depth and channel width. The tree is rebuilt
+    from the flat :class:`TraceLens.ModelUtils.meta_trace.MetaModuleGroup` list by
+    dotted-path containment; see ``extract._build_nested_groups``.
+
+    A numeric index segment in a child path is collapsed to ``*`` (``stages.2.layers``
+    -> ``stages.*.layers``) so the per-stage ``layers`` lists fold into ONE logical
+    child whose ``per_index_counts`` records each parent position's own length
+    (ConvNeXt: ``[3, 3, 27, 3]``). ``per_index_counts`` is ``None`` for a uniform
+    child (every parent position repeats the child the same number of times).
+    """
+
+    path: str  # live dotted path, index segments collapsed to "*" (e.g. "stages.*.layers")
+    count: int  # len(ModuleList); for a collapsed child, the modal per-position length
+    element_class: str
+    label: str
+    children: list["RepeatedGroup"] = field(default_factory=list)
+    # One structural signature per element (from MetaModuleGroup.signatures), for
+    # in-group sub-variant bucketing with collections.Counter.
+    signatures: tuple[str, ...] = ()
+    # Per-parent-position child lengths when they diverge (ConvNeXt [3,3,27,3]);
+    # None when every parent position repeats this child uniformly.
+    per_index_counts: list[int] | None = None
+    # Class of every element at one position, in forward order. A single distinct
+    # class is an N× repeat (``element_class``). More than one is a pipeline that
+    # leads the repeated body — ConvNeXt's downsample is LayerNorm then Conv2d —
+    # and must be emitted element by element, not as N× the first class. Empty
+    # when the walk only recorded ``element_class``; those groups stay uniform.
+    element_classes: tuple[str, ...] = ()
+    # One structural descriptor per element (dotted path, class), from the live
+    # module. The first element is the representative the graph expands; later
+    # elements say which attrs exist only on that first element (a ResNet
+    # projection shortcut) and which stage-level modules are not repeated
+    # (Swin's patch merging).
+    descriptors: tuple[tuple[tuple[str, str], ...], ...] = ()
+
+
+@dataclass
 class BlockComponent:
     """One submodule inside a decoder layer, ordered for export."""
 
@@ -152,6 +194,11 @@ class CodeAnalysis:
     class_registry: dict[str, ClassStructure] = field(default_factory=dict)
     external_imports: dict[str, str] = field(default_factory=dict)
     positional_helpers: list[str] = field(default_factory=list)
+    #: Whether this file binds a platform-detection flag (``_is_npu =
+    #: is_npu()``) that a branch reads -- i.e. whether which accelerator is
+    #: being modeled actually affects this graph, and so is worth stating on
+    #: the fact sheet.
+    device_sensitive: bool = False
 
     def has_block_graph(self) -> bool:
         return bool(

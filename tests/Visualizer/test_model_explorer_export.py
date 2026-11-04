@@ -1390,6 +1390,15 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
             "incomingEdges": [{"sourceNodeId": "mlp", "sourceNodeOutputId": "0"}],
         },
         {"id": "orphan", "label": "Detached"},
+        {
+            "id": "residual_add",
+            "label": "Add",
+            "attrs": [{"key": "raw_op", "value": "add"}],
+            "incomingEdges": [
+                {"sourceNodeId": "mlp", "sourceNodeOutputId": "0"},
+                {"sourceNodeId": "orphan", "sourceNodeOutputId": "0"},
+            ],
+        },
     ]
 
     # Each module is sized by its OWN weight -- an embedding widens token ids to
@@ -1427,6 +1436,10 @@ def test_fill_missing_node_shapes_seeds_and_propagates():
         # Its weight is [32000, 4096] and it is handed a 4096-wide activation,
         # so it projects onto the 32000 rows. Nothing here reads "Logits".
         "lm_head": "[B, S, 32000] float16",
+        # One operand (orphan) never resolves, but a broadcasting op is read off
+        # whichever operand did -- it is not left unshaped just because its
+        # sibling input stayed opaque.
+        "residual_add": "[B, S, 4096] float16",
     }
     # A computation with no tensor input has no inferred output shape.
     orphan = next(node for node in nodes if node["id"] == "orphan")
@@ -1526,6 +1539,42 @@ def test_group_boundary_shapes_reads_the_crossing_tensor():
             "output_shape": "[B, S, 8] float16",
         },
     }
+
+    # refresh_displayed_group_shapes drives the same crossing-tensor read into
+    # a graph's groupNodeAttributes: it seeds a never-before-seen full_* shape
+    # from whatever the bucket's display shape held before this call (a
+    # pre-partition shape stamped earlier), then always rewrites the plain
+    # display key to the current boundary. A pre-existing full_* is never
+    # clobbered by a later refresh with the same (already-rewritten) shapes.
+    from TraceLens.Visualizer.model_explorer_export.shapes import (
+        refresh_displayed_group_shapes,
+    )
+
+    graph = {
+        "nodes": nodes,
+        "groupNodeAttributes": {
+            "mlp": {
+                "input_shape": "[B, S, 32] float16",
+                "output_shape": "[B, S, 32] float16",
+            }
+        },
+    }
+    refresh_displayed_group_shapes(graph)
+    assert graph["groupNodeAttributes"]["mlp"] == {
+        "full_input_shape": "[B, S, 32] float16",
+        "input_shape": "[B, S, 8] float16",
+        "full_output_shape": "[B, S, 32] float16",
+        "output_shape": "[B, S, 8] float16",
+    }
+    refresh_displayed_group_shapes(graph)
+    assert (
+        graph["groupNodeAttributes"]["mlp"]["full_input_shape"] == "[B, S, 32] float16"
+    )
+
+    # Malformed graph shapes (no node list, no attrs dict) are a no-op, not a crash.
+    malformed = {"nodes": "not-a-list", "groupNodeAttributes": {}}
+    refresh_displayed_group_shapes(malformed)
+    assert malformed == {"nodes": "not-a-list", "groupNodeAttributes": {}}
 
 
 def test_build_model_explorer_payload_includes_operator_export():

@@ -259,7 +259,8 @@ flowchart TD
     CatFindings --> Agg
     Agg --> Step9["Step 9: Validate"]
     Step9 --> Step10["Step 10: Report Prep + Model ID"]
-    Step10 --> Step11["Step 11: Render PNG"]
+    Step10 --> Step102["Step 10.2: Roofline augment (optional)"]
+    Step102 --> Step11["Step 11: Render PNG"]
     Step11 --> Step12["Step 12: Final Report"]
 ```
 
@@ -280,6 +281,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 8.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
 9.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
 10.  Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
+10.2 Analytical Roofline Augmentation (optional; only when <augment_analytical_roofline> is set)
 11.  Render performance PNG if agent_extension.py is absent
 12.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
 ```
@@ -310,7 +312,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 
 ### Sub-agent model
 
-The orchestrator and all 13 sub-agents run on a capable frontier reasoning model, declared in each agent file's front matter under `skills/analysis-orchestrator/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
+The orchestrator and all 14 sub-agents run on a capable frontier reasoning model, declared in each agent file's front matter under `skills/analysis-orchestrator/agents/`. The full set: `cpu-idle-analyzer`, `multi-kernel-analyzer`, `kernel-fusion-analyzer`, `model-identification-agent`, `roofline-augment-agent`, `gemm-analyzer`, `sdpa-analyzer`, `elementwise-analyzer`, `reduce-analyzer`, `triton-analyzer`, `moe-analyzer`, `norm-analyzer`, `convolution-analyzer`, `generic-op-analyzer`.
 
 ### Supported Analysis Modes
 

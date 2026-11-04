@@ -32,11 +32,43 @@ from TraceLens.Reporting.reporting_utils import (
 from TraceLens.util import TraceEventUtils
 from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
+    CAPTURE_ROLE_PATTERNS,
+    SPEC_ROLE_TARGET,
     CaptureAnnotation,
+    filename_request_bs,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
+
+_INFERENCE_ANNOTATION_OP_PREFIXES = [
+    "vllm::unified_attention_with_output",
+    "aiter::mha_varlen_fwd",
+    "pseudo_mla_decode_fwd",
+    "pseudo_mla_prefill_fwd",
+    "vllm::gdn_attention_core",
+    "aiter::fmha_v3_varlen_fwd",
+    "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
+    "sglang_profiler::attention_paged_attention_ragged",
+    "aiter::mha_batch_prefill",
+    "aiter::pa_decode_gluon",
+    "aiter::v4_attention_with_output",
+    "pseudo_v4_paged_decode_swa",
+    "pseudo_v4_paged_decode_csa",
+    "pseudo_v4_paged_decode_hca",
+    "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_preshuffle",
+    "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded",
+    "aiter::_opus_bmm_a8w8_mxscale_raw",
+    "aiter::topk_gating_fwd",
+    "aiter::mla_decode_v4_asm",
+    "sglang_profiler::moe_sorting_small__run_small_sort",
+    "aiter::gemm_a8w8_blockscale_bpreshuffle",
+    "aiter::_opus_moe_stage1_a8w4_fwd_raw",
+    "_moe_C::topk_softplus_sqrt",
+    "aiter::moe_sorting_opus_fwd",
+    "pseudo_vllm_sparse_attn_decode",
+    "sgl_kernel::fast_topk_transform_fused",
+]
 
 
 def perf_report_sanity_check(
@@ -195,7 +227,8 @@ def find_capture_annotation_events(events):
 
 def classify_graph_capture_trace(input_folder: str):
     """
-    Return {file, batch_size, mode} for a single graph-capture trace file.
+    Return {file, batch_size, mode, capture_type, request_bs, token, num_captures}
+    for one capture file.
     Supports .json, .json.gz, and .zip (containing a .json).
     """
     execution_details_path = os.path.join(input_folder, "execution_details.json")
@@ -264,24 +297,49 @@ def classify_graph_capture_trace(input_folder: str):
         dummy_roots = find_dummy_run_roots(events)
         annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
+        role = next(
+            (r for p, r in CAPTURE_ROLE_PATTERNS if p.search(basename)),
+            SPEC_ROLE_TARGET,
+        )
+        request_bs = filename_request_bs(basename)
+        token = most_common_first_dim(events)
+        num_captures = count_stream_begin_captures(events)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
             cap = CaptureAnnotation(annotation_roots[0]["name"])
             batch_size, mode = cap.batch_size, cap.mode
             print(
-                f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
+                f"batch_size: {batch_size}, request_bs: {request_bs}, token: {token}, mode: {mode} parsed from annotation, num_captures: {num_captures}"
             )
-            results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+            results.append(
+                {
+                    "file": basename,
+                    "batch_size": batch_size,
+                    "mode": mode,
+                    "capture_type": role,
+                    "request_bs": request_bs,
+                    "token": token,
+                    "num_captures": num_captures,
+                }
+            )
             continue
 
-        num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = most_common_first_dim(events)
+        batch_size = token
         print(
-            f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
+            f"batch_size: {batch_size}, request_bs: {request_bs}, token: {token}, mode: {mode}, capture_type: {role} inferred, num_captures: {num_captures}"
         )
-
-        results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+        results.append(
+            {
+                "file": basename,
+                "batch_size": batch_size,
+                "mode": mode,
+                "capture_type": role,
+                "request_bs": request_bs,
+                "token": token,
+                "num_captures": num_captures,
+            }
+        )
     with open(f"{input_folder}/execution_details.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults written to {input_folder}/execution_details.json")
@@ -395,6 +453,23 @@ def apply_extension(perf_analyzer, extension_path):
     spec = importlib.util.spec_from_file_location(extension_name, extension_path)
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
+
+    if hasattr(extension, "external_op_projection"):
+        print(f"Applying external op projection from {extension_path}")
+        perf_analyzer.set_external_op_projection(extension.external_op_projection)
+
+    for attr, register in (
+        ("op_projections", "register_op_projection"),
+        ("kernel_filters", "register_kernel_filter"),
+    ):
+        if not hasattr(extension, attr):
+            continue
+        print(f"Applying {attr} from {extension_path}")
+        entries = getattr(extension, attr)
+        if not isinstance(entries, dict):
+            raise TypeError(f"Expected {attr} to be a dict, got {type(entries)}")
+        for label, fn in entries.items():
+            getattr(perf_analyzer, register)(label, fn)
 
     if hasattr(extension, "tree_postprocess_extension"):
         print(f"Applying tree postprocess extension from {extension_path}")
@@ -534,12 +609,11 @@ def generate_perf_report_pytorch(
     precomputed_diff_stats: Optional[str] = None,
     comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
-    python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
-    enable_origami: bool = False,
+    enable_origami_gemm: bool = False,
+    enable_origami_sdpa_tile: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
@@ -563,20 +637,22 @@ def generate_perf_report_pytorch(
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
             arch=gpu_arch_json,
-            python_path=python_path,
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
             rebuild_tree=False,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
             profile_filepath=profile_json_path,
             arch=gpu_arch_json,
-            python_path=python_path,
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
 
         graph_launch_events = [
@@ -591,24 +667,7 @@ def generate_perf_report_pytorch(
             )
 
     ## Apply annotation for vLLM eager and replay phase
-    perf_analyzer.tree.apply_annotation(
-        name_filters=[
-            "vllm::unified_attention_with_output",
-            "aiter::mha_varlen_fwd",
-            "pseudo_mla_decode_fwd",
-            "pseudo_mla_prefill_fwd",
-            "vllm::gdn_attention_core",
-            "aiter::fmha_v3_varlen_fwd",
-            "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd",
-            "sglang_profiler::attention_paged_attention_ragged",
-            "aiter::mha_batch_prefill",
-            "aiter::pa_decode_gluon",
-            "aiter::v4_attention_with_output",
-            "pseudo_v4_paged_decode_swa",
-            "pseudo_v4_paged_decode_csa",
-            "pseudo_v4_paged_decode_hca",
-        ]
-    )
+    perf_analyzer.tree.apply_annotation(name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES)
 
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
@@ -929,7 +988,6 @@ def generate_perf_report_pytorch(
                 perf_analyzer2 = TreePerfAnalyzer(
                     tree=comparison_augmented_tree,
                     arch=gpu_arch_json,
-                    python_path=python_path,
                     include_unlinked_kernels=include_unlinked_kernels,
                     add_python_func=add_python_func,
                     enable_pseudo_ops=enable_pseudo_ops,
@@ -938,13 +996,12 @@ def generate_perf_report_pytorch(
             else:
                 perf_analyzer2 = TreePerfAnalyzer.from_file(
                     profile_filepath=comparison_json_path,
-                    python_path=perf_analyzer.python_path,
                     include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
                     enable_pseudo_ops=enable_pseudo_ops,
                     add_python_func=perf_analyzer.add_python_func,
                 )
             perf_analyzer2.tree.apply_annotation(
-                name_filters=["vllm::unified_attention_with_output"]
+                name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES
             )
             td = TraceDiff(perf_analyzer.tree, perf_analyzer2.tree)
             td.generate_tracediff_report()
@@ -1311,21 +1368,23 @@ def main():
         "--extension_file",
         type=str,
         default=None,
-        help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
+        help="Python file with custom hooks: tree post-processing, perf models, "
+        "op categories, op projections (op_projections, external_op_projection), and kernel filters.",
     )
 
-    parser.add_argument(
-        "--python_path",
-        type=str,
-        default=None,
-        help="Path to the python executable for gemm simulator",
-    )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
-        "--enable-origami",
+        "--enable-origami-gemm",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+        help="Add Origami GEMM times (Origami columns) when a GPU arch is given.",
+    )
+    parser.add_argument(
+        "--enable-origami-sdpa-tile",
+        action="store_true",
+        default=False,
+        help="Add attention times from TraceLens's SDPA tile model, with Origami "
+        "timing each tile GEMM (SDPA Tile Origami columns), when a GPU arch is given.",
     )
 
     parser.add_argument(
@@ -1414,10 +1473,10 @@ def main():
         precomputed_diff_stats=args.precomputed_diff_stats,
         comparison_augmented_tree=comparison_graph_tree,
         extension_file=args.extension_file,
-        python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
-        enable_origami=args.enable_origami,
+        enable_origami_gemm=args.enable_origami_gemm,
+        enable_origami_sdpa_tile=args.enable_origami_sdpa_tile,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,
