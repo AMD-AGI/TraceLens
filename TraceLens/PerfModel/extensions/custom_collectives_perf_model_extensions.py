@@ -10,7 +10,12 @@ Performance models for custom collective operation extensions.
 
 import re
 from math import prod
-from TraceLens.PerfModel.utils import dense_counted_tensor, name2bpe, torch_dtype_map
+from TraceLens.PerfModel.utils import (
+    cxx_dtype_to_torch,
+    dense_counted_tensor,
+    name2bpe,
+    torch_dtype_map,
+)
 
 
 class CustomCollective:
@@ -446,14 +451,6 @@ _AR_1STAGE_RE = re.compile(
     r"allreduce_fusion_kernel_1stage<([^,]+),\s*([^,]+),\s*(\d+),\s*(true|false)>"
 )
 
-_CXX_DTYPE_TO_TORCH = {
-    "std::bfloat16_t": "c10::BFloat16",
-    "std::half_t": "c10::Half",
-    "__half": "c10::Half",
-    "std::float_t": "float",
-    "float": "float",
-}
-
 
 class allreduce_fusion_kernel_1stage_synthetic(CustomCollective):
     """
@@ -529,7 +526,9 @@ class allreduce_fusion_kernel_1stage_synthetic(CustomCollective):
             return {"_no_perf": True}
 
         cxx_dtype = parsed["cxx_dtype_in"]
-        torch_dtype = _CXX_DTYPE_TO_TORCH.get(cxx_dtype, "c10::BFloat16")
+        torch_dtype = cxx_dtype_to_torch(cxx_dtype)
+        if torch_dtype is None:
+            return {"_no_perf": True}
         bpe_in = name2bpe(torch_dtype)
         if bpe_in is None:
             bpe_in = 2

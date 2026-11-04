@@ -174,6 +174,19 @@ def event_process_thread_names(tree, event):
     }
 
 
+_AR_1STAGE_TP_RE = re.compile(r"allreduce_fusion_kernel_1stage<[^,]+,\s*[^,]+,\s*(\d+)")
+
+
+def _detect_tp_world_size(events):
+    """Scan events for an allreduce_fusion_kernel_1stage Synthetic Op and
+    return its world_size template param (= TP), or None."""
+    for e in events:
+        m = _AR_1STAGE_TP_RE.search(e.get("name", ""))
+        if m:
+            return int(m.group(1))
+    return None
+
+
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(
@@ -1961,6 +1974,12 @@ class TreePerfAnalyzer:
 
         if events is None:
             events = self.collect_unified_perf_events(include_nccl=include_nccl)
+
+        tp = _detect_tp_world_size(events)
+        if tp is not None:
+            if self.arch is None:
+                self.arch = {}
+            self.arch.setdefault("tp_world_size", tp)
 
         if len(events) == 0:
             warnings.warn(

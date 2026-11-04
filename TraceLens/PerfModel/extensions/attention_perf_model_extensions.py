@@ -8,8 +8,6 @@
 Performance models for pseudo-op extensions.
 """
 
-import re
-
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
@@ -1337,35 +1335,22 @@ class paged_mqa_logits_preshuffle_synthetic:
     BPE_W = 4
     BPE_OUT = 4
 
-    _AR_TP_RE = re.compile(r"allreduce_fusion_kernel_1stage<[^,]+,\s*[^,]+,\s*(\d+)")
-
-    @classmethod
-    def _detect_tp(cls, event):
-        """Derive TP world_size from a co-occurring allreduce_fusion_kernel_1stage
-        kernel in the same trace.  Returns None if not found."""
-        peers = event.get("_peer_synthetic_ops") or []
-        for name in peers:
-            m = cls._AR_TP_RE.search(name)
-            if m:
-                return int(m.group(1))
-        return None
-
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
-        self.param_details = self.get_param_details(event)
+        self.param_details = self.get_param_details(event, arch)
 
     @classmethod
-    def get_param_details(cls, event):
+    def get_param_details(cls, event, arch=None):
         try:
             annotation = str(event.get("annotation"))
             stats = InferenceAttention._parse_chunk_stats(annotation)
             sum_len = stats["c_sqsk"] + stats["g_sqsk"]
             seq_q = stats["c_sq"] + stats["g_sq"]
             kv_touched = stats["c_sk"] + stats["g_sk"]
-            tp = cls._detect_tp(event)
+            tp = (arch or {}).get("tp_world_size")
             # All MLA models (DeepSeek-V2/V2.5/V3/V3.1, GLM-5.2/5.3)
-            # use 128 total heads. NUM_HEADS = TOTAL_HEADS / TP.
+            # use 128 total heads. H_Q = TOTAL_HEADS / TP.
             if tp is None:
                 return {"_no_perf": True}
             H_Q = cls.TOTAL_HEADS // tp
