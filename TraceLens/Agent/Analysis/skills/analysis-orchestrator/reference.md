@@ -550,9 +550,7 @@ load_findings(sys.argv[1])
 
 Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/model-identification-agent.md` with context: <output_dir>. Wait for completion.
 
-**On failure (subagent error, timeout, or `model_info.json` not written):**
-1. **Retry exactly once** by re-launching the same subagent with the same prompt.
-2. If the retry also fails, write fallback `metadata/model_info.json` with all four fields set to `"Cannot be inferred from trace"`.
+**On failure (subagent error or timeout), retry exactly once** by re-launching the same subagent with the same prompt.
 
 Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
 

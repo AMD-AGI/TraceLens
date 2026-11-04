@@ -246,18 +246,18 @@ Three Cursor agent skills under `TraceLens/Agent/Analysis/skills/analysis-orches
 
 The remaining two skills define the per-case eval logic:
 
-**workflow-eval** -- 14 evals (13 scripted + 1 LLM):
+**workflow-eval** -- 12 evals (11 scripted + 1 LLM):
 
 | Eval | Type | What it checks |
 |------|------|---------------|
-| 1–8 | Scripted | Directory structure, metadata files, model info, perf report, tree data, findings existence, plot |
-| 9 | Scripted | Report template rendering — all required `##` headers present. Per-header sub-indices (`_executive_summary`, `_compute`, `_system`, `_detailed`, `_appendix`, `_metrics_table`) |
-| 10 | Scripted | Executive Summary metrics — values match `gpu_timeline.csv` within 1%. Per-metric sub-indices (`_compute_pct`, `_idle_pct`, `_comm_pct`, `_total_time`, `_bottleneck`) |
-| 11 | Scripted | Issue template rendering — each P-item has Insight/Action/Impact fields. Per-P-item sub-indices (`_compute_P1`, `_system_P2`, etc.) |
-| 12 | LLM | Hardware Reference in Appendix — platform, memory BW, MAF values. Multi-dimensional weighted scoring: correctness (50%) + completeness (50%), pass threshold ≥ 7.0 |
-| 13 | Scripted | Model identification in Appendix — all 4 `model_info.json` fields present. Per-field sub-indices (`_model`, `_architecture`, `_scale`, `_precision`) |
+| 1–7 | Scripted | Directory structure, platform specs, model info, perf report, findings existence, plot |
+| 8 | Scripted | Report template rendering — all required `##` headers present. Per-header sub-indices (`_executive_summary`, `_compute`, `_system`, `_detailed`, `_appendix`, `_metrics_table`) |
+| 9 | Scripted | Executive Summary metrics — values match `gpu_timeline.csv` within 1%. Per-metric sub-indices (`_compute_pct`, `_idle_pct`, `_comm_pct`, `_total_time`, `_bottleneck`) |
+| 10 | Scripted | Issue template rendering — each P-item has Insight/Action/Impact fields. Per-P-item sub-indices (`_compute_P1`, `_system_P2`, etc.) |
+| 11 | LLM | Hardware Reference in Appendix — platform, memory BW, MAF values. Multi-dimensional weighted scoring: correctness (50%) + completeness (50%), pass threshold ≥ 7.0 |
+| 12 | Scripted | Model identification in Appendix — all 4 `model_info.json` fields present. Per-field sub-indices (`_model`, `_architecture`, `_scale`, `_precision`) |
 
-Scripted evals (1–11, 13–14) run via `eval_utils/workflow_scripted_evals.py`. LLM eval (12) runs via `skills/workflow-llm-eval/` (`SKILL.md` + `reference.md`).
+Scripted evals (1–10, 12) run via `eval_utils/workflow_scripted_evals.py`. LLM eval (11) runs via `skills/workflow-llm-eval/` (`SKILL.md` + `reference.md`).
 
 All scripted evals include **pre-check gates** that immediately FAIL all evals with a clear message if the output directory is missing, `analysis.md` is absent/garbled, or other fundamental prerequisites are unmet.
 
@@ -292,7 +292,7 @@ index,category,issue_summary,result,details,root_cause,recommended_fix
 
 | Column | Description |
 |--------|-------------|
-| `index` | Eval identifier (e.g., `workflow_eval_9_compute`, `quality_eval_2`) |
+| `index` | Eval identifier (e.g., `workflow_eval_8_compute`, `quality_eval_2`) |
 | `category` | `Workflow` or `Quality` |
 | `issue_summary` | Human-readable name of the check |
 | `result` | `PASS` or `FAIL` |
