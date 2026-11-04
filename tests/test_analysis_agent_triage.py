@@ -287,7 +287,7 @@ def make_run_dir(
             ``trace_input/model_TP-0_rank0.json.gz`` (wrapped in
             ``{"traceEvents": ...}``). Triggers the trace_input manifest.
         output_dirs: iterable of directory names to create under ``run_dir``
-            (e.g. ``("metadata", "category_data", "system_findings",
+            (e.g. ``("category_data", "system_findings",
             "category_findings")``).
         analysis_md: content written to ``analysis.md``.
     """
@@ -1675,8 +1675,7 @@ def test_output_incomplete_fires(tmp_path):
     assert isinstance(finding, FindingDraft)
     assert finding.failure_mode == "Output directory structure incomplete"
     assert finding.evidence == (
-        "Missing directories: metadata, category_data, system_findings, "
-        "category_findings"
+        "Missing directories: category_data, system_findings, category_findings"
     )
 
 
@@ -1684,7 +1683,6 @@ def test_output_incomplete_none_when_all_present(tmp_path):
     run_dir = make_run_dir(
         tmp_path,
         output_dirs=(
-            "metadata",
             "category_data",
             "system_findings",
             "category_findings",

@@ -30,7 +30,6 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered uncategorized operations (includes `call_stack` column for architecture context)
-2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<cat>_findings.md`
@@ -71,7 +70,7 @@ Use vendor-agnostic terminology:
   --comparison_scope <comparison_scope>
 ```
 
-### Step 2: Read Metrics and Tree Data
+### Step 2: Read Metrics
 
 ```bash
 cat <output_dir>/category_data/<cat>_metrics.json

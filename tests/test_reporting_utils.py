@@ -1155,9 +1155,9 @@ class TestAnalysisUtilsAndReporting:
         cat_dir = tmp_path / "category_data"
         cat_dir.mkdir()
         (cat_dir / "category_manifest.json").write_text(
-            json.dumps({"focus_csv_dir": "/focus/csvs"})
+            json.dumps({"focus_csv_dir": "focus_csvs"})
         )
-        assert au.perf_report_csv_dir(str(tmp_path)) == "/focus/csvs"
+        assert au.perf_report_csv_dir(str(tmp_path)) == str(tmp_path / "focus_csvs")
 
     def test_resolve_gpu_arch_and_node_span(self):
         arch = ru.resolve_gpu_arch(
@@ -2300,51 +2300,6 @@ class TestPush95Phase2:
             )
         assert t is None
 
-    def test_orchestrator_comparative_main(self, tmp_path, monkeypatch):
-
-        out = str(tmp_path)
-        _write_minimal_orchestrator_csvs(out, comparative=True)
-        k1 = _kernel_event(10, "Cijk_a")
-        k2 = _kernel_event(11, "ew_add")
-        module = {
-            "name": "nn.Module: MLP_0",
-            "_category": "aten",
-            "gpu_events": [10, 11],
-        }
-        tree = _StubTree([module], {10: k1, 11: k2})
-        analyzer = _StubAnalyzer(tree)
-
-        class _FakeTreePerfAnalyzer:
-            @classmethod
-            def from_file(cls, *args, **kwargs):
-                return analyzer
-
-        monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(
-            FusionCandidateBuilder, "comparative", lambda self, diff_stats: []
-        )
-        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
-
-        old_argv = sys.argv
-        sys.argv = [
-            "orchestrator_prepare",
-            "--trace-path",
-            "/fake/trace.json",
-            "--platform",
-            "MI300X",
-            "--output-dir",
-            out,
-            "--comparison-scope",
-            "comparative",
-        ]
-        try:
-            op.main()
-        finally:
-            sys.argv = old_argv
-        assert os.path.isfile(
-            os.path.join(out, "metadata", "trace2_gpu_utilization.json")
-        )
-
     def test_analysis_utils_and_kernel_fusion(self, tmp_path):
 
         row = pd.Series(
@@ -2538,7 +2493,11 @@ class TestPush95Phase3:
             json.dumps(
                 {
                     "platform": "MI300X",
-                    "focus_csv_dir": str(csv_dir),
+                    "platform_specs": {
+                        "peak_mem_bw_tbs": 5.3,
+                        "max_achievable_tflops": {"matrix_bf16": 1000.0},
+                    },
+                    "focus_csv_dir": csv_dir.name,
                     "gpu_utilization": {"total_time_ms": 1000.0},
                 }
             )
@@ -2565,18 +2524,6 @@ class TestPush95Phase3:
                 ]
             )
         )
-        (cat_dir / "arch_config.json").write_text(
-            json.dumps(
-                {
-                    "peak_mem_bw_tbs": 5.3,
-                    "max_achievable_tflops": {
-                        "matrix_bf16": 1000.0,
-                        "vector_fp32": 100.0,
-                    },
-                }
-            )
-        )
-
         mod = importlib.import_module(
             "TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis"
         )

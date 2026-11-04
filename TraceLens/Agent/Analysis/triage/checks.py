@@ -887,7 +887,7 @@ def check_step2_5_fail(run_dir, stream_file):
 
 
 def check_output_incomplete(run_dir, _stream_file):
-    expected = ["metadata", "category_data", "system_findings", "category_findings"]
+    expected = ["category_data", "system_findings", "category_findings"]
     missing = [d for d in expected if not os.path.isdir(os.path.join(run_dir, d))]
     if missing:
         return FindingDraft(

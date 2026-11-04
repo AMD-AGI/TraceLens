@@ -40,6 +40,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     get_peak_specs,
     gpu_utilization_from_timeline,
     load_category_data,
+    perf_report_csv_dir,
     standalone_efficiency,
     validate_efficiency,
     write_metrics_json,
@@ -132,10 +133,9 @@ _FUSION_ADD_KEY = ["aten::add", "[[16, 64]]", "['float']", "", "", "p", "", "t1"
 
 @pytest.fixture
 def output_dir_with_category_data(tmp_path):
-    """Create minimal category_data + metadata for one category (gemm)."""
+    """Create minimal category_data + manifest for one category (gemm)."""
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
-    (out / "metadata").mkdir(parents=True)
 
     # gemm_ops.csv: minimal columns required by build_operation_metrics / load_category_data
     gemm_csv = out / "category_data" / "gemm_ops.csv"
@@ -152,14 +152,14 @@ def output_dir_with_category_data(tmp_path):
     )
     df.to_csv(gemm_csv, index=False)
 
-    # gemm_metadata.json
-    meta = {
-        "platform": "MI300X",
-        "peak_mem_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708, "matrix_fp16": 654},
+    manifest = {
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 708, "matrix_fp16": 654},
+        },
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
-    (out / "metadata" / "gemm_metadata.json").write_text(json.dumps(meta, indent=2))
+    (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
 
     return str(out)
 
@@ -249,14 +249,13 @@ def output_dir_with_manifest_and_metrics(tmp_path):
 
 @pytest.fixture
 def output_dir_other_and_customcollective_nccl(tmp_path):
-    """Minimal ops CSV + metadata for ``other`` and ``customcollective`` (NCCL-style name).
+    """Minimal ops CSV + manifest for ``other`` and ``customcollective`` (NCCL-style name).
 
     ``classify_other_operation`` treats this op as communication; ``customcollective``
     analysis must still retain it, while ``other`` strips it for NCCL Analyzer routing.
     """
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
-    (out / "metadata").mkdir(parents=True)
 
     df = pd.DataFrame(
         {
@@ -272,15 +271,14 @@ def output_dir_other_and_customcollective_nccl(tmp_path):
     for cat in ("customcollective", "other"):
         df.to_csv(out / "category_data" / f"{cat}_ops.csv", index=False)
 
-    meta = {
-        "platform": "MI300X",
-        "peak_mem_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708},
+    manifest = {
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 708},
+        },
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
-    meta_text = json.dumps(meta, indent=2)
-    for cat in ("customcollective", "other"):
-        (out / "metadata" / f"{cat}_metadata.json").write_text(meta_text)
+    (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
 
     return str(out)
 
@@ -587,13 +585,11 @@ def test_load_category_data(output_dir_with_category_data):
     assert len(df) == 2
     assert "name" in df.columns
     assert "Kernel Time (µs)_sum" in df.columns
-    assert meta["platform"] == "MI300X"
     assert meta["peak_mem_bw_tbs"] == 5.3
+    assert meta["output_dir"] == output_dir_with_category_data
 
 
 def test_load_category_data_missing_csv_raises(tmp_path):
-    (tmp_path / "metadata").mkdir(parents=True)
-    (tmp_path / "metadata" / "gemm_metadata.json").write_text("{}")
     with pytest.raises(FileNotFoundError, match="Category CSV not found"):
         load_category_data(str(tmp_path), "gemm")
 
@@ -2786,11 +2782,17 @@ def test_orchestrator_main_writes_manifest(orchestrator_prepared_output):
     # cpu_idle is always inserted first as a system-tier category.
     assert "cpu_idle" in names
     assert manifest["gpu_utilization"]["total_time_ms"] > 0
-    assert manifest["focus_csv_dir"] == os.path.join(
-        orchestrator_prepared_output, "perf_report_csvs"
-    )
+    assert manifest["focus_csv_dir"] == "perf_report_csvs"
+    assert set(manifest["platform_specs"]) == {
+        "peak_mem_bw_tbs",
+        "max_achievable_tflops",
+        "memory_gb",
+    }
     assert manifest["capture_folder"] is None
     assert "focus_job" not in manifest
+    assert os.path.isfile(
+        os.path.join(orchestrator_prepared_output, "cache", "model_info.json")
+    )
 
 
 def test_orchestrator_main_exports_category_data(orchestrator_prepared_output):
@@ -2801,22 +2803,6 @@ def test_orchestrator_main_exports_category_data(orchestrator_prepared_output):
     with open(os.path.join(cat_data, "fusion_candidates.json")) as f:
         fusion = json.load(f)
     assert isinstance(fusion, list)
-
-
-def test_orchestrator_main_writes_metadata_with_time_breakdown(
-    orchestrator_prepared_output,
-):
-    meta_path = os.path.join(
-        orchestrator_prepared_output, "metadata", "gemm_metadata.json"
-    )
-    assert os.path.isfile(meta_path)
-    with open(meta_path) as f:
-        meta = json.load(f)
-    assert meta["platform"] == "MI300X"
-    assert meta["category_name"] == "gemm"
-    # Step 5.5 augments each category metadata with a time_breakdown block.
-    assert "time_breakdown" in meta
-    assert "gpu_kernel_time_ms" in meta["time_breakdown"]
 
 
 # ----- Fixtures -----
@@ -3492,8 +3478,8 @@ def test_prepare_model_identification_standalone(tmp_path, perf_csv_dir):
     dst = os.path.join(out, "perf_report_csvs", "unified_perf_summary.csv")
     pd.read_csv(src).to_csv(dst, index=False)
     assert prepare_model_identification_data(out) is True
-    assert os.path.isfile(os.path.join(out, "metadata", "condensed_op_info.csv"))
-    nn = open(os.path.join(out, "metadata", "nn_modules.txt")).read()
+    assert os.path.isfile(os.path.join(out, "cache", "condensed_op_info.csv"))
+    nn = open(os.path.join(out, "cache", "nn_modules.txt")).read()
     assert "LlamaMLP" in nn
 
 
@@ -4148,7 +4134,7 @@ def test_orchestrator_main_missing_csv_exits(tmp_path):
 
 def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
 
-    out = str(tmp_path)
+    out = str(tmp_path / "run")
     _write_minimal_orchestrator_csvs(out, comparative=True)
     # Trace 2 fuses the add into the GEMM, so trace 1 has a fusion gap.
     pd.DataFrame(
@@ -4198,14 +4184,16 @@ def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
     )
     assert manifest["comparison_scope"] == "comparative"
     assert "trace2_gpu_utilization" in manifest
-    assert manifest["trace2_csv_dir"] == os.path.join(out, "perf_report_trace2_csvs")
-    assert os.path.isfile(os.path.join(out, "metadata", "trace2_gpu_utilization.json"))
+    assert manifest["trace2_csv_dir"] == "perf_report_trace2_csvs"
     candidates = json.loads(
         open(os.path.join(out, "category_data", "fusion_candidates.json")).read()
     )
     assert [(c["fusion_kind"], c["delta"]) for c in candidates] == [
         ("gemm_epilogue", 1)
     ]
+    moved = tmp_path / "moved"
+    shutil.move(out, moved)
+    assert perf_report_csv_dir(str(moved)) == str(moved / "perf_report_trace1_csvs")
 
 
 @pytest.mark.parametrize("merge_ok", [True, False], ids=["merged", "merge_failed"])
@@ -4364,7 +4352,7 @@ def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
 
     manifest = json.load(open(os.path.join(cat_dir, "category_manifest.json")))
     assert manifest["focus_job"] == "prefill_0"
-    assert manifest["focus_csv_dir"] == os.path.join(out, "perf_report_prefill_0_csvs")
+    assert manifest["focus_csv_dir"] == "perf_report_prefill_0_csvs"
     util = manifest["gpu_utilization"]
     assert util["total_time_ms"] == 1500.0
     assert list(util["nodes"]) == ["prefill_0", "decode_0"]
@@ -4405,62 +4393,6 @@ class TestOrchestratorPhase11:
             assert exc.value.code == 1
         finally:
             sys.argv = old_argv
-
-    def test_orchestrator_bottleneck_top5_fallback(self, tmp_path, monkeypatch):
-
-        out = str(tmp_path / "orch_out")
-        _write_minimal_orchestrator_csvs(out, comparative=False)
-        csv_dir = os.path.join(out, "perf_report_csvs")
-        rows = []
-        for i in range(8):
-            rows.append(
-                {
-                    "name": f"aten::op_{i}",
-                    "op category": "GEMM",
-                    "Kernel Time (µs)_sum": float(100 + i),
-                    "total_duration_us": 60000.0,
-                    "kernel_details_summary": f"[{{'name': 'k{i}'}}]",
-                    "Data Moved (MB)": 1.0,
-                    "perf_params": "{}",
-                    "Input Dims": "[[2,3]]",
-                }
-            )
-        pd.DataFrame(rows).to_csv(
-            os.path.join(csv_dir, "unified_perf_summary.csv"), index=False
-        )
-        pd.DataFrame({"name": ["aten::op_0"], "op category": ["GEMM"]}).to_csv(
-            os.path.join(csv_dir, "ops_summary.csv"), index=False
-        )
-
-        class _FakeTPA:
-            @classmethod
-            def from_file(cls, *args, **kwargs):
-                k = _kernel_event(0, "k0", dur=100)
-                mod = {
-                    "name": "aten::mm",
-                    "_category": "aten",
-                    "gpu_events": [0],
-                    "ts": 0,
-                }
-                tree = _StubTree([mod, k], {0: k})
-                return _StubAnalyzer(tree)
-
-        monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTPA)
-        old_argv = sys.argv
-        sys.argv = [
-            "orchestrator_prepare",
-            "--trace-path",
-            NORM_TRACE,
-            "--platform",
-            "MI300X",
-            "--output-dir",
-            out,
-        ]
-        try:
-            op.main()
-        finally:
-            sys.argv = old_argv
-        assert os.path.isdir(os.path.join(out, "category_data"))
 
 
 class TestOrchestratorPhase12B:
@@ -4562,64 +4494,6 @@ class TestOrchestratorPhase12B:
             open(os.path.join(out, "category_data", "multi_kernel_data.json")).read()
         )
         assert "overlap_analysis" in data
-
-    def test_sync_bottleneck_detection(self, tmp_path, monkeypatch):
-        rows = [
-            {
-                "name": "aten::slow_sync",
-                "op category": "GEMM",
-                "Kernel Time (µs)_sum": 100.0,
-                "total_duration_us": 5000000.0,
-                "kernel_details_summary": "[{'name': 'k0'}]",
-                "Data Moved (MB)": 1.0,
-                "perf_params": "{}",
-                "Input Dims": "[[2,3]]",
-            }
-        ]
-        out = self._run_orch(tmp_path, monkeypatch, rows)
-        meta_dir = os.path.join(out, "metadata")
-        gemm_meta = os.path.join(meta_dir, "gemm_metadata.json")
-        assert os.path.isfile(gemm_meta)
-
-
-@pytest.mark.parametrize("with_manifest", [True, False])
-def test_kernel_fusion_main_writes_metrics(tmp_path, with_manifest):
-
-    out = str(tmp_path)
-    _write_minimal_orchestrator_csvs(out, comparative=False)
-    cat_dir = os.path.join(out, "category_data")
-    os.makedirs(cat_dir, exist_ok=True)
-    with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
-        json.dump([_fusion_candidate().to_dict()], f)
-    if with_manifest:
-        with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
-            json.dump(
-                {
-                    "platform": "MI300X",
-                    "comparison_scope": "standalone",
-                    "focus_csv_dir": os.path.join(out, "perf_report_csvs"),
-                    "gpu_utilization": {"total_time_ms": 1000.0},
-                },
-                f,
-            )
-        meta_dir = os.path.join(out, "metadata")
-        os.makedirs(meta_dir)
-        json.dump(
-            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp32": 100}},
-            open(os.path.join(meta_dir, "gemm_metadata.json"), "w"),
-        )
-
-    old_argv = sys.argv
-    sys.argv = ["kernel_fusion_analysis", "--output-dir", out]
-    try:
-        kfa.main()
-    finally:
-        sys.argv = old_argv
-    metrics = json.loads(
-        open(os.path.join(out, "category_data", "kernel_fusion_metrics.json")).read()
-    )
-    assert metrics["status"] == "OK"
-    assert metrics["candidate_count"] == 1
 
 
 class TestOrchestratorPhase6:
@@ -4751,16 +4625,11 @@ class TestOrchestratorPhase6:
 def test_comparative_fusion_producer_to_rows(
     tmp_path, monkeypatch, platform2, same_platform
 ):
-    t1_dir, t2_dir, cat_dir, meta_dir = (
+    t1_dir, t2_dir, cat_dir = (
         tmp_path / d
-        for d in (
-            "perf_report_trace1_csvs",
-            "perf_report_trace2_csvs",
-            "category_data",
-            "metadata",
-        )
+        for d in ("perf_report_trace1_csvs", "perf_report_trace2_csvs", "category_data")
     )
-    for d in (t1_dir, t2_dir, cat_dir, meta_dir):
+    for d in (t1_dir, t2_dir, cat_dir):
         d.mkdir()
     pd.DataFrame(
         {
@@ -4814,19 +4683,18 @@ def test_comparative_fusion_producer_to_rows(
     pd.DataFrame([{"name": "aten::mm", **_CSV_ARGS, **perf_cols}]).to_csv(
         t2_dir / "unified_perf_summary.csv", index=False
     )
-    (meta_dir / "x_metadata.json").write_text(
-        json.dumps(
-            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1000}}
-        )
-    )
     (cat_dir / "category_manifest.json").write_text(
         json.dumps(
             {
                 "comparison_scope": "comparative",
                 "platform": "GPU_A",
                 "platform2": platform2,
-                "trace2_csv_dir": str(t2_dir),
-                "focus_csv_dir": str(t1_dir),
+                "platform_specs": {
+                    "peak_mem_bw_tbs": 5.3,
+                    "max_achievable_tflops": {"matrix_bf16": 1000},
+                },
+                "trace2_csv_dir": t2_dir.name,
+                "focus_csv_dir": t1_dir.name,
                 "gpu_utilization": {"total_time_ms": 1000.0},
                 "trace2_gpu_utilization": {"total_time_ms": 800.0},
             }
