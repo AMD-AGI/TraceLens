@@ -3426,6 +3426,38 @@ def test_validate_report_r5_compute_block_needs_its_data_table():
     ]
 
 
+def test_validate_report_r5_every_compute_p_item_needs_a_block():
+    """A Detailed Analysis without compute blocks would leave analysis.json with no kernels."""
+    summary = (
+        "## Compute Kernel Optimizations\n\n### Top Operations\n\n"
+        "### 🔴 P1: GEMM (hipBLASLt)\n\nprose\n\n### 🟡 P2: Attention\n\nprose\n\n"
+    )
+    table = "\n**Data:**\n\n| Operation | Args |\n|---|---|\n| aten::mm | (4, 8) |\n"
+    block_1 = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n#### P1: GEMM\n" + table
+    )
+    block_2 = (
+        "<!-- reasoning-candidate tier=compute rank=2 -->\n#### P2: Attention\n" + table
+    )
+    detailed = "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+
+    assert (
+        _validate_report_reasoning_candidates(summary + detailed + block_1 + block_2)
+        == []
+    )
+    expected = (
+        "R5: Compute Kernel Optimizations has 2 P-item headings but Compute Kernel "
+        "Insights has {} reasoning-candidate tier=compute blocks; add one block per "
+        "P-item, each with its **Data:** table"
+    )
+    assert _validate_report_reasoning_candidates(summary + detailed) == [
+        expected.format(0)
+    ]
+    assert _validate_report_reasoning_candidates(summary + detailed + block_1) == [
+        expected.format(1)
+    ]
+
+
 def test_extract_detailed_analysis_subsection():
     content = "## Detailed Analysis\n\n### Compute Kernel Insights\n\n#### P1: x\nbody\n### Other\n"
     sub = _extract_detailed_analysis_subsection(content, "### Compute Kernel Insights")
