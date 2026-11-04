@@ -14,7 +14,12 @@ from collections.abc import Callable
 from datetime import datetime
 
 from TraceLens.ModelUtils.ast_analyze import _classify_role, _label_for
-from TraceLens.ModelUtils.extract import ArchitectureSpec
+from TraceLens.ModelUtils.blocks import RepeatedGroup
+from TraceLens.ModelUtils.extract import (
+    ArchitectureSpec,
+    ordered_repeated_children,
+    repeated_group_is_pipeline,
+)
 from TraceLens.ModelUtils.github import is_github_url, parse_github_url
 
 from TraceLens.Visualizer.model_explorer_export.overview import format_forward_sequence
@@ -126,17 +131,73 @@ def _display_layer_repeat_subline(line: str) -> str:
     return f"{attr_name} → {display}{rest}"
 
 
+def _child_count_at(child: RepeatedGroup, pos: int) -> int:
+    if child.per_index_counts is not None and pos < len(child.per_index_counts):
+        return child.per_index_counts[pos]
+    return child.count
+
+
+def _stage_part(child: RepeatedGroup, count: int) -> str:
+    if repeated_group_is_pipeline(child):
+        return " → ".join(child.element_classes[:count])
+    return f"{count}× {child.element_class}"
+
+
+def _nested_stage_lines(spec: ArchitectureSpec) -> list[str]:
+    """One block per non-uniform stage tree: the banner, then each position.
+
+    A position lists its leading pipeline (stem-style downsample) before the
+    repeated body, in the same order the graph emits them.
+    """
+    lines: list[str] = []
+
+    def emit(group: RepeatedGroup, stage_path: tuple[int, ...]) -> None:
+        if not group.children:
+            if not stage_path:
+                lines.append(f"Stages: {group.count}× {group.element_class}")
+            return
+        if not stage_path:
+            lines.append(f"Stages: {group.count}× {group.element_class}")
+        children = ordered_repeated_children(spec, group)
+        for pos in range(group.count):
+            parts: list[str] = []
+            for child in children:
+                count = _child_count_at(child, pos)
+                if count > 0:
+                    parts.append(_stage_part(child, count))
+            if not parts:
+                continue
+            index = ".".join(str(part) for part in (*stage_path, pos))
+            lines.append(f"{_FACT_SUBLINE_INDENT}stage {index}: " + ", ".join(parts))
+            for child in children:
+                if child.children and _child_count_at(child, pos) > 0:
+                    emit(child, (*stage_path, pos))
+
+    for root in spec.nested_module_groups:
+        emit(root, ())
+    return lines
+
+
 def _fact_lines(spec: ArchitectureSpec) -> list[str]:
     """Build fact-sheet bullet lines from architecture metadata."""
-    lines = [
-        f"Model type: {spec.model_type}",
-        f"Decoder: {spec.decoder_type}",
-        f"Attention: {spec.attention_type}",
-        f"Positional: {spec.positional_encoding}",
-        f"Norm: {spec.norm_type} ({spec.norm_placement})",
-    ]
+    lines = [f"Model type: {spec.model_type}"]
+    if spec.nested_module_groups:
+        lines.extend(_nested_stage_lines(spec))
+    selected = _selected_parallelism(spec)
+    if selected:
+        lines.append(selected)
+    lines.extend(
+        [
+            f"Decoder: {spec.decoder_type}",
+            f"Attention: {spec.attention_type}",
+            f"Positional: {spec.positional_encoding}",
+            f"Norm: {spec.norm_type} ({spec.norm_placement})",
+        ]
+    )
     if spec.decoder_class:
         lines.append(f"Decoder class: {spec.decoder_class}")
+    if spec.device_sensitive:
+        lines.append(f"Device: {spec.runtime_regime.device}")
     if spec.checkpoint_source:
         lines.append(_format_source_line("Checkpoint", spec.checkpoint_source))
     if spec.github_source:
@@ -169,12 +230,38 @@ def _fact_lines(spec: ArchitectureSpec) -> list[str]:
         lines.append(f"Layer mix: {spec.layer_mix}")
     if spec.forward_sequence:
         lines.append(f"Forward: {format_forward_sequence(spec, arrow=' -> ')}")
+    lines.extend(_parallel_lines(spec))
     for note in spec.moe_notes[:2]:
         lines.append(f"MoE: {note}")
     for note in spec.layer_notes[:1]:
         lines.append(f"Layers: {note}")
     lines.extend(_analysis_note_lines(spec))
     return lines
+
+
+def _selected_parallelism(spec: ArchitectureSpec) -> str | None:
+    """The degrees the user asked for, shown directly under the model type."""
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is None:
+        return None
+    degree = layout.degree
+    parts = []
+    if degree.tp > 1:
+        parts.append(f"TP {degree.tp}")
+    if degree.pp > 1:
+        parts.append(f"PP {degree.pp}")
+    if degree.ep > 1:
+        parts.append(f"EP {degree.ep}")
+    if not parts:
+        return None
+    return "Parallelism: " + ", ".join(parts)
+
+
+def _parallel_lines(spec: ArchitectureSpec) -> list[str]:
+    layout = getattr(spec, "parallel_layout", None)
+    if layout is None:
+        return []
+    return list(layout.fact_lines())
 
 
 def _format_analysis_note(spec: ArchitectureSpec, note: str) -> str:

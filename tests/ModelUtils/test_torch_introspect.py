@@ -10,16 +10,26 @@ These exercise the FX-inventory → ComputationGraph → Model Explorer payload
 transforms without importing torch, so they run under the torch-free CI.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from TraceLens.ModelUtils.torch_introspect import (
     FxNodeInfo,
+    InputSpec,
     _dotted_prefixes,
+    _export_output_roles,
     computation_graph_from_fx_inventory,
+    symbolic_example_sizes,
+)
+from TraceLens.Visualizer.model_explorer_export.torch_payload import (
     explorer_graph_from_fx_inventory,
     payload_from_fx_inventory,
 )
-from TraceLens.Visualizer.model_explorer_export.cli import parse_input_shape
+from TraceLens.Visualizer.model_explorer_export.cli import (
+    parse_input_shape,
+    parse_input_spec,
+)
 
 
 def _sample_inventory():
@@ -107,6 +117,64 @@ def test_explorer_graph_applies_shapes_and_namespaces():
     assert edge["targetNodeInputId"] == "result"
 
 
+def test_explorer_graph_preserves_structured_persistent_state_metadata():
+    inventory = [
+        FxNodeInfo(
+            name="state",
+            op="placeholder",
+            label="state",
+            shape=(2, 8),
+            dtype="float32",
+            state_reads=("cache.0",),
+        ),
+        FxNodeInfo(
+            name="next_state",
+            op="call_function",
+            label="update",
+            inputs=["state"],
+            shape=(2, 4),
+            dtype="bfloat16",
+            state_writes=("cache.0", "auxiliary"),
+        ),
+        FxNodeInfo(name="out", op="output", label="Output", inputs=["next_state"]),
+    ]
+
+    nodes = {
+        node["id"]: node
+        for node in explorer_graph_from_fx_inventory(inventory)["nodes"]
+    }
+    assert [
+        attr["value"] for attr in nodes["state"]["attrs"] if attr["key"] == "state_read"
+    ] == ["cache.0"]
+    assert [
+        attr["value"]
+        for attr in nodes["next_state"]["attrs"]
+        if attr["key"] == "state_write"
+    ] == ["cache.0", "auxiliary"]
+
+
+def test_export_output_roles_separate_mutations_from_user_outputs():
+    def spec(kind, name, target=None):
+        return SimpleNamespace(
+            kind=SimpleNamespace(name=kind),
+            arg=SimpleNamespace(name=name),
+            target=target,
+        )
+
+    writes, user_outputs = _export_output_roles(
+        SimpleNamespace(
+            output_specs=(
+                spec("BUFFER_MUTATION", "updated_cache", "cache"),
+                spec("USER_INPUT_MUTATION", "updated_state", "state"),
+                spec("USER_OUTPUT", "logits"),
+            )
+        )
+    )
+
+    assert writes == {"updated_cache": ("cache",), "updated_state": ("state",)}
+    assert user_outputs == {"logits"}
+
+
 def test_include_shapes_false_omits_shape_attrs():
     graph = explorer_graph_from_fx_inventory(
         _sample_inventory(), graph_id="demo", include_shapes=False
@@ -134,3 +202,38 @@ def test_parse_input_shape_valid_and_invalid():
         parse_input_shape("")
     with pytest.raises(ValueError):
         parse_input_shape("2,abc")
+
+
+def test_parse_input_spec_mixes_symbolic_and_static_dims():
+    assert parse_input_spec("ids=B,S:int64") == InputSpec("ids", ("B", "S"), "int64")
+    assert parse_input_spec(" x = B , 3 , 224 ") == InputSpec("x", ("B", 3, 224))
+    for bad in ("B,S", "=B,S", "ids=", "ids=B,,S", "ids=B,-1", "1x=B"):
+        with pytest.raises(ValueError):
+            parse_input_spec(bad)
+
+
+def test_symbolic_example_sizes_are_distinct_and_never_0_or_1():
+    specs = [InputSpec("ids", ("B", "S")), InputSpec("links", ("B", "S", 48, "K"))]
+    sizes = symbolic_example_sizes(specs)
+    assert list(sizes) == ["B", "S", "K"]
+    assert len(set(sizes.values())) == 3
+    assert min(sizes.values()) > 1
+
+
+def test_nodes_no_input_reaches_are_constant():
+    inventory = [
+        FxNodeInfo(name="ids", op="placeholder", label="ids"),
+        FxNodeInfo(name="freqs", op="call_function", label="arange"),
+        FxNodeInfo(name="inv", op="call_function", label="pow", inputs=["freqs"]),
+        FxNodeInfo(
+            name="positions", op="call_function", label="arange", reads_sizes=True
+        ),
+        FxNodeInfo(
+            name="angles", op="call_function", label="mul", inputs=["positions", "inv"]
+        ),
+        FxNodeInfo(name="emb", op="call_function", label="embedding", inputs=["ids"]),
+        FxNodeInfo(name="out", op="output", label="Output", inputs=["emb"]),
+    ]
+    graph = computation_graph_from_fx_inventory(inventory)
+    constant = {node.key for node in graph.nodes if node.constant}
+    assert constant == {"freqs", "inv"}

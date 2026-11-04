@@ -19,10 +19,7 @@ from TraceLens.util import (
     merge_intervals,
     suppress_native_hlo_logs,
 )
-from TraceLens.Agent.Analysis.category_analyses import (
-    analysis_utils as au,
-    kernel_fusion_analysis as kfa,
-)
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
 
 TK = TraceEventUtils.TraceKeys
 TP = TraceEventUtils.TracePhases
@@ -1439,7 +1436,7 @@ def test_pftrace_parser_validation_errors(tmp_path):
 
 
 class TestAnalysisUtilsPhase13:
-    def test_efficiency_memory_bound_and_fusion_map_empty(self, tmp_path):
+    def test_efficiency_memory_bound_and_fusion_keys_empty(self, tmp_path):
         row = pd.Series(
             {
                 "FLOPS/Byte": 0.5,
@@ -1450,10 +1447,10 @@ class TestAnalysisUtilsPhase13:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_mem_bw=5300
+            row, max_achievable_tflops={"matrix_fp16": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "memory"
-        assert au._load_fusion_map(str(tmp_path)) == {}
+        assert au._load_fusion_op_keys(str(tmp_path)) == set()
 
 
 class TestAnalysisUtilsPhase7:
@@ -1468,7 +1465,7 @@ class TestAnalysisUtilsPhase7:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"matrix_fp16": 100.0}, peak_mem_bw=5300
+            row, max_achievable_tflops={"matrix_fp16": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "compute"
 
@@ -1489,18 +1486,7 @@ class TestAnalysisUtilsPhase7:
                 }
             )
         )
-        loaded = au._load_fusion_map(str(tmp_path))
-        assert isinstance(loaded, dict)
-
-        ops = [
-            {
-                "kernel_names": ["a", "b"],
-                "base_name": "Block",
-                "instance_count": 3,
-                "kernel_type_signature": ["GEMM", "elementwise"],
-            }
-        ]
-        assert len(kfa._filter_and_dedup(ops)) >= 1
+        assert au._load_fusion_op_keys(str(tmp_path)) == set()
 
 
 class TestAnalysisUtilsPhase8:

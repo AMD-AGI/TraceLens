@@ -185,6 +185,22 @@ def select_related_tests(repo_root, changed_paths):
     return Selection("selected", existing)
 
 
+def exclude_test_prefixes(selection, prefixes):
+    """Remove test roots owned by dedicated runners from a selected test set.
+
+    ``all`` remains unchanged: its caller must run the full core suite.  A
+    selected set with no remaining paths becomes ``none``, allowing that
+    runner to be skipped rather than treating its empty list as an error.
+    """
+    if selection.mode != "selected":
+        return selection
+    normalized = tuple(_normalize(prefix).rstrip("/") + "/" for prefix in prefixes)
+    files = tuple(
+        path for path in selection.test_files if not path.startswith(normalized)
+    )
+    return Selection("selected", files) if files else Selection("none", ())
+
+
 def git_changed_paths(repo_root, base, head="HEAD"):
     """Paths changed between the merge-base of *base*/*head* and *head*."""
     result = subprocess.run(
@@ -237,6 +253,12 @@ def main(argv=None):
     )
     parser.add_argument("--all", action="store_true", help="Select the full suite")
     parser.add_argument(
+        "--exclude-test-prefix",
+        action="append",
+        default=[],
+        help="Test-path prefix owned by a dedicated runner; repeatable",
+    )
+    parser.add_argument(
         "--github-output", type=Path, help="Append mode and test_files for Actions"
     )
     parser.add_argument(
@@ -260,6 +282,7 @@ def main(argv=None):
         if not changed and not args.base and args.changed_from is None:
             parser.error("pass --all, --base, --changed-file, or --changed-from")
         selection = select_related_tests(args.repo_root, changed)
+    selection = exclude_test_prefixes(selection, args.exclude_test_prefix)
 
     print(f"mode={selection.mode}")
     for path in selection.test_files:

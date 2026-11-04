@@ -130,11 +130,11 @@ def extract_kernel_sequence(by_cat):
             "ts": k["ts"],
             "args": k.get("args", {}),
             "stream_id": get_stream_id(k),
-            # Single-trace path: _stamp_raw_uid() sets "_gpu_op_uid" in-memory.
-            # Split path: split_inference_trace_annotation.py (invoked with
-            # --emit-gpu-op-uid) already persisted "gpu_op_uid" onto the event
-            # before writing the per-region file, so it survives the subprocess
-            # boundary as literal JSON content.
+            # Each event is tagged with its index in the source traceEvents
+            # array (the TraceToTree/TreePerfAnalyzer UID scheme). Single-trace
+            # path: _stamp_raw_uid() sets "_gpu_op_uid" in-memory. Split path:
+            # the same index is stamped before splitting (emit_gpu_op_uid=True)
+            # so it rides into each per-region file and survives the reload.
             "gpu_op_uid": k.get("_gpu_op_uid", k.get("gpu_op_uid")),
         }
         for k in combined
@@ -304,7 +304,9 @@ def main():  # pragma: no cover
 
     # --- Auto-detect vLLM annotation regions (unless suppressed) -----------
     if not args.no_split:
-        split_result = split_vllm_trace(args.trace)
+        # Opt in to gpu_op_uid stamping so split-region kernels carry a
+        # unique, source-aligned id (required for scoreable semantic diffs).
+        split_result = split_vllm_trace(args.trace, emit_gpu_op_uid=True)
         if split_result:
             output_dir = args.output or "."
             _write_split_regions(split_result, args.trace, output_dir)

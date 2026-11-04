@@ -976,6 +976,21 @@ def test_check_marker_top_ops_row_missing_attrs(tmp_path):
     assert "high" in rows[0]["details"]
 
 
+def test_check_marker_top_ops_checks_every_block(tmp_path):
+    text = (
+        "<!-- impact-begin kind=top_ops node=n0 -->\n"
+        "<!-- top-ops-row name=foo low=1 high=3 -->\n"
+        "<!-- impact-end -->\n"
+        "<!-- impact-begin kind=top_ops node=n1 -->\n"
+        "<!-- top-ops-row name=bar low=1 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_top_ops(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "high" in rows[0]["details"]
+
+
 def test_check_marker_top_ops_no_analysis_md(tmp_path):
     rows = workflow._check_marker_top_ops(str(tmp_path))
     assert rows[0]["result"] == "FAIL"
@@ -1021,13 +1036,19 @@ def test_check_marker_detail_estimates_complete(tmp_path):
         "## Detailed Analysis\n"
         "### Compute Kernel Insights\n"
         "#### Kernel P1: First\n"
-        "<!-- impact-begin kind=detail_estimate low=1 high=5 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
+        "body\n"
+        "<!-- impact-end -->\n"
+        "### Kernel Fusion Insights\n"
+        "#### Fusion P1: First\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n"
         "<!-- impact-end -->\n"
     )
     out = _write_report(tmp_path, text)
     rows = workflow._check_marker_detail_estimates(out)
-    assert rows[0]["result"] == "PASS"
+    assert [r["result"] for r in rows] == ["PASS", "PASS"]
+    assert rows[1]["index"] == "marker_eval_3_fusion_P1"
 
 
 def test_check_marker_detail_estimates_sentinel_passes(tmp_path):
@@ -1632,7 +1653,7 @@ def _valid_output_dir(tmp_path, comparison_scope="standalone"):
         "### Compute Kernel Insights\n"
         "<!-- reasoning-candidate tier=compute rank=1 -->\n"
         "#### Kernel P1: Fix gemm\n"
-        "<!-- impact-begin kind=detail_estimate low=1 high=5 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n<!-- impact-end -->\n"
         "## Appendix\n"
         "Model: TestNet dense 7B fp16\n"

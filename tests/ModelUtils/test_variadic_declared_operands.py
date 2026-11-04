@@ -6,6 +6,10 @@
 
 """A variadic op counts the operands it DECLARES, not a ceiling.
 
+An ``@op_l`` id in this file is a name this test gives a node. It is not a
+lookup into an upstream modeling file.
+
+
 ``_needs_another_tensor_operand`` decides whether an op still has an operand
 slot its edges have not filled, by comparing its predecessors against the
 operand ceiling its signature allows. ``torch.cat`` and ``torch.stack`` have no

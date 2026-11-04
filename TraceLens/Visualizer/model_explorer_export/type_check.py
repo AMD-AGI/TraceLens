@@ -29,6 +29,7 @@ import re
 from typing import Any
 
 from TraceLens.ModelUtils.ast_analyze import PHI_CLASS, PHI_LABEL
+from TraceLens.ModelUtils.kernel_pipeline import _ALLOCATION_CALLS
 from TraceLens.ModelUtils.shape_inference import (
     _normalize_op_name,
     _operand_ceiling,
@@ -634,7 +635,16 @@ def _kernel_interface_tile_warnings(nodes: list[dict[str, Any]]) -> list[str]:
                 f"no port of its own cannot be told from the others -- give it a "
                 f"kernel input port naming it."
             )
-        readers = consumers.get(str(node.get("id")), [])
+        # An allocation call (``new_empty``, ``new_zeros``, ...) borrows the
+        # source's dtype/device as a template for a buffer a LATER kernel
+        # writes into; it never reads the source's value, so several such
+        # allocations off the one kernel are not several of its published
+        # values competing to be told apart.
+        readers = [
+            reader
+            for reader in consumers.get(str(node.get("id")), [])
+            if _node_attr_value(reader, "raw_op") not in _ALLOCATION_CALLS
+        ]
         untiled = [
             reader
             for reader in readers
@@ -695,6 +705,41 @@ def _phi_forwards_an_arm_warnings(nodes: list[dict[str, Any]]) -> list[str]:
             f"{[(str(label), shape) for label, shape in arms]}. A phi computes "
             f"nothing; a shape no arm has is one nothing produces."
         )
+    return warnings
+
+
+def warn_degenerate_mutually_exclusive_branches(
+    nodes: list[dict[str, Any]],
+) -> list[str]:
+    """Warn when a mutually exclusive branch no longer has two live inputs.
+
+    A branch joins alternatives. One live input means the other inputs are
+    dead and the branch should already have been removed. A boundary tile
+    that only carries the branch's name is not the branch.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    warnings: list[str] = []
+    for node in nodes:
+        label = str(node.get("label") or "")
+        identity = str(_node_attr_value(node, "class_name") or "")
+        if PHI_LABEL not in (label, identity) and PHI_CLASS not in (label, identity):
+            continue
+        if _node_attr_value(node, "synthetic"):
+            continue
+        live = [
+            str(edge.get("sourceNodeId") or "")
+            for edge in node.get("incomingEdges") or []
+            if str(edge.get("sourceNodeId") or "") in by_id
+        ]
+        if len(live) > 1:
+            continue
+        warnings.append(
+            f"{node.get('id')}: Mutually exclusive branch has {len(live)} live "
+            f"input(s); it must have more than one. Remove it when every other "
+            f"input is dead."
+        )
+    for line in warnings:
+        _log.warning("graph generation: %s", line)
     return warnings
 
 
@@ -1367,6 +1412,9 @@ def integrity_check_graph_nodes(
             or _is_synthetic_output(node)
             or _is_loop_carried(node)
             or node_id == "@output"
+            # A pipeline recv records a transfer into the next stage. That stage
+            # is the same folded stack tile, so the recv is a sink on purpose.
+            or _node_attr_value(node, "synthetic") == "communication_sink"
         )
         if not exempt_sink and node_id not in consumed:
             warnings.append(

@@ -210,5 +210,5 @@ class TestTheSuiteOnlyAssertsOnPinnedModels:
                     unpinned.add(f"{model_id}  ({path.relative_to(_TESTS)})")
         assert not unpinned, (
             "these tests read a hub model at no fixed revision; add each to "
-            "TraceLens/ModelUtils/model_pins.py:\n  " + "\n  ".join(sorted(unpinned))
+            "tests/model_pins.py:\n  " + "\n  ".join(sorted(unpinned))
         )

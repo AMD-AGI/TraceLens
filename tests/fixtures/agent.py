@@ -9,6 +9,8 @@
 import os
 import pandas as pd
 
+from TraceLens.Reporting.generate_perf_report_from_config import RESOLVED_CONFIG_NAME
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 
@@ -144,11 +146,16 @@ def _kernel_event(uid, name, dur=1000):
     return {"name": name, "dur": dur, "_category": "kernel", "gpu_events": []}
 
 
+def _write_resolved_config(base):
+    _write(os.path.join(base, RESOLVED_CONFIG_NAME), "{}")
+
+
 def _write_minimal_orchestrator_csvs(base, comparative=False):
     t1 = os.path.join(
         base, "perf_report_trace1_csvs" if comparative else "perf_report_csvs"
     )
     os.makedirs(t1)
+    _write_resolved_config(base)
     pd.DataFrame(
         {
             "type": ["total_time", "computation_time", "idle_time"],

@@ -173,7 +173,39 @@ def test_a_store_into_persistent_state_is_recorded() -> None:
         for detail in op.details
         if str(detail).startswith("stores:")
     ]
-    assert stored == ["stores: buffer"], [op.details for op in ops]
+    assert stored == ["stores: buffer[name]"], [op.details for op in ops]
+
+
+def test_one_producer_can_store_multiple_persistent_states() -> None:
+    source = """
+class Cache:
+    def update(self, value):
+        self.primary = self.secondary = value.clone()
+"""
+    from TraceLens.ModelUtils.ast_analyze import named_method_operations
+
+    analysis = analyze_sources({"m.py": textwrap.dedent(source)})
+    ops = named_method_operations(analysis.class_registry["Cache"], "update")
+    stored = [
+        detail
+        for op in ops
+        for detail in op.details
+        if str(detail).startswith("stores:")
+    ]
+    assert stored == ["stores: primary", "stores: secondary"]
+
+
+def test_augmented_assignment_to_persistent_state_is_recorded() -> None:
+    source = """
+class Cache:
+    def update(self, value):
+        self.total += value
+"""
+    from TraceLens.ModelUtils.ast_analyze import named_method_operations
+
+    analysis = analyze_sources({"m.py": textwrap.dedent(source)})
+    ops = named_method_operations(analysis.class_registry["Cache"], "update")
+    assert any("stores: total" in op.details for op in ops)
 
 
 class TestWhatTheCallHandsIn:

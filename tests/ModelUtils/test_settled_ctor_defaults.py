@@ -114,3 +114,54 @@ class B:
 """
         settled = _settled_ctor_defaults(ast.parse(source), {})
         assert "flag" not in settled.get("A", {}), settled
+
+
+class TestANamedArgumentResolvedFromTheCaller:
+    """A caller rarely passes a literal; it threads a value it just settled.
+
+    MiniMax's decoder passes ``is_sparse_attention_layer=is_sparse_attention_layer``
+    into its attention -- a NAME, not a literal -- where ``is_sparse_attention_layer``
+    is itself settled one line above from the config. That is exactly as strong a
+    claim on the parameter's value as nobody overriding its default; it should
+    resolve the same way.
+    """
+
+    SOURCE = """
+class Attention(nn.Module):
+    def __init__(self, config, is_sparse=False):
+        self.is_sparse = is_sparse
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, config):
+        is_sparse_layer = config.use_sparse_attention
+        self.self_attn = Attention(config, is_sparse=is_sparse_layer)
+"""
+
+    def test_it_resolves_through_the_callers_own_local(self) -> None:
+        settled = _settled_ctor_defaults(
+            ast.parse(self.SOURCE), {"use_sparse_attention": True}
+        )
+        assert settled["Attention"]["is_sparse"] is True
+
+    def test_an_unresolvable_caller_value_withdraws_the_claim(self) -> None:
+        settled = _settled_ctor_defaults(ast.parse(self.SOURCE), {})
+        assert "is_sparse" not in settled.get("Attention", {})
+
+    def test_two_call_sites_disagreeing_withdraw_the_claim(self) -> None:
+        source = """
+class Attention(nn.Module):
+    def __init__(self, config, is_sparse=False):
+        self.is_sparse = is_sparse
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, config):
+        is_sparse_layer = config.use_sparse_attention
+        self.self_attn = Attention(config, is_sparse=is_sparse_layer)
+        self.cross_attn = Attention(config, is_sparse=True)
+"""
+        settled = _settled_ctor_defaults(
+            ast.parse(source), {"use_sparse_attention": False}
+        )
+        assert "is_sparse" not in settled.get("Attention", {})

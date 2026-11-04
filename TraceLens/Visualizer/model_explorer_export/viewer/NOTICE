@@ -1,0 +1,30 @@
+AI Edge Model Explorer Visualizer
+https://www.npmjs.com/package/ai-edge-model-explorer-visualizer
+https://github.com/google-ai-edge/model-explorer
+
+TraceLens loads ai-edge-model-explorer-visualizer 0.1.2 the way that
+package's README describes:
+
+  * the <model-explorer-visualizer> component comes from
+    https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2
+  * font textures and styles come from
+    https://unpkg.com/ai-edge-model-explorer-visualizer@0.1.2/dist/static_files
+    (modelExplorer.assetFilesBaseUrl; another origin is allowed)
+  * dist/worker.js is served from this same origin as ./worker.js
+    (modelExplorer.workerScriptPath). The package README states that a
+    worker loaded from a different origin is not supported.
+
+The published package names its author as Google Inc. and its license as
+Apache-2.0. Its source carries this notice:
+
+Copyright 2024 The Model Explorer Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+The upstream repository does not ship a separate NOTICE file. The license
+text is ai-edge-model-explorer-visualizer.LICENSE in this directory.
+A standalone HTML export that embeds the worker also includes that text.

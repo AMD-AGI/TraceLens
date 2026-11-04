@@ -8,7 +8,7 @@
 
 TraceLens authors the human-readable ``analysis.md`` perf report; this module
 reads only that md and emits a structured, operation-grouped ``analysis.json``
-beside it (compute tier only, v1). The parse anchors on the ``MarkerValidator``
+beside it (compute and fusion tiers, standalone only, v1). The parse anchors on the ``MarkerValidator``
 marker grammar so the renderer moves in lockstep with the writer. Byte-identical
 on rerun. Fallback and agentic single-trace variants share one parser; the only
 mode-conditional is the deterministic-fallback grouping key.
@@ -21,20 +21,38 @@ from pathlib import Path
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
+    _arg_pairs,
+    _kernel_name_list,
+    node_field,
 )
+from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
+    ComputeTask,
+    TaskMember,
+)
+from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms, _efficiency_parts
 from TraceLens.Agent.Analysis.utils.validation_utils import (
+    EXEC_TOTAL_COL,
+    PCT_OF_NODE_COL,
+    TIER_COMPUTE,
+    TIER_FUSION,
     MarkerValidator,
     _find_data_table,
-    _iter_compute_candidate_blocks,
+    _iter_candidate_blocks,
+    _marker_attrs,
 )
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 logger = logging.getLogger(__name__)
 
 # Constants
-MAX_COMPUTE_TASKS = 100
+MAX_TASKS = 100
 IDENTIFICATION_CAP = 2000
 REASONING_CAP = 2000
 RESOLUTION_CAP = 2000
+# Raw perf-report columns a caller passes as ``extra_fields`` to
+# ``build_operation_metrics`` so ``compute_tasks`` can build task members.
+TASK_SOURCE_COLUMNS = ("Input Dims", "Input type", "call_stack_full")
 
 _TITLE_RE = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
 _LABEL_RE = re.compile(
@@ -42,12 +60,23 @@ _LABEL_RE = re.compile(
     r"(?=\n\s*\n|\n\*\*|\Z)",
     re.DOTALL,
 )
+_KIND_RE = re.compile(r"surfaced as\s+`(\w+)`", re.IGNORECASE)
+_FUSION_KINDS = FusionForms(TAXONOMY).kinds
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
-_ANCHOR_LINK_RE = re.compile(r"#detailed-analysis-compute-p(\d+)")
-_CATEGORY_ATTR_RE = re.compile(r"\bcategory=(\S+)")
 _LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_PRIORITY_PREFIX_RE = re.compile(r"^(?:[🔴🟡🟢]\s*)?(?:P\d+:\s*)?")
+_TOTAL_TIME_RE = re.compile(
+    r"^\|\s*Total Time\s*\|\s*(\d+(?:\.\d+)?) ms\s*\|", re.MULTILINE
+)
 _NULL_CELLS = {"", "-", "—", "–"}
+_TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*$", re.DOTALL)
+
+
+def _strip_trailing_comment(text: str) -> str:
+    """Remove one trailing HTML comment, including a multiline comment."""
+    return _TRAILING_COMMENT_RE.sub("", text)
+
 
 # Data-table header labels, normalized (lowercased, stripped) -> logical field.
 _HEADER_ALIASES = {
@@ -57,11 +86,25 @@ _HEADER_ALIASES = {
     "kernel name": "kernel_name",
     "time (ms)": "time_ms",
     "%e2e": "pct_e2e",
+    PCT_OF_NODE_COL.lower(): "pct_of_node",
     "count": "count",
     "flops/byte": "flops_per_byte",
     "efficiency": "efficiency",
     "bound": "bound",
 }
+
+# Top Operations header labels, normalized -> emitted JSON field. The comparative
+# table's Trace 2 Time and Difference columns are deliberately unmapped.
+_TOP_OPS_HEADERS = {
+    "rank": "rank",
+    "category": "category",
+    "time (ms)": "time_ms",
+    "trace 1 time (ms)": "time_ms",
+    "% of compute time": "pct_of_compute",
+    "ops": "ops",
+}
+# The improvement column's unit suffix varies by report, so it matches by prefix.
+_IMPROVEMENT_HEADER_PREFIX = "potential improvement"
 
 # Executive-summary metric label (lowercased, stripped) -> emitted JSON field.
 _METRIC_FIELDS = {
@@ -96,8 +139,10 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
     if top_ops is not None:
         report["top_operations"] = top_ops
 
-    findings = parser.findings()
-    report["compute_optimizations"] = ComputeGrouper(findings, mode).group()
+    for tier in (TIER_COMPUTE, TIER_FUSION):
+        report[f"{tier}_optimizations"] = TaskGrouper(
+            parser.findings(tier), tier, mode
+        ).group()
 
     appendix = parser.appendix()
     if appendix is not None:
@@ -108,6 +153,50 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
         json.dumps(report, sort_keys=False, indent=2, ensure_ascii=False) + "\n"
     )
     return out_path
+
+
+def compute_tasks(op_metrics: list[dict]) -> list[ComputeTask]:
+    """Group ``build_operation_metrics`` rows into ``analysis.json`` compute tasks.
+
+    One task per op name, one member per row, grouped, sorted and capped by the
+    same ``TaskGrouper`` that renders the md-driven report. The rows must carry
+    ``TASK_SOURCE_COLUMNS`` as ``extra_fields``; a row missing one yields an
+    empty field.
+    """
+    return TaskGrouper(
+        [_op_finding(op) for op in op_metrics], TIER_COMPUTE, "non-llm"
+    ).group()
+
+
+def _op_finding(op: dict) -> dict:
+    """One op-metrics row as a single-member finding for ``TaskGrouper``."""
+    eff = op["efficiency"]
+    pct, peak, unit, bound = _efficiency_parts(eff)
+    args = _arg_pairs(op.get("Input Dims"), op.get("Input type"))
+    member = {
+        "operation_cell": op["name"],
+        "kernel_launcher_path": op["launcher_path"],
+        "library": op["library"],
+        "category": None,
+        "analysis_md_rank": None,
+        "kernel_name": _kernel_name_list(op.get("call_stack_full")),
+        "args_shapes": [shape for shape, _ in args] or None,
+        "args_datatypes": [kind or None for _, kind in args] or None,
+        "time_ms": op["time_ms"],
+        "count": op["count"],
+        "pct_e2e": op["percent_of_total"],
+        "flops_per_byte": eff["flops_per_byte"],
+        "efficiency_percent": pct,
+        "efficiency_peak_value": peak,
+        "efficiency_peak_unit": unit,
+        "bound": bound,
+    }
+    return {
+        "members": [member],
+        "impacts": [op["impact_score"]],
+        "prose": {},
+        "node": op.get(NODE_COL),
+    }
 
 
 class AnalysisMdParser:
@@ -161,14 +250,19 @@ class AnalysisMdParser:
             return None
         narrative_parts = []
         metrics: dict = {}
+        node_metrics: dict = {}
         for ln in section.splitlines():
             stripped = ln.strip()
             if stripped.startswith("|"):
                 cells = self._split_row(stripped)
-                if len(cells) >= 2:
+                if cells[:2] == ["Metric", EXEC_TOTAL_COL]:
+                    node_metrics = {name: {} for name in cells[2:]}
+                elif len(cells) >= 2:
                     field = _METRIC_FIELDS.get(cells[0].strip().lower())
                     if field:
                         metrics[field] = self._first_float(cells[1])
+                        for name, cell in zip(node_metrics, cells[2:]):
+                            node_metrics[name][field] = self._first_float(cell)
             elif (
                 stripped
                 and not stripped.startswith("!")
@@ -178,34 +272,57 @@ class AnalysisMdParser:
         narrative = " ".join(narrative_parts).strip()
         if not narrative and not metrics:
             return None
-        return {"narrative": narrative, "metrics": metrics}
+        summary = {"narrative": narrative, "metrics": metrics}
+        if node_metrics:
+            summary["node_metrics"] = node_metrics
+        return summary
+
+    def _total_time_ms(self) -> float:
+        """The Executive Summary's Total Time, the ``% of Node`` tables' T_all."""
+        found = _TOTAL_TIME_RE.search(self.text)
+        if not found:
+            raise ValueError(
+                "A '% of Node' table needs the Executive Summary row "
+                "'| Total Time | <N> ms |' with a plain number "
+                "(no thousands separator)"
+            )
+        return float(found.group(1))
 
     def top_operations(self) -> "list[dict] | None":
-        block = self._marker_block("top_ops")
-        if block is None:
-            return None
         rows = []
-        for cells in self._iter_table_rows(block):
-            if len(cells) < 6:
-                continue
-            rows.append(
-                {
-                    "rank": int(self._first_float(cells[0]) or 0),
-                    "category": self._cell_or_null(cells[1]),
-                    "time_ms": self._first_float(cells[2]),
-                    "pct_of_compute": self._first_float(cells[3]),
-                    "ops": self._int_or_null(cells[4]),
-                    "potential_improvement_md": self._cell_or_null(cells[5]),
+        for attrs, block in self._marker_blocks("top_ops"):
+            for row in self._iter_table_rows(block):
+                fields = {
+                    (
+                        "potential_improvement_md"
+                        if h.startswith(_IMPROVEMENT_HEADER_PREFIX)
+                        else _TOP_OPS_HEADERS.get(h)
+                    ): c
+                    for h, c in row.items()
                 }
-            )
+                rows.append(
+                    {
+                        "rank": int(self._first_float(fields.get("rank")) or 0),
+                        "category": self._cell_or_null(fields.get("category")),
+                        "time_ms": self._first_float(fields.get("time_ms")),
+                        "pct_of_compute": self._first_float(
+                            fields.get("pct_of_compute")
+                        ),
+                        "ops": self._int_or_null(fields.get("ops")),
+                        "potential_improvement_md": self._cell_or_null(
+                            fields.get("potential_improvement_md")
+                        ),
+                        **node_field(attrs.get(NODE_COL)),
+                    }
+                )
         return rows if rows else None
 
-    def findings(self) -> list:
-        """Parse every compute reasoning-candidate block into finding dicts."""
-        category_by_rank = self._card_categories()
+    def findings(self, tier: str) -> list:
+        """Parse every ``tier`` reasoning-candidate block into finding dicts."""
+        attrs_by_rank = self._card_attrs(tier)
         return [
-            self._parse_finding(start, end, category_by_rank)
-            for start, end in _iter_compute_candidate_blocks(self.text)
+            self._parse_finding(start, end, rank, tier, attrs_by_rank)
+            for start, end, rank in _iter_candidate_blocks(self.text, tier)
         ]
 
     def appendix(self) -> "dict | None":
@@ -222,25 +339,31 @@ class AnalysisMdParser:
             return None
         return {"model_architecture": model, "hardware_reference": hardware}
 
-    def _parse_finding(self, start: int, end: int, category_by_rank: dict) -> dict:
-        """Parse one compute reasoning-candidate block into a finding dict.
+    def _parse_finding(
+        self, start: int, end: int, rank: int, tier: str, attrs_by_rank: dict
+    ) -> dict:
+        """Parse one ``tier`` reasoning-candidate block into a finding dict.
 
-        ``category_by_rank`` joins each finding to its card ``p_item`` category via
-        the compute rank; the category is per-finding and is stamped on every
-        member.
+        ``attrs_by_rank`` joins each finding to its card ``p_item``
+        marker attrs via the tier's rank; the category is per-finding and is
+        stamped on every member, the node on the finding.
         """
         lines = self.lines
         block = "\n".join(lines[start:end])
 
-        rank_m = re.search(
-            r"reasoning-candidate\s+tier=compute\s+rank=(\d+)", lines[start]
-        )
-        md_rank = f"P{rank_m.group(1)}" if rank_m else None
-        category = category_by_rank.get(int(rank_m.group(1))) if rank_m else None
+        md_rank = f"P{rank}"
+        attrs = attrs_by_rank.get(rank, {})
+        category = attrs.get("category")
+        node = attrs.get(NODE_COL) or self._parse_block_node(block)
 
         heading = next((ln for ln in lines[start:end] if ln.startswith("####")), None)
-        lib_m = _LIBRARY_PARENS_RE.search(heading) if heading else None
-        library = lib_m.group(1).strip() if lib_m else None
+        library = None
+        title = None
+        if tier == TIER_COMPUTE:
+            lib_m = _LIBRARY_PARENS_RE.search(heading) if heading else None
+            library = lib_m.group(1).strip() if lib_m else None
+        elif heading:
+            title = _PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
 
         prose = {"identification": None, "reasoning": None, "resolution": None}
         for label, body in _LABEL_RE.findall(block):
@@ -252,20 +375,29 @@ class AnalysisMdParser:
             else:
                 prose["resolution"] = cleaned
 
+        kind_m = _KIND_RE.search(prose["identification"] or "")
+        kind = kind_m.group(1).lower() if kind_m else None
+        if kind not in _FUSION_KINDS:
+            kind = None
+
         members = self._parse_data_table(start, end)
         for member in members:
             member["category"] = category
             member["library"] = library
             member["analysis_md_rank"] = md_rank
         impacts = self._parse_op_row_marker(block)
-        low, high = self._parse_finding_range(block)
+        low, mid, high = self._parse_finding_range(block)
         return {
             "members": members,
             "impacts": impacts,
             "prose": prose,
             "rank": md_rank,
+            "title": title,
+            "kind": kind,
             "low": low,
+            "mid": mid,
             "high": high,
+            "node": node,
         }
 
     def _parse_data_table(self, start: int, end: int) -> list:
@@ -280,6 +412,7 @@ class AnalysisMdParser:
             if h.strip().lower() in _HEADER_ALIASES
         }
 
+        total_ms = self._total_time_ms() if "pct_of_node" in col else None
         members = []
         for _, cells in row_iter:
 
@@ -290,6 +423,12 @@ class AnalysisMdParser:
             operation_cell = get("operation")
             eff_pct, eff_peak, eff_unit = self._parse_efficiency(get("efficiency"))
             args_shapes, args_datatypes = self._split_args(get("args"))
+            time_ms = self._first_float(get("time_ms"))
+            pct_e2e = (
+                round(time_ms / total_ms * 100, 2)
+                if total_ms and time_ms is not None
+                else self._first_float(get("pct_e2e"))
+            )
             members.append(
                 {
                     "operation_cell": operation_cell,
@@ -300,9 +439,9 @@ class AnalysisMdParser:
                     "analysis_md_rank": None,
                     "args_shapes": args_shapes,
                     "args_datatypes": args_datatypes,
-                    "time_ms": self._first_float(get("time_ms")),
+                    "time_ms": time_ms,
                     "count": self._int_or_null(get("count")),
-                    "pct_e2e": self._first_float(get("pct_e2e")),
+                    "pct_e2e": pct_e2e,
                     "flops_per_byte": self._first_float(get("flops_per_byte")),
                     "efficiency_percent": eff_pct,
                     "efficiency_peak_value": eff_peak,
@@ -312,36 +451,35 @@ class AnalysisMdParser:
             )
         return members
 
-    def _card_categories(self) -> dict:
-        """Map compute rank -> card ``p_item`` category via the detailed anchor.
+    def _card_attrs(self, tier: str) -> dict:
+        """Map ``tier`` rank -> card ``p_item`` marker attrs via the detailed anchor.
 
-        Each compute card carries a ``kind=p_item category=<cat>`` marker followed
-        by a ``#detailed-analysis-compute-p{N}`` link; the anchor's N is the rank
-        the detailed block is keyed on. Cards without a category or anchor are
-        skipped, so findings with no matching card (e.g. fallback reports) keep
-        ``category=null``.
+        Each card carries a ``kind=p_item`` marker followed by a
+        ``#detailed-analysis-<tier>-p{N}`` link; the anchor's N is the rank
+        the detailed block is keyed on. Cards without an anchor are skipped, so
+        findings with no matching card (e.g. fallback reports) keep
+        ``category=null`` and take ``node`` from their own p_item marker.
         """
+        anchor_re = re.compile(rf"#detailed-analysis-{tier}-[pP](\d+)")
         mapping: dict = {}
-        for m in MarkerValidator.BEGIN_RE.finditer(self.text):
-            inner = m.group(1)
-            km = MarkerValidator.KIND_ATTR_RE.search(inner)
-            if not km or km.group(1) != "p_item":
-                continue
-            cat_m = _CATEGORY_ATTR_RE.search(inner)
-            if not cat_m:
-                continue
+        for m, attrs in _marker_attrs(self.text, "p_item"):
             end = MarkerValidator.END_RE.search(self.text, m.end())
-            tail = self.text[end.end() : end.end() + 400] if end else ""
-            link_m = _ANCHOR_LINK_RE.search(tail)
+            if not end:
+                continue
+            nxt = MarkerValidator.BEGIN_RE.search(self.text, end.end())
+            link_m = anchor_re.search(
+                self.text[end.end() : nxt.start() if nxt else None]
+            )
             if link_m:
-                mapping[int(link_m.group(1))] = cat_m.group(1)
+                mapping[int(link_m.group(1))] = attrs
         return mapping
 
     def _parse_op_row_marker(self, block: str) -> "list[float | None] | None":
         """Return the ``kind=op_row`` ``impacts=`` CSV, one entry per row.
 
-        A ``—`` cell (spec-legal null) maps to ``None`` so the reader can
-        fall back to that row's ``pct_e2e``; the whole marker is None when absent.
+        A ``—`` cell (spec-legal null, e.g. a fusion-flagged row) maps to
+        ``None``, which scores 0.0. The whole marker is None when absent, and
+        every row then back-fills ``pct_e2e * HEURISTIC_FRACTION_MID``.
         """
         for m in MarkerValidator.BEGIN_RE.finditer(block):
             inner = m.group(1)
@@ -356,8 +494,21 @@ class AnalysisMdParser:
             ]
         return None
 
+    def _parse_block_node(self, block: str) -> "str | None":
+        """Return ``node=`` from the block's own ``kind=p_item`` marker, if any.
+
+        Fallback reports carry no card anchors, so the node rides on the p_item
+        marker inside the reasoning-candidate block instead.
+        """
+        for _, attrs in _marker_attrs(block, "p_item"):
+            return attrs.get(NODE_COL)
+        return None
+
     def _parse_finding_range(self, block: str) -> tuple:
-        """Return (low, high) E2E-% range from the detail_estimate/p_item marker."""
+        """Return (low, mid, high) E2E-% from the detail_estimate/p_item marker.
+
+        ``mid`` is None when the marker omits it.
+        """
         for kind in ("detail_estimate", "p_item"):
             for m in MarkerValidator.BEGIN_RE.finditer(block):
                 inner = m.group(1)
@@ -365,11 +516,12 @@ class AnalysisMdParser:
                 if not km or km.group(1) != kind:
                     continue
                 attrs = dict(MarkerValidator.ATTR_RE.findall(inner))
-                low, high = attrs.get("low"), attrs.get("high")
+                low, mid, high = attrs.get("low"), attrs.get("mid"), attrs.get("high")
                 if low in (None, "null") or high in (None, "null"):
                     continue
-                return float(low), float(high)
-        return None, None
+                mid = None if mid is None else float(mid)
+                return float(low), mid, float(high)
+        return None, None, None
 
     def _iter_report_blocks(self):
         """Yield (kind, attrs, inner_text) per report-begin/report-end block."""
@@ -409,33 +561,30 @@ class AnalysisMdParser:
         nxt = re.search(rf"^{hashes}\s+", rest, re.MULTILINE)
         return rest[: nxt.start()] if nxt else rest
 
-    def _marker_block(self, kind: str) -> "str | None":
-        """Return the text between an ``impact-begin kind=<kind>`` and its end."""
+    def _marker_blocks(self, kind: str):
+        """Yield (attrs, text) between each ``impact-begin kind=<kind>`` and its end."""
         text = self.text
-        for m in MarkerValidator.BEGIN_RE.finditer(text):
-            km = MarkerValidator.KIND_ATTR_RE.search(m.group(1))
-            if not km or km.group(1) != kind:
-                continue
+        for m, attrs in _marker_attrs(text, kind):
             end = MarkerValidator.END_RE.search(text, m.end())
-            return text[m.end() : end.start()] if end else text[m.end() :]
-        return None
+            yield attrs, text[m.end() : end.start()] if end else text[m.end() :]
 
     def _iter_table_rows(self, block: str):
-        """Yield body-row cell lists from the first markdown table in ``block``."""
-        seen_header = False
+        """Yield body rows of the first markdown table in ``block`` as
+        ``{lowercased header: cell}`` dicts, trailing HTML comments stripped."""
+        header = None
         for ln in block.splitlines():
             stripped = ln.strip()
             if not stripped.startswith("|"):
-                if seen_header:
+                if header is not None:
                     break
                 continue
-            cells = self._split_row(stripped)
-            if not seen_header:
-                seen_header = True
+            cells = self._split_row(_strip_trailing_comment(stripped))
+            if header is None:
+                header = [c.lower() for c in cells]
                 continue
             if all(set(c) <= {"-", ":", " "} for c in cells):
                 continue
-            yield cells
+            yield dict(zip(header, cells))
 
     @staticmethod
     def _split_row(row: str) -> list:
@@ -517,19 +666,22 @@ class AnalysisMdParser:
         return int(value) if value is not None else None
 
 
-class ComputeGrouper:
-    """Bucket compute findings into operation-grouped tasks.
+class TaskGrouper:
+    """Build one tier's ``analysis.json`` tasks from its reasoning-candidate findings.
 
-    Holds ``is_fallback`` (the only mode-conditional) so bucketing, task build,
-    and finalize share it. Members are one-per-row; the group key is the raw
-    ``Operation`` cell, or the ``kernel_name`` on the deterministic-fallback path
-    where the Operation cell only duplicates the kernel name. Members sort
-    by ``impact_score`` desc, task ``impact.mid`` is the member sum, tasks sort by
-    ``impact.mid`` desc and cap at 100.
+    Compute buckets members by the raw ``Operation`` cell (the ``kernel_name`` on
+    the deterministic-fallback path, where the Operation cell only duplicates the
+    kernel name); members sort by ``impact_score`` desc and the task ``impact.mid``
+    is the member sum. Fusion makes each finding (md block) one task: members stay
+    in table order, carry no ``impact_score``, and ``impact.mid`` is the block's
+    ``detail_estimate`` mid. Tasks sort by ``impact.mid`` desc (compute ties break
+    on operation then kernel name, fusion ties keep block order, i.e. md rank
+    order) and cap at 100.
     """
 
-    def __init__(self, findings: list, mode: str):
+    def __init__(self, findings: list, tier: str, mode: str):
         self.findings = findings
+        self.tier = tier
         self.is_fallback = mode == "deterministic-fallback"
 
     def group(self) -> list:
@@ -544,97 +696,102 @@ class ComputeGrouper:
             members = finding["members"]
             impacts = finding["impacts"]
             for ri, member in enumerate(members):
-                row_impact = impacts[ri] if impacts is not None else None
-                score = (
-                    row_impact
-                    if row_impact is not None
-                    else (member["pct_e2e"] or 0.0) * HEURISTIC_FRACTION_MID
-                )
+                # Marker absent for the block: back-fill pct_e2e * HEURISTIC_FRACTION_MID.
+                # Marker present: the cell value, with a ``—`` cell scoring 0.0.
+                if impacts is None:
+                    row_impact = (member["pct_e2e"] or 0.0) * HEURISTIC_FRACTION_MID
+                else:
+                    row_impact = impacts[ri] or 0.0
 
-                if self.is_fallback:
+                if self.tier == TIER_FUSION:
+                    key, operation = fi, finding["title"]
+                elif self.is_fallback:
                     key = member["kernel_name"][0] if member["kernel_name"] else ""
                     operation = None
                 else:
                     operation = AnalysisMdParser._cell_or_null(member["operation_cell"])
                     key = operation or ""
 
-                emitted = {
-                    "impact_score": score,
-                    "kernel_launcher_path": member["kernel_launcher_path"],
-                    "library": member["library"],
-                    "category": member["category"],
-                    "analysis_md_rank": member["analysis_md_rank"],
-                    "kernel_name": member["kernel_name"],
-                    "args_shapes": member["args_shapes"],
-                    "args_datatypes": member["args_datatypes"],
-                    "time_ms": member["time_ms"],
-                    "count": member["count"],
-                    "pct_e2e": member["pct_e2e"],
-                    "flops_per_byte": member["flops_per_byte"],
-                    "efficiency_percent": member["efficiency_percent"],
-                    "efficiency_peak_value": member["efficiency_peak_value"],
-                    "efficiency_peak_unit": member["efficiency_peak_unit"],
-                    "bound": member["bound"],
-                }
                 bucket = buckets.setdefault(
-                    key, {"operation": operation, "members": [], "findings": {}}
+                    (finding["node"], key),
+                    {
+                        "operation": operation,
+                        "node": finding["node"],
+                        "members": [],
+                        "findings": {},
+                    },
                 )
-                bucket["members"].append((emitted, fi))
+                bucket["members"].append((self._emit_member(member, row_impact), fi))
                 bucket["findings"].setdefault(fi, finding)
 
         return buckets
 
+    def _emit_member(self, member: dict, row_impact: float) -> dict:
+        """The per-row member fields; compute rows lead with their ``impact_score``."""
+        fields = {k: member[k] for k in TaskMember.__annotations__}
+        if self.tier == TIER_FUSION:
+            return fields
+        return {"impact_score": row_impact, **fields}
+
     def _build_task(self, bucket: dict) -> dict:
         entries = bucket["members"]
-        entries.sort(
-            key=lambda e: (
-                -e[0]["impact_score"],
-                tuple(e[0]["kernel_name"]),
-                tuple(e[0]["args_shapes"] or []),
+        if self.tier == TIER_COMPUTE:
+            entries.sort(
+                key=lambda e: (
+                    -e[0]["impact_score"],
+                    tuple(e[0]["kernel_name"]),
+                    tuple(e[0]["args_shapes"] or []),
+                )
             )
-        )
         members = [e[0] for e in entries]
-        mid = sum(m["impact_score"] for m in members)
 
         ordered_fi: list = []
         for _, fi in entries:
             if fi not in ordered_fi:
                 ordered_fi.append(fi)
 
-        low = self._sum_optional(bucket["findings"][fi]["low"] for fi in ordered_fi)
-        high = self._sum_optional(bucket["findings"][fi]["high"] for fi in ordered_fi)
+        if self.tier == TIER_FUSION:
+            mid = bucket["findings"][ordered_fi[0]]["mid"]
+        else:
+            mid = sum(m["impact_score"] for m in members)
 
         prose = self._accumulate_prose(ordered_fi, bucket["findings"])
 
-        return {
-            "operation": bucket["operation"],
-            "members": members,
-            "impact": {"mid": mid, "low": low, "high": high},
-            **prose,
-        }
+        task = {"operation": bucket["operation"], NODE_COL: bucket["node"]}
+        if self.tier == TIER_FUSION:
+            task["kind"] = bucket["findings"][ordered_fi[0]]["kind"]
+        return {**task, "members": members, "impact": {"mid": mid}, **prose}
 
     def _finalize(self, tasks: list) -> list:
-        tasks.sort(
-            key=lambda t: (
-                -t["impact"]["mid"],
-                t["operation"] or "",
-                "".join(t["members"][0]["kernel_name"]) if t["members"] else "",
-            )
-        )
+        # Python's sort is stable, so fusion ties keep block order.
+        tasks.sort(key=self._sort_key)
 
-        if len(tasks) > MAX_COMPUTE_TASKS:
+        if len(tasks) > MAX_TASKS:
             logger.info(
-                "analysis_json: capping %d compute tasks at %d",
+                "analysis_json: capping %d %s tasks at %d",
                 len(tasks),
-                MAX_COMPUTE_TASKS,
+                self.tier,
+                MAX_TASKS,
             )
-            tasks = tasks[:MAX_COMPUTE_TASKS]
+            tasks = tasks[:MAX_TASKS]
 
         for i, task in enumerate(tasks, start=1):
             task["priority"] = i
         return tasks
 
-    def _accumulate_prose(self, ordered_fi: list, findings: dict) -> dict:
+    def _sort_key(self, task: dict) -> tuple:
+        neg_mid = -(task["impact"]["mid"] or 0.0)
+        if self.tier == TIER_FUSION:
+            return (neg_mid,)
+        return (
+            neg_mid,
+            task["operation"] or "",
+            task["node"] or "",
+            "".join(task["members"][0]["kernel_name"]) if task["members"] else "",
+        )
+
+    @staticmethod
+    def _accumulate_prose(ordered_fi: list, findings: dict) -> dict:
         """Concatenate per-finding prose under fixed caps; prefix ``[P<rank>]`` only when merged."""
         caps = {
             "identification": IDENTIFICATION_CAP,
@@ -655,7 +812,7 @@ class ComputeGrouper:
             if not blocks:
                 out[field] = None
                 continue
-            value, clipped = self._clip_blocks(blocks, cap)
+            value, clipped = TaskGrouper._clip_blocks(blocks, cap)
             out[field] = value
             truncated = truncated or clipped
         out["prose_truncated"] = truncated
@@ -676,8 +833,3 @@ class ComputeGrouper:
         if not kept:
             return blocks[0][:cap], True
         return "\n\n".join(kept), clipped
-
-    @staticmethod
-    def _sum_optional(values) -> "float | None":
-        present = [v for v in values if v is not None]
-        return sum(present) if present else None

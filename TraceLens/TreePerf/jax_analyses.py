@@ -12,7 +12,12 @@ from itertools import chain
 import pandas as pd
 
 from ..PerfModel import perf_model
-from ..PerfModel.utils import add_simulation_time_columns, build_perf_metrics_dict
+from ..PerfModel.op_projections import (
+    add_op_projection_outputs,
+    default_op_projections,
+    op_work,
+)
+from ..PerfModel.utils import build_perf_metrics_dict
 from ..util import DataLoader, JaxProfileProcessor, TraceEventUtils
 from .gpu_event_analyser import GPUEventAnalyser, JaxGPUEventAnalyser
 
@@ -416,7 +421,7 @@ class JaxAnalyses:
         pb_file_name,
         module_name: str = "jit_train_step",
         arch: dict = None,
-        enable_origami: bool = False,
+        enable_origami_gemm: bool = False,
     ):
         all_profile_events, _ = DataLoader.load_trace_events(
             pb_file_name, framework="jax"
@@ -472,7 +477,7 @@ class JaxAnalyses:
                 ],
                 False,
                 arch,
-                enable_origami=enable_origami,
+                enable_origami_gemm=enable_origami_gemm,
             )
             for event in gpu_0_gemms
         ]
@@ -538,7 +543,11 @@ class JaxAnalyses:
 
     @staticmethod
     def gemm_perf_metrics(
-        event, op_params, bwd: bool = False, arch=None, enable_origami: bool = False
+        event,
+        op_params,
+        bwd: bool = False,
+        arch=None,
+        enable_origami_gemm: bool = False,
     ):
         perf_model_class = JaxAnalyses.get_perf_model(event)
         # the class structure of the perf_model class doesn't make it easy to add additional parameters to the event,
@@ -547,26 +556,16 @@ class JaxAnalyses:
         event_copy[TraceEventUtils.JaxKernelEventArgs.hlo_op] = op_params
         # the perf model needs a kernel names field
         event_copy["kernel_names"] = [event[TraceEventUtils.TraceKeys.Name]]
-        perf_model = perf_model_class(
-            event_copy, arch=arch, enable_origami=enable_origami
-        )
+        perf_model = perf_model_class(event_copy, arch=arch)
 
-        gflops = (perf_model.flops() if not bwd else perf_model.flops_bwd()) / 1e9
+        work = op_work(perf_model, bwd)
         time = event[TraceEventUtils.TraceKeys.Duration]
 
-        bytes_moved = perf_model.bytes() if not bwd else perf_model.bytes_bwd()
-
-        # Return metrics
-        dict_metrics = build_perf_metrics_dict(gflops, bytes_moved, time)
-
-        if hasattr(perf_model, "get_simulation_time"):
-            add_simulation_time_columns(
-                dict_metrics,
-                perf_model.get_simulation_time(),
-                gflops,
-                bytes_moved,
-                time,
-            )
+        dict_metrics = build_perf_metrics_dict(work.gflops, work.bytes_moved, time)
+        dict_metrics["Compute Spec"] = work.compute_spec or ""
+        add_op_projection_outputs(
+            dict_metrics, default_op_projections(enable_origami_gemm), work, arch, time
+        )
 
         for key, value in perf_model.param_details.items():
             dict_metrics[f"param: {key}"] = value

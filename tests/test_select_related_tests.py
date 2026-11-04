@@ -243,6 +243,42 @@ def test_inference_trace_selects_inference_tests():
     assert "tests/test_kernel_source_cli.py" not in selection.test_files
 
 
+def test_exclude_test_prefixes_skips_a_dedicated_suite_only_selection():
+    selection = selector.Selection(
+        "selected",
+        (
+            "tests/dedicated_alpha/test_shapes.py",
+            "tests/dedicated_beta/test_export.py",
+        ),
+    )
+
+    filtered = selector.exclude_test_prefixes(
+        selection, ("tests/dedicated_alpha/", "tests/dedicated_beta/")
+    )
+
+    assert filtered == selector.Selection("none", ())
+
+
+def test_exclude_test_prefixes_retains_core_tests_and_full_suite():
+    selection = selector.Selection(
+        "selected",
+        (
+            "tests/dedicated_alpha/test_shapes.py",
+            "tests/test_core.py",
+            "tests/dedicated_beta/test_export.py",
+        ),
+    )
+
+    filtered = selector.exclude_test_prefixes(
+        selection, ("tests/dedicated_alpha", "tests/dedicated_beta")
+    )
+
+    assert filtered == selector.Selection("selected", ("tests/test_core.py",))
+    assert selector.exclude_test_prefixes(
+        selector.Selection("all", ()), ("tests/dedicated_alpha/",)
+    ) == selector.Selection("all", ())
+
+
 def test_main_prints_mode(capsys, tmp_path):
     listing = tmp_path / "selected.txt"
     code = selector.main(

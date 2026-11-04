@@ -6,6 +6,10 @@
 
 """An op is wired the operands it declares, not every argument the call carries.
 
+An ``@op_l`` id in this file is a sample of the record format this test feeds
+the wirer. It is not a lookup into an upstream modeling file.
+
+
 A dispatched attention implementation is expanded into the ops it performs, and
 each of those ops records which of the implementation's parameters it reads::
 

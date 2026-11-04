@@ -24,10 +24,13 @@ from __future__ import annotations
 import builtins
 
 import pytest
+import torch
 
 from TraceLens.ModelUtils.shape_inference import (
     ShapeInferencer,
     TensorSpec,
+    _annotation_tensor_kind,
+    _ceiling_via_inspect,
     _observed_op_shapes,
     _op_output_can_exceed_first_operand,
     _operand_ceiling,
@@ -113,6 +116,72 @@ class TestWhatTheProbesDoAgree:
 
     def test_a_write_does_not(self) -> None:
         assert not _op_output_can_exceed_first_operand("masked_fill")
+
+
+class TestAnnotationTensorKind:
+    """Classifying an ``inspect`` parameter annotation as a single tensor, an
+    unbounded tensor list, or neither -- matched structurally against the
+    aten/Python spellings, never by guessing from the op's name."""
+
+    def test_a_bare_tensor_annotation_is_a_single_operand(self) -> None:
+        assert _annotation_tensor_kind("Tensor") == "tensor"
+        assert _annotation_tensor_kind("torch.Tensor") == "tensor"
+
+    def test_an_optional_tensor_is_still_a_single_operand(self) -> None:
+        assert _annotation_tensor_kind("Optional[Tensor]") == "tensor"
+        assert _annotation_tensor_kind("Tensor?") == "tensor"
+
+    def test_a_tensor_sequence_annotation_is_variadic(self) -> None:
+        assert _annotation_tensor_kind("List[Tensor]") == "list"
+        assert _annotation_tensor_kind("Sequence[Tensor]") == "list"
+
+    def test_a_non_tensor_annotation_is_neither(self) -> None:
+        assert _annotation_tensor_kind("int") == ""
+        assert _annotation_tensor_kind("List[int]") == ""
+
+    def test_a_real_type_object_is_read_by_its_own_name(self) -> None:
+        # Not every annotation arrives as a string -- ``inspect`` can hand back
+        # the live type object itself, which has no ``.replace`` of its own.
+        assert _annotation_tensor_kind(int) == ""
+
+
+class TestCeilingViaInspect:
+    """``inspect`` only answers when it saw at least one REAL type annotation
+    (torch's C-bound ops expose none); registered here as attributes of
+    ``torch`` itself, the way ``_ceiling_via_inspect`` looks them up."""
+
+    def _register(self, monkeypatch, name, fn) -> None:
+        monkeypatch.setattr(torch, name, fn, raising=False)
+        _operand_ceiling.cache_clear()
+
+    def test_a_var_positional_tail_beside_an_annotated_tensor_is_variadic(
+        self, monkeypatch
+    ) -> None:
+        # ``from __future__ import annotations`` already stringifies these, so
+        # the annotation is left bare rather than double-quoted.
+        def op(a: Tensor, *rest: Tensor):
+            pass
+
+        self._register(monkeypatch, "__fake_variadic_tail", op)
+        assert _ceiling_via_inspect("__fake_variadic_tail") == (None, True)
+
+    def test_two_annotated_tensor_params_count_as_two_operands(
+        self, monkeypatch
+    ) -> None:
+        def op(a: Tensor, b: Tensor):
+            pass
+
+        self._register(monkeypatch, "__fake_two_tensors", op)
+        assert _ceiling_via_inspect("__fake_two_tensors") == (2, False)
+
+    def test_a_list_tensor_annotation_is_variadic_without_var_positional(
+        self, monkeypatch
+    ) -> None:
+        def op(xs: List[Tensor]):
+            pass
+
+        self._register(monkeypatch, "__fake_list_only", op)
+        assert _ceiling_via_inspect("__fake_list_only") == (None, True)
 
 
 class _Spec:

@@ -380,6 +380,10 @@ def _list_repo_config_paths(model_id: str, revision: str | None = None) -> list[
 def _download_config(
     model_id: str, config_path: str, revision: str | None = None
 ) -> Path:
+    from TraceLens.ModelUtils.source import is_weight_file
+
+    if is_weight_file(config_path):
+        raise ValueError(f"Refusing to download weight file {config_path}")
     from huggingface_hub import hf_hub_download
 
     # When a revision is given the config must come from it, not from the head:

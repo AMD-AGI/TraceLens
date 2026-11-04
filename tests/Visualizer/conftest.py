@@ -35,18 +35,21 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_graph_in_env import (
+    cached_graph_nodes,
+    pinned_merged_graph,
+    pinned_model_spec,
+)
+
 _BUILDER = Path(__file__).with_name("build_graph_in_env.py")
 
 
 def _build_here(model_id: str, revision: str | None = None, regime=None) -> list[dict]:
-    from TraceLens.ModelUtils.loader import load_model_spec
     from TraceLens.ModelUtils.shape_inference import ShapeInferencer
-    from TraceLens.Visualizer.model_explorer_export.merge import (
-        build_merged_model_graph,
-    )
 
-    spec = load_model_spec(model_id, detailed=True, revision=revision, regime=regime)
-    graph = build_merged_model_graph(spec, shape_inferencer=ShapeInferencer(spec))
+    spec = pinned_model_spec(model_id, revision=revision, regime=regime)
+    graph = pinned_merged_graph(spec, shape_inferencer=ShapeInferencer(spec))
     return graph["nodes"]
 
 
@@ -137,16 +140,24 @@ def model_graph_nodes():
             # re-exec flag): this interpreter IS the right one.
             import os
 
-            if os.environ.get(model_env.REEXEC_ENV_FLAG):
-                cache[key] = _build_here(model_id, pin.revision, regime)
-            elif pin.own_environment:
-                reason = model_env.detect_env_mismatch(model_id)
-                cache[key] = _build_in_env(
-                    model_id, reason or "pinned to its own environment", pin, regime
-                )
-            else:
+            def _build() -> list[dict]:
+                if os.environ.get(model_env.REEXEC_ENV_FLAG):
+                    return _build_here(model_id, pin.revision, regime)
+                if pin.own_environment:
+                    reason = model_env.detect_env_mismatch(model_id)
+                    return _build_in_env(
+                        model_id, reason or "pinned to its own environment", pin, regime
+                    )
                 _require_pinned_transformers(model_id, pin)
-                cache[key] = _build_here(model_id, pin.revision, regime)
+                return _build_here(model_id, pin.revision, regime)
+
+            cache[key] = cached_graph_nodes(
+                model_id,
+                pin.revision,
+                pin.transformers,
+                regime,
+                _build,
+            )
         return cache[key]
 
     return nodes

@@ -21,17 +21,20 @@ from TraceLens.ModelUtils.ast_analyze import (
     base_submodule_attr,
     expand_class_forward_dataflow,
     FORWARD_METHOD_INPUT,
+    POSITIONAL_SYNTHETIC_PREFIX,
     method_input_param,
     stack_entry_dataflow,
 )
 from TraceLens.ModelUtils.block_tree import (
     BlockNode,
+    build_block_node,
     collect_nested_diagrams,
     expand_block_tree_inplace,
     is_transparent_inline_expansion,
+    resolved_phi_arms,
     subgraph_warrants_json_export,
 )
-from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
+from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant, RepeatedGroup
 from TraceLens.ModelUtils.computation_graph import (
     ComputationGraph,
     build_computation_graph,
@@ -40,6 +43,9 @@ from TraceLens.ModelUtils.extract import (
     ArchitectureSpec,
     architecture_section_trees,
     image_placeholder_token_id,
+    ordered_repeated_children,
+    repeated_child_attr,
+    repeated_group_is_pipeline,
     vision_tower_component,
     vision_tower_passthrough_inputs,
 )
@@ -64,19 +70,24 @@ from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
     build_fact_sheet_group_attributes,
 )
 from TraceLens.Visualizer.model_explorer_export.type_check import (
+    _walls_crossed,
     group_cycle_check_graph_nodes,
     integrity_check_graph_nodes,
     type_check_graph_nodes,
+    warn_degenerate_mutually_exclusive_branches,
 )
 from TraceLens.Visualizer.model_explorer_export.shapes import (
     annotate_nodes_with_shapes,
     apply_shape_attrs,
+    canonicalize_port_shape_keys,
     fill_missing_node_shapes,
     group_boundary_shapes,
     infer_block_tree_shapes,
+    stamp_full_shapes,
     node_output_spec,
+    refine_multi_output_port_shapes,
+    widen_broadcast_results,
     format_shape_dims,
-    format_shape_tensor,
     format_shape_with_dtype,
     parse_shape_dims,
     SHAPE_SEPARATOR,
@@ -224,15 +235,15 @@ def _append_stack_entry_dataflow(
     node_by_id = {str(node.get("id", "")): node for node in nodes}
     ref_specs: dict[str, TensorSpec] = {}
     if shape_inferencer is not None:
-        context = shape_inferencer.context
+        token_ids = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
         for component in spec.stack_pre:
             if component.role != "embedding" or component.attr_name not in refs:
                 continue
-            hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-            ref_specs[component.attr_name] = TensorSpec(
-                (Symbol.BATCH.value, Symbol.SEQ.value, hidden),
-                context.dtype,
+            embedded = shape_inferencer.module_output_spec(
+                component.attr_name, token_ids
             )
+            if embedded is not None:
+                ref_specs[component.attr_name] = embedded
     for operation in dataflow.operations:
         source_pairs = [
             (predecessor, refs[predecessor])
@@ -339,6 +350,23 @@ def _source_parts(source: SourceRef) -> tuple[str, str]:
     return source if isinstance(source, tuple) else (source, "0")
 
 
+def _spine_entry_spec(
+    nodes: list[dict[str, Any]], previous_exits: list[SourceRef]
+) -> TensorSpec | None:
+    """Shape of the tensor the previous spine section hands this one.
+
+    A block inferred on its own has no caller. The exit it is wired from is
+    that caller, and its shape is the block's ``hidden_states``.
+    """
+    if not previous_exits:
+        return None
+    source_id, port = _source_parts(previous_exits[0])
+    for node in reversed(nodes):
+        if str(node.get("id")) == source_id:
+            return node_output_spec(node, port)
+    return None
+
+
 def _source_edge(source: SourceRef, target_input_id: str) -> dict[str, str]:
     source_id, output_port = _source_parts(source)
     return {
@@ -388,6 +416,15 @@ def _node_attr(node: dict[str, Any], key: str) -> str | None:
             if isinstance(value, str):
                 return value
     return None
+
+
+def _node_attr_values(node: dict[str, Any], key: str) -> tuple[str, ...]:
+    """All non-empty values for repeatable structured node metadata."""
+    return tuple(
+        str(attr["value"])
+        for attr in node.get("attrs", [])
+        if attr.get("key") == key and attr.get("value")
+    )
 
 
 def _is_generator_source_node(node: dict[str, Any]) -> bool:
@@ -1053,6 +1090,38 @@ def _section_exits(
                 return [replacement]
     _entries, exits = _boundary_nodes(section_nodes)
     return exits
+
+
+def _untie_host_constructors_from_the_activation(
+    nodes: list[dict[str, Any]],
+) -> None:
+    """A host-built tensor does not read the frame's activation.
+
+    ``torch.tensor([spatial_merge_size]).expand(len(grid_thw))`` is marked
+    ``constant_extent`` because its data is a Python int. The frame still
+    hands that expand its own ``@input`` (the vision activation), so the op
+    reports bfloat16 in and int64 out. Drop that stand-in edge and tag the
+    op constant: it has no activation operand.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    for node in nodes:
+        details = str(_node_attr(node, "details") or "")
+        if "constant_extent: true" not in details:
+            continue
+        edges = list(node.get("incomingEdges") or [])
+        kept = [
+            edge
+            for edge in edges
+            if not _is_synthetic_input(by_id.get(str(edge.get("sourceNodeId")), {}))
+        ]
+        if len(kept) == len(edges):
+            continue
+        node["incomingEdges"] = kept
+        if kept:
+            continue
+        attrs = node.setdefault("attrs", [])
+        if not any(item.get("key") == "constant" for item in attrs):
+            attrs.append({"key": "constant", "value": "true"})
 
 
 def _is_primary_section_input(node: dict[str, Any]) -> bool:
@@ -2134,8 +2203,25 @@ def _collapse_mirror_boundary_passthroughs(nodes: list[dict[str, Any]]) -> None:
         nodes[:] = [node for node in nodes if str(node["id"]) not in removed]
 
 
-def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
-    """Mutually-exclusive layer variants converge in a Merge, not side by side.
+_LOOP_END_LABEL = re.compile(
+    r"^loop (?:in|out): (?P<name>.+?)"
+    r"(?: iterations: \d+| - \d+ of \d+ iterations)?$"
+)
+
+
+def _carried_loop_variable(label: str) -> str | None:
+    """The tensor a ``loop in`` / ``loop out`` tile is named for, if it is one."""
+    match = _LOOP_END_LABEL.match(label.strip())
+    if match is None:
+        return None
+    name = match.group("name").strip()
+    return name or None
+
+
+def _converge_layer_variants_through_an_output_tile(
+    nodes: list[dict[str, Any]],
+) -> None:
+    """Mutually-exclusive layer variants leave through the stack's output tile.
 
     A repeat stack whose layers are not all alike is drawn as one group per
     variant -- GLM's decoder splits into ``31x_``/``11x_``/``3x_``, DeepSeek's
@@ -2145,15 +2231,12 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
     ``hc_head``, a ``mean``, appeared to take three operands, and the operand
     contract of every such consumer was unreadable in the same way.
 
-    The graph already has a name for arms that converge: the ``Merge`` phi
-    ``ast_analyze`` emits for the two arms of an unresolved ``if`` -- forward
-    whichever is live, same shape as each arm. Deliberately ``Merge`` and not
-    ``Select``: ``torch.select`` slices and drops an axis, which is not what
-    this does. The same node is owed here, for the same reason, one rank up.
-
-    The phi sits in the scope that CONTAINS the variant groups, since that is
-    where the choice between them is made, and the consumer then reads one
-    tensor.
+    Each variant already has the tiles a consumer reads: its own ``@input`` and
+    ``@output``, which are the loop's ends. A value leaves every other block
+    through an output tile, and the consumer's input tile reads that. The stack
+    is the block those alternatives share, so they meet in one output tile of
+    the stack and the consumer reads that tile. The choice is the tiles. A
+    ``Mutually exclusive branch`` beside them would restate it.
     """
     by_id = {str(node["id"]): node for node in nodes}
 
@@ -2170,8 +2253,19 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
                 return "/".join(parts[:depth]), parts[depth]
         return None
 
+    def exit_label(group: list[dict[str, Any]]) -> str:
+        names = [
+            _carried_loop_variable(
+                str(by_id[str(edge.get("sourceNodeId"))].get("label") or "")
+            )
+            for edge in group
+        ]
+        if names and all(names) and len(set(names)) == 1:
+            return str(names[0])
+        return "output"
+
     additions: list[dict[str, Any]] = []
-    for node in nodes:
+    for node in list(nodes):
         edges = node.get("incomingEdges", []) or []
         if len(edges) < 2:
             continue
@@ -2192,54 +2286,54 @@ def _converge_layer_variants_through_a_phi(nodes: list[dict[str, Any]]) -> None:
             group = [edge for edge in by_variant.values() if edge is not None]
             if len(group) < 2 or len(group) != len(by_variant):
                 continue
-            # The choice is resolved where the stack's result is READ, so the
-            # phi sits at the level both the variants and their consumer share.
-            # Inside the stack it would be a node whose value leaves the box
-            # without passing through the box's own output tile.
-            scope = _common_namespace(parent, str(node.get("namespace") or ""))
-            phi_id = (
-                f"{scope}/@variant_merge:{node['id']}"
-                if scope
-                else (f"@variant_merge:{node['id']}")
-            )
-            if phi_id in by_id:
-                continue
-            first = by_id[str(group[0].get("sourceNodeId"))]
-            phi = {
-                "id": phi_id,
-                "label": PHI_LABEL,
-                "namespace": scope,
-                "attrs": [
-                    {"key": "class_name", "value": PHI_CLASS},
-                    {"key": "role", "value": "other"},
-                    {"key": "operation", "value": "torch_functional"},
-                    {
-                        "key": "details",
-                        "value": f"merge: one layer variant of {len(group)}",
-                    },
-                    {
-                        "key": "output_shape",
-                        "value": _node_attr(first, "output_shape") or "",
-                    },
-                    {
-                        "key": "output_dtype",
-                        "value": _node_attr(first, "output_dtype") or "",
-                    },
-                ],
-                # Every operation tile is coloured for what it does, and the
-                # colour is per LABEL -- a phi added here must look like the
-                # phis the extractor emits, not like an unstyled box.
-                "style": ensure_readable_text(operation_tile_style(PHI_LABEL)),
-                "incomingEdges": [dict(edge) for edge in group],
-            }
-            for position, edge in enumerate(phi["incomingEdges"]):
-                edge["targetNodeInputId"] = str(position)
-            additions.append(phi)
-            by_id[phi_id] = phi
+            # The tile is the stack's output, the same port any other block
+            # hands its consumer. It is drawn beside the stack: the stack box
+            # holds the variants, and this tile is the one value they hand on.
+            scope = parent
+            boundary = scope.rsplit("/", 1)[0] if "/" in scope else ""
+            label = exit_label(group)
+            base_id = f"{scope}/@output:{label}" if scope else f"@output:{label}"
+            wanted = {str(edge.get("sourceNodeId")) for edge in group}
+            tile_id = base_id
+            existing = by_id.get(tile_id)
+            if (
+                existing is not None
+                and {
+                    str(edge.get("sourceNodeId"))
+                    for edge in existing.get("incomingEdges") or []
+                }
+                != wanted
+            ):
+                tile_id = f"{base_id}:{node['id']}"
+                existing = by_id.get(tile_id)
+            if existing is None:
+                first = by_id[str(group[0].get("sourceNodeId"))]
+                tile = {
+                    "id": tile_id,
+                    "label": label,
+                    "namespace": boundary,
+                    "attrs": [{"key": "synthetic", "value": "@output"}],
+                    "style": ensure_readable_text(output_port_style()),
+                    "incomingEdges": [dict(edge) for edge in group],
+                }
+                for position, edge in enumerate(tile["incomingEdges"]):
+                    edge["targetNodeInputId"] = str(position)
+                carried = node_output_spec(
+                    first, str(group[0].get("sourceNodeOutputId", "0"))
+                )
+                if carried is not None:
+                    apply_shape_attrs(tile, carried)
+                else:
+                    for key in ("output_shape", "output_dtype"):
+                        value = _node_attr(first, key)
+                        if value:
+                            tile["attrs"].append({"key": key, "value": value})
+                additions.append(tile)
+                by_id[tile_id] = tile
             kept = [edge for edge in edges if edge not in group]
             kept.append(
                 {
-                    "sourceNodeId": phi_id,
+                    "sourceNodeId": tile_id,
                     "sourceNodeOutputId": "0",
                     "targetNodeInputId": str(group[0].get("targetNodeInputId") or "0"),
                 }
@@ -2253,14 +2347,13 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     """A value written into persistent state leaves through a tile of its own.
 
     ``self.overlap_kv[name] = chunk_kv[..., :head_dim].clone()`` publishes into
-    the module's own state: nothing in THIS forward reads it, the NEXT call
-    does. With no consumer the clone reads as a dead node, which is the one
-    thing it is not -- it is the whole point of the statement.
+    the module's own state: the NEXT call reads it. A producer can also feed
+    work in this call, but that does not remove its cross-call boundary.
 
     The graph already says "a value leaves here" with an output tile, so the
     store gets one, named for the state it writes. The reader sees where the
-    value goes instead of a box wired to nothing, and the dead-node check sees
-    a legitimate sink rather than a dropped edge.
+    value goes and the dead-node check sees a legitimate sink rather than a
+    dropped edge.
     """
     consumed = {
         str(edge.get("sourceNodeId"))
@@ -2269,22 +2362,66 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     }
     additions: list[dict[str, Any]] = []
     for node in nodes:
-        if str(node["id"]) in consumed or _node_attr(node, "synthetic"):
+        if _node_attr(node, "synthetic"):
             continue
-        stored = next(
+        stored = _node_attr_values(node, "state_write")
+        if str(node["id"]) in consumed and not stored:
+            continue
+        side_effect = next(
             (
                 part.split(":", 1)[1].strip()
                 for part in str(_node_attr(node, "details") or "").split(";")
-                if part.strip().startswith("stores:")
+                if part.startswith("side_effect:")
             ),
             None,
         )
-        if not stored:
+        if stored:
+            # One producer can publish several independent state values.  Each
+            # gets its own sink so graph consumers retain every identity.
+            for state in stored:
+                sink_id = f"{node['id']}:@state_out:{state}"
+                additions.append(
+                    {
+                        "id": sink_id,
+                        "label": state,
+                        "namespace": node.get("namespace", ""),
+                        "attrs": [
+                            {"key": "synthetic", "value": "@state_out"},
+                            # This is a visual boundary for a write already
+                            # represented on its producer.  Keep its identity
+                            # without making it a second costed write.
+                            {"key": "state_boundary", "value": state},
+                            {
+                                "key": "output_shape",
+                                "value": _node_attr(node, "output_shape") or "",
+                            },
+                            {
+                                "key": "output_dtype",
+                                "value": _node_attr(node, "output_dtype") or "",
+                            },
+                        ],
+                        "incomingEdges": [
+                            {
+                                "sourceNodeId": node["id"],
+                                "sourceNodeOutputId": "0",
+                                "targetNodeInputId": "0",
+                            }
+                        ],
+                    }
+                )
+            continue
+        elif side_effect:
+            # A discarded call (a shape check, a log) is the consumer of the
+            # tensor it was handed. The call itself is not a tensor op, so the
+            # tensor it reads is given the same kind of sink a store gets.
+            sink_id = f"{node['id']}:@side_effect:{side_effect}"
+            sink_label = side_effect
+        else:
             continue
         additions.append(
             {
-                "id": f"{node['id']}:@state_out:{stored}",
-                "label": stored,
+                "id": sink_id,
+                "label": sink_label,
                 "namespace": node.get("namespace"),
                 "attrs": [
                     {"key": "synthetic", "value": "@output"},
@@ -2340,7 +2477,8 @@ def _drop_undrawn_state_reads(nodes: list[dict[str, Any]]) -> None:
             if str(node["id"]) not in consumed
             and not _node_attr(node, "synthetic")
             and "method_params:" in str(_node_attr(node, "details") or "")
-            and "stores:" not in str(_node_attr(node, "details") or "")
+            and not _node_attr_values(node, "state_write")
+            and "side_effect:" not in str(_node_attr(node, "details") or "")
         }
         # A constant tile belongs to the op that reads it; when that op is not
         # drawn, neither is the weight it was reading.
@@ -2382,10 +2520,9 @@ def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
     """
     by_id = {str(node["id"]): node for node in nodes}
     additions: list[dict[str, Any]] = []
-    # One tensor read by several kernels is one tile, the way
-    # ``_share_one_tile_per_kernel_operand`` already draws it: Kimi's three
-    # ``ShortConvolution`` kernels read the same ``cu_seqlens``, and a port each
-    # would put three tiles of that name in one box.
+    # One producer port is one tensor. Kernels that read it share the port
+    # already drawn for it. Two operands of one kernel do not: sdpa reads one
+    # ``kv`` tensor as both ``key`` and ``value``, and those stay two ports.
     shared: dict[tuple[str, str, str], dict[str, Any]] = {}
     for node in nodes:
         if _node_attr(node, "operation") != "gpu_kernel":
@@ -2419,8 +2556,18 @@ def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
             )
             namespace = str(node.get("namespace") or "")
             source_id = str(edge.get("sourceNodeId"))
-            existing = shared.get((namespace, label, source_id))
-            if existing is not None:
+            source_port = str(edge.get("sourceNodeOutputId") or "0")
+            # One producer port is one tensor. Another kernel that reads it
+            # uses the port already drawn. A second operand of THIS kernel is
+            # a different port even when the tensor is the same one -- sdpa
+            # takes ``kv`` as both ``key`` and ``value``.
+            identity = (namespace, source_id, source_port)
+            existing = shared.get(identity)
+            feeds_this_kernel = existing is not None and any(
+                str(item.get("sourceNodeId")) == str(existing["id"])
+                for item in node.get("incomingEdges") or []
+            )
+            if existing is not None and not feeds_this_kernel:
                 edge["sourceNodeId"] = str(existing["id"])
                 edge["sourceNodeOutputId"] = "0"
                 continue
@@ -2448,7 +2595,7 @@ def _port_unnamed_kernel_operands(nodes: list[dict[str, Any]]) -> None:
             }
             additions.append(port)
             by_id[port_id] = port
-            shared[(namespace, label, source_id)] = port
+            shared.setdefault(identity, port)
             edge["sourceNodeId"] = port_id
             edge["sourceNodeOutputId"] = "0"
     nodes.extend(additions)
@@ -2816,23 +2963,33 @@ def _route_frame_exits_through_output_tiles(nodes: list[dict[str, Any]]) -> None
             shared = _common_namespace(source_ns, target_ns)
             if shared == source_ns:
                 continue  # entering the source's own block, not leaving it
-            if _is_synthetic_output(source) or _node_attr(source, "synthetic") in {
+            if _node_attr(source, "synthetic") in {
                 "@output_mirror",
                 "@kernel_port_out",
                 "@loop_carried",
             }:
                 continue
+            # An ``@output`` already leaves its own box. Keep walking the boxes
+            # above it; stopping here let one edge jump out of every parent.
+            own_box_already_tiled = _is_synthetic_output(source)
             if str(_node_attr(source, "constant")) == "true":
                 continue
             tail = source_ns[len(shared) :] if shared else source_ns
             segments = [p for p in tail.split("/") if p]
+            walk = source_ns
+            if own_box_already_tiled:
+                # The innermost box already has this output tile. Tile the
+                # parents only, or the edge still leaves every ancestor at once.
+                if len(segments) < 2 or "/" not in walk:
+                    continue
+                segments = segments[1:]
+                walk = walk.rsplit("/", 1)[0]
             if not segments:
                 continue
             name = str(source.get("label") or "output").strip() or "output"
             carried = node_output_spec(source, str(edge.get("sourceNodeOutputId", "0")))
             upstream = str(edge["sourceNodeId"])
             upstream_port = str(edge.get("sourceNodeOutputId", "0"))
-            walk = source_ns
             for _ in segments:
                 if not is_loop_wrapper(walk):
                     tile_id = f"{walk}/@output:{name}"
@@ -2893,7 +3050,6 @@ def _declare_tuple_boundary_ports(nodes: list[dict[str, Any]]) -> None:
             attrs.extend(
                 [
                     {"key": "shape", "value": format_shape_with_dtype(spec)},
-                    {"key": "tensor_shape", "value": format_shape_tensor(spec)},
                     {"key": "dtype", "value": spec.dtype},
                 ]
             )
@@ -3257,9 +3413,9 @@ def _loop_end_label(side: str, variable: str, namespace: str) -> str:
     variant for its own count made Kimi's decoder read as three loops running
     68, 24 and 1 times, when it is one loop of 93 whose body differs by slot --
     every one of those layers runs, which is what their summing to the stack's
-    own count says. The arms all read the same tensor in and all converge in the
-    one ``Mutually exclusive branch`` below, so the picture was already a single
-    stack; only these labels claimed otherwise.
+    own count says.     The arms all read the same tensor in and all leave through the stack's one
+    output tile, so the picture was already a single stack; only these labels
+    claimed otherwise.
     """
     share = _variant_share_of_stack(namespace)
     if share is not None:
@@ -4008,16 +4164,17 @@ def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None
     Run to a fixed point rather than once, because the tiles chain: the outer
     level has to be given its shape before the level inside it can take it.
 
-    Only a tile with exactly ONE producer is filled; anything else is not a
-    pass-through and is left to say nothing rather than pick one of several.
+    Only a tile with exactly ONE producer is synchronized; anything else is not
+    a pass-through and is left to say nothing rather than pick one of several.
+    Existing attrs are replaced too. A boundary can carry a stale meta-signature
+    shape for the raw forward parameter even after analysis proves the model
+    hands the module a derived tensor of another rank.
     """
     by_id = {str(node["id"]): node for node in nodes}
     while True:
         progressed = False
         for tile in nodes:
             if _node_attr(tile, "synthetic") not in {"@input", "@input_mirror"}:
-                continue
-            if _node_attr(tile, "output_shape") is not None:
                 continue
             edges = tile.get("incomingEdges") or []
             if len(edges) != 1:
@@ -4028,14 +4185,65 @@ def _carry_producer_shape_to_boundary_tiles(nodes: list[dict[str, Any]]) -> None
             shape = _node_attr(source, "output_shape")
             if not shape:
                 continue
-            attrs = tile.setdefault("attrs", [])
-            attrs.append({"key": "output_shape", "value": shape})
             dtype = _node_attr(source, "output_dtype")
+            if _node_attr(tile, "output_shape") == shape and (
+                not dtype or _node_attr(tile, "output_dtype") == dtype
+            ):
+                continue
+            _set_node_attr(tile, "output_shape", shape)
             if dtype:
-                attrs.append({"key": "output_dtype", "value": dtype})
+                _set_node_attr(tile, "output_dtype", dtype)
+            for metadata in tile.get("outputsMetadata", []) or []:
+                metadata_attrs = metadata.setdefault("attrs", [])
+                existing = next(
+                    (attr for attr in metadata_attrs if attr.get("key") == "shape"),
+                    None,
+                )
+                if existing is None:
+                    metadata_attrs.append({"key": "shape", "value": shape})
+                else:
+                    existing["value"] = shape
+                metadata_attrs = [
+                    attr for attr in metadata_attrs if attr.get("key") != "tensor_shape"
+                ]
+                metadata["attrs"] = metadata_attrs
+                if dtype:
+                    existing_dtype = next(
+                        (attr for attr in metadata_attrs if attr.get("key") == "dtype"),
+                        None,
+                    )
+                    if existing_dtype is None:
+                        metadata_attrs.append({"key": "dtype", "value": dtype})
+                    else:
+                        existing_dtype["value"] = dtype
             progressed = True
         if not progressed:
             return
+
+
+def publish_stated_shapes_and_check(graph: dict[str, Any], *, label: str) -> list[str]:
+    """Publish every stated shape, then run the post-processing checks.
+
+    Communication nodes are added after the build's own finishing passes. A
+    node that states ``output_shape`` and never publishes a port is drawn as
+    ``?`` on the edge that leaves it. The checks are the same ones the build
+    runs, so a node added later is held to the same graph.
+    """
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    _publish_declared_shapes_as_output_ports(nodes)
+    canonicalize_port_shape_keys(nodes)
+    stamp_full_shapes(nodes)
+    # input_shapes was stamped before the per-GPU rewrite. The checks compare
+    # an op with the tensor it reads, which is the port just published.
+    _annotate_op_input_signatures(nodes)
+    warnings: list[str] = []
+    warnings.extend(type_check_graph_nodes(nodes))
+    warnings.extend(integrity_check_graph_nodes(nodes, label=label))
+    warnings.extend(group_cycle_check_graph_nodes(nodes, label=label))
+    warnings.extend(warn_degenerate_mutually_exclusive_branches(nodes))
+    return warnings
 
 
 def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> None:
@@ -4055,8 +4263,8 @@ def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> Non
 
     One port, because a node with several has already published them -- that is
     where several come from. Its id is the one its readers dock on, so a tile
-    read at a named slot keeps that name. ``shape`` and ``tensor_shape`` carry
-    the same text, as they do on every port the shape pass writes.
+    read at a named slot keeps that name. The port carries that text on
+    ``shape``, the key the viewer draws on the edge.
     """
     docked: dict[str, set[str]] = {}
     for node in nodes:
@@ -4070,10 +4278,7 @@ def _publish_declared_shapes_as_output_ports(nodes: list[dict[str, Any]]) -> Non
         shape = _node_attr(node, "output_shape")
         if not shape:
             continue
-        attrs = [
-            {"key": "shape", "value": shape},
-            {"key": "tensor_shape", "value": shape},
-        ]
+        attrs = [{"key": "shape", "value": shape}]
         dtype = _node_attr(node, "output_dtype")
         if dtype:
             attrs.append({"key": "dtype", "value": dtype})
@@ -4542,7 +4747,8 @@ def _port_meta_attr(port: dict[str, Any], key: str) -> str | None:
 
 def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
     """Surface each output slice of a multi-output split (``Unbind`` / ``Split`` /
-    ``Chunk``) as its own named, input-styled passthrough tile.
+    ``Chunk``) -- or each bundled element of a ``Pack`` -- as its own named,
+    input-styled passthrough tile.
 
     Model Explorer does not render output-*port* names, so a split's per-slice
     ports (``query_states`` / ``key_states`` / ``value_states``) are invisible on
@@ -4551,21 +4757,34 @@ def _add_split_slice_tiles(nodes: list[dict[str, Any]]) -> None:
     tiles, synthesize one tile per slice carrying the slot label and that slice's
     shape, and rewire every consumer of the port to read the tile instead. The
     split node stays visible -- no computation is hidden -- and every slice now
-    shows a readable name and its own shape.
+    shows a readable name and its own shape. ``Pack`` gets the identical
+    treatment for the same reason -- each packed element (``q``, ``idx_q``, ...)
+    is a real, independently-shaped tensor the pack's own node cannot label. So
+    does a branch ``Merge`` ("Mutually exclusive branch") whose two arms are
+    themselves such a bundle (``inner_state = (...)`` built fresh on each side
+    of an ``if``) -- its own ``output_names`` is only ever stamped in that case
+    (see ``_emit_branch_select``), never for an ordinary single-tensor merge.
 
-    General: fires for any ``Unbind`` / ``Split`` / ``Chunk`` node with two or
-    more output slices. Per-slice shapes come from ``outputsMetadata`` when a
-    ``ShapeInferencer`` drove the build; without one the tiles still appear, named
-    from the node's ``output_names`` attr (index-aligned to the ports consumers
-    already read) -- the split's topology must not depend on shape inference being
-    available. Uses a distinct ``@slice_out`` synthetic tag -- it must not
-    reintroduce the retired ``@split_out:`` id prefix.
+    General: fires for any ``Unbind`` / ``Split`` / ``Chunk`` / ``Pack`` /
+    ``Merge`` node with two or more output slices. Per-slice shapes come from
+    ``outputsMetadata`` when a ``ShapeInferencer`` drove the build; without one
+    the tiles still appear, named from the node's ``output_names`` attr
+    (index-aligned to the ports consumers already read) -- the split's topology
+    must not depend on shape inference being available. Uses a distinct
+    ``@slice_out`` synthetic tag -- it must not reintroduce the retired
+    ``@split_out:`` id prefix.
     """
     tiles: list[dict[str, Any]] = []
     # (split_id, port_id) -> (tile_id, tile_port) for every slice we surface.
     port_redirect: dict[tuple[str, str], tuple[str, str]] = {}
     for node in nodes:
-        if str(node.get("label") or "") not in {"Unbind", "Split", "Chunk"}:
+        if str(node.get("label") or "") not in {
+            "Unbind",
+            "Split",
+            "Chunk",
+            "Pack",
+            "Mutually exclusive branch",
+        }:
             continue
         split_id = str(node.get("id"))
         namespace = str(node.get("namespace", ""))
@@ -4723,6 +4942,37 @@ def _dock_nullary_ops_on_what_sizes_them(nodes: list[dict[str, Any]]) -> None:
         node["incomingEdges"] = moved
 
 
+def _drop_mismatched_boundary_operands(nodes: list[dict[str, Any]]) -> None:
+    """Remove a sibling parameter boundary from an over-full fixed-arity op.
+
+    An expanded helper can have several bare caller parameters. If its chain
+    fallback lands the helper's primary boundary on an op that explicitly names
+    another parameter as its boundary input, that op receives both siblings.
+    The op's own fixed tensor arity and declared boundary name provide the full
+    structural proof needed to discard the mismatched boundary edge.
+    """
+    by_id = {str(node.get("id") or ""): node for node in nodes}
+    for node in nodes:
+        boundary = str(_node_attr(node, "boundary_input") or "").strip()
+        ceiling, variadic = _operand_ceiling(_node_attr(node, "raw_op") or "")
+        edges = list(node.get("incomingEdges") or [])
+        if not boundary or variadic or ceiling is None or len(edges) <= ceiling:
+            continue
+        removable = []
+        for edge in edges:
+            source = by_id.get(str(edge.get("sourceNodeId") or ""))
+            if source is None or not _is_synthetic_input(source):
+                continue
+            source_name = str(
+                _node_attr(source, "boundary_input") or source.get("label") or ""
+            ).strip()
+            if source_name and source_name != boundary:
+                removable.append(edge)
+        while len(edges) > ceiling and removable:
+            edges.remove(removable.pop(0))
+        node["incomingEdges"] = edges
+
+
 def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
     """Remove a frame ``@input`` tile that nothing inside the frame reads.
 
@@ -4769,6 +5019,18 @@ def _drop_unconsumed_input_boundaries(nodes: list[dict[str, Any]]) -> None:
             kept = [e for e in edges if str(e.get("sourceNodeId")) not in doomed]
             if len(kept) != len(edges):
                 node["incomingEdges"] = kept
+
+
+def _merged_variable(node: dict[str, Any]) -> str | None:
+    """The variable a phi rebinds, recorded as ``merges: <name>``."""
+    for part in str(_node_attr(node, "details") or "").split(";"):
+        part = part.strip()
+        if not part.startswith("merges:"):
+            continue
+        name = part.split(":", 1)[1].strip()
+        if name.isidentifier():
+            return name
+    return None
 
 
 def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
@@ -4824,6 +5086,31 @@ def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
         redirect[str(node.get("id"))] = (source_id, source_port)
     if not redirect:
         return
+    # A boundary minted while the branch still existed is named after the
+    # branch. Once the branch is folded away the name describes a node the
+    # reader cannot see; the variable the branch rebound is the tensor.
+    merged_name = {
+        phi_id: name
+        for phi_id, phi in ((phi_id, node_by_id.get(phi_id)) for phi_id in redirect)
+        if phi is not None and (name := _merged_variable(phi))
+    }
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in {"@input", "@output"}:
+            continue
+        label = str(node.get("label") or "")
+        if label != PHI_LABEL and not label.startswith(f"{PHI_LABEL}_"):
+            continue
+        names = {
+            merged_name[str(edge.get("sourceNodeId"))]
+            for edge in node.get("incomingEdges", []) or []
+            if str(edge.get("sourceNodeId")) in merged_name
+        }
+        if len(names) != 1:
+            continue
+        node["label"] = names.pop()
+        for attr in node.get("attrs") or []:
+            if attr.get("key") == "port_label":
+                attr["value"] = node["label"]
     for node in nodes:
         if str(node.get("id")) in redirect:
             continue
@@ -4842,6 +5129,49 @@ def _elide_noop_merges_and_casts(nodes: list[dict[str, Any]]) -> None:
         if rebuilt:
             node["incomingEdges"] = rebuilt
     nodes[:] = [n for n in nodes if str(n.get("id")) not in redirect]
+    _rename_branch_boundaries_after_their_tensor(nodes)
+
+
+def _rename_branch_boundaries_after_their_tensor(nodes: list[dict[str, Any]]) -> None:
+    """An input still called ``Mutually exclusive branch`` names the tensor instead.
+
+    The branch node is gone: it had one arm left and was folded onto that arm.
+    Another boundary of the same producer may already carry the tensor's name
+    (``position_ids`` beside the ``Expand`` that builds it). A boundary that
+    kept the branch's label is the same tensor.
+    """
+    by_id = {str(node.get("id")): node for node in nodes}
+    names_for: dict[str, set[str]] = {}
+    for node in nodes:
+        if _node_attr(node, "synthetic") not in {"@input", "@input_mirror"}:
+            continue
+        label = str(node.get("label") or "")
+        if not label or label == PHI_LABEL or label.startswith(f"{PHI_LABEL}_"):
+            continue
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            continue
+        source_id = str(edges[0].get("sourceNodeId"))
+        source = by_id.get(source_id)
+        if source is None or label == str(source.get("label") or ""):
+            continue
+        names_for.setdefault(source_id, set()).add(label)
+    for node in nodes:
+        if _node_attr(node, "synthetic") != "@input":
+            continue
+        label = str(node.get("label") or "")
+        if label != PHI_LABEL and not label.startswith(f"{PHI_LABEL}_"):
+            continue
+        edges = node.get("incomingEdges", []) or []
+        if len(edges) != 1:
+            continue
+        found = names_for.get(str(edges[0].get("sourceNodeId")), set())
+        if len(found) != 1:
+            continue
+        node["label"] = next(iter(found))
+        for attr in node.get("attrs") or []:
+            if attr.get("key") == "port_label":
+                attr["value"] = node["label"]
 
 
 def _elide_noop_single_input_concat(nodes: list[dict[str, Any]]) -> None:
@@ -5145,7 +5475,7 @@ def _annotate_op_input_signatures(nodes: list[dict[str, Any]]) -> None:
             # that tensor's producer has no consumer and is pruned -- but it is
             # not an operand, and counting it as one makes a one-operand op look
             # like it takes two. The extractor says which inputs these are.
-            elif source is not None and _is_host_param_operand(node, source):
+            elif source is not None and _is_host_param_operand(node, source, edge):
                 input_types[-1] = "Scalar"
             concrete_inputs.append("")
         for value in _op_scalar_details(node):
@@ -5174,10 +5504,61 @@ def _host_param_names(node: dict[str, Any]) -> set[str]:
     return names
 
 
-def _is_host_param_operand(node: dict[str, Any], source: dict[str, Any]) -> bool:
-    """True when *source* carries one of *node*'s declared host dependencies."""
+def _host_predecessor_names(node: dict[str, Any]) -> set[str]:
+    """Producer attrs whose values this op consumes after host materialisation."""
+    names: set[str] = set()
+    for part in str(_node_attr(node, "details") or "").split(";"):
+        part = part.strip()
+        if part.startswith("host_predecessors:"):
+            names.update(
+                item.strip()
+                for item in part.split(":", 1)[1].split(",")
+                if item.strip()
+            )
+    return names
+
+
+def _is_host_param_operand(
+    node: dict[str, Any],
+    source: dict[str, Any],
+    edge: dict[str, Any] | None = None,
+) -> bool:
+    """True when *source* carries one of *node*'s declared host dependencies.
+
+    The extractor records the parameter the op sizes itself from
+    (``host_params: cu_seqlens``). The tile that carries that value can be
+    labelled for a different tensor that shares the boundary, while the edge
+    still names the parameter. Matching only the source label counted the size
+    read as a second tensor operand.
+    """
     names = _host_param_names(node)
-    return bool(names) and str(source.get("label") or "").strip() in names
+    host_predecessors = _host_predecessor_names(node)
+    if not names and not host_predecessors:
+        return False
+    labels = {str(source.get("label") or "").strip()}
+    for key in ("boundary_input", "port_label"):
+        labels.add(str(_node_attr(source, key) or "").strip())
+    source_id = str(source.get("id") or "")
+    if any(
+        f":{producer}:" in source_id or source_id.endswith(f":{producer}")
+        for producer in host_predecessors
+    ):
+        return True
+    if "@input:" in source_id:
+        labels.add(source_id.rsplit("@input:", 1)[-1].split("/")[0].split("^")[0])
+    if edge is not None:
+        labels.add(str((edge.get("metadata") or {}).get("port_label") or "").strip())
+    if names & {label for label in labels if label}:
+        return True
+    # The entry-point edge is labelled with the parameter. Later ops that read
+    # the same host value are linked without that label, so the tile's own name
+    # no longer matches. The activation arrives from a real op on port 0; an
+    # extra edge that starts at a boundary tile is the size.
+    if edge is None or str(edge.get("targetNodeInputId") or "0") == "0":
+        return False
+    synthetic = str(_node_attr(source, "synthetic") or "")
+    source_id = str(source.get("id") or "")
+    return synthetic in {"@input", "@input_mirror"} or "/@input" in source_id
 
 
 def _stamp_boundary_input_shapes(
@@ -5256,25 +5637,22 @@ def _producer_output_spec(
     class_name: str | None,
     nested_block: Any,
     known: dict[str, TensorSpec],
+    inherited: TensorSpec | None = None,
 ) -> TensorSpec | None:
-    """Spec of the tensor a nested method expansion is handed.
+    """Spec of the tensor a nested section is handed.
 
-    ``self.indexer.build_block_mask(block_indices, ...)`` is inferred as its own
-    section, so nothing tells its ``@input`` what ``block_indices`` is and the
-    body computes the decoder's geometry instead. The step's FIRST recorded
-    predecessor is what produced that tensor (``indexer@l466``, the indexer's own
-    forward), and sibling sections are annotated in order, so its output is
-    already known.
-
-    Scoped to a method expansion -- a block whose ``input_label`` names something
-    other than the activation it would otherwise inherit. A plain submodule
-    section is fed by the spine and must keep inheriting it.
+    A plain submodule is fed by the spine, so it inherits that stream. A method
+    expansion is not: ``self.indexer.build_block_mask(block_indices, ...)`` is
+    inferred as its own section, and the tensor it is handed is the step's first
+    recorded predecessor (``indexer@l466``), already annotated because siblings
+    are walked in order. It does not inherit the spine.
     """
-    if not getattr(nested_block, "input_label", None) or not class_name:
-        return None
-    if not any(
+    is_method = any(
         str(detail).startswith("method:") for detail in nested_block.details or ()
-    ):
+    )
+    if not is_method:
+        return inherited
+    if not getattr(nested_block, "input_label", None) or not class_name:
         return None
     structure = spec.class_registry.get(class_name)
     predecessors = (getattr(structure, "forward_step_predecessors", None) or {}).get(
@@ -5340,6 +5718,43 @@ def _passes_whole_tuple(node: dict[str, Any], nodes: list[dict[str, Any]]) -> bo
     return len(ports) >= 2 or any(not port.isdigit() for port in ports)
 
 
+def _existing_ancestor_input(
+    producer: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    namespace: str,
+) -> str | None:
+    """An ``@input`` in a scope enclosing *namespace* that carries this tensor.
+
+    Identity is the producer port, followed through boundary tiles. Two tiles
+    of one tensor are one tile; shape is a consequence of that, not the test.
+    The closest enclosing input wins, so a rope helper reads the attention
+    tile rather than one further out.
+    """
+    seen: set[str] = set()
+    current: dict[str, Any] | None = producer
+    while current is not None and str(current.get("id")) not in seen:
+        seen.add(str(current["id"]))
+        other_ns = str(current.get("namespace") or "")
+        if (
+            _node_attr(current, "synthetic") == "@input"
+            and other_ns
+            and namespace.startswith(other_ns + "/")
+        ):
+            return str(current["id"])
+        if _node_attr(current, "synthetic") not in {
+            "@input",
+            "@input_mirror",
+            "@output",
+            "@output_mirror",
+        }:
+            return None
+        edges = list(current.get("incomingEdges") or [])
+        if len(edges) != 1:
+            return None
+        current = by_id.get(str(edges[0].get("sourceNodeId")))
+    return None
+
+
 def _split_tuple_boundary_slots(nodes: list[dict[str, Any]]) -> None:
     """A boundary carrying a tuple is drawn as one tile per component.
 
@@ -5371,9 +5786,25 @@ def _split_tuple_boundary_slots(nodes: list[dict[str, Any]]) -> None:
 
 
 def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
-    """Split the first tuple boundary that can be split soundly."""
+    """Split the outermost tuple boundary that can be split soundly.
+
+    Outermost first, so a component tile exists in the enclosing scope before
+    a nested rope helper is asked whether it needs one of its own.
+    """
     by_id = {str(node.get("id")): node for node in nodes}
-    for node in nodes:
+    candidates = [
+        node
+        for node in nodes
+        if _node_attr(node, "synthetic") in {"@input", "@input_mirror"}
+        and _tuple_slot_producers(node, by_id) is not None
+    ]
+    candidates.sort(
+        key=lambda node: (
+            str(node.get("namespace") or "").count("/"),
+            str(node.get("id")),
+        )
+    )
+    for node in candidates:
         kind = _node_attr(node, "synthetic")
         if kind not in {"@input", "@input_mirror"}:
             continue
@@ -5385,11 +5816,33 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
         prefix = node_id.rsplit("/", 1)[0] if "/" in node_id else ""
         slot_ids: list[str] = []
         additions: list[dict[str, Any]] = []
+        named_slots: dict[str, str] = {}
         for index, (edge, producer, slot) in enumerate(components):
             # A component already carrying the qualified name (a mirror of an
             # upstream ``position_embeddings.cos``) keeps it rather than being
             # qualified twice.
             name = slot if slot.startswith(f"{base}.") else f"{base}.{slot}"
+            # A rope helper inlined inside the module that already declares
+            # this tensor does not declare it again. The helper's readers use
+            # the tile the enclosing scope already has. A real nested module
+            # still gets a boundary of its own, and a kernel port is never
+            # decided here.
+            if _is_positional_frame_boundary(node):
+                existing = _existing_ancestor_input(
+                    producer, by_id, str(node.get("namespace") or "")
+                )
+                ancestor = by_id.get(existing) if existing else None
+                # Reuse only when the hop into the helper crosses one box. The
+                # attention tile is that hop. A tile two boxes out, wired
+                # straight at the helper's own op, never lands on the box it
+                # enters.
+                if ancestor is not None and all(
+                    len(walls) <= 1 for walls in _walls_crossed(ancestor, node)
+                ):
+                    slot_ids.append(existing)
+                    named_slots[slot] = existing
+                    named_slots[name.rsplit(".", 1)[-1]] = existing
+                    continue
             token = "@input_mirror" if kind == "@input_mirror" else "@input"
             suffix = f"{name}^{name}" if kind == "@input_mirror" else name
             tile_id = f"{prefix}/{token}:{suffix}" if prefix else f"{token}:{suffix}"
@@ -5417,12 +5870,12 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
                 }
             )
             slot_ids.append(tile_id)
+            named_slots[slot] = tile_id
+            named_slots[name.rsplit(".", 1)[-1]] = tile_id
         if len(slot_ids) != len(components):
             continue
 
-        by_slot_name = {
-            str(tile["label"]).rsplit(".", 1)[-1]: tile["id"] for tile in additions
-        }
+        by_slot_name = named_slots
         # Work out every consumer's new edge BEFORE committing: a consumer whose
         # port names no component cannot be re-pointed, and guessing would hand a
         # reader the wrong tensor.
@@ -5502,6 +5955,28 @@ def _split_one_tuple_boundary(nodes: list[dict[str, Any]]) -> bool:
         nodes.extend(additions)
         return True
     return False
+
+
+def _positional_frame_owner(node_id: str) -> str:
+    """The frame path of a boundary tile, excluding its ``/@input`` token."""
+    marker = "/@"
+    return node_id[: node_id.rfind(marker)] if marker in node_id else ""
+
+
+def _is_positional_frame_boundary(node: dict[str, Any]) -> bool:
+    """True when this tile is the input of an inlined rope helper.
+
+    Those helpers are marked ``@positional_`` on the frame id. Sanitising that
+    marker for a namespace yields a ``_positional_`` segment, so either form
+    identifies the frame.
+    """
+    owner = _positional_frame_owner(str(node.get("id") or ""))
+    if POSITIONAL_SYNTHETIC_PREFIX in owner:
+        return True
+    return any(
+        segment.startswith("_positional_")
+        for segment in str(node.get("namespace") or "").split("/")
+    )
 
 
 def _name_a_boundary_for_its_mirror(nodes: list[dict[str, Any]]) -> None:
@@ -5596,8 +6071,24 @@ def _share_one_tile_per_entering_tensor(nodes: list[dict[str, Any]]) -> None:
             continue
         shared_id = str(shared["id"])
         label = str(shared.get("label") or "")
+        # A call's own input mirror lives in the parent so the call can show
+        # its argument, but it still belongs to that call. Another module that
+        # reads the same producer is a separate use of the value; sending it
+        # through this mirror draws that module as fed by the call's port.
+        shared_module = (
+            shared_id[:marker] if (marker := shared_id.rfind("/@")) != -1 else ""
+        )
         for tile in tiles:
             if tile is shared:
+                continue
+            tile_id = str(tile.get("id"))
+            tile_module = (
+                tile_id[:marker] if (marker := tile_id.rfind("/@")) != -1 else ""
+            )
+            if shared_module and not (
+                tile_module == shared_module
+                or tile_module.startswith(shared_module + "/")
+            ):
                 continue
             # A boundary standing for this tensor carries this tensor's name. One
             # minted straight off the producer is named after the producing op
@@ -5629,6 +6120,7 @@ def _reconcile_edge_endpoint_shapes(nodes: list[dict[str, Any]]) -> None:
     ``masked_scatter`` combine) must be preserved, not papered over — and only
     ever replace a weak dim with a concrete one, never the reverse.
     """
+    canonicalize_port_shape_keys(nodes)
     node_by_id = {str(node.get("id")): node for node in nodes}
 
     def _reconcile(a: dict[str, Any], b: dict[str, Any]) -> None:
@@ -5733,10 +6225,9 @@ def _write_port_shape(
     if dtype:
         display = f"{display} {dtype}"
     shape_attr["value"] = display
-    for attr in metadata.get("attrs", []):
-        if attr.get("key") == "tensor_shape":
-            tensor = format_shape_dims(dims)
-            attr["value"] = f"{tensor} {dtype}" if dtype else tensor
+    metadata["attrs"] = [
+        attr for attr in metadata.get("attrs", []) if attr.get("key") != "tensor_shape"
+    ]
 
 
 def _prune_unconsumed_outputs(
@@ -6083,6 +6574,22 @@ def _resolve_section_tree_for_component(
                     component_label=variant.ffn_label,
                     basic_ops=basic_ops,
                 )
+                # The variant's own class was not parsed into the registry (both
+                # MLP classes live in sibling modules the entry file never
+                # defines). The attribute lookup then returns the component's
+                # own tree — the other class, the one the constructor assigned
+                # last. Leave that unresolved so the caller emits one summary
+                # tile named for the class this layer actually builds. A tree
+                # the label selected, whose class is not the component's, still
+                # stands.
+                if (
+                    resolved is not None
+                    and variant.ffn_class
+                    and variant.ffn_class != component.class_name
+                    and resolved[1].class_name == component.class_name
+                    and (spec.class_registry or {}).get(variant.ffn_class) is None
+                ):
+                    return None
                 if resolved is not None:
                     return resolved
     return _resolve_section_tree(
@@ -6145,6 +6652,49 @@ def _resolve_section_tree(
     return max(matches, key=lambda item: len(item[1].children or ()))
 
 
+def _single_op_attrs(node: BlockNode) -> list[dict[str, str]]:
+    """The collapsed op's own record, so the spine tile still computes it.
+
+    ``hc_head`` is one ``mean`` and the spine shows that mean under the
+    component id. The tile is still a summary: without ``dim`` and ``raw_op``
+    nothing reduces it, and it inherits the multi-stream tensor it was handed.
+    """
+    details = [str(item) for item in node.details if str(item).strip()]
+    if not details:
+        return []
+    attrs: list[dict[str, str]] = [{"key": "details", "value": "; ".join(details)}]
+    for item in details:
+        name, separator, value = item.partition(":")
+        if separator and name.strip() == "raw_op" and value.strip():
+            attrs.append({"key": "raw_op", "value": value.strip()})
+            break
+    return attrs
+
+
+def _stamp_variant_ffn_identity(
+    summary: dict[str, Any],
+    component: BlockComponent,
+    variant: LayerVariant | None,
+) -> None:
+    """Name a collapsed FFN tile after the class THIS layer builds.
+
+    The decoder component keeps whichever class the constructor assigned last
+    (the MoE arm, for a ``dense if layer_id < threshold else MoE`` block). A
+    variant whose class was never parsed still has to say so, or every layer —
+    including the dense ones — is costed as that last class.
+    """
+    if not _component_uses_variant_ffn_class(component, variant):
+        return
+    class_name = variant.ffn_class if variant is not None else None
+    if not class_name or class_name == component.class_name:
+        return
+    from TraceLens.ModelUtils.ast_analyze import ffn_role_for_class
+
+    _set_node_attr(summary, "class_name", class_name)
+    _set_node_attr(summary, "role", ffn_role_for_class(component.attr_name, class_name))
+    summary["label"] = variant.ffn_label or class_name
+
+
 def _summary_node(
     node_id: str,
     label: str,
@@ -6166,6 +6716,31 @@ def _summary_node(
     if style:
         node["style"] = ensure_readable_text(style)
     return node
+
+
+def _stamp_module_summary(
+    summary: dict[str, Any],
+    component: BlockComponent,
+    merged_nodes: list[dict[str, Any]],
+    previous_exits: list[SourceRef],
+    shape_inferencer: ShapeInferencer | None,
+) -> None:
+    """Shape a collapsed module tile from its own weight before later sections read it.
+
+    An embedding drawn as one tile has no body to infer. The sections after it
+    are sized from this tile, so the weight's answer has to be on it now -- the
+    pass that fills missing shapes runs only once every section has already
+    been inferred.
+    """
+    if shape_inferencer is None:
+        return
+    if component.role == "embedding":
+        source = TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value), "int64")
+    else:
+        source = _spine_entry_spec(merged_nodes, previous_exits)
+    produced = shape_inferencer.module_output_spec(component.attr_name, source)
+    if produced is not None:
+        apply_shape_attrs(summary, produced)
 
 
 def _append_section(
@@ -6201,6 +6776,7 @@ def _append_section(
             variant=variant,
             basic_ops=basic_ops,
         )
+        collapsed_op: BlockNode | None = None
         if single_op is not None:
             _single_title, single_tree = single_op
             prepared_single = expand_block_tree_inplace(
@@ -6208,16 +6784,28 @@ def _append_section(
             )
             if single_tree.children and not prepared_single.children:
                 summary_label = prepared_single.label
+                collapsed_op = prepared_single
         summary = _summary_node(
             id_prefix,
             summary_label,
             namespace=summary_namespace,
             component=component,
         )
+        if collapsed_op is not None:
+            summary["attrs"].extend(_single_op_attrs(collapsed_op))
         if previous_exits:
             summary["incomingEdges"] = [
                 _source_edge(source, "0") for source in previous_exits
             ]
+        _stamp_module_summary(
+            summary,
+            component,
+            merged_nodes,
+            previous_exits,
+            shape_inferencer,
+        )
+        if collapsed_op is None:
+            _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -6242,6 +6830,14 @@ def _append_section(
             summary["incomingEdges"] = [
                 _source_edge(source, "0") for source in previous_exits
             ]
+        _stamp_module_summary(
+            summary,
+            component,
+            merged_nodes,
+            previous_exits,
+            shape_inferencer,
+        )
+        _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -6260,6 +6856,7 @@ def _append_section(
             ),
             component=component,
         )
+        summary["attrs"].extend(_single_op_attrs(prepared_tree))
         if previous_exits:
             summary["incomingEdges"] = [
                 _source_edge(source, "0") for source in previous_exits
@@ -6296,11 +6893,35 @@ def _append_section(
         # Resolve the nested modules FIRST, so this section knows what each of
         # them returns before it sizes the node that stands for one. They are
         # annotated properly further down; this pass only warms that knowledge.
+        # A plain submodule inherits the spine stream. A method expansion does
+        # not: its argument is a sibling's output, which this pass has not
+        # annotated yet.
+        # The previous section's multiply may still say ``[1]`` from the scalar
+        # it saw first. Its activation edge is already drawn; widen that result
+        # before this section is sized from it.
+        widen_broadcast_results(merged_nodes)
+        section_entry = _spine_entry_spec(merged_nodes, previous_exits)
         for _label, nested in collect_nested_diagrams(block_tree, basic_ops=basic_ops):
-            infer_block_tree_shapes(shape_inferencer, nested, title=_label)
+            infer_block_tree_shapes(
+                shape_inferencer,
+                nested,
+                title=_label,
+                entry_spec=_producer_output_spec(
+                    spec,
+                    block_tree.class_name,
+                    nested,
+                    {},
+                    inherited=section_entry,
+                ),
+            )
         annotate_nodes_with_shapes(
             section_nodes,
-            infer_block_tree_shapes(shape_inferencer, block_tree, title=_title),
+            infer_block_tree_shapes(
+                shape_inferencer,
+                block_tree,
+                title=_title,
+                entry_spec=section_entry,
+            ),
             id_prefix=id_prefix,
         )
 
@@ -6426,6 +7047,7 @@ def _append_section(
                         block_tree.class_name,
                         nested_block,
                         nested_output_specs,
+                        inherited=section_entry,
                     ),
                 ),
                 id_prefix=nested_prefix,
@@ -6773,6 +7395,90 @@ def _exported_section_outputs(
     return refs
 
 
+def _split_multi_argument_inputs(
+    decoder: Any,
+    step: str,
+    *,
+    callee: Any,
+    refs: dict[str, SourceRef],
+    inputs: list[SourceRef],
+) -> tuple[list[SourceRef], dict[str, SourceRef]]:
+    """Separate a multi-argument call's primary port from its other parameters.
+
+    The flat predecessor list stacks every argument on the callee's primary
+    ``@input``. A gate called as ``gate(residual, hidden_states)`` then shows
+    the layernorm on ``residual`` and leaves ``hidden_states`` unsourced, so a
+    later pass fills it from a same-named ancestor. When the call records which
+    producer feeds which parameter, the primary input keeps only its own
+    producer and each remaining parameter is returned for its own tile.
+    """
+    arg_map = (getattr(decoder, "forward_step_predecessor_args", None) or {}).get(
+        step
+    ) or {}
+    params = getattr(callee, "forward_param_inputs", None) or ()
+    if len(arg_map) < 2 or not params:
+        return inputs, {}
+    primary = params[0]
+    producer = arg_map.get(primary)
+    if producer not in refs:
+        return inputs, {}
+    named = {
+        param: refs[pred]
+        for param, pred in arg_map.items()
+        if param != primary and pred in refs
+    }
+    if not named:
+        return inputs, {}
+    return [refs[producer]], named
+
+
+def _bind_named_section_inputs(
+    nodes: list[dict[str, Any]],
+    section_prefix: str,
+    named_inputs: dict[str, SourceRef],
+) -> bool:
+    """Point each ``@input:<param>`` at the argument this call passes.
+
+    Returns False when any named tile is absent, so the caller can leave the
+    flat predecessor edges in place instead of dropping an argument.
+    """
+    if not named_inputs:
+        return False
+    by_id = {str(node.get("id")): node for node in nodes}
+    located: list[tuple[dict[str, Any], SourceRef, str]] = []
+    for param, source in named_inputs.items():
+        tile = by_id.get(_merge_node_id(section_prefix, f"@input:{param}"))
+        if tile is None:
+            return False
+        located.append((tile, source, param))
+    for tile, source, param in located:
+        tile["incomingEdges"] = [_source_edge(source, param)]
+    return True
+
+
+def _step_boundary_sources(
+    step: str,
+    boundary_params: dict[str, tuple[str, ...]],
+    refs: dict[str, SourceRef],
+) -> list[SourceRef]:
+    """A step's sources from the method's own parameters, for a step with no listed
+    chained predecessor.
+
+    ``forward_step_predecessors`` is empty for a call whose first read of a tensor is a
+    bare forward parameter (``self.input_layernorm(hidden_states)`` as a model's very
+    first statement) rather than another step's output -- that fact is recorded in
+    ``forward_step_boundary_params`` instead. Leaving such a step without an input would
+    drop it, and everything chained after it, from the rendered graph even though it is
+    the model's actual entry point.
+    """
+    sources = []
+    for param in boundary_params.get(step, ()):
+        source = refs.get(f"@method_input:{param}") or refs.get("@method_input")
+        if source is not None:
+            sources.append(source)
+    return sources
+
+
 def _append_source_decoder_layer(
     merged_nodes: list[dict[str, Any]],
     *,
@@ -6793,6 +7499,10 @@ def _append_source_decoder_layer(
         return list(previous_exits)
     components = {component.attr_name: component for component in spec.block_components}
     refs: dict[str, SourceRef] = {}
+    omitted = (
+        frozenset(variant.omitted_components) if variant is not None else frozenset()
+    )
+    dead_steps, phi_live_arms = resolved_phi_arms(decoder, omitted)
     if previous_exits:
         refs["@method_input"] = previous_exits[0]
         # A per-parameter boundary token resolves to the same chain input here:
@@ -6804,11 +7514,19 @@ def _append_source_decoder_layer(
     for step in decoder.forward_calls:
         operation = decoder.forward_operations.get(step)
         if operation is not None:
+            if step in dead_steps:
+                continue
             sources = [
                 refs[predecessor]
-                for predecessor in operation.predecessors
+                for predecessor in phi_live_arms.get(step, operation.predecessors)
                 if predecessor in refs
             ]
+            if not sources:
+                sources = _step_boundary_sources(
+                    step,
+                    getattr(decoder, "forward_step_boundary_params", None) or {},
+                    refs,
+                )
             if not sources:
                 continue
             if (operation.class_name or "") == PHI_CLASS and len(sources) == 1:
@@ -6854,6 +7572,12 @@ def _append_source_decoder_layer(
             refs[predecessor] for predecessor in predecessors if predecessor in refs
         ]
         if not inputs:
+            inputs = _step_boundary_sources(
+                step,
+                getattr(decoder, "forward_step_boundary_params", None) or {},
+                refs,
+            )
+        if not inputs:
             continue
         section_prefix = _merge_node_id(id_prefix, component.attr_name)
         section_namespace = _section_namespace_for_component(
@@ -6865,6 +7589,23 @@ def _append_source_decoder_layer(
         group = _group_config_for_role(section_namespace, component.role)
         if group:
             group_node_configs.append(group)
+        class_name = component.class_name
+        if variant is not None and _component_uses_variant_attention_class(
+            component, variant
+        ):
+            class_name = variant.attention_class or class_name
+        elif variant is not None and _component_uses_variant_ffn_class(
+            component, variant
+        ):
+            class_name = variant.ffn_class or class_name
+        callee = spec.class_registry.get(class_name)
+        primary_inputs, named_inputs = _split_multi_argument_inputs(
+            decoder,
+            step,
+            callee=callee,
+            refs=refs,
+            inputs=inputs,
+        )
         exits = _append_section(
             merged_nodes,
             spec=spec,
@@ -6880,19 +7621,21 @@ def _append_source_decoder_layer(
             parent_class=spec.decoder_class,
             inline_expansion=inline_expansion,
         )
+        if named_inputs and _bind_named_section_inputs(
+            merged_nodes, section_prefix, named_inputs
+        ):
+            primary_id = _merge_node_id(section_prefix, "@input")
+            for node in merged_nodes:
+                if node.get("id") != primary_id:
+                    continue
+                node["incomingEdges"] = [
+                    _source_edge(source, str(index))
+                    for index, source in enumerate(primary_inputs)
+                ]
+                break
         if exits:
             refs[step] = exits[0]
         outputs = _exported_section_outputs(merged_nodes, section_prefix)
-        class_name = component.class_name
-        if variant is not None and _component_uses_variant_attention_class(
-            component, variant
-        ):
-            class_name = variant.attention_class or class_name
-        elif variant is not None and _component_uses_variant_ffn_class(
-            component, variant
-        ):
-            class_name = variant.ffn_class or class_name
-        callee = spec.class_registry.get(class_name)
         if callee is not None:
             for slot, producer in callee.forward_return_slots.items():
                 if slot in outputs:
@@ -7005,19 +7748,41 @@ def _append_decoder_layers(
         group = _group_config_for_role(section_namespace, component.role)
         if group:
             group_node_configs.append(group)
-    chain_exits = _append_source_decoder_layer(
-        merged_nodes,
-        spec=spec,
-        id_prefix="decoder",
-        namespace_prefix=decoder_namespace,
-        basic_ops=basic_ops,
-        previous_exits=previous_exits,
-        variant=None,
-        group_node_configs=group_node_configs,
-        group_node_attributes=group_node_attributes,
-        shape_inferencer=shape_inferencer,
-        inline_expansion=inline_expansion,
-    )
+    if decoder is not None and (
+        decoder.forward_operations or decoder.forward_step_predecessors
+    ):
+        chain_exits = _append_source_decoder_layer(
+            merged_nodes,
+            spec=spec,
+            id_prefix="decoder",
+            namespace_prefix=decoder_namespace,
+            basic_ops=basic_ops,
+            previous_exits=previous_exits,
+            variant=None,
+            group_node_configs=group_node_configs,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
+    else:
+        # Some decoder forwards have a regular sequential hidden-state spine
+        # but no recorded predecessor metadata. Trying the source-driven path
+        # in that case emits no sections at all: the tail norm becomes an
+        # orphan and the model output bypasses the decoder. Use the structural
+        # component chain, which retains the real input and output boundaries.
+        chain_exits = _append_variant_layer(
+            merged_nodes,
+            spec=spec,
+            variant=None,
+            id_prefix="decoder",
+            namespace_prefix=decoder_namespace,
+            basic_ops=basic_ops,
+            previous_exits=previous_exits,
+            group_node_configs=group_node_configs,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
     result = _wrap_actual_group_boundary(
         merged_nodes,
         namespace=decoder_namespace,
@@ -7174,6 +7939,153 @@ def _name_loop_frames_for_the_axis_they_walk(
         }
         if walked & set(passthrough):
             frame.label = f"loop iterations: {Symbol.VISION_GRID.value}"
+
+
+def _coalesce_duplicate_section_inputs(nodes: list[dict[str, Any]]) -> None:
+    """One synthetic section input per id, with every incoming edge preserved.
+
+    Independent consumers of one outer parameter can each ask the computation
+    builder for its boundary. Once namespaced into the merged graph those
+    requests denote the same section port. Keeping both creates duplicate ids
+    and makes integrity diagnostics report the same orphan more than once.
+    """
+    keeper_by_id: dict[str, dict[str, Any]] = {}
+    duplicates: set[int] = set()
+    for node in nodes:
+        if not _is_synthetic_input(node):
+            continue
+        node_id = str(node.get("id") or "")
+        keeper = keeper_by_id.get(node_id)
+        if keeper is None:
+            keeper_by_id[node_id] = node
+            continue
+        duplicates.add(id(node))
+        existing = {
+            (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId") or "0"),
+                str(edge.get("targetNodeInputId") or "0"),
+            )
+            for edge in keeper.get("incomingEdges", []) or []
+        }
+        for edge in node.get("incomingEdges", []) or []:
+            key = (
+                str(edge.get("sourceNodeId") or ""),
+                str(edge.get("sourceNodeOutputId") or "0"),
+                str(edge.get("targetNodeInputId") or "0"),
+            )
+            if key not in existing:
+                keeper.setdefault("incomingEdges", []).append(edge)
+                existing.add(key)
+        keeper_attrs = {str(attr.get("key")) for attr in keeper.get("attrs", []) or []}
+        for attr in node.get("attrs", []) or []:
+            if str(attr.get("key")) not in keeper_attrs:
+                keeper.setdefault("attrs", []).append(attr)
+    if duplicates:
+        nodes[:] = [node for node in nodes if id(node) not in duplicates]
+
+
+def _clear_unverified_output_spec(node: dict[str, Any]) -> None:
+    """Remove a heuristic output spec from a newly exposed graph input."""
+    node["attrs"] = [
+        attr
+        for attr in node.get("attrs", []) or []
+        if str(attr.get("key")) not in {"output_shape", "output_dtype"}
+    ]
+    for metadata in node.get("outputsMetadata", []) or []:
+        metadata["attrs"] = [
+            attr
+            for attr in metadata.get("attrs", []) or []
+            if str(attr.get("key")) not in {"shape", "dtype"}
+        ]
+
+
+def _clear_unverified_boundary_chain(
+    nodes: list[dict[str, Any]], source_id: str
+) -> None:
+    """Carry an unknown external spec through pass-through boundary tiles."""
+    frontier = [source_id]
+    visited: set[str] = set()
+    while frontier:
+        current = frontier.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        for tile in nodes:
+            if _node_attr(tile, "synthetic") not in {"@input", "@input_mirror"}:
+                continue
+            edges = tile.get("incomingEdges") or []
+            if len(edges) != 1 or str(edges[0].get("sourceNodeId")) != current:
+                continue
+            _clear_unverified_output_spec(tile)
+            frontier.append(str(tile.get("id") or ""))
+
+
+def _expose_unfed_section_inputs(
+    nodes: list[dict[str, Any]],
+    shape_inferencer: ShapeInferencer | None = None,
+) -> None:
+    """Surface each unfed outer-section input as a top-level model input.
+
+    A section can contain an expanded helper whose primary is a bare parameter
+    of the enclosing model rather than the section's chain input. The helper's
+    ``section/@input:param`` is then a genuine external graph source. Give it a
+    root-scope source tile instead of leaving a namespaced boundary orphaned.
+
+    Only the first namespace level is eligible. A deeper ``a/b/@input:param`` is
+    an internal module boundary and still has to be wired by its caller.
+    """
+    by_id = {str(node.get("id") or ""): node for node in nodes}
+    additions: list[dict[str, Any]] = []
+    for target in list(nodes):
+        if not _is_synthetic_input(target) or target.get("incomingEdges"):
+            continue
+        namespace = str(target.get("namespace") or "")
+        if not namespace or "/" in namespace:
+            continue
+        target_id = str(target.get("id") or "")
+        if not target_id.startswith(f"{namespace}/@input:"):
+            continue
+        param = str(
+            _node_attr(target, "boundary_input") or target.get("label") or ""
+        ).strip()
+        if not param:
+            continue
+        source_id = f"@input:{param}"
+        source = by_id.get(source_id)
+        verified_spec = (
+            shape_inferencer.boundary_input_spec(param, namespace)
+            if shape_inferencer is not None
+            else None
+        )
+        if shape_inferencer is not None:
+            if verified_spec is None:
+                _clear_unverified_output_spec(target)
+            else:
+                apply_shape_attrs(target, verified_spec)
+        if source is None:
+            source = _make_group_input_node(
+                input_id=source_id,
+                label=param,
+                namespace="",
+                port_label=param,
+            )
+            if verified_spec is not None:
+                apply_shape_attrs(source, verified_spec)
+            elif shape_inferencer is None and (
+                shape := _node_attr(target, "output_shape")
+            ):
+                source.setdefault("attrs", []).append(
+                    {"key": "output_shape", "value": shape}
+                )
+            additions.append(source)
+            by_id[source_id] = source
+        elif verified_spec is not None:
+            apply_shape_attrs(source, verified_spec)
+        target["incomingEdges"] = [_source_edge((source_id, "0"), param)]
+        if shape_inferencer is not None and verified_spec is None:
+            _clear_unverified_boundary_chain(nodes, source_id)
+    nodes.extend(additions)
 
 
 def _grid_descriptor_columns(nodes: list[dict[str, Any]], boundary_id: str) -> int:
@@ -7381,13 +8293,6 @@ def _attach_vision_language_combine(
             },
         ],
     }
-    if shape_inferencer is not None:
-        context = shape_inferencer.context
-        hidden = context.dims.get(Symbol.HIDDEN.value, Symbol.HIDDEN.value)
-        apply_shape_attrs(
-            node,
-            TensorSpec((Symbol.BATCH.value, Symbol.SEQ.value, hidden), context.dtype),
-        )
     nodes.append(node)
     return [(combine_id, "0")]
 
@@ -7438,6 +8343,11 @@ def _tag_secondary_module_groups(
     namespace/attribute rewrite — no new nodes or edges, so it cannot create a
     cycle. Degrades to a no-op when the live tree is unavailable or no rendered
     namespace matches a secondary group's element class."""
+    # The nested-stage path already emitted each position with its own count and
+    # label. Re-tagging those ModuleLists (a downsample list's first class, say)
+    # would rename a single leading node into a fake N× group.
+    if getattr(spec, "nested_module_groups", None):
+        return
     groups = getattr(spec, "meta_module_groups", None)
     if not groups:
         return
@@ -7548,10 +8458,7 @@ def _copy_carried_shape(dst: dict[str, Any], src: dict[str, Any] | None) -> None
         return
     dtype = _node_attr(src, "output_dtype")
     dst["attrs"].append({"key": "output_shape", "value": shape})
-    port_attrs = [
-        {"key": "shape", "value": shape},
-        {"key": "tensor_shape", "value": shape},
-    ]
+    port_attrs = [{"key": "shape", "value": shape}]
     if dtype is not None:
         dst["attrs"].append({"key": "output_dtype", "value": dtype})
         port_attrs.append({"key": "dtype", "value": dtype})
@@ -8244,6 +9151,58 @@ def _expand_model_scope_producer_ops(
     )
     if not operations:
         return None
+    method_returns = (getattr(cls, "multi_op_method_returns", None) or {}).get(
+        producer_attr
+    )
+    primary_producer: str | None = None
+    if method_returns:
+        return_slots, _return_order, primary_slot = method_returns
+        if primary_slot:
+            primary_producer = return_slots.get(primary_slot)
+    if primary_producer and any(
+        operation.attr_name == primary_producer for operation in operations
+    ):
+        by_attr = {operation.attr_name: operation for operation in operations}
+        live: set[str] = set()
+        pending = [primary_producer]
+        while pending:
+            attr = pending.pop()
+            if attr in live:
+                continue
+            operation = by_attr.get(attr)
+            if operation is None:
+                continue
+            live.add(attr)
+            pending.extend(
+                predecessor
+                for predecessor in operation.predecessors
+                if predecessor in by_attr
+            )
+        # A helper can expose secondary return bookkeeping after its primary
+        # result. Model-scope callers selecting only the primary must not render
+        # those branches as dead leaves.
+        operations = [
+            operation for operation in operations if operation.attr_name in live
+        ]
+    call_input_specs = [
+        spec
+        for edge in incoming
+        if (
+            spec := node_output_spec(
+                node_by_id.get(str(edge.get("sourceNodeId", ""))),
+                str(edge.get("sourceNodeOutputId", "0")),
+            )
+        )
+        is not None
+    ]
+    floating_call_dtype = next(
+        (
+            spec.dtype
+            for spec in call_input_specs
+            if any(token in str(spec.dtype) for token in ("float", "bfloat"))
+        ),
+        None,
+    )
     namespace = _sanitize_namespace_segment(label)
     # The frame is a module in the render, and a module handed several tensors
     # must name them: the mask builders take the mask and the position tensor
@@ -8380,12 +9339,22 @@ def _expand_model_scope_producer_ops(
         # several selects -- and it is built outside the per-section inference
         # pass, so nothing else ever sized it. Leaving the head unsized blanks
         # every op downstream of it too, because each one asks its operands.
-        _apply_expansion_shape(node, edges, node_by_id, operation, shape_inferencer)
+        _apply_expansion_shape(
+            node,
+            edges,
+            node_by_id,
+            operation,
+            shape_inferencer,
+            floating_call_dtype=floating_call_dtype,
+        )
         nodes.append(node)
         node_by_id[op_id] = node
         own_ids[operation.attr_name] = op_id
         last_id = op_id
-    return last_id
+    # A multi-return helper can end with bookkeeping for a secondary return.
+    # The caller receives the helper's declared primary return, not whichever
+    # operation happened to be emitted last.
+    return own_ids.get(primary_producer or "") or last_id
 
 
 def _apply_expansion_shape(
@@ -8394,6 +9363,8 @@ def _apply_expansion_shape(
     node_by_id: dict[str, dict[str, Any]],
     operation: Any,
     shape_inferencer: Any,
+    *,
+    floating_call_dtype: str | None = None,
 ) -> None:
     """Give one op of a model-scope frame expansion its output shape.
 
@@ -8431,6 +9402,31 @@ def _apply_expansion_shape(
         return
     if inferred is None:
         return
+    if str(operation.label) == PHI_LABEL and input_specs:
+        # Every arm of a phi produces the same logical tensor. When one arm is
+        # only partly recovered (a dispatched callable can leave behind its
+        # scalar extent plumbing), keep the most informative alternative rather
+        # than whichever predecessor happened to be listed first.
+        inferred = max(input_specs, key=lambda spec: len(spec.shape))
+    declared_shape = next(
+        (
+            str(detail).split(":", 1)[1].strip()
+            for detail in operation.details
+            if str(detail).startswith("shape:")
+        ),
+        "",
+    )
+    declared_rank = len([part for part in declared_shape.split(",") if part.strip()])
+    if (
+        floating_call_dtype
+        and declared_rank > max((len(spec.shape) for spec in input_specs), default=0)
+        and not any(token in str(inferred.dtype) for token in ("float", "bfloat"))
+    ):
+        # The recovered predecessor is extent plumbing (typically aranges), not
+        # the callable's hidden tensor result. The call itself is fed floating
+        # model data and declares a higher-rank broadcast target; preserve that
+        # data dtype rather than promoting an integer extent to the output dtype.
+        inferred = TensorSpec(tuple(inferred.shape), floating_call_dtype)
     if (
         len(input_specs) == 1
         and tuple(inferred.shape) == tuple(input_specs[0].shape)
@@ -8447,6 +9443,33 @@ def _apply_expansion_shape(
     apply_shape_attrs(node, inferred)
 
 
+def _recorded_producer_predecessors(
+    cls: Any, producer_attr: str
+) -> tuple[tuple[str, ...], dict[str, str], Any]:
+    """Predecessors of a producer, and the output slot each one is read at.
+
+    A call records its predecessors on ``forward_step_predecessors``. A merge
+    over a dict subscript is an ordinary op: its predecessors and the tuple
+    slot each one occupies live on the operation itself.
+    """
+    recorded = tuple(
+        (getattr(cls, "forward_step_predecessors", None) or {}).get(producer_attr, ())
+        or ()
+    )
+    operation = (getattr(cls, "forward_operations", None) or {}).get(producer_attr)
+    ports: dict[str, str] = {}
+    if operation is not None:
+        for producer, ordinal in getattr(operation, "predecessor_ports", ()) or ():
+            ports.setdefault(str(producer), str(ordinal))
+        # Only a merge records its alternatives on the operation. Other ops
+        # (a cast, an index) keep the call-step map, so a producer the export
+        # cannot draw still falls through to the structural capture instead of
+        # becoming a new root.
+        if not recorded and getattr(operation, "label", None) == PHI_LABEL:
+            recorded = tuple(getattr(operation, "predecessors", ()) or ())
+    return recorded, ports, operation
+
+
 def _materialize_model_scope_producer(
     nodes: list[dict[str, Any]],
     node_by_id: dict[str, dict[str, Any]],
@@ -8454,13 +9477,19 @@ def _materialize_model_scope_producer(
     cls: Any,
     producer_attr: str,
     shape_inferencer: Any = None,
+    stack: set[str] | None = None,
 ) -> str | None:
     """Emit (or reuse) a model-scope source node for a loop-invariant producer.
 
     The node is wired from whichever of the producer's own stack-entry
-    predecessors are already materialised. Returns ``None`` when none are, so the
-    caller leaves the boundary unsourced rather than inventing a rootless node.
+    predecessors are already materialised, or can be. A predecessor that is
+    itself a free function or a merge is materialised first, and a submodule
+    call docks on the section already drawn for it. Returns ``None`` when
+    nothing it reads is a real node, so the caller leaves the boundary
+    unsourced rather than inventing a rootless node.
     """
+    if stack is not None and producer_attr in stack:
+        return None
     existing = _resolve_existing_producer_node(node_by_id, producer_attr)
     if existing is not None:
         return existing
@@ -8475,19 +9504,41 @@ def _materialize_model_scope_producer(
         return section_output
     node_id = f"@model_forward/{producer_attr}"
     incoming: list[dict[str, str]] = []
-    for pred in cls.forward_step_predecessors.get(producer_attr, ()):  # type: ignore[attr-defined]
+    recorded, ports, operation = _recorded_producer_predecessors(cls, producer_attr)
+    pending = set(stack or ())
+    pending.add(producer_attr)
+    for pred in recorded:
         source = _resolve_existing_producer_node(node_by_id, pred)
+        if source is None:
+            source = _resolve_submodule_output_node(
+                node_by_id, base_submodule_attr(pred)
+            )
+        if source is None and (
+            pred.startswith("@fn_")
+            or pred.startswith("@op_")
+            or pred.startswith("@positional_")
+        ):
+            source = _materialize_model_scope_producer(
+                nodes,
+                node_by_id,
+                cls=cls,
+                producer_attr=pred,
+                shape_inferencer=shape_inferencer,
+                stack=pending,
+            )
         if source is not None:
             incoming.append(
                 {
                     "sourceNodeId": source,
-                    "sourceNodeOutputId": "0",
+                    "sourceNodeOutputId": ports.get(pred, "0"),
                     "targetNodeInputId": str(len(incoming)),
                 }
             )
     if not incoming:
         return None
     label = _loop_invariant_producer_label(cls, producer_attr)
+    if operation is not None and getattr(operation, "label", None) == PHI_LABEL:
+        label = PHI_LABEL
     # The callee's body may already be expanded into real ops -- a mask builder
     # imported from ``transformers.masking_utils`` is analysed like any other
     # free function and lands in ``multi_op_methods``. Render those ops instead
@@ -8516,6 +9567,14 @@ def _materialize_model_scope_producer(
         "style": ensure_readable_text(operation_tile_style(label)),
         "incomingEdges": incoming,
     }
+    if operation is not None:
+        _apply_expansion_shape(
+            node,
+            incoming,
+            node_by_id,
+            operation,
+            shape_inferencer,
+        )
     nodes.append(node)
     node_by_id[node_id] = node
     return node_id
@@ -9124,6 +10183,687 @@ def _synthesize_repeat_loop_boundaries(nodes: list[dict[str, Any]]) -> None:
         _wrap_container_loop_carried(nodes, container)
 
 
+def _repeat_group_config(namespace: str) -> dict[str, Any]:
+    """The red collapsible-group styling every N× repeated container shares."""
+    return {
+        "namespaceRegex": f"^{re.escape(namespace)}$",
+        "backgroundColor": "#fff5f4",
+        "borderColor": "#c0392b",
+        "textColor": "#1a1a1a",
+        "layoutDirection": "TOP_BOTTOM",
+    }
+
+
+def _container_class_overrides(
+    descriptors: tuple[tuple[tuple[str, str], ...], ...],
+) -> dict[str, str] | None:
+    """``layer.0`` → class for a Sequential the representative element contains.
+
+    The representative is the first element. Its ``layer`` Sequential lists the
+    bottleneck convs the AST draws as one opaque tile.
+    """
+    if not descriptors:
+        return None
+    paths = dict(descriptors[0])
+    overrides: dict[str, str] = {}
+    for path, class_name in paths.items():
+        parent, _, leaf = path.rpartition(".")
+        if (
+            parent
+            and leaf.isdigit()
+            and paths.get(parent) in {"Sequential", "ModuleList"}
+        ):
+            overrides[path] = class_name
+    return overrides or None
+
+
+def _attrs_only_on_first_element(
+    descriptors: tuple[tuple[tuple[str, str], ...], ...],
+) -> frozenset[str]:
+    """Top-level attrs whose class differs between the first element and the next.
+
+    ResNet's projection shortcut exists on the first block of a stage. The
+    graph draws that representative once, so those nodes repeat once per stage,
+    not once per block.
+    """
+    if len(descriptors) < 2:
+        return frozenset()
+
+    def tops(desc: tuple[tuple[str, str], ...]) -> dict[str, str]:
+        return {path: class_name for path, class_name in desc if "." not in path}
+
+    first, second = tops(descriptors[0]), tops(descriptors[1])
+    return frozenset(
+        attr for attr, class_name in first.items() if second.get(attr) != class_name
+    )
+
+
+def _ensure_nested_element_trees(
+    spec: ArchitectureSpec, basic_ops: BasicOpFilter
+) -> None:
+    """Register a detail tree for each leaf element class of the nested groups.
+
+    Mirrors :func:`extract._append_vision_section_tree`: a non-uniform model's
+    stage-element classes (``ConvNextLayer``) are fully parsed in the registry but
+    are not among the top-level export sections, so build each once and append it
+    so :func:`_append_section` can expand it by class.
+    """
+
+    def walk(group: RepeatedGroup):
+        yield group
+        for child in group.children:
+            yield from walk(child)
+
+    existing = {tree.class_name for _label, tree in spec.export_block_trees}
+    for root in spec.nested_module_groups:
+        for group in walk(root):
+            # Only classes we actually expand. A parent stage is a container,
+            # not a tile; its leaf body and each pipeline member are.
+            if group.children:
+                class_names: list[str] = []
+            elif group.element_classes:
+                class_names = list(group.element_classes)
+            elif group.element_class:
+                class_names = [group.element_class]
+            else:
+                class_names = []
+            overrides = _container_class_overrides(group.descriptors)
+            for class_name in class_names:
+                if class_name in existing:
+                    continue
+                tree = build_block_node(
+                    attr_name=class_name,
+                    class_name=class_name,
+                    registry=spec.class_registry,
+                    basic_ops=basic_ops,
+                    infer_init_steps=True,
+                    class_overrides=overrides,
+                )
+                spec.export_block_trees.append((class_name, tree))
+                existing.add(class_name)
+            # A stage module that is not itself a repeated group (Swin patch
+            # merging) still needs a detail tree so the side tile expands.
+            child_attrs = {
+                repeated_child_attr(group, child) for child in group.children
+            }
+            for desc in group.descriptors:
+                for path, class_name in desc:
+                    if "." in path or path in child_attrs or class_name in existing:
+                        continue
+                    if class_name in {"Sequential", "ModuleList", "Identity"}:
+                        continue
+                    if class_name not in spec.class_registry:
+                        continue
+                    tree = build_block_node(
+                        attr_name=class_name,
+                        class_name=class_name,
+                        registry=spec.class_registry,
+                        basic_ops=basic_ops,
+                        infer_init_steps=True,
+                    )
+                    spec.export_block_trees.append((class_name, tree))
+                    existing.add(class_name)
+
+
+def _child_meta_path(parent: RepeatedGroup, pos: int, child: RepeatedGroup) -> str:
+    """Live module path of *child* at parent position *pos* (fills the collapsed ``*``)."""
+    suffix = child.path[len(parent.path) :]  # ".*.layers"
+    if suffix.startswith(".*"):
+        return f"{parent.path}.{pos}{suffix[2:]}"
+    return child.path
+
+
+def _stamp_meta_path(
+    nodes: list[dict[str, Any]], first_index: int, meta_path: str
+) -> None:
+    """Tag every node just emitted with its live module path.
+
+    The path carries the stage index. Shape attachment matches a node to the
+    captured module whose dotted suffix appears in the node id, so a boundary
+    tile and the conv next to it share one concrete ``[B, C, H, W]``.
+    """
+    if not meta_path:
+        return
+    for node in nodes[first_index:]:
+        attrs = node.setdefault("attrs", [])
+        if not isinstance(attrs, list):
+            continue
+        if any(item.get("key") == "meta_path" for item in attrs):
+            continue
+        attrs.append({"key": "meta_path", "value": meta_path})
+
+
+def _stamp_repeat_count(
+    nodes: list[dict[str, Any]],
+    first_index: int,
+    count: int,
+    once_attrs: frozenset[str] = frozenset(),
+) -> None:
+    """Record how many live modules this drawn node stands for.
+
+    The stage namespace is ``s2_27x_...`` so a parser that only accepts a
+    segment starting with ``{N}x_`` would count the stage once. The attr is the
+    count those parsers read. An attr that exists only on the first element
+    (the projection shortcut) is drawn on the representative and counted once.
+    """
+    for node in nodes[first_index:]:
+        ident = f"{node.get('id', '')} {node.get('namespace', '')}".lower()
+        value = "1" if any(attr.lower() in ident for attr in once_attrs) else str(count)
+        attrs = node.setdefault("attrs", [])
+        if not isinstance(attrs, list):
+            continue
+        current = next(
+            (item for item in attrs if item.get("key") == "repeat_count"), None
+        )
+        if current is None:
+            attrs.append({"key": "repeat_count", "value": value})
+        else:
+            current["value"] = value
+
+
+def _stage_banner(stage_index: tuple[int, ...], text: str) -> str:
+    """Prefix a repeated-body or leading-node label with its stage index."""
+    if not stage_index:
+        return text
+    index = ".".join(str(part) for part in stage_index)
+    return f"stage {index} · {text}"
+
+
+def _append_pipeline_members(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    count: int,
+    meta_path: str,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Emit a mixed-class list as individual leading nodes, in element order.
+
+    ConvNeXt's downsampling list is LayerNorm then Conv2d. Each element is one
+    node threaded ahead of the stage's N× body, labeled with the stage index.
+    The conv carries the live module path (``...downsampling_layer.1``) so the
+    meta-shape pass can stamp its ``[B, C, H, W]``.
+    """
+    attr = group.path.split(".")[-1]
+    exits = previous_exits
+    for index, class_name in enumerate(group.element_classes[:count]):
+        slug = _sanitize_namespace_segment(f"{position_tag}{attr}_{index}_{class_name}")
+        prefix = _merge_node_id(id_prefix, slug)
+        # A private namespace per element. Sharing the parent namespace lets
+        # each stage's leading norm overwrite the previous stage's group label.
+        namespace = _join_namespace(namespace_prefix, slug)
+        component = BlockComponent(
+            attr_name=class_name,
+            class_name=class_name,
+            role="other",
+            label=_stage_banner(stage_index, class_name),
+        )
+        first_node_index = len(merged_nodes)
+        exits = _append_section(
+            merged_nodes,
+            spec=spec,
+            component=component,
+            id_prefix=prefix,
+            namespace_prefix=namespace,
+            basic_ops=basic_ops,
+            previous_exits=exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
+        element_path = f"{meta_path}.{index}" if meta_path else ""
+        if element_path:
+            _stamp_meta_path(merged_nodes, first_node_index, element_path)
+        # A leading norm/conv runs once per stage, not once per block.
+        _stamp_repeat_count(merged_nodes, first_node_index, 1)
+    return exits
+
+
+def _stage_position_steps(
+    spec: ArchitectureSpec, group: RepeatedGroup, pos: int
+) -> list[tuple[str, Any]]:
+    """Repeated children and one-off stage modules, in forward order.
+
+    Patch merging on a Swin stage is a plain submodule, not a ``ModuleList``,
+    so the repeated-group walk does not record it. Leaving it out connects the
+    next stage to the pre-downsample tensor.
+    """
+    children = ordered_repeated_children(spec, group)
+    child_attrs = {repeated_child_attr(group, child) for child in children}
+    owner = (getattr(spec, "class_registry", None) or {}).get(group.element_class)
+    calls = list(getattr(owner, "forward_calls", None) or [])
+    steps: list[tuple[int, int, str, Any]] = []
+    for index, child in enumerate(children):
+        attr = repeated_child_attr(group, child)
+        order = calls.index(attr) if attr in calls else index
+        steps.append((order, index, "child", child))
+    if pos < len(group.descriptors):
+        seen: set[str] = set()
+        for path, class_name in group.descriptors[pos]:
+            if "." in path or path in child_attrs or path in seen:
+                continue
+            if class_name in {"Sequential", "ModuleList", "Identity", "NoneType"}:
+                continue
+            seen.add(path)
+            order = calls.index(path) if path in calls else len(calls) + len(seen)
+            steps.append((order, len(calls) + len(seen), "side", (path, class_name)))
+    steps.sort()
+    return [(kind, payload) for _order, _index, kind, payload in steps]
+
+
+def _append_stage_side(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    attr: str,
+    class_name: str,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Draw one non-repeated stage module (Swin patch merging) once."""
+    slug = _sanitize_namespace_segment(f"{position_tag}{attr}_{class_name}")
+    namespace = _join_namespace(namespace_prefix, slug)
+    prefix = _merge_node_id(id_prefix, slug)
+    banner = _stage_banner(stage_index, class_name)
+    component = BlockComponent(
+        attr_name=class_name,
+        class_name=class_name,
+        role="other",
+        label=banner,
+    )
+    first_node_index = len(merged_nodes)
+    exits = _append_section(
+        merged_nodes,
+        spec=spec,
+        component=component,
+        id_prefix=prefix,
+        namespace_prefix=namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": "1",
+        "operation": class_name,
+    }
+    meta_path = f"{group.path}.{pos}.{attr}" if group.path else ""
+    if meta_path:
+        _stamp_meta_path(merged_nodes, first_node_index, meta_path)
+    _stamp_repeat_count(merged_nodes, first_node_index, 1)
+    return exits
+
+
+def _append_stage_position(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Emit one stage index: its repeated children and any one-off modules."""
+    exits = previous_exits
+    for kind, payload in _stage_position_steps(spec, group, pos):
+        if kind == "child":
+            child = payload
+            child_count = (
+                child.per_index_counts[pos]
+                if child.per_index_counts is not None
+                else child.count
+            )
+            if child_count == 0:
+                continue
+            exits = _append_nested_repeated_group(
+                merged_nodes,
+                spec=spec,
+                group=child,
+                namespace_prefix=namespace_prefix,
+                id_prefix=id_prefix,
+                basic_ops=basic_ops,
+                previous_exits=exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+                count=child_count,
+                meta_path=_child_meta_path(group, pos, child),
+                position_tag=f"{position_tag}s{pos}_",
+                stage_index=(*stage_index, pos),
+            )
+            continue
+        attr, class_name = payload
+        exits = _append_stage_side(
+            merged_nodes,
+            spec=spec,
+            group=group,
+            pos=pos,
+            attr=attr,
+            class_name=class_name,
+            namespace_prefix=namespace_prefix,
+            id_prefix=id_prefix,
+            basic_ops=basic_ops,
+            previous_exits=exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+            position_tag=f"{position_tag}s{pos}_",
+            stage_index=(*stage_index, pos),
+        )
+    return exits
+
+
+def _stage_position_steps(
+    spec: ArchitectureSpec, group: RepeatedGroup, pos: int
+) -> list[tuple[str, Any]]:
+    """Repeated children and one-off stage modules, in forward order.
+
+    Patch merging on a Swin stage is a plain submodule, not a ``ModuleList``,
+    so the repeated-group walk does not record it. Leaving it out connects the
+    next stage to the pre-downsample tensor.
+    """
+    children = ordered_repeated_children(spec, group)
+    child_attrs = {repeated_child_attr(group, child) for child in children}
+    owner = (getattr(spec, "class_registry", None) or {}).get(group.element_class)
+    calls = list(getattr(owner, "forward_calls", None) or [])
+    steps: list[tuple[int, int, str, Any]] = []
+    for index, child in enumerate(children):
+        attr = repeated_child_attr(group, child)
+        order = calls.index(attr) if attr in calls else index
+        steps.append((order, index, "child", child))
+    if pos < len(group.descriptors):
+        seen: set[str] = set()
+        for path, class_name in group.descriptors[pos]:
+            if "." in path or path in child_attrs or path in seen:
+                continue
+            if class_name in {"Sequential", "ModuleList", "Identity", "NoneType"}:
+                continue
+            seen.add(path)
+            order = calls.index(path) if path in calls else len(calls) + len(seen)
+            steps.append((order, len(calls) + len(seen), "side", (path, class_name)))
+    steps.sort()
+    return [(kind, payload) for _order, _index, kind, payload in steps]
+
+
+def _append_stage_side(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    attr: str,
+    class_name: str,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Draw one non-repeated stage module (Swin patch merging) once."""
+    slug = _sanitize_namespace_segment(f"{position_tag}{attr}_{class_name}")
+    namespace = _join_namespace(namespace_prefix, slug)
+    prefix = _merge_node_id(id_prefix, slug)
+    banner = _stage_banner(stage_index, class_name)
+    component = BlockComponent(
+        attr_name=class_name,
+        class_name=class_name,
+        role="other",
+        label=banner,
+    )
+    first_node_index = len(merged_nodes)
+    exits = _append_section(
+        merged_nodes,
+        spec=spec,
+        component=component,
+        id_prefix=prefix,
+        namespace_prefix=namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": "1",
+        "operation": class_name,
+    }
+    meta_path = f"{group.path}.{pos}.{attr}" if group.path else ""
+    if meta_path:
+        _stamp_meta_path(merged_nodes, first_node_index, meta_path)
+    _stamp_repeat_count(merged_nodes, first_node_index, 1)
+    return exits
+
+
+def _append_stage_position(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    pos: int,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    position_tag: str,
+    stage_index: tuple[int, ...],
+) -> list[SourceRef]:
+    """Emit one stage index: its repeated children and any one-off modules."""
+    exits = previous_exits
+    for kind, payload in _stage_position_steps(spec, group, pos):
+        if kind == "child":
+            child = payload
+            child_count = (
+                child.per_index_counts[pos]
+                if child.per_index_counts is not None
+                else child.count
+            )
+            if child_count == 0:
+                continue
+            exits = _append_nested_repeated_group(
+                merged_nodes,
+                spec=spec,
+                group=child,
+                namespace_prefix=namespace_prefix,
+                id_prefix=id_prefix,
+                basic_ops=basic_ops,
+                previous_exits=exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+                count=child_count,
+                meta_path=_child_meta_path(group, pos, child),
+                position_tag=f"{position_tag}s{pos}_",
+                stage_index=(*stage_index, pos),
+            )
+            continue
+        attr, class_name = payload
+        exits = _append_stage_side(
+            merged_nodes,
+            spec=spec,
+            group=group,
+            pos=pos,
+            attr=attr,
+            class_name=class_name,
+            namespace_prefix=namespace_prefix,
+            id_prefix=id_prefix,
+            basic_ops=basic_ops,
+            previous_exits=exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+            position_tag=f"{position_tag}s{pos}_",
+            stage_index=(*stage_index, pos),
+        )
+    return exits
+
+
+def _append_nested_repeated_group(
+    merged_nodes: list[dict[str, Any]],
+    *,
+    spec: ArchitectureSpec,
+    group: RepeatedGroup,
+    namespace_prefix: str,
+    id_prefix: str,
+    basic_ops: BasicOpFilter,
+    previous_exits: list[SourceRef],
+    group_node_configs: list[dict[str, Any]],
+    group_node_attributes: dict[str, dict[str, str]],
+    shape_inferencer: ShapeInferencer | None,
+    inline_expansion: bool,
+    count: int | None = None,
+    meta_path: str = "",
+    position_tag: str = "",
+    stage_index: tuple[int, ...] = (),
+) -> list[SourceRef]:
+    """Emit one repeated group (and its nested children) as graph nodes.
+
+    A non-uniform PARENT (ConvNeXt's ``stages``) is a SEQUENCE of distinct positions,
+    not an N× repeat: it emits each position's children in series, pipeline members
+    (the downsampling conv) first, then the uniform body. A LEAF group
+    (``ConvNextLayer``) is an ``N×`` container whose element-class body is expanded
+    once via :func:`_append_section`, labeled with its stage index. Leaf containers
+    are emitted FLAT under one namespace and threaded in series -- the known-good
+    decoder-variant shape -- rather than nested in per-stage boxes, which would
+    need boundary tiles at every level.
+    """
+    effective = group.count if count is None else count
+
+    if not group.children and repeated_group_is_pipeline(group):
+        return _append_pipeline_members(
+            merged_nodes,
+            spec=spec,
+            group=group,
+            namespace_prefix=namespace_prefix,
+            id_prefix=id_prefix,
+            basic_ops=basic_ops,
+            previous_exits=previous_exits,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+            count=effective,
+            meta_path=meta_path,
+            position_tag=position_tag,
+            stage_index=stage_index,
+        )
+
+    if group.children:
+        exits = previous_exits
+        for pos in range(effective):
+            exits = _append_stage_position(
+                merged_nodes,
+                spec=spec,
+                group=group,
+                pos=pos,
+                namespace_prefix=namespace_prefix,
+                id_prefix=id_prefix,
+                basic_ops=basic_ops,
+                previous_exits=exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+                position_tag=position_tag,
+                stage_index=stage_index,
+            )
+        return exits
+
+    slug = _sanitize_namespace_segment(
+        f"{position_tag}{effective}x_{group.element_class}"
+    )
+    namespace = _join_namespace(namespace_prefix, slug)
+    prefix = _merge_node_id(id_prefix, slug)
+    banner = _stage_banner(stage_index, f"{effective}× {group.element_class}")
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": str(effective),
+    }
+    group_node_configs.append(_repeat_group_config(namespace))
+    component = BlockComponent(
+        attr_name=group.element_class,
+        class_name=group.element_class,
+        role="other",
+        label=banner,
+    )
+    first_node_index = len(merged_nodes)
+    exits = _append_section(
+        merged_nodes,
+        spec=spec,
+        component=component,
+        id_prefix=prefix,
+        namespace_prefix=namespace,
+        basic_ops=basic_ops,
+        previous_exits=previous_exits,
+        group_node_attributes=group_node_attributes,
+        shape_inferencer=shape_inferencer,
+        inline_expansion=inline_expansion,
+    )
+    # ``_append_section`` replaces this namespace's attributes with the tile
+    # label. Put the stage banner and the trip count back.
+    group_node_attributes[namespace] = {
+        "label": banner,
+        "count": str(effective),
+        "operation": group.element_class,
+    }
+    exits = _wrap_actual_group_boundary(
+        merged_nodes,
+        namespace=namespace,
+        id_prefix=prefix,
+        inputs=previous_exits,
+        outputs=exits,
+        first_node_index=first_node_index,
+    )
+    if meta_path:
+        # The container path is the ModuleList/Sequential. Shapes belong to its
+        # representative element (index 0), including the boundaries wrap adds.
+        _stamp_meta_path(merged_nodes, first_node_index, f"{meta_path}.0")
+    _stamp_repeat_count(
+        merged_nodes,
+        first_node_index,
+        effective,
+        _attrs_only_on_first_element(group.descriptors),
+    )
+    return exits
+
+
 def build_merged_model_graph(
     spec: ArchitectureSpec,
     *,
@@ -9220,17 +10960,29 @@ def build_merged_model_graph(
         if previous_exits:
             stack_module_sources[component.attr_name] = previous_exits[0]
 
+    vision_combine_exits: list[SourceRef] | None = None
     if vision_exit is not None:
-        previous_exits = _attach_vision_language_combine(
+        # ``stack_pre`` also includes loop-invariant positional modules. They
+        # are expanded after the embedding, but are NOT the text activation
+        # path: Muse Spark's rotary output was previously mistaken for
+        # ``inputs_embeds`` here. The stack dataflow map records the actual
+        # embedding producer, which is the only valid text input to the
+        # multimodal scatter.
+        embedding_source = (
+            stack_module_sources.get(embedding_target_attr)
+            if embedding_target_attr is not None
+            else None
+        )
+        vision_combine_exits = _attach_vision_language_combine(
             nodes,
             vision_exit=vision_exit,
-            text_exits=previous_exits,
+            text_exits=[embedding_source] if embedding_source is not None else [],
             shape_inferencer=shape_inferencer,
         )
         # Route the language stack's embedding consumers through the combine so
         # the merged embeddings — not the raw token embeddings — flow downstream.
-        if embedding_target_attr is not None and previous_exits:
-            stack_module_sources[embedding_target_attr] = previous_exits[0]
+        if embedding_target_attr is not None and vision_combine_exits:
+            stack_module_sources[embedding_target_attr] = vision_combine_exits[0]
 
     source_entry = _append_stack_entry_dataflow(
         nodes,
@@ -9240,19 +10992,47 @@ def build_merged_model_graph(
     )
     if source_entry is not None:
         previous_exits = source_entry
+    elif vision_combine_exits:
+        # A model with no recoverable stack-entry dataflow still starts its
+        # decoder from the multimodal embedding combine, never from a later
+        # loop-invariant pre-module such as rotary embeddings.
+        previous_exits = vision_combine_exits
 
     decoder_namespace = _decoder_namespace(spec)
-    previous_exits = _append_decoder_layers(
-        nodes,
-        spec=spec,
-        decoder_namespace=decoder_namespace,
-        basic_ops=resolved_basic_ops,
-        previous_exits=previous_exits,
-        group_node_configs=group_node_configs,
-        group_node_attributes=group_node_attributes,
-        shape_inferencer=shape_inferencer,
-        inline_expansion=inline_expansion,
-    )
+    if spec.nested_module_groups:
+        # A non-uniform nesting (a CNN's per-stage channels/depths) the single uniform
+        # decoder stack cannot express: emit it recursively from the reconstructed tree.
+        # stack_pre (the stem / patch embedding) is already on ``previous_exits``, so
+        # it leads the encoder; each stage then leads with its downsampling pipeline.
+        # Use a fixed "encoder" namespace -- a CNN has no decoder stack, so the
+        # decoder-derived namespace is meaningless (and ill-formed) here.
+        _ensure_nested_element_trees(spec, resolved_basic_ops)
+        for group in spec.nested_module_groups:
+            previous_exits = _append_nested_repeated_group(
+                nodes,
+                spec=spec,
+                group=group,
+                namespace_prefix="encoder",
+                id_prefix="encoder",
+                basic_ops=resolved_basic_ops,
+                previous_exits=previous_exits,
+                group_node_configs=group_node_configs,
+                group_node_attributes=group_node_attributes,
+                shape_inferencer=shape_inferencer,
+                inline_expansion=inline_expansion,
+            )
+    else:
+        previous_exits = _append_decoder_layers(
+            nodes,
+            spec=spec,
+            decoder_namespace=decoder_namespace,
+            basic_ops=resolved_basic_ops,
+            previous_exits=previous_exits,
+            group_node_configs=group_node_configs,
+            group_node_attributes=group_node_attributes,
+            shape_inferencer=shape_inferencer,
+            inline_expansion=inline_expansion,
+        )
 
     for component in _stack_tail_components(spec):
         expands = component_has_detail_section(component, spec)
@@ -9370,11 +11150,9 @@ def build_merged_model_graph(
 
     # Describe every operation node's operands PyTorch-profiler-style (op_type +
     # input_shapes/input_types/concrete_inputs, including scalar args that are not
-    # graph edges), then type-check the ops whose operand contract is known.
-    # Warnings only -- an offender is a wiring/extraction fidelity bug to fix
-    # upstream, not a reason to fail the export. Runs after edges/shapes are final.
+    # graph edges). Later passes still rewire edges, so the type check itself
+    # waits until those edges are the ones the reader sees.
     _annotate_op_input_signatures(nodes)
-    type_check_graph_nodes(nodes)
 
     finalize_graph_node_styles(nodes)
 
@@ -9443,8 +11221,11 @@ def build_merged_model_graph(
     # loop body and each ``@loop_carried_out`` after it.
     # After the loop-invariant threading, which is what wires several of
     # these boundaries in the first place.
+    _coalesce_duplicate_section_inputs(nodes)
+    _expose_unfed_section_inputs(nodes, shape_inferencer)
     _share_one_tile_per_entering_tensor(nodes)
     _name_a_boundary_for_its_mirror(nodes)
+    refine_multi_output_port_shapes(nodes)
     _split_tuple_boundary_slots(nodes)
     _order_model_inputs(nodes)
     _topologically_order_nodes(nodes)
@@ -9454,8 +11235,15 @@ def build_merged_model_graph(
     # Runs last of the loop passes: the body boundaries above are derived FROM
     # the ports, so they must exist before the ports can be folded away.
     _fold_loop_ports(nodes)
+    # Folding replaces a carried port used after the loop with the ordinary
+    # ``@body_out`` boundary inside the loop body. Only now is it a frame exit:
+    # route it through every enclosing helper's output tile before its caller
+    # reads it. Running earlier sees ``@loop_carried_out``, which is deliberately
+    # exempt because loop ports sit outside the body they bracket.
+    _route_frame_exits_through_output_tiles(nodes)
+    _carry_producer_shape_to_boundary_tiles(nodes)
     _name_iterated_block_ends(nodes)
-    _converge_layer_variants_through_a_phi(nodes)
+    _converge_layer_variants_through_an_output_tile(nodes)
 
     # After every boundary pass has placed its tiles: a mirror is only
     # redundant once its neighbours are final.
@@ -9469,12 +11257,27 @@ def build_merged_model_graph(
     # this pass then mirrors outside the box.
     _name_kernel_pipeline_inputs_outside_it(nodes)
     _publish_state_stores_through_output_tiles(nodes)
-    # Both the phi above and the kernel ports change which node an operand
-    # arrives FROM (and the phi changes how many there are), so the
+    # Both the stack output tile above and the kernel ports change which node
+    # an operand arrives FROM (and the tile changes how many there are), so the
     # profiler-style operand annotation is re-read here. Leaving it as first
     # stamped left GLM's ``hc_head`` recorded as taking three tensors while its
     # edges, correctly, showed one.
+    _untie_host_constructors_from_the_activation(nodes)
+    # The tuple split and the kernel-port passes wire edges after the first
+    # boundary-level pass. An edge created then can descend two boxes at once;
+    # the same pass, run on the final edges, lands it on each box it enters.
+    _insert_missing_boundary_levels(nodes)
+    refine_multi_output_port_shapes(nodes)
+    _carry_producer_shape_to_boundary_tiles(nodes)
+    _drop_mismatched_boundary_operands(nodes)
+    # Boundary rewrites above can change the operand a shape-preserving op
+    # finally reads. Reconcile its output before operand annotation/type-check,
+    # so both sides of the same edge are checked in their final state.
+    widen_broadcast_results(nodes)
     _annotate_op_input_signatures(nodes)
+    # After the second annotation: no-op casts materialised by the loop-invariant
+    # pass have been elided, and operand edges match the graph being written.
+    type_check_graph_nodes(nodes)
     _qualify_colliding_mirrors(nodes)
 
     # Structural-integrity check on the FINAL built graph (after loop-carried
@@ -9503,12 +11306,28 @@ def build_merged_model_graph(
     # without the shape of what crosses it. Idempotent -- a tile that already has
     # one is left alone.
     _carry_producer_shape_to_boundary_tiles(nodes)
+    widen_broadcast_results(nodes)
+    refine_multi_output_port_shapes(nodes)
     # Right behind it: that pass is the last thing to state a shape, and this
     # is what makes a stated shape one the reader can actually see.
     _publish_declared_shapes_as_output_ports(nodes)
+    # Ports leave with one shape key. A copied adapter alias is promoted here,
+    # after the last pass that writes port metadata.
+    canonicalize_port_shape_keys(nodes)
     if shape_inferencer is not None:
         for namespace, boundary in group_boundary_shapes(nodes).items():
-            graph_attributes.setdefault(namespace, {}).update(boundary)
+            bucket = graph_attributes.setdefault(namespace, {})
+            bucket.update(boundary)
+            for key, value in boundary.items():
+                bucket.setdefault(f"full_{key}", value)
+
+    # Last structural pass: a branch reduced to one live input is that input.
+    # Anything still standing with fewer than two is reported, not drawn as a choice.
+    _elide_noop_merges_and_casts(nodes)
+    warn_degenerate_mutually_exclusive_branches(nodes)
+    # After the last pass that writes a shape. Same text as ``output_shape``
+    # until a partition rewrites the displayed key.
+    stamp_full_shapes(nodes)
 
     return {
         "id": graph_id,

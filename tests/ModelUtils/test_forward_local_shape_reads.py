@@ -6,6 +6,11 @@
 
 """An expression may name a forward LOCAL, and locals get rebound.
 
+An ``@op_l`` id in this file is a step this test builds. The line number in the
+id is the line this test's own binding table uses. It is not a lookup into an
+upstream modeling file.
+
+
 DeepSeek extends its attention mask by::
 
     if isinstance(attention_mask, torch.Tensor) and kv.shape[2] > attention_mask.shape[-1]:

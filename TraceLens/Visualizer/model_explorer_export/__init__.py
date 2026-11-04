@@ -16,7 +16,7 @@ from TraceLens.Visualizer.model_explorer_export.adapter import (
     computation_graph_to_explorer_graph,
 )
 from TraceLens.Visualizer.model_explorer_export.viewer_page import save_viewer_html
-from TraceLens.ModelUtils.torch_introspect import (
+from TraceLens.Visualizer.model_explorer_export.torch_payload import (
     build_torch_module_payload,
     payload_from_fx_inventory,
 )

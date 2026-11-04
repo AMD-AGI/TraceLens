@@ -6,33 +6,15 @@
 
 """Model and library versions the graph tests are written against.
 
-**Tests pin; generation does not.** Exporting a model pulls that model's current
-code and whatever libraries it currently needs -- that is the product, and it has
-to draw the model as it is today. A test is the opposite: it asserts that one
-revision of one model produces one specific graph, so it has to read the same
-source every run.
+Tests pin a checkpoint revision and a transformers release so a graph assertion
+describes one source tree. Export does not read these pins; it draws the model
+as it is today.
 
-Nothing here is consulted by the library. ``load_model_spec(revision=...)`` and
-``ensure_model_dependencies(extra_packages=...)`` take these as arguments, and
-only these tests pass them; left unset, both resolve to current.
-
-Why this exists: ``deepseek-ai/DeepSeek-V4-Flash`` published an ``inference/``
-reference implementation and an ``encoding/`` chat-template helper mid-session.
-The export began reading them, 2267 nodes became 1472, and 20 tests went red for
-a reason that had nothing to do with this repo -- indistinguishable from a real
-regression until someone went looking.
-
-Two kinds of version matter, and a test needs both:
-
-* the **checkpoint revision**, which decides what the model's own repo ships;
-* the **library versions**, which decide what its modeling code resolves to. A
-  natively-supported model is read from installed ``transformers``, so upgrading
-  that package changes the graph as surely as the checkpoint changing does.
-
-To move a pin: change it here, rerun the four-model gate, and account for every
-node-count delta the way any other graph change is accounted for. Never refresh
-one to silence a failure -- a moved pin and a real regression look identical in
-the diff, which is exactly what the pin exists to tell apart.
+The four-model gate is GLM-5.3-Flash, MiniMax-M3, DeepSeek-V4-Flash, and
+Kimi-K3. A checkpoint revision decides what the model's own repo ships. The
+transformers pin decides what a natively supported model's modeling code
+resolves to. Move a pin here and account for the graph delta. Do not move a
+pin only to silence a failure.
 """
 
 from __future__ import annotations
@@ -77,21 +59,9 @@ MODEL_PINS: dict[str, ModelPin] = {
         revision="f0e1c1e04d40177e4673a22097036854f536e9c0",
         transformers="5.16.1",
     ),
-    # Read from INSTALLED transformers, so its graph moves with that package.
+    # Read from installed transformers, so its graph moves with that package.
     "deepseek-ai/DeepSeek-V4-Flash": ModelPin(
         revision="60d8d70770c6776ff598c94bb586a859a38244f1",
-        transformers="5.16.1",
-    ),
-    # A decoder-only model of the pre-Llama generation, and the only one here
-    # that is not a recent MoE. It covers what the others cannot: `Conv1D`
-    # projections (`addmm` against a `[in, out]` weight, the transpose of
-    # `F.linear`'s layout), a shape restored by tuple CONCATENATION rather than
-    # written as one tuple, and a config that states none of its own switches --
-    # `add_cross_attention` and `reorder_and_upcast_attn` live in the config
-    # CLASS, and reading them as `None` rather than `False` drew a whole
-    # cross-attention tower the checkpoint cannot build.
-    "openai-community/gpt2": ModelPin(
-        revision="607a30d783dfa663caf39e06633721c8d4cfcd7e",
         transformers="5.16.1",
     ),
     # Kimi's code does not run under the transformers installed here, so its
