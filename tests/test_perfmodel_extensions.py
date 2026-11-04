@@ -887,9 +887,13 @@ class TestPerfModelExtensions:
         num_kv = 3 * per_query
         assert model.param_details["N_KV"] == num_kv
         assert model.param_details["kv_mode"] == mode
-        assert model.flops() == 128 * 2 * num_kv * (576 + 512)
+        # The 512-byte NoPE row holds 448 values and their scales, plus 64 RoPE.
+        assert model.flops() == 128 * 2 * num_kv * (512 + 512)
         assert model.bytes() == (
-            4 * 128 * (512 + 64 * 2) + num_kv * (512 + 64 * 2 + 4) + 4 * 128 * 512 * 2
+            4 * 128 * (512 + 64 * 2)
+            + num_kv * (512 + 64 * 2 + 4)
+            + (5 + 5 + 128) * 4
+            + 4 * 128 * 512 * 2
         )
         assert model.get_compute_precision() == "fp8"
 
@@ -917,7 +921,7 @@ class TestPerfModelExtensions:
         assert model.get_maf_type() is None
 
     @staticmethod
-    def _mqa_logits_event(annotation, rows=4):
+    def _mqa_logits_event(annotation, rows=4, q_per_block=1):
         # Traced aiter::_fwd_sched_raw layout; the cache and logits are capacities.
         return {
             "args": {
@@ -949,6 +953,8 @@ class TestPerfModelExtensions:
                     "float",
                 ]
                 + ["Scalar"] * 7,
+                "Concrete Inputs": [""] * 11
+                + [str(rows), "3072", "0.011", "64", "262144", str(q_per_block), "64"],
             },
             "annotation": annotation,
         }
@@ -968,9 +974,16 @@ class TestPerfModelExtensions:
         annotation = (
             "execute_1_context_1(sq8sk8sqsq64sqsk64)_generation_0(sq0sk0sqsq0sqsk0)"
         )
-        model = aext.pa_mqa_logits_mxfp4(self._mqa_logits_event(annotation, rows=16))
+        model = aext.pa_mqa_logits_mxfp4(
+            self._mqa_logits_event(annotation, rows=16, q_per_block=4)
+        )
         assert model.param_details["rows"] == 8
-        assert model.param_details["keys"] == (64 - (64 - 8) // 2) // 4
+        keys = (64 - (64 - 8) // 2) // 4
+        assert model.param_details["keys"] == keys
+        # Four rows per CTA share each KV tile; every row stores its own logits.
+        assert model.bytes() == 8 * 64 * (64 + 4 + 2) + keys * (
+            (64 + 4 + 4 / 64) / 4 + 4
+        )
 
     def test_sparse_mla_v4_and_mqa_logits_unknown_dtype_bytes(self):
         mla = self._sparse_mla_event("csa", self._decode_annotation(3, 1000))

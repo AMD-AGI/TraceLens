@@ -1226,12 +1226,13 @@ class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
     attended rows come from a decode sq/sk step annotation: ``min(ctx, window)``
     plus ``min(ctx / 4, index_topk)`` CSA or ``ctx / 128`` HCA compressed rows,
     with the layer mode stamped from its compress kernels. Other steps are
-    no-perf.
+    no-perf. A NoPE row packs its values with their E8M0 scales, so the
+    QK and PV head dim is the output's, not the NoPE row width plus RoPE.
 
-        Input Dims[0] = q_nope (T, H, D)     Input Dims[1] = q_rope (T, H, RD)
-        Input Dims[2] = kv_nope (rows, D)    Input Dims[3] = kv_rope (rows, RD)
-        Input Dims[4] = kv_indices (capacity,)
-        Input Dims[11] = out (T, H, D)
+        Input Dims[0] = q_nope (T, H, row)   Input Dims[1] = q_rope (T, H, RD)
+        Input Dims[2] = kv_nope (rows, row)  Input Dims[3] = kv_rope (rows, RD)
+        Input Dims[4] = kv_indices (capacity,)  Input Dims[5], [9] = indptr (T + 1,)
+        Input Dims[10] = attn_sink (H,)      Input Dims[11] = out (T, H, D)
     """
 
     @classmethod
@@ -1240,8 +1241,11 @@ class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
             args = event.get("args") or {}
             dims = args["Input Dims"]
             types = args["Input type"]
-            tokens, heads, d_nope = (int(x) for x in dims[0])
+            tokens, heads, nope_row = (int(x) for x in dims[0])
             d_rope = int(dims[1][2])
+            d_head = int(dims[11][2])
+            indptr_elems = int(dims[5][0]) + int(dims[9][0])
+            sink_elems = int(dims[10][0])
             ann = IterationAnnotation(str(event.get("annotation")))
             if not ann.has_sqsk or ann.c_sq or ann.g_sq <= 0 or tokens <= 0:
                 raise ValueError
@@ -1265,8 +1269,8 @@ class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
             "H_Q": heads,
             "N_KV": num_kv,
             "H_KV": 1,
-            "d_h_qk": d_nope + d_rope,
-            "d_h_v": d_nope,
+            "d_h_qk": d_head,
+            "d_h_v": d_head,
             "c_sq": 0,
             "c_sk": 0,
             "c_sqsq": 0,
@@ -1281,6 +1285,10 @@ class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
             "dtype_kvrope": types[3],
             "dtype_index": types[4],
             "dtype_out": types[11],
+            "nope_row": nope_row,
+            "rope_dim": d_rope,
+            "indptr_elems": indptr_elems,
+            "sink_elems": sink_elems,
             "kv_mode": mode,
             "live_queries": live,
         }
@@ -1304,12 +1312,12 @@ class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
         if None in bpe:
             return None
         bpe_q, bpe_rope, bpe_kv, bpe_kvrope, bpe_index, bpe_out = bpe
-        d_nope = p["d_h_v"]
-        d_rope = p["d_h_qk"] - d_nope
+        nope_row, d_rope = p["nope_row"], p["rope_dim"]
         q_rows = p["N_Q"] * p["H_Q"]
-        query = q_rows * (d_nope * bpe_q + d_rope * bpe_rope)
-        kv = p["N_KV"] * (d_nope * bpe_kv + d_rope * bpe_kvrope + bpe_index)
-        return query + kv + q_rows * d_nope * bpe_out
+        query = q_rows * (nope_row * bpe_q + d_rope * bpe_rope)
+        kv = p["N_KV"] * (nope_row * bpe_kv + d_rope * bpe_kvrope + bpe_index)
+        meta = (p["indptr_elems"] + p["sink_elems"]) * 4
+        return query + kv + meta + q_rows * p["d_h_v"] * bpe_out
 
 
 class sgl_kernel_fast_topk_transform_fused:
@@ -1392,12 +1400,13 @@ class pa_mqa_logits_mxfp4:
     Each row scores ``out[r, k] = sum_h relu(q[r, h] . K[k]) * w[r, h]`` over its
     CSA-compressed context. The cache and logits buffers are sized for the
     longest context, so the scored keys come from the step annotation: the
-    causal (query, key) pairs over the CSA compression stride.
+    causal (query, key) pairs over the CSA compression stride. The
+    ``q_per_block`` rows of a CTA share each KV tile they load.
 
     Expected Input Dims (aiter::_fwd_sched_raw):
         [1] q (T, H, D/2) uint8          [2] q_scale (T, H, D/32) uint8
         [3] kv_cache (pages, P, D/2)     [4] kv_scale (pages, P, D/32)
-        [6] weights (T, H) bf16
+        [6] weights (T, H) bf16          Concrete Inputs[16] = q_per_block
     """
 
     category = "InferenceAttention"
@@ -1425,6 +1434,7 @@ class pa_mqa_logits_mxfp4:
                 "kv_row_bytes": dims[3][2] + dims[4][2],
                 "page_size": dims[3][1],
                 "weight_bytes": name2bpe(event["args"]["Input type"][6]),
+                "q_per_block": max(int(event["args"]["Concrete Inputs"][16]), 1),
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
@@ -1446,10 +1456,8 @@ class pa_mqa_logits_mxfp4:
         if p.get("_no_perf") or p["weight_bytes"] is None:
             return None
         query = p["rows"] * p["heads"] * (p["q_row_bytes"] + p["weight_bytes"])
-        per_key = (
-            p["kv_row_bytes"] + self._LOGIT_BYTES + self._PAGE_ID_BYTES / p["page_size"]
-        )
-        return query + p["keys"] * per_key
+        kv_per_key = p["kv_row_bytes"] + self._PAGE_ID_BYTES / p["page_size"]
+        return query + p["keys"] * (kv_per_key / p["q_per_block"] + self._LOGIT_BYTES)
 
     def flops_bwd(self):
         raise NotImplementedError("Backward pass for MQA logits is not defined.")
