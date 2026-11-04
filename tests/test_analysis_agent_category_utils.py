@@ -517,51 +517,50 @@ def test_split_multiple_gemm_boundaries():
 
 
 def _pricer(perf_rows=None, baseline_ms=1.0):
-    """Peak memory 1 MB/us, vector 1 TFLOPS, matrix 700 TFLOPS."""
+    """Peak memory 1 MB/us, vector 1 TFLOPS (fp32 0.5), matrix 700 TFLOPS."""
     return FusionPricer(
         FusionForms(TAXONOMY),
-        (1.048576, {"matrix_bf16": 700.0, "vector_bf16": 1.0}),
+        (1.048576, {"matrix_bf16": 700.0, "vector_bf16": 1.0, "vector_fp32": 0.5}),
         perf_rows or {},
         baseline_ms,
     )
 
 
-def _ew(name, dur_us, data_in=None, data_out=None, data_moved=None, gflops=None):
+def _ew(name, dur_us, data_in=None, data_out=None):
     return {
         "name": name,
         "is_matrix": False,
         "dur_us": dur_us,
-        "data_moved_mb": data_moved,
         "data_in_mb": data_in,
         "data_out_mb": data_out,
-        "gflops": gflops,
+        "compute_us": 0.0,
         "has_perf_data": True,
     }
 
 
 def test_roofline_savings_memory_only():
     """Single memory-bound kernel: fused == memory_time, savings = dur - memory_time."""
-    enriched = [_ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0, gflops=None)]
+    enriched = [_ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0)]
     # 2 MB at 1 MB/us, frac=1.0 -> memory_time = 2 us; savings = 10 - 2
-    savings = _pricer()._roofline_savings_us(enriched, 100.0)
+    savings = _pricer()._roofline_savings_us(enriched)
     assert savings == pytest.approx(8.0)
 
 
 def test_roofline_savings_no_modeled_returns_zero():
     enriched = [dict(_ew("ew", 10.0, 1.0, 1.0), has_perf_data=False)]
-    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched) == 0.0
 
 
 def test_roofline_savings_zero_external_data_returns_zero():
     enriched = [_ew("ew", 10.0, data_in=0.0, data_out=0.0)]
-    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched) == 0.0
 
 
 def test_roofline_savings_clamped_at_zero():
     """When current time is below fused time, savings clamp to 0."""
     enriched = [_ew("ew", dur_us=1.0, data_in=1.0, data_out=1.0)]
     # memory_time = 2 us > current 1.0 us -> savings clamp to 0
-    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched) == 0.0
 
 
 def test_roofline_savings_unmodeled_subtracted():
@@ -571,21 +570,18 @@ def test_roofline_savings_unmodeled_subtracted():
         dict(_ew("unmodeled", dur_us=5.0), has_perf_data=False),
     ]
     # current = 15, memory_time = 2, unmodeled = 5
-    savings = _pricer()._roofline_savings_us(enriched, 100.0)
+    savings = _pricer()._roofline_savings_us(enriched)
     assert savings == pytest.approx(8.0)
 
 
-def test_roofline_savings_overlap_blend():
-    """Blends max (perfect overlap) and sum (no overlap) via OVERLAP_EFFICIENCY."""
+def test_roofline_savings_chain_ignores_later_inputs():
+    """A later input may re-read the first: only first in + last out count."""
     enriched = [
-        _ew("ew1", dur_us=10.0, data_in=1.0, gflops=0.0005),
-        _ew("ew2", dur_us=10.0, data_out=1.0, gflops=0.0005),
+        _ew("ew1", dur_us=10.0, data_in=1.0, data_out=1.0),
+        _ew("ew2", dur_us=10.0, data_in=2.0, data_out=1.0),
     ]
-    # memory_time = 2; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
-    # optimal = memory_time, sum = memory_time + 1, current = 20
-    savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    expected = 20.0 - (2.0 + (1.0 - OVERLAP_EFFICIENCY) * 1.0)
-    assert savings == pytest.approx(expected)
+    # memory = 1 + 1 = 2 us, not 3; savings = 20 - 2
+    assert _pricer()._roofline_savings_us(enriched) == pytest.approx(18.0)
 
 
 # ----- FusionPricer.price -----
@@ -644,6 +640,75 @@ def test_price_matrix_op_launch_is_not_epilogue():
     ]
     est = _pricer(_golden_lookup()).price(_standalone_candidate(kernels, 600, []))
     assert est.impact_score_high == 20.0
+
+
+def _kernel(name, type_, dur_us, data_in, data_out, op_uid=None):
+    return KernelRecord(
+        name,
+        type_,
+        dur_us,
+        _name_key(name),
+        op_uid=op_uid,
+        data_in_mb=data_in,
+        data_out_mb=data_out,
+    )
+
+
+def test_price_each_op_at_its_own_peak():
+    """Compute is each op's GFLOPS over its own peak: 4 us at fp32, 2 us at bf16."""
+    rows = _lookup(ew_a=(2.0, 0.002, "vector_fp32"), ew_b=(2.0, 0.002, "vector_bf16"))
+    kernels = [
+        _kernel("ew_a", "Elementwise", 100, 1.0, 1.0),
+        _kernel("ew_b", "Elementwise", 100, 1.0, 1.0),
+    ]
+    est = _pricer(rows).price(_standalone_candidate(kernels, 200, []))
+    # memory 2 us, compute 6 us: fused = 6 + 0.15 * 2 = 6.3; savings 193.7 of 200
+    assert est.impact_score_high == 19.37
+
+
+def test_price_attention_span_is_one_fused_kernel():
+    """QK, softmax, PV: external bytes Q + K + V + O, both GEMMs' compute, softmax absorbed."""
+    rows = _lookup(qk=(34.0, 42.0, "matrix_bf16"), pv=(36.0, 42.0, "matrix_bf16"))
+    kernels = [
+        _kernel("qk", "GEMM", 150, 4.0, 30.0, op_uid=0),
+        KernelRecord("softmax_stub", "Softmax", 300, op_uid=1),
+        _kernel("pv", "GEMM", 150, 34.0, 2.0, op_uid=2),
+    ]
+    est = _pricer(rows).price(_standalone_candidate(kernels, 600, [], kind="attention"))
+    # memory (4 + 34 - 30 + 2) = 10 us, compute 60 + 60 us: fused = 120 + 0.15 * 10
+    assert est.impact_score_high == 47.85
+    assert est.bound_type == "compute"
+    assert est.estimation == "partial"
+    assert "their time is saved" in est.warning
+
+
+def test_price_op_counted_once():
+    """One op launching two kernels adds its compute once; both kernels still count."""
+    rows = _lookup(ew_a=(2.0, 0.002, "vector_bf16"))
+    kernels = [_kernel("ew_a", "Elementwise", 500, 1.0, 1.0, op_uid=0)] * 2
+    est = _pricer(rows).price(_standalone_candidate(kernels, 1000, []))
+    # memory 2 us, compute 2 us: fused = 2 + 0.15 * 2 = 2.3; savings 997.7 of 1000
+    assert est.impact_score_high == 99.77
+    assert est.modeled_kernel_count == 2
+
+
+@pytest.mark.parametrize(
+    "first_type,kind,impact_high",
+    [("Elementwise", "elementwise_chain", 19.8), ("GEMM", "attention", 10.0)],
+)
+def test_price_op_without_peak(first_type, kind, impact_high):
+    """GFLOPS with no resolvable peak: a non-matrix op adds no compute (memory 2 us
+    only); a matrix op blocks span pricing, leaving the epilogue credit (ew_add's
+    time)."""
+    rows = _lookup(op_a=(2.0, 1.0, None), ew_add=(2.0, None, None))
+    kernels = [
+        _kernel("op_a", first_type, 100, 1.0, 1.0),
+        _kernel("ew_add", "Elementwise", 100, 1.0, 1.0),
+    ]
+    est = _pricer(rows).price(_standalone_candidate(kernels, 200, [], kind=kind))
+    assert est.impact_score_high == impact_high
+    assert est.estimation == "full"
+    assert est.warning is None
 
 
 @pytest.mark.parametrize(

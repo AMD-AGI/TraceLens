@@ -27,7 +27,6 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     _extract_kernel_names,
     _extract_module_chain,
     _parse_call_stack,
-    _resolve_peak_maf,
     build_category_findings,
     build_operation_metrics,
     calculate_efficiency,
@@ -41,6 +40,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     gpu_utilization_from_timeline,
     load_category_data,
     perf_report_csv_dir,
+    resolve_peak_maf,
     standalone_efficiency,
     validate_efficiency,
     write_metrics_json,
@@ -2183,18 +2183,18 @@ def test_dedup_by_kernel_set_prefers_nn_module_then_deeper_chain():
 
 
 def test_group_ops():
-    def pair(name, op_uid, perf_key, dur_us):
-        return KernelRecord(name, "GEMM", dur_us, perf_key), op_uid
+    def rec(name, op_uid, perf_key, dur_us):
+        return KernelRecord(name, "GEMM", dur_us, perf_key, op_uid=op_uid)
 
     key_a, key_b = ["aten::mm", "a"], ["aten::mm", "b"]
     instances = [
         [
-            pair(_GEMM_KERNEL, 1, key_a, 100.0),
-            pair(_ADD_KERNEL, 1, key_a, 50.0),
-            pair(_RMSNORM_KERNEL, 9, None, 4.0),
+            rec(_GEMM_KERNEL, 1, key_a, 100.0),
+            rec(_ADD_KERNEL, 1, key_a, 50.0),
+            rec(_RMSNORM_KERNEL, 9, None, 4.0),
         ],
-        [pair(_GEMM_KERNEL, 2, key_a, 100.0), pair(_RMSNORM_KERNEL, 8, None, 4.0)],
-        [pair(_MUL_KERNEL, 3, key_b, 1.0)],
+        [rec(_GEMM_KERNEL, 2, key_a, 100.0), rec(_RMSNORM_KERNEL, 8, None, 4.0)],
+        [rec(_MUL_KERNEL, 3, key_b, 1.0)],
     ]
     groups = FusionCandidateBuilder._group_ops(instances)
     by_key = {tuple(g["perf_key"] or g["kernel_names"]): g for g in groups}
@@ -2225,12 +2225,14 @@ def _diff_stats_df():
 
 
 def test_diff_stats_lookups_splits_trace1_and_trace2():
-    uid_to_t1, lca_to_t2 = _builder()._diff_stats_lookups(_diff_stats_df())
+    df = _diff_stats_df().assign(cpu_op_uid=[None, None, 7, None])
+    uid_to_t1, lca_to_t2 = _builder()._diff_stats_lookups(df)
     assert set(uid_to_t1) == {100, 101}
     assert uid_to_t1[100] == (KernelRecord(_GEMM_KERNEL, "GEMM", 5.0, None, 100), 10)
     assert set(lca_to_t2) == {10, 11}
-    ((record, _),) = lca_to_t2[10]
+    (record,) = lca_to_t2[10]
     assert (record.name, record.type, record.dur_us) == (_MUL_KERNEL, "Mul", 2.0)
+    assert record.op_uid == 7
 
 
 def test_diff_stats_lookups_missing_uid_col_skips_trace1():
@@ -2442,17 +2444,17 @@ def test_standalone_efficiency_missing_roofline_is_noop():
     assert result["efficiency_percent"] is None
 
 
-# ----- analysis_utils: _resolve_peak_maf -----
+# ----- analysis_utils: resolve_peak_maf -----
 
 
 def test_resolve_peak_maf_precision_hit():
     row = pd.Series({"Compute Spec": "matrix_fp16"})
-    assert _resolve_peak_maf(row, {"matrix_bf16": 708, "matrix_fp16": 654}, 708) == 654
+    assert resolve_peak_maf(row, {"matrix_bf16": 708, "matrix_fp16": 654}, 708) == 654
 
 
 def test_resolve_peak_maf_unknown_spec_falls_back():
     row = pd.Series({"Compute Spec": "weird"})
-    assert _resolve_peak_maf(row, {"matrix_bf16": 708}, 708) == 708
+    assert resolve_peak_maf(row, {"matrix_bf16": 708}, None) is None
 
 
 # ----- analysis_utils: get_peak_specs -----
@@ -4033,6 +4035,7 @@ def test_comparative_candidates_accumulate_instances():
     assert cand.comparative
     assert (cand.kernel_count_trace1, cand.kernel_count_trace2, cand.delta) == (2, 1, 1)
     assert cand.instance_count == 2
+    assert [k.op_uid for k in cand.kernels_trace1] == [10, 11]
     assert (cand.total_kernel_time_us_trace1, cand.total_kernel_time_us_trace2) == (
         16000.0,
         12000.0,

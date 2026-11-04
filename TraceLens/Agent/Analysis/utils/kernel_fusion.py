@@ -39,9 +39,9 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     calculate_efficiency,
     format_args,
     format_kernel_names,
-    get_matrix_maf_tflops,
     perf_float,
     perf_row_key,
+    resolve_peak_maf,
 )
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
     COMPILED,
@@ -159,6 +159,7 @@ class KernelRecord:
     dur_us: float
     perf_key: list | None = None
     gpu_op_uid: int | None = None
+    op_uid: int | None = None
     data_in_mb: float | None = None
     data_out_mb: float | None = None
 
@@ -476,8 +477,8 @@ def _efficiency_parts(eff: dict) -> tuple:
 class _Group:
     """The instances of one module (or sibling parent) found in the trace.
 
-    Each instance is a list of (kernel record, launching-op UID) pairs, in stream
-    order; ``instances2`` holds trace 2's kernels of a comparative group.
+    Each instance is a list of kernel records in stream order; ``instances2`` holds
+    trace 2's kernels of a comparative group.
     """
 
     module_name: str
@@ -499,7 +500,7 @@ class FusionCandidateBuilder:
         self.categorizer = analyzer.event_to_category
         self.perf_ops = analyzer.collect_unified_perf_events()
         self.resolver = OpResolver(tree, self.perf_ops)
-        self._launches: dict[int, tuple[KernelRecord, int] | None] = {}
+        self._launches: dict[int, KernelRecord | None] = {}
 
     # -- standalone ---------------------------------------------------------
 
@@ -514,7 +515,7 @@ class FusionCandidateBuilder:
         candidates = [c for g in modules for c in [self._candidate(g)] if c]
         accepted = [tuple(k.name for k in c.kernels) for c in candidates]
         for g in self._sibling_groups():
-            names = tuple(k.name for k, _ in g.instances[0])
+            names = tuple(k.name for k in g.instances[0])
             if any(self._contains_run(names, hay) for hay in accepted):
                 continue
             if c := self._candidate(g, "sibling_sequence"):
@@ -571,8 +572,9 @@ class FusionCandidateBuilder:
                 groups[base] = _Group(name, base, [], [launches])
         return list(groups.values())
 
-    def _launch(self, uid) -> tuple[KernelRecord, int] | None:
-        """Kernel ``uid`` as (record, launching-op UID); None if it is not a kernel.
+    def _launch(self, uid) -> KernelRecord | None:
+        """Kernel ``uid`` as a record carrying its launching-op UID; None if it is not
+        a kernel.
 
         Memoized: the module walk meets each kernel once per ancestor.
         """
@@ -580,21 +582,21 @@ class FusionCandidateBuilder:
             self._launches[uid] = self._resolve_launch(uid)
         return self._launches[uid]
 
-    def _resolve_launch(self, uid) -> tuple[KernelRecord, int] | None:
+    def _resolve_launch(self, uid) -> KernelRecord | None:
         try:
             k = self.tree.get_UID2event(uid)
             if self.categorizer(k) != TraceEventUtils.GpuEventCategories.Kernel:
                 return None
             name = k.get("name", "")
             op = self.resolver.fields(uid)
-            record = KernelRecord(
+            return KernelRecord(
                 name=name,
                 type=self.taxonomy.classify(name).type,
                 dur_us=k.get("dur", 0),
                 perf_key=op["perf_key"],
                 gpu_op_uid=uid,
+                op_uid=op["op_uid"],
             )
-            return record, op["op_uid"]
         except (KeyError, IndexError):
             return None
 
@@ -611,7 +613,7 @@ class FusionCandidateBuilder:
                 for inst, lab in zip(instances, labels)
                 if lab is not None and lab.span is not None
             ]
-        kernels = tuple(self._with_data_moved(k) for k, _ in instances[0])
+        kernels = tuple(self._with_data_moved(k) for k in instances[0])
         signature, summary = self._type_summary(kernels)
         return FusionCandidate(
             module_name=group.module_name,
@@ -625,14 +627,14 @@ class FusionCandidateBuilder:
             fusion_kind=label.kind,
             confidence=label.confidence,
             source=source,
-            total_kernel_time_us=sum(k.dur_us for inst in instances for k, _ in inst),
+            total_kernel_time_us=sum(k.dur_us for inst in instances for k in inst),
             ops=self._group_ops(instances),
         )
 
     def _label(self, instance: list) -> Label | None:
-        """The label of one instance's (kernel, op UID) pairs."""
+        """The label of one instance's kernel records."""
         return self.labeler.label(
-            [k.name for k, _ in instance], [k.perf_key for k, _ in instance]
+            [k.name for k in instance], [k.perf_key for k in instance]
         )
 
     def _with_data_moved(self, k: KernelRecord) -> KernelRecord:
@@ -686,12 +688,14 @@ class FusionCandidateBuilder:
                 if uid in uid_to_t1:
                     record, lca_id = uid_to_t1[uid]
                     op = self.resolver.fields(uid)
-                    t1.append((replace(record, perf_key=op["perf_key"]), op["op_uid"]))
+                    t1.append(
+                        replace(record, perf_key=op["perf_key"], op_uid=op["op_uid"])
+                    )
                     lca_ids.add(lca_id)
             if len(t1) < 2:
                 continue
-            t2 = [pair for lca_id in lca_ids for pair in lca_to_t2.get(lca_id, [])]
-            if not self._passes_gates([k for k, _ in t1], [k for k, _ in t2]):
+            t2 = [k for lca_id in lca_ids for k in lca_to_t2.get(lca_id, [])]
+            if not self._passes_gates(t1, t2):
                 continue
 
             if base in groups:
@@ -709,15 +713,15 @@ class FusionCandidateBuilder:
         # Per-instance += keeps the totals reproducible against earlier runs.
         total1 = total2 = 0
         for inst1, inst2 in zip(group.instances, group.instances2, strict=True):
-            total1 += sum(k.dur_us for k, _ in inst1)
-            total2 += sum(k.dur_us for k, _ in inst2)
+            total1 += sum(k.dur_us for k in inst1)
+            total2 += sum(k.dur_us for k in inst2)
         if total1 < total2:
             return None
         label = self._label(group.instances[0])
         if label is None:
             return None
-        kernels1 = tuple(k for k, _ in group.instances[0])
-        kernels2 = tuple(k for k, _ in group.instances2[0])
+        kernels1 = tuple(group.instances[0])
+        kernels2 = tuple(group.instances2[0])
         signature, summary = self._type_summary(kernels1)
         return FusionCandidate(
             module_name=group.module_name,
@@ -740,7 +744,7 @@ class FusionCandidateBuilder:
         )
 
     def _diff_stats_lookups(self, df: pd.DataFrame) -> tuple[dict, dict]:
-        """UID to (trace 1 kernel, LCA id) and LCA id to trace 2 (kernel, op UID) pairs."""
+        """UID to (trace 1 kernel, LCA id) and LCA id to trace 2 kernels."""
         uid_to_t1 = {}
         lca_to_t2: dict = defaultdict(list)
 
@@ -771,9 +775,12 @@ class FusionCandidateBuilder:
                     )
                 )
                 lca_to_t2[lca_id].append(
-                    (
-                        KernelRecord(name, ktype, dur_us, perf_key),
-                        row.get("gpu_op_uid") if pd.isna(op_uid) else op_uid,
+                    KernelRecord(
+                        name,
+                        ktype,
+                        dur_us,
+                        perf_key,
+                        op_uid=row.get("gpu_op_uid") if pd.isna(op_uid) else op_uid,
                     )
                 )
         return uid_to_t1, dict(lca_to_t2)
@@ -835,8 +842,8 @@ class FusionCandidateBuilder:
         """
         groups: dict = {}
         op_uids: dict = defaultdict(set)
-        for pairs in instances:
-            for k, op_uid in pairs:
+        for instance in instances:
+            for k in instance:
                 # A kernel with no perf row is its own row, keyed by kernel name.
                 key = tuple(k.perf_key) if k.perf_key else (None, k.name)
                 g = groups.setdefault(
@@ -846,7 +853,7 @@ class FusionCandidateBuilder:
                 if k.name not in g["kernel_names"]:
                     g["kernel_names"].append(k.name)
                 g["time_us"] += k.dur_us
-                op_uids[key].add(op_uid)
+                op_uids[key].add(k.op_uid)
         return [{**g, "count": len(op_uids[key])} for key, g in groups.items()]
 
     @staticmethod
@@ -951,8 +958,6 @@ class FusionPricer:
         self.forms = forms
         self.peak_bw_tbs, self.peak_maf_tflops = peaks
         self.peak_bw_bytes_s = self.peak_bw_tbs * 1e12
-        self.matrix_maf = get_matrix_maf_tflops(self.peak_maf_tflops)
-        self.vector_maf = self.peak_maf_tflops.get("vector_bf16", self.matrix_maf)
         self.perf_rows = perf_rows
         self.baseline_ms = baseline_ms
         self.display_ms = baseline_ms if display_ms is None else display_ms
@@ -1066,38 +1071,55 @@ class FusionPricer:
         """Impact of a standalone candidate.
 
         Savings are projected via roofline model: the elementwise epilogue time saved
-        if kernels were fused, or the roofline-capped savings of elementwise-only
-        groups. Kernels without perf models use their measured trace time as-is and
-        a warning is emitted. None if the candidate should be skipped.
+        if kernels were fused, the roofline-capped savings of elementwise-only
+        groups, or, for a span-replacing kind, the whole span against one fused
+        kernel. Kernels without perf models use their measured trace time as-is
+        (inside a span their time is saved) and a warning is emitted. None if the
+        candidate should be skipped.
         """
-        enriched = []
         matrix = self.forms.matrix_mask(
             [k.type for k in c.kernels], [k.perf_key for k in c.kernels]
         )
-        for k, is_matrix in zip(c.kernels, matrix):
+        # A kernel without an op UID is its own op.
+        by_op = defaultdict(list)
+        for i, (k, is_matrix) in enumerate(zip(c.kernels, matrix)):
+            by_op[i if k.op_uid is None else ("op", k.op_uid)].append((k, is_matrix))
+        enriched = []
+        for launches in by_op.values():
+            # Every kernel of an op carries the op's whole data in/out.
+            k = launches[0][0]
             perf = self.perf_rows.get(tuple(k.perf_key)) if k.perf_key else None
             dm = perf_float(perf, "Data Moved (MB)")
+            gflops = perf_float(perf, "GFLOPS")
+            peak = (
+                resolve_peak_maf(perf, self.peak_maf_tflops, None) if gflops else None
+            )
+            is_matrix = any(m for _, m in launches)
+            # Work without a peak: a non-matrix op is memory-only (0.0); a matrix op
+            # is unpriced (None), which blocks span pricing.
+            compute_us = gflops * 1e3 / peak if peak else (None if is_matrix else 0.0)
             enriched.append(
                 {
-                    "dur_us": k.dur_us,
+                    "dur_us": sum(rec.dur_us for rec, _ in launches),
+                    "kernel_count": len(launches),
                     "is_matrix": is_matrix,
-                    "data_moved_mb": dm,
                     "data_in_mb": k.data_in_mb,
                     "data_out_mb": k.data_out_mb,
-                    "gflops": perf_float(perf, "GFLOPS"),
+                    "compute_us": compute_us,
                     "has_perf_data": dm is not None,
                 }
             )
 
         modeled = [e for e in enriched if e["has_perf_data"]]
-        unmodeled_count = len(enriched) - len(modeled)
+        modeled_kernels = sum(e["kernel_count"] for e in modeled)
+        unmodeled_count = len(c.kernels) - modeled_kernels
         if not modeled:
             return None
 
-        modeled_frac = len(modeled) / len(enriched)
+        modeled_frac = modeled_kernels / len(c.kernels)
         min_frac = (
             MIN_MODELED_FRAC
-            if len(enriched) < LONG_GROUP_KERNELS
+            if len(c.kernels) < LONG_GROUP_KERNELS
             else MIN_MODELED_FRAC_LONG
         )
         if modeled_frac < min_frac:
@@ -1107,24 +1129,34 @@ class FusionPricer:
         if current_per_instance_us <= 0:
             return None
 
-        subgroups = self._split_into_subgroups(enriched)
         has_matrix_ops = any(e["is_matrix"] for e in enriched)
 
-        total_savings_us = 0.0
-        for has_epilogue, sg_kernels in subgroups:
-            if has_epilogue:
-                non_gemm_time = sum(
-                    e["dur_us"] for e in sg_kernels if not e["is_matrix"]
-                )
-                total_savings_us += non_gemm_time
-            elif not any(e["is_matrix"] for e in sg_kernels):
-                total_savings_us += self._roofline_savings_us(sg_kernels, TARGET_HIGH)
-
-        bound_type = (
-            BOUND_COMPUTE
-            if any(has_epilogue for has_epilogue, _ in subgroups)
-            else BOUND_MEMORY
+        span_fused = (
+            self._fused_time_us(modeled, span=True)
+            if self.forms.replaces_span(c.fusion_kind)
+            and all(e["compute_us"] is not None for e in enriched)
+            else None
         )
+        if span_fused is not None:
+            fused_us, bound_type = span_fused
+            total_savings_us = max(0.0, current_per_instance_us - fused_us)
+        else:
+            subgroups = self._split_into_subgroups(enriched)
+            total_savings_us = 0.0
+            for has_epilogue, sg_kernels in subgroups:
+                if has_epilogue:
+                    non_gemm_time = sum(
+                        e["dur_us"] for e in sg_kernels if not e["is_matrix"]
+                    )
+                    total_savings_us += non_gemm_time
+                elif not any(e["is_matrix"] for e in sg_kernels):
+                    total_savings_us += self._roofline_savings_us(sg_kernels)
+
+            bound_type = (
+                BOUND_COMPUTE
+                if any(has_epilogue for has_epilogue, _ in subgroups)
+                else BOUND_MEMORY
+            )
 
         gap_high = total_savings_us / current_per_instance_us
         gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
@@ -1143,26 +1175,32 @@ class FusionPricer:
         if impact_score_high < MIN_IMPACT_SCORE:
             return None
 
+        warning = None
+        if unmodeled_count > 0:
+            suffix = (
+                "their time is saved, their compute is not modeled"
+                if span_fused is not None
+                else "savings estimate uses trace time for unmodeled kernels"
+            )
+            warning = (
+                f"{unmodeled_count} of {len(c.kernels)} kernels lack perf models; "
+                f"{suffix}"
+            )
         return FusionEstimate(
             operation=c.base_name,
             impact_score=round(impact_score_mid, 2),
             impact_score_low=round(impact_score_low, 2),
             impact_score_high=round(impact_score_high, 2),
-            estimation="full" if len(modeled) == len(enriched) else "partial",
+            estimation="full" if unmodeled_count == 0 else "partial",
             bound_type=bound_type,
             time_ms=round(time_ms, 3),
             instance_count=c.instance_count,
             kernel_count=len(c.kernels),
-            modeled_kernel_count=len(modeled),
+            modeled_kernel_count=modeled_kernels,
             confidence=c.confidence,
             fusion_kind=c.fusion_kind,
             fusion_type=FUSION_TYPE_MATRIX if has_matrix_ops else FUSION_TYPE_MEMORY,
-            warning=(
-                f"{unmodeled_count} of {len(c.kernels)} kernels lack perf models; "
-                f"savings estimate uses trace time for unmodeled kernels"
-                if unmodeled_count > 0
-                else None
-            ),
+            warning=warning,
             rows=self.build_rows(c.ops, self.perf_rows, self.display_ms),
             op_keys=[g["perf_key"] for g in c.ops if g["perf_key"]],
         )
@@ -1194,54 +1232,40 @@ class FusionPricer:
             for sg in subgroups
         ]
 
-    def _roofline_savings_us(self, enriched: list, target_pct: float) -> float:
-        """Roofline-projected savings for an elementwise sub-group.
+    def _fused_time_us(
+        self, ops: list, *, span: bool = False
+    ) -> tuple[float, str] | None:
+        """(time in us, bound) of the modeled ``ops`` run as one fused kernel, or None
+        when they move no external data. Blends max (perfect overlap) and sum (no
+        overlap) of memory and compute time using OVERLAP_EFFICIENCY."""
+        if not ops:
+            return None
+        # "Data Moved (MB)" in the perf report is MiB, as in the perf model. A span's
+        # later ops read new tensors (K, V); a chain's later ops may re-read an earlier
+        # one, so a chain counts only the first op's input and the last op's output.
+        last_out = ops[-1]["data_out_mb"] or 0.0
+        ext_mb = (ops[0]["data_in_mb"] or 0.0) + last_out
+        if span:
+            data_in = sum(o["data_in_mb"] or 0.0 for o in ops)
+            data_out = sum(o["data_out_mb"] or 0.0 for o in ops[:-1])
+            ext_mb = max(ext_mb, data_in - data_out + last_out)
+        if ext_mb <= 0:
+            return None
+        memory_us = ext_mb * 2**20 / self.peak_bw_bytes_s * 1e6
+        compute_us = sum(o["compute_us"] for o in ops)
+        fused_us = max(memory_us, compute_us) + (1.0 - OVERLAP_EFFICIENCY) * min(
+            memory_us, compute_us
+        )
+        return fused_us, BOUND_COMPUTE if compute_us > memory_us else BOUND_MEMORY
 
-        Blends between max (perfect overlap) and sum (no overlap) using OVERLAP_EFFICIENCY.
-        """
-        modeled = [e for e in enriched if e["has_perf_data"]]
-        if not modeled:
+    def _roofline_savings_us(self, enriched: list) -> float:
+        """Roofline-projected savings for an elementwise sub-group: its time less the
+        fused time of its modeled ops and the time of its unmodeled ones."""
+        fused = self._fused_time_us([e for e in enriched if e["has_perf_data"]])
+        if fused is None:
             return 0.0
-
-        first = modeled[0]
-        last = modeled[-1]
-        # "Data Moved (MB)" in the perf report is MiB, as in the perf model.
-        total_ext_data_bytes = (
-            (first["data_in_mb"] or 0.0) + (last["data_out_mb"] or 0.0)
-        ) * 2**20
-
-        vector_gflops = sum(
-            e["gflops"] for e in modeled if e["gflops"] and not e["is_matrix"]
-        )
-        matrix_gflops = sum(
-            e["gflops"] for e in modeled if e["gflops"] and e["is_matrix"]
-        )
-
-        if total_ext_data_bytes <= 0:
-            return 0.0
-
-        frac = target_pct / 100.0
-        memory_time_us = total_ext_data_bytes / (self.peak_bw_bytes_s * frac) * 1e6
-        matrix_time_us = (
-            (matrix_gflops * 1e9) / (self.matrix_maf * 1e12 * frac) * 1e6
-            if matrix_gflops > 0
-            else 0.0
-        )
-        vector_time_us = (
-            (vector_gflops * 1e9) / (self.vector_maf * 1e12 * frac) * 1e6
-            if vector_gflops > 0
-            else 0.0
-        )
-
-        fused_optimal = max(memory_time_us, matrix_time_us, vector_time_us)
-        fused_sum = memory_time_us + matrix_time_us + vector_time_us
-        fused_time_us = fused_optimal + (1.0 - OVERLAP_EFFICIENCY) * (
-            fused_sum - fused_optimal
-        )
-
-        unmodeled_time_us = sum(e["dur_us"] for e in enriched if not e["has_perf_data"])
-        current_us = sum(e["dur_us"] for e in enriched)
-        return max(0.0, current_us - fused_time_us - unmodeled_time_us)
+        unmodeled_us = sum(e["dur_us"] for e in enriched if not e["has_perf_data"])
+        return max(0.0, sum(e["dur_us"] for e in enriched) - fused[0] - unmodeled_us)
 
     def _efficiency_cells(self, eff: dict) -> tuple:
         """(Efficiency, Bound) table cells from a ``calculate_efficiency`` result."""
