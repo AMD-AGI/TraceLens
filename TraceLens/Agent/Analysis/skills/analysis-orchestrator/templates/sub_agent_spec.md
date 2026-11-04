@@ -237,7 +237,7 @@ When citing peak performance for a bottleneck, select the correct peak based on
 - **memory-bound**: Use `operations[i].efficiency.resolved_peak_mem_bw` (TB/s).
   Report achieved TB/s vs peak TB/s.
 
-Do not look up peaks independently from the metadata dict.
+Do not look up peaks independently.
 
 ---
 
