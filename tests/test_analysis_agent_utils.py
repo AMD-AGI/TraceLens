@@ -27,7 +27,6 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     _extract_kernel_names,
     _extract_module_chain,
     _parse_call_stack,
-    _resolve_peak_maf,
     build_category_findings,
     build_operation_metrics,
     calculate_efficiency,
@@ -41,6 +40,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     gpu_utilization_from_timeline,
     load_category_data,
     perf_report_csv_dir,
+    resolve_peak_maf,
     standalone_efficiency,
     validate_efficiency,
     write_metrics_json,
@@ -2444,17 +2444,17 @@ def test_standalone_efficiency_missing_roofline_is_noop():
     assert result["efficiency_percent"] is None
 
 
-# ----- analysis_utils: _resolve_peak_maf -----
+# ----- analysis_utils: resolve_peak_maf -----
 
 
 def test_resolve_peak_maf_precision_hit():
     row = pd.Series({"Compute Spec": "matrix_fp16"})
-    assert _resolve_peak_maf(row, {"matrix_bf16": 708, "matrix_fp16": 654}, 708) == 654
+    assert resolve_peak_maf(row, {"matrix_bf16": 708, "matrix_fp16": 654}, 708) == 654
 
 
 def test_resolve_peak_maf_unknown_spec_falls_back():
     row = pd.Series({"Compute Spec": "weird"})
-    assert _resolve_peak_maf(row, {"matrix_bf16": 708}, 708) == 708
+    assert resolve_peak_maf(row, {"matrix_bf16": 708}, None) is None
 
 
 # ----- analysis_utils: get_peak_specs -----

@@ -313,11 +313,13 @@ def calculate_efficiency_with_validation(
     }
 
 
-def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> float:
+def resolve_peak_maf(
+    row, max_achievable_tflops: dict, fallback_maf: Optional[float]
+) -> Optional[float]:
     """Resolve the correct peak MAF for an operation using Compute Spec.
 
     Uses the Compute Spec column to look up the precision-aware peak from
-    max_achievable_tflops. Falls back to matrix_bf16 if Compute Spec is
+    max_achievable_tflops. Returns ``fallback_maf`` if Compute Spec is
     missing or unknown.
     """
     compute_spec = row.get("Compute Spec", "")
@@ -448,7 +450,7 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
-    peak_maf = _resolve_peak_maf(
+    peak_maf = resolve_peak_maf(
         row, max_achievable_tflops, get_matrix_maf_tflops(max_achievable_tflops)
     )
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
