@@ -61,7 +61,7 @@ All binary PASS/FAIL. Root cause is always `pipeline`.
 | `workflow_eval_4` | Unified perf report exists | `perf_report_csvs/unified_perf_summary.csv` exists (standalone) or `perf_report_trace1_csvs/unified_perf_summary.csv` (comparative) | — |
 | `workflow_eval_5` | Categorical findings .md files exist | For every category in manifest (except `cpu_idle` when idle ≤ 15%), the corresponding `*_findings.md` exists in the correct tier directory | — |
 | `workflow_eval_6` | All findings correctly placed | No findings file is in the wrong tier directory (`system_findings/` vs `category_findings/`) | — |
-| `workflow_eval_7` | Plot generated on disk | `perf_improvement.png` exists **OR** no kernel tuning recommendations exist (legitimately skipped) | Checks `plot_data.json` and `*_metrics.json` for zero recommendations |
+| `workflow_eval_7` | Plot generated on disk | `perf_improvement.png` exists **OR** no kernel tuning recommendations exist (legitimately skipped) | Checks `priority_data.json` and `*_metrics.json` for zero recommendations |
 
 ---
 

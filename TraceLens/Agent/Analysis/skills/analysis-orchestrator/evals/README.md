@@ -232,7 +232,7 @@ For each test case in the traces CSV, the scripts run two phases:
 
 1. **Phase 1 -- Analysis:** Invokes the Analysis agent on the trace file. Output is written to `analysis_output/`. Agent output is logged as stream JSON (`.ndjson`). The orchestrator includes targeted subagent retry (1 retry per failed subagent in Steps 6, 7, and 9) to reduce flaky pipeline failures.
 2. **Phase 2 -- Workflow + Quality Evals (4 parallel tasks):** Launches four tasks concurrently:
-   - Scripted workflow evals — 13 evals with per-item sub-scoring (via `docker exec`)
+   - Scripted workflow evals — 11 evals with per-item sub-scoring (via `docker exec`)
    - LLM workflow eval — 1 eval with multi-dimensional weighted scoring (via `agent`)
    - Scripted quality evals — 1 eval (via `docker exec`)
    - LLM quality evals — 2 evals with multi-dimensional weighted scoring (via `agent`)

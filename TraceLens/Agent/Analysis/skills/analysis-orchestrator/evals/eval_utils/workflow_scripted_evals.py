@@ -278,7 +278,7 @@ EVAL_REGISTRY = [
         "Plot generated on disk",
         _check_plot,
         "pipeline",
-        "Check priority_data.json; add fallback empty plot_data.json",
+        "Check priority_data.json",
         False,
     ),
 ]

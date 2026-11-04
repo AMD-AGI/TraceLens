@@ -369,7 +369,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 <!-- Paste reasoning blocks from sub-agent findings, augment headings with P-numbers, icons, and HTML anchors. Everything else should be copied verbatim-->
 <!-- Detailed Analysis labels per rule 9 — do not use these labels in optimization cards above -->
-<!-- Impact estimate bullets are rendered by each sub-agent from metadata/*.json → impact_estimates (same source as card Impact). -->
+<!-- Impact estimate bullets are rendered by each sub-agent from category_data/*_metrics.json → impact_estimates (same source as card Impact). -->
 <!-- MARKER CONTRACT: Every #### P<N>: heading in Detailed Analysis MUST be
      preceded by  <!-- reasoning-candidate tier=<TIER> rank=<R> --> where TIER = compute | fusion | system (matching the ### subsection), R= 1, 2, 3, … incrementing per tier (rank=1 for first item, rank=2 for second, etc.). -->
 
@@ -414,7 +414,7 @@ communication/compute overlap). These affect the GPU pipeline as a whole.
 
 **Reasoning for Slowdown:** [2-3 sentences - Why Trace 1 is slower than Trace 2 for these operations as the traces show. No micro-architecture speculation.]
 **Resolution:** [1-2 sentences - Why the suggested optimization helps close the gap — not merely restating what to do.]
-**Impact estimate:** [Rendered from metadata → impact_estimates]
+**Impact estimate:** [Rendered from category_data/*_metrics.json → impact_estimates]
 
 <a id="detailed-analysis-compute-p2"></a>
 <!-- reasoning-candidate tier=compute rank=2 -->

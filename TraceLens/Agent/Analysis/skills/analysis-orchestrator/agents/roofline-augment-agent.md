@@ -40,8 +40,8 @@ if not prepare_model_identification_data('<output_dir>'):
 
 - `<output_dir>/cache/nn_modules.txt` — nn.Module class names, when present
 - `<output_dir>/cache/run_config.yaml` — `analysis_mode`, and each job's `name` and `phase`
-- `<output_dir>/category_data/category_manifest.json` — `focus_csv_dir`, and `gpu_utilization.jobs` (each entry has a `phase`)
-- The perf CSVs in `focus_csv_dir` (or `<output_dir>/perf_report_csvs` when the manifest has no `focus_csv_dir`). Read headers and the rows you need; do not load a trace JSON.
+- `<output_dir>/category_data/category_manifest.json` — `focus_csv_dir`
+- The perf CSVs in `<output_dir>/<focus_csv_dir>`. Read headers and the rows you need; do not load a trace JSON.
 
 **Output file you must write:**
 - `<output_dir>/cache/roofline_augment_args.json`
@@ -106,7 +106,7 @@ Look for an explicit degree, in this order:
 
 ### phases
 
-Collect candidate phase names from `cache/run_config.yaml` `jobs[].phase` and from `category_manifest.json` `gpu_utilization.jobs.*.phase`. Keep `prefill` and `decode` only (case-insensitive; write them in lowercase). A job phase with any other name is not a roofline phase.
+Collect candidate phase names from `cache/run_config.yaml` `jobs[].phase`. Keep `prefill` and `decode` only (case-insensitive; write them in lowercase). A job phase with any other name is not a roofline phase.
 
 For each kept phase, read `batch_size` and `seq_len` from `condensed_op_info.csv` `Input Dims` on attention-like ops (`attention`, `sdpa`, `bmm` with a 4D shape):
 
