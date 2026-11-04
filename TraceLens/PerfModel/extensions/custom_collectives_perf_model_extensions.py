@@ -540,6 +540,10 @@ class allreduce_fusion_kernel_1stage_synthetic(CustomCollective):
         block = args.get("block", [0, 1, 1])
 
         M = grid[0]
+        # grid.x is capped at kMaxBlocks=80; beyond that the kernel
+        # grid-strides so grid.x no longer equals the real token count.
+        if M >= 80:
+            return {"_no_perf": True}
         N = block[0] * pack_size
 
         return {

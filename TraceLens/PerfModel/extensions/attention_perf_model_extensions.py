@@ -8,6 +8,8 @@
 Performance models for pseudo-op extensions.
 """
 
+import re
+
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
@@ -1328,12 +1330,25 @@ class paged_mqa_logits_preshuffle_synthetic:
     category = "InferenceAttention"
     bwd_category = None
 
-    NUM_HEADS = 32
+    TOTAL_HEADS = 128
     HEAD_DIM = 128
     BPE_Q = 1
     BPE_KV = 1
     BPE_W = 4
     BPE_OUT = 4
+
+    _AR_TP_RE = re.compile(r"allreduce_fusion_kernel_1stage<[^,]+,\s*[^,]+,\s*(\d+)")
+
+    @classmethod
+    def _detect_tp(cls, event):
+        """Derive TP world_size from a co-occurring allreduce_fusion_kernel_1stage
+        kernel in the same trace.  Returns None if not found."""
+        peers = event.get("_peer_synthetic_ops") or []
+        for name in peers:
+            m = cls._AR_TP_RE.search(name)
+            if m:
+                return int(m.group(1))
+        return None
 
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
@@ -1348,12 +1363,19 @@ class paged_mqa_logits_preshuffle_synthetic:
             sum_len = stats["c_sqsk"] + stats["g_sqsk"]
             seq_q = stats["c_sq"] + stats["g_sq"]
             kv_touched = stats["c_sk"] + stats["g_sk"]
+            tp = cls._detect_tp(event)
+            # All MLA models (DeepSeek-V2/V2.5/V3/V3.1, GLM-5.2/5.3)
+            # use 128 total heads. NUM_HEADS = TOTAL_HEADS / TP.
+            if tp is None:
+                return {"_no_perf": True}
+            H_Q = cls.TOTAL_HEADS // tp
             return {
-                "H": cls.NUM_HEADS,
-                "D": cls.HEAD_DIM,
+                "H_Q": H_Q,
+                "d_h_qk": cls.HEAD_DIM,
                 "sum_len": sum_len,
                 "seq_q": seq_q,
                 "kv_touched": kv_touched,
+                "tp": tp,
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
@@ -1362,18 +1384,18 @@ class paged_mqa_logits_preshuffle_synthetic:
         p = self.param_details
         if p.get("_no_perf"):
             return None
-        return 2 * p["H"] * p["D"] * p["sum_len"]
+        return 2 * p["H_Q"] * p["d_h_qk"] * p["sum_len"]
 
     def bytes(self):
         p = self.param_details
         if p.get("_no_perf"):
             return None
-        H, D, seq_q = p["H"], p["D"], p["seq_q"]
+        H_Q, d_h_qk, seq_q = p["H_Q"], p["d_h_qk"], p["seq_q"]
         kv_touched, sum_len = p["kv_touched"], p["sum_len"]
         return (
-            seq_q * H * D * self.BPE_Q
-            + seq_q * H * self.BPE_W
-            + kv_touched * (D * self.BPE_KV + self.BPE_OUT)
+            seq_q * H_Q * d_h_qk * self.BPE_Q
+            + seq_q * H_Q * self.BPE_W
+            + kv_touched * (d_h_qk * self.BPE_KV + self.BPE_OUT)
             + 2 * seq_q * self.BPE_OUT
             + sum_len * self.BPE_OUT
         )
