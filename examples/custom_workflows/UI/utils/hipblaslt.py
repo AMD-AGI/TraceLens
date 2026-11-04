@@ -19,7 +19,7 @@ from typing import Literal
 import pandas as pd
 import torch
 
-from TraceLens.UI.utils.reporting import TraceLensColumns
+from utils.reporting import TraceLensColumns
 
 logging.basicConfig(level=logging.INFO)
 LOGS_DIR = f"{os.getcwd()}/logs"

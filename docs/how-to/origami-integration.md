@@ -12,7 +12,7 @@ See LICENSE for license information.
 
 TraceLens can estimate simulated GEMM and SDPA kernel times using *Origami*
 (ROCm's performance modeling library) when you provide a GPU architecture
-description and explicitly opt in. This is optional: `pip install TraceLens`
+description and explicitly opt in. This is optional: `pip install git+https://github.com/AMD-AGI/TraceLens.git`
 doesn't install Origami.
 
 ## What Origami does in TraceLens

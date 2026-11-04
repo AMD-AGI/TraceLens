@@ -22,7 +22,7 @@ See LICENSE for license information.
 
 # Magpie benchmark + profiling
 
-Drive end-to-end **Magpie** benchmark runs with **PyTorch profiler** traces suitable for **`TraceLens_generate_perf_report_pytorch_inference`** and the [Analysis orchestrator](../../Analysis/README.md): patched Docker images when needed, YAML and InferenceX script edits, targeted vs full profiling modes, remote execution, trace QA, and steady-state trace splitting.
+Drive end-to-end **Magpie** benchmark runs with **PyTorch profiler** traces suitable for **`TraceLens_generate_perf_report_pytorch_inference`** and the [Analysis orchestrator](../../../Analysis/README.md): patched Docker images when needed, YAML and InferenceX script edits, targeted vs full profiling modes, remote execution, trace QA, and steady-state trace splitting.
 
 ## Full procedure
 

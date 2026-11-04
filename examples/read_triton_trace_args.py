@@ -38,10 +38,12 @@ def is_triton_cpu_event(event):
 
 
 def main():
-    # default_trace = "torch_trace_output_claude/triton_repro/trace.json.gz"
-    default_trace = "/root/repos/TraceLens/torch_trace_output_claude/triton_repro/trace.json_mi250.gz"
+    if len(sys.argv) != 2:
+        sys.exit(
+            "Usage: python read_triton_trace_args.py <trace.json or trace.json.gz>"
+        )
 
-    path = sys.argv[1] if len(sys.argv) > 1 else default_trace
+    path = sys.argv[1]
     print(f"Reading: {path}\n")
     events = load_trace(path)
     triton_events = [e for e in events if is_triton_cpu_event(e)]

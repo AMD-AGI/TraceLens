@@ -40,6 +40,8 @@ subtrees:
       title: Collective-communication report
     - file: how-to/compare-perf-reports
       title: Compare performance reports
+  - file: how-to/split-traces
+    title: Split traces into iterations, steady state, and phases
   - file: how-to/compare-traces
     title: Compare two traces
   - file: how-to/event-replay
@@ -52,12 +54,18 @@ subtrees:
     title: Index a corpus of traces
   - file: how-to/perf-model-without-trace
     title: Model op performance without a trace
+  - file: how-to/generate-model-roofline-projection
+    title: Project a model's roofline from its checkpoint
   - file: how-to/nccl-analysis
     title: Analyze collective communication
   - file: how-to/origami-integration
     title: Estimate kernel times with Origami
+  - file: how-to/map-kernel-source
+    title: Map a GPU kernel to its source
   - file: how-to/agent
     title: Agentic performance analysis with the TraceLens Agent
+  - file: how-to/visualize-model
+    title: Visualize a model with the TraceLens Agent
 
 - caption: Concepts
   entries:
