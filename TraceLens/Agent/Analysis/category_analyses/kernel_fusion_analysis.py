@@ -24,15 +24,14 @@ sys.path.insert(0, _ANALYSIS_DIR)
 
 from analysis_utils import (
     HIGH_CONFIDENCE_OP_KEYS,
-    PEAK_MEM_BW_KEY,
     focus_job_utilization,
     get_peak_mem_bw_tbs,
+    load_manifest,
     load_perf_rows,
     perf_report_csv_dir,
     write_metrics_json,
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
-from utils.arch_utils import load_arch
 from utils.classify_kernels import TAXONOMY
 from utils.kernel_fusion import (
     CONFIDENCE_HIGH,
@@ -46,7 +45,6 @@ from utils.kernel_fusion import (
 def load_fusion_data(output_dir: str):
     """Load fusion candidates and the perf summary path from analysis output."""
     fc_path = os.path.join(output_dir, "category_data", "fusion_candidates.json")
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
 
     if not os.path.exists(fc_path):
         raise FileNotFoundError(f"Fusion candidates not found: {fc_path}")
@@ -54,10 +52,7 @@ def load_fusion_data(output_dir: str):
     with open(fc_path, "r") as f:
         candidates = [FusionCandidate.from_dict(c) for c in json.load(f)]
 
-    manifest = {}
-    if os.path.exists(manifest_path):
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
+    manifest = load_manifest(output_dir)
 
     csv_path = os.path.join(perf_report_csv_dir(output_dir), "unified_perf_summary.csv")
 
@@ -65,32 +60,6 @@ def load_fusion_data(output_dir: str):
         raise FileNotFoundError(f"Perf summary CSV not found: {csv_path}")
 
     return candidates, manifest, csv_path
-
-
-def load_arch_config(output_dir: str, platform: str) -> dict:
-    """Load platform arch config, trying metadata files first then arch JSON."""
-    metadata_dir = os.path.join(output_dir, "metadata")
-    if os.path.isdir(metadata_dir):
-        for fname in os.listdir(metadata_dir):
-            if fname.endswith("_metadata.json"):
-                with open(os.path.join(metadata_dir, fname), "r") as f:
-                    meta = json.load(f)
-                if PEAK_MEM_BW_KEY in meta and "max_achievable_tflops" in meta:
-                    return {
-                        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(meta),
-                        "max_achievable_tflops": meta["max_achievable_tflops"],
-                    }
-
-    try:
-        arch = load_arch(platform)
-        return {
-            "peak_mem_bw_tbs": arch["mem_bw_gbps"] / 1000,
-            "max_achievable_tflops": arch["max_achievable_tflops"],
-        }
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"No arch config found for platform {platform} in metadata or arch JSON"
-        )
 
 
 def main():
@@ -118,7 +87,7 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    baseline_ms = manifest.get("gpu_utilization", {}).get("total_time_ms", 0)
+    baseline_ms = manifest["gpu_utilization"]["total_time_ms"]
     is_comparative = args.comparison_scope == "comparative"
     # The standalone report note quotes the overlap even when nothing is found.
     scope_metrics = {} if is_comparative else {"overlap_efficiency": OVERLAP_EFFICIENCY}
@@ -139,25 +108,16 @@ def main():
         print(f"No fusion candidates found. Metrics written to: {output_path}")
         return
 
-    platform = manifest.get("platform", "MI300X")
-    try:
-        arch = load_arch_config(args.output_dir, platform)
-    except FileNotFoundError as e:
-        error_metrics = {
-            "category": "kernel_fusion",
-            "status": "ERROR",
-            "error": str(e),
-        }
-        write_metrics_json(error_metrics, args.output_dir, "kernel_fusion")
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    peak_bw_tbs = arch["peak_mem_bw_tbs"]
-    peak_maf_tflops = arch["max_achievable_tflops"]
+    platform = manifest["platform"]
+    specs = manifest["platform_specs"]
+    peak_bw_tbs = get_peak_mem_bw_tbs(specs)
+    peak_maf_tflops = specs["max_achievable_tflops"]
 
     trace2_kwargs = {}
     if is_comparative:
-        csv_path2 = os.path.join(manifest["trace2_csv_dir"], "unified_perf_summary.csv")
+        csv_path2 = os.path.join(
+            args.output_dir, manifest["trace2_csv_dir"], "unified_perf_summary.csv"
+        )
         # Trace 2's perf CSV is optional; without it Trace 2 perf cells render as "—".
         trace2_kwargs = {
             "perf_rows2": (

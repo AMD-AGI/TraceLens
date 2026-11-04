@@ -1530,20 +1530,20 @@ def test_sdpa_extract_empty():
 
 
 def _write_category_inputs(base, category, ops_df):
-    """Lay out the {category}_ops.csv + {category}_metadata.json that
+    """Lay out the {category}_ops.csv + category_manifest.json that
     load_category_data expects under an output dir."""
     cat_dir = os.path.join(base, "category_data")
-    meta_dir = os.path.join(base, "metadata")
     os.makedirs(cat_dir, exist_ok=True)
-    os.makedirs(meta_dir, exist_ok=True)
     ops_df.to_csv(os.path.join(cat_dir, f"{category}_ops.csv"), index=False)
-    metadata = {
-        "max_achievable_tflops": {"matrix_bf16": 1300.0},
-        "peak_mem_bw_tbs": 5.3,
+    manifest = {
+        "platform_specs": {
+            "max_achievable_tflops": {"matrix_bf16": 1300.0},
+            "peak_mem_bw_tbs": 5.3,
+        },
         "gpu_utilization": {"total_time_ms": 100.0},
     }
-    with open(os.path.join(meta_dir, f"{category}_metadata.json"), "w") as f:
-        json.dump(metadata, f)
+    with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
+        json.dump(manifest, f)
 
 
 def _read_metrics(base, category):
@@ -1668,9 +1668,8 @@ def test_driver_cpu_idle_main(tmp_path, monkeypatch):
 
 def _write_fusion_inputs(base, candidates):
     cat_dir = os.path.join(base, "category_data")
-    meta_dir = os.path.join(base, "metadata")
     csv_dir = os.path.join(base, "perf_report_csvs")
-    for d in (cat_dir, meta_dir, csv_dir):
+    for d in (cat_dir, csv_dir):
         os.makedirs(d, exist_ok=True)
     with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
         json.dump(candidates, f)
@@ -1678,14 +1677,13 @@ def _write_fusion_inputs(base, candidates):
         json.dump(
             {
                 "platform": "MI300X",
-                "focus_csv_dir": csv_dir,
+                "focus_csv_dir": "perf_report_csvs",
                 "gpu_utilization": {"total_time_ms": 100.0},
+                "platform_specs": {
+                    "peak_mem_bw_tbs": 5.3,
+                    "max_achievable_tflops": {"matrix_bf16": 1300.0},
+                },
             },
-            f,
-        )
-    with open(os.path.join(meta_dir, "gemm_metadata.json"), "w") as f:
-        json.dump(
-            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1300.0}},
             f,
         )
     pd.DataFrame(
@@ -1702,14 +1700,19 @@ def _write_fusion_inputs(base, candidates):
     ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
 
 
-def test_driver_fusion_main_missing_files_errors(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "missing", ["fusion_candidates.json", "category_manifest.json"]
+)
+def test_driver_fusion_main_missing_files_errors(tmp_path, monkeypatch, missing):
     base = str(tmp_path)
-    os.makedirs(os.path.join(base, "category_data"), exist_ok=True)
+    _write_fusion_inputs(base, [])
+    os.remove(os.path.join(base, "category_data", missing))
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     with pytest.raises(SystemExit):
         kernel_fusion_analysis.main()
     metrics = _read_metrics(base, "kernel_fusion")
     assert metrics["status"] == "ERROR"
+    assert missing in metrics["error"]
 
 
 def test_driver_fusion_main_no_candidates(tmp_path, monkeypatch):
@@ -2050,7 +2053,6 @@ def _build_moe_tree(events: List[Dict], add_python_func: bool = False) -> TraceT
 def _setup_gemm_output_dir(tmp_path):
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
-    (out / "metadata").mkdir()
     df = pd.DataFrame(
         {
             "name": ["aten::mm", "aten::addmm"],
@@ -2070,14 +2072,14 @@ def _setup_gemm_output_dir(tmp_path):
         }
     )
     df.to_csv(out / "category_data" / "gemm_ops.csv", index=False)
-    meta = {
-        "platform": "MI300X",
-        "peak_mem_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708},
+    manifest = {
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 708},
+        },
         "gpu_utilization": {"total_time_ms": 1000.0},
-        "output_dir": str(out),
     }
-    (out / "metadata" / "gemm_metadata.json").write_text(json.dumps(meta))
+    (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
     return str(out)
 
 

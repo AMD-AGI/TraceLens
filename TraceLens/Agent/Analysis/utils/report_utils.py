@@ -21,17 +21,11 @@ import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     focus_job_utilization,
+    load_manifest,
     node_field,
     perf_report_csv_dir,
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
-
-
-def load_manifest(output_dir: str) -> dict:
-    """Load and return the category manifest JSON from output_dir."""
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    with open(manifest_path) as f:
-        return json.load(f)
 
 
 def write_csv(path, rows, fieldnames, verbose=False):

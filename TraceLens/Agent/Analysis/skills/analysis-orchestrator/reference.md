@@ -329,7 +329,6 @@ This script performs:
 
 **Outputs:**
 - `category_data/<category>_ops.csv` - Filtered operations per category
-- `metadata/<category>_metadata.json` - Platform specs, GPU utilization, config
 - `category_data/multi_kernel_data.json` - Memcpy/NCCL/overlap pre-computed data
 - `category_data/category_manifest.json` - Workflow metadata with categories (includes `tier` field: `system` or `compute_kernel`)
 - `system_findings/` - Directory for system-level analysis outputs
@@ -480,8 +479,7 @@ Read and follow the FULL instructions in:
   TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/{agent_file}
 
 - Category: {category}
-- Input files: category_data/{category}_ops.csv, metadata/{category}_metadata.json,
-  category_data/{category}_metrics.json (P-items come from `category_findings[]`; `operations[i].module_chain` provides model layer context)
+- Input files: category_data/{category}_ops.csv, category_data/{category}_metrics.json (P-items come from `category_findings[]`; `operations[i].module_chain` provides model layer context)
 - Output file: category_findings/{category}_findings.md
 
 Execute every step in the agent file. Return "DONE" when complete.
@@ -676,7 +674,7 @@ a. Check if the report contains similar but incorrectly named headers and rename
 b. If sections are entirely absent, add them with the correct `##` headers, keeping existing content.
 c. For "Missing metrics row" errors: add the row to the Executive Summary table using values from `category_data/category_manifest.json` (`gpu_utilization` keys) and `priority_data.json` (top bottleneck).
 d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary metrics table: replace each with the actual value from `category_manifest.json` -> `gpu_utilization`.
-e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `metadata/*_metadata.json`.
+e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `category_manifest.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 g. For marker errors: restore or add the missing/broken marker in place — never delete a card or block to silence an error. Source numeric values from `priority_data.json` (P-items) or `<cat>_metrics.json::impact_estimates[]` (detail estimates); use `null` or the sentinel `not quantifiable from trace data` for non-quantifiable items.
 h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category-order mismatch, R3 marker numeric mismatch, R4 Top Ops row-count mismatch, R6 node mismatch): re-render the affected card(s) by re-reading `priority_data.json::findings[N-1]` for `category`, `node` (fusion markers: `kernel_fusion_metrics.json::node`), `low` (impact_score_low), `mid` (impact_score), `high` (impact_score_high), and `priorities[]` for the Top Operations table rows (one row per entry, in array order; under `multi_trace`, each node's table takes the entries with that `node`).

@@ -28,7 +28,6 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/<sdpa>_ops.csv` - Filtered SDPA operations (includes `call_stack` column for architecture context)
-2. `<output_dir>/metadata/<sdpa>_metadata.json` - Hardware specs, GPU utilization
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<sdpa>_findings.md`

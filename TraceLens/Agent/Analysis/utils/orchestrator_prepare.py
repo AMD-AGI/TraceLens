@@ -159,7 +159,7 @@ def perf_report_metadata(csv_dir: str, platform: str) -> dict:
     """Peaks of ``platform`` plus the GPU utilization of the perf report in ``csv_dir``.
 
     The metadata ``build_operation_metrics`` reads, shared by the agent route's
-    per-category metadata and any caller analyzing a perf report directly.
+    manifest `platform_specs` and any caller analyzing a perf report directly.
     """
     arch = load_arch(platform)
     gpu_timeline = pd.read_csv(os.path.join(csv_dir, "gpu_timeline.csv"))
@@ -274,8 +274,6 @@ def main():
     ]:
         os.makedirs(d, exist_ok=True)
 
-    platform_specs = load_arch(platform)
-
     # ============================================================================
     # STEP 3: Assess GPU Utilization
     # ============================================================================
@@ -283,9 +281,16 @@ def main():
 
     trace1_metadata = perf_report_metadata(trace1_csv_dir, platform)
     gpu_utilization_metrics = trace1_metadata["gpu_utilization"]
+    platform_specs = {
+        PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
+        "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
+        "memory_gb": load_arch(platform)["memory_gb"],
+    }
     if plans is not None:
         focus_job = plans[0].node_id
-        focus_csv_dir = plans[0].output_csvs_dir
+        focus_csv_dir = os.path.join(
+            output_dir, os.path.basename(plans[0].output_csvs_dir)
+        )
         system_utilization = gpu_utilization_metrics["nodes"][focus_job]
     else:
         focus_csv_dir = trace1_csv_dir
@@ -297,10 +302,6 @@ def main():
         trace2_gpu_utilization = gpu_utilization_from_timeline(
             pd.read_csv(os.path.join(trace2_csv_dir, "gpu_timeline.csv"))
         )
-        with open(
-            os.path.join(output_dir, "metadata", "trace2_gpu_utilization.json"), "w"
-        ) as f:
-            json.dump(trace2_gpu_utilization, f, indent=2)
         trace2_ops_summary_by_category = ops_summary_by_enhanced_category(
             trace2_csv_dir
         )
@@ -688,25 +689,6 @@ def main():
         category_df.to_csv(csv_file, index=False)
         print(f"    ✓ Exported CSV: {len(category_df)} ops")
 
-        # Create metadata JSON
-        metadata = {
-            "platform": platform,
-            PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
-            "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
-            "memory_gb": platform_specs.get("memory_gb"),
-            "trace_path": trace_path,
-            "output_dir": output_dir,
-            "category": display_name,
-            "category_name": category_name,
-            "gpu_utilization": gpu_utilization_metrics,
-            "trace_loading_policy": "DO_NOT_LOAD_TRACE_use_precomputed_tree_data",
-        }
-
-        metadata_file = f"{output_dir}/metadata/{category_name}_metadata.json"
-        with open(metadata_file, "w") as f:
-            json.dump(metadata, f, indent=2)
-        print(f"    ✓ Exported metadata")
-
         exported_categories.append(
             {
                 "name": category_name,
@@ -714,8 +696,6 @@ def main():
                 "skill": CATEGORY_SKILL_MAP.get(category_name, "generic-op-analyzer"),
                 "tier": "compute_kernel",
                 "ops_count": len(category_df),
-                "csv_file": csv_file,
-                "metadata_file": metadata_file,
             }
         )
 
@@ -725,27 +705,6 @@ def main():
     print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
     print(f"    Idle time: {system_utilization['idle_time_percent']:.1f}%")
 
-    cpu_idle_metadata = {
-        "platform": platform,
-        PEAK_MEM_BW_KEY: trace1_metadata[PEAK_MEM_BW_KEY],
-        "max_achievable_tflops": trace1_metadata["max_achievable_tflops"],
-        "memory_gb": platform_specs.get("memory_gb"),
-        "trace_path": trace_path,
-        "output_dir": output_dir,
-        "category": "CPU/Idle Analysis",
-        "category_name": "cpu_idle",
-        "gpu_utilization": system_utilization,
-    }
-
-    cpu_idle_metadata_file = f"{output_dir}/metadata/cpu_idle_metadata.json"
-    with open(cpu_idle_metadata_file, "w") as f:
-        json.dump(cpu_idle_metadata, f, indent=2)
-
-    cpu_idle_csv = f"{output_dir}/category_data/cpu_idle_ops.csv"
-    pd.DataFrame().to_csv(cpu_idle_csv, index=False)
-
-    print(f"    ✓ Exported metadata")
-
     exported_categories.insert(
         0,
         {
@@ -754,8 +713,6 @@ def main():
             "skill": "cpu-idle-analyzer",
             "tier": "system",
             "ops_count": 0,
-            "csv_file": cpu_idle_csv,
-            "metadata_file": cpu_idle_metadata_file,
             "priority": 0,
         },
     )
@@ -785,9 +742,6 @@ def main():
                 "skill": "multi-kernel-analyzer",
                 "tier": "system",
                 "ops_count": 0,
-                "csv_file": None,
-                "metadata_file": None,
-                "data_file": multi_kernel_data_file,
             }
         )
 
@@ -808,9 +762,6 @@ def main():
                     "skill": "kernel-fusion-analyzer",
                     "tier": "system",
                     "ops_count": len(_fc),
-                    "csv_file": None,
-                    "metadata_file": None,
-                    "data_file": fusion_candidates_file,
                 }
             )
 
@@ -878,41 +829,23 @@ def main():
         else:
             cat_info["has_sync_bottleneck"] = False
 
-        # Also update the metadata file with time breakdown
-        metadata_file = cat_info.get("metadata_file")
-        if metadata_file and os.path.exists(metadata_file):
-            with open(metadata_file, "r") as f:
-                metadata = json.load(f)
-
-            metadata["time_breakdown"] = {
-                "gpu_kernel_time_ms": cat_info["gpu_kernel_time_ms"],
-                "cpu_duration_ms": cat_info["cpu_duration_ms"],
-                "sync_time_ms": cat_info["sync_time_ms"],
-                "sync_ops_count": cat_info["sync_ops_count"],
-                "has_sync_bottleneck": cat_info["has_sync_bottleneck"],
-                "note": "Use gpu_kernel_time_ms for bottleneck prioritization. sync_time_ms indicates host-device sync overhead.",
-            }
-
-            with open(metadata_file, "w") as f:
-                json.dump(metadata, f, indent=2)
-
     print(f"  ✓ Time metrics calculated for all categories")
 
     # Save category manifest
     manifest = {
         "platform": platform,
+        "platform_specs": platform_specs,
         "trace_path": trace_path,
-        "output_dir": output_dir,
         "comparison_scope": comparison_scope,
         "gpu_utilization": gpu_utilization_metrics,
-        "focus_csv_dir": focus_csv_dir,
+        "focus_csv_dir": os.path.basename(focus_csv_dir),
         "capture_folder": args.capture_folder if merged_tree is not None else None,
         "categories": exported_categories,
         "time_metric_note": "Use gpu_kernel_time_ms for bottleneck prioritization. cpu_duration_ms includes sync/launch overhead.",
     }
     if comparison_scope == "comparative" and trace2_gpu_utilization is not None:
         manifest["platform2"] = args.platform2
-        manifest["trace2_csv_dir"] = trace2_csv_dir
+        manifest["trace2_csv_dir"] = os.path.basename(trace2_csv_dir)
         manifest["trace2_gpu_utilization"] = trace2_gpu_utilization
         manifest["trace2_ops_summary_by_category"] = trace2_ops_summary_by_category
 
@@ -943,8 +876,6 @@ def main():
     print(f"✓ Orchestrator Preparation Complete (Steps 3-6)")
     print(f"✓ Exported {len(exported_categories)} categories")
     print(f"✓ Manifest saved: {manifest_file}")
-    if comparison_scope == "comparative":
-        print(f"✓ metadata/trace2_gpu_utilization.json + manifest trace2_* fields")
     print(f"{'='*80}")
 
 

@@ -9,7 +9,7 @@
 Shared utilities for category-specific analysis scripts.
 
 This module provides common functions for:
-- Loading category data (CSV, metadata JSON)
+- Loading category data (CSV, category manifest)
 - Calculating time metrics
 - Calculating efficiency metrics
 - Building operation metrics for JSON output
@@ -105,15 +105,22 @@ def _eff_bucket(pct):
     return f"{_EFF_BUCKET_BOUNDARIES[1]}-100"
 
 
+def load_manifest(output_dir: str) -> dict:
+    """Load and return the category manifest JSON from output_dir."""
+    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
+    with open(manifest_path) as f:
+        return json.load(f)
+
+
 def perf_report_csv_dir(output_dir: str) -> str:
     """The perf-report CSV dir of the trace fusion and system analysis read: the
-    manifest's ``focus_csv_dir``, or ``<output_dir>/perf_report_csvs`` before prepare.
+    manifest's ``focus_csv_dir`` under ``output_dir``, or ``<output_dir>/perf_report_csvs``
+    before prepare.
     """
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    if os.path.isfile(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            return json.load(f)["focus_csv_dir"]
-    return os.path.join(output_dir, "perf_report_csvs")
+    try:
+        return os.path.join(output_dir, load_manifest(output_dir)["focus_csv_dir"])
+    except FileNotFoundError:
+        return os.path.join(output_dir, "perf_report_csvs")
 
 
 def focus_job_utilization(manifest: dict) -> dict:
@@ -158,30 +165,32 @@ def gpu_utilization_from_timeline(gpu_timeline: pd.DataFrame) -> dict:
 
 def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
     """
-    Load CSV operations data and metadata JSON for a category.
+    Load CSV operations data and the manifest's platform specs for a category.
 
     Args:
         output_dir: Base output directory path
         category: Category name (e.g., 'gemm', 'sdpa_fwd', 'elementwise')
 
     Returns:
-        Tuple of (operations DataFrame, metadata dict)
+        Tuple of (operations DataFrame, metadata dict with the platform specs,
+        ``gpu_utilization`` and ``output_dir``)
 
     Raises:
         FileNotFoundError: If required files don't exist
     """
     csv_path = f"{output_dir}/category_data/{category}_ops.csv"
-    metadata_path = f"{output_dir}/metadata/{category}_metadata.json"
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Category CSV not found: {csv_path}")
 
     ops_df = pd.read_csv(csv_path)
+    manifest = load_manifest(output_dir)
 
-    with open(metadata_path, "r") as f:
-        metadata = json.load(f)
-
-    return ops_df, metadata
+    return ops_df, {
+        **manifest["platform_specs"],
+        "gpu_utilization": manifest["gpu_utilization"],
+        "output_dir": output_dir,
+    }
 
 
 def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
