@@ -895,6 +895,15 @@ def _validate_report_args_column(content, output_dir):
     ]
 
 
+def _compute_optimizations_section(content):
+    """The ``## Compute Kernel Optimizations`` section of analysis.md, or None."""
+    sec_start = content.find("## Compute Kernel Optimizations")
+    if sec_start < 0:
+        return None
+    sec_end = content.find("\n## ", sec_start + 1)
+    return content[sec_start:] if sec_end < 0 else content[sec_start:sec_end]
+
+
 def _validate_report_priority_consistency(content, output_dir):
     """Cross-check analysis.md against priority_data.json.
 
@@ -925,11 +934,9 @@ def _validate_report_priority_consistency(content, output_dir):
     priorities = pd.get("priorities", []) or []
     errors = []
 
-    sec_start = content.find("## Compute Kernel Optimizations")
-    if sec_start < 0:
+    section = _compute_optimizations_section(content)
+    if section is None:
         return errors
-    sec_end = content.find("\n## ", sec_start + 1)
-    section = content[sec_start:] if sec_end < 0 else content[sec_start:sec_end]
 
     n_p = len(_P_ITEM_RE.findall(section))
     if n_p != len(findings):
@@ -1063,7 +1070,9 @@ def _validate_report_reasoning_candidates(content):
     of ``#### P<N>:`` headings in the corresponding subsection. Missing markers
     break Hyperloom's ``parse_analysis_md()`` which uses them as block delimiters.
     Each compute block must also keep its **Data:** table: ``analysis.json``
-    reads its kernels from that table alone.
+    reads its kernels from that table alone. When Compute Kernel Insights is
+    present, every P-item of Compute Kernel Optimizations needs its own compute
+    block there, so a subsection that omits the blocks does not pass with no kernels.
     """
     errors = []
     checks = [
@@ -1084,6 +1093,23 @@ def _validate_report_reasoning_candidates(content):
             errors.append(
                 f"R5: {label} has {n_headings} #### P<N>: headings but "
                 f"{n_markers} reasoning-candidate tier={tier} markers"
+            )
+    insights = _extract_detailed_analysis_subsection(
+        content, "### Compute Kernel Insights"
+    )
+    section = _compute_optimizations_section(content)
+    if insights is not None and section is not None:
+        n_items = len(_P_ITEM_RE.findall(section))
+        n_blocks = sum(
+            1
+            for m in _CANDIDATE_RE.finditer(insights)
+            if m.group(1).lower() == TIER_COMPUTE
+        )
+        if n_blocks < n_items:
+            errors.append(
+                f"R5: Compute Kernel Optimizations has {n_items} P-item headings but "
+                f"Compute Kernel Insights has {n_blocks} reasoning-candidate tier=compute "
+                f"blocks; add one block per P-item, each with its **Data:** table"
             )
     lines = content.splitlines()
     errors.extend(
