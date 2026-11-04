@@ -192,7 +192,7 @@ expand_archive() {
     if [[ -f "$archive" ]] && [[ ! -d "$target" ]]; then
         echo "Expanding ${name}.tar.gz..."
         # Archives store paths as agent_evals/Analysis/analysis_tests/...
-        tar xzf "$archive" -C "$EVALS_DIR" --strip-components=2
+        tar xzf "$archive" --no-same-owner -C "$EVALS_DIR" --strip-components=2
         echo "Done."
     fi
 }
