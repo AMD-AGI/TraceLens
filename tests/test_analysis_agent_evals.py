@@ -1577,7 +1577,7 @@ def test_quality_csv_alignment_string_column_numpy_normalized(tmp_path):
 def _valid_output_dir(tmp_path, comparison_scope="standalone"):
     """Build a fully-populated analysis output_dir that passes most checks."""
     out = tmp_path / "out"
-    for d in ("metadata", "category_data", "system_findings", "category_findings"):
+    for d in ("cache", "category_data", "system_findings", "category_findings"):
         (out / d).mkdir(parents=True)
 
     manifest = {
@@ -1594,7 +1594,7 @@ def _valid_output_dir(tmp_path, comparison_scope="standalone"):
         json.dumps({"impact_estimates": []})
     )
     (out / "category_findings" / "gemm_findings.md").write_text("# findings\n")
-    (out / "metadata" / "model_info.json").write_text(
+    (out / "cache" / "model_info.json").write_text(
         json.dumps(
             {
                 "model": "TestNet",
@@ -1675,8 +1675,8 @@ def test_workflow_check_directories_missing(tmp_path):
 
 def test_workflow_check_model_info_missing_keys(tmp_path):
     out = tmp_path / "out"
-    (out / "metadata").mkdir(parents=True)
-    (out / "metadata" / "model_info.json").write_text(json.dumps({"model": "X"}))
+    (out / "cache").mkdir(parents=True)
+    (out / "cache" / "model_info.json").write_text(json.dumps({"model": "X"}))
     result, details = workflow._check_model_info(str(out))
     assert result == "FAIL"
     assert "Missing keys" in details

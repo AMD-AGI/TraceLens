@@ -33,7 +33,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 8. Invoke Compute Kernel Subagents (PARALLEL, read category_findings[] from _metrics.json) → category_findings/
    8.5. Aggregate per-category category_findings[] → priority_data.json::findings[] (globally sorted)
 9. Validate Subagent Outputs (system_findings/ + category_findings/)
-10. Prepare Report Data (load_findings) + Model Identification (subagent) → metadata/model_info.json
+10. Prepare Report Data (load_findings) + Model Identification (subagent) → cache/model_info.json
     10.2. Analytical Roofline Augmentation (optional; only when <augment_analytical_roofline> is set)
 11. Render performance PNG IF agent_extension.py is absent
 12. Generate Final Report (composable System + Compute sections), validate it,
@@ -552,7 +552,7 @@ Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/
 
 **On failure (subagent error or timeout), retry exactly once** by re-launching the same subagent with the same prompt.
 
-Assign <Model> to model value in `<output_dir>/metadata/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
+Assign <Model> to model value in `<output_dir>/cache/model_info.json` or "Workload" if model is "Cannot be inferred from trace".
 
 ---
 
@@ -564,14 +564,14 @@ Skip this step unless `<augment_analytical_roofline>` is set.
 
 Launch a Task subagent (generalPurpose) that reads and follows `TraceLens/Agent/Analysis/skills/analysis-orchestrator/agents/roofline-augment-agent.md` with context: `<output_dir>`, `<platform>`, `<prefix>`. Wait for completion.
 
-On failure (subagent error, timeout, or `metadata/roofline_augment_args.json` not written), retry once. If the file is still missing, skip the rest of this step.
+On failure (subagent error, timeout, or `cache/roofline_augment_args.json` not written), retry once. If the file is still missing, skip the rest of this step.
 
 ### 10.2.2 Project and merge
 
 ```bash
 <prefix> python3 -m TraceLens.Visualizer.model_explorer_export.roofline_augment \
   --output-dir <output_dir> \
-  --args-json <output_dir>/metadata/roofline_augment_args.json
+  --args-json <output_dir>/cache/roofline_augment_args.json
 ```
 
 ---
@@ -632,7 +632,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
       - When a finding has `roofline.note`, emit it as a blockquote under that finding's `**Identification:**` line, and rephrase any "no performance model" or "cannot compute a roofline" wording for that finding (including its Executive Summary line and card Insight) to "no trace-based perf model".
 
    f. **Appendix** — append `## Appendix` with `### Model Architecture` and `### Hardware Reference`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
-      - `metadata/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
+      - `cache/model_info.json` — substitute `<model>`, `<architecture>`, `<scale>`, `<precision>` with the four field values.
       - Platform arch file — read `platform` from `category_manifest.json`, then read `TraceLens/Agent/Analysis/utils/arch/<platform>.json`. For `### Hardware Reference`: substitute `<platform>`, Peak Memory BW = `mem_bw_gbps / 1000` TB/s, Peak MAF (BF16) = `max_achievable_tflops.matrix_bf16` TFLOPS, Peak MAF (FP8) = `max_achievable_tflops.matrix_fp8` TFLOPS if present.
 
 **Failure exclusion:** Skip any category listed in `load_findings()` output as `failed_system` or `failed_compute`; emit one top `kind=warning` marker per failure and per `high_variance` operation (CoV > 1.0 in `*_metrics.json`) instead. No mid-document `## Warnings` section — validation rejects it.

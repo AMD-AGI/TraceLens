@@ -55,9 +55,9 @@ All binary PASS/FAIL. Root cause is always `pipeline`.
 
 | Index | Summary | Pass Criteria | Key Details |
 |-------|---------|---------------|-------------|
-| `workflow_eval_1` | Directory structure created | `metadata/`, `category_data/`, `system_findings/`, `category_findings/` all exist | — |
+| `workflow_eval_1` | Directory structure created | `category_data/`, `system_findings/`, `category_findings/` all exist | — |
 | `workflow_eval_2` | Platform specs recorded | `category_manifest.json` has `platform_specs` with `peak_mem_bw_tbs`, `max_achievable_tflops`, `memory_gb` | Requires manifest |
-| `workflow_eval_3` | Model info JSON exists and valid | `metadata/model_info.json` exists, is valid JSON, has keys `{model, architecture, scale, precision}`, none empty | — |
+| `workflow_eval_3` | Model info JSON exists and valid | `cache/model_info.json` exists, is valid JSON, has keys `{model, architecture, scale, precision}`, none empty | — |
 | `workflow_eval_4` | Unified perf report exists | `perf_report_csvs/unified_perf_summary.csv` exists (standalone) or `perf_report_trace1_csvs/unified_perf_summary.csv` (comparative) | — |
 | `workflow_eval_5` | Categorical findings .md files exist | For every category in manifest (except `cpu_idle` when idle ≤ 15%), the corresponding `*_findings.md` exists in the correct tier directory | — |
 | `workflow_eval_6` | All findings correctly placed | No findings file is in the wrong tier directory (`system_findings/` vs `category_findings/`) | — |
@@ -166,7 +166,7 @@ overall_score = correctness × 0.50 + completeness × 0.50
 
 **Type:** Scripted, per-field. **Root cause on fail:** `template`.
 
-Reads `metadata/model_info.json` and checks that each field value appears
+Reads `cache/model_info.json` and checks that each field value appears
 (case-insensitive substring match) in the `## Appendix` section of the report.
 
 | Sub-index | JSON Field | Pass Criteria |

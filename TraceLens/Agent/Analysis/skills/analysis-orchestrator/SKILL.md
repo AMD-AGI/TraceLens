@@ -35,7 +35,7 @@ Follow **[reference.md](reference.md)** for every step (user prompts, `<prefix>`
 8. Compute Kernel Subagents (PARALLEL) → category_findings/
   8.5. Aggregate → priority_data.json::findings[]
 9. Validate Subagent Outputs
-10. load_findings + Model Identification (subagent) → metadata/model_info.json
+10. load_findings + Model Identification (subagent) → cache/model_info.json
     10.2. Analytical Roofline Augmentation (optional; only when <augment_analytical_roofline> is set)
 11. Render performance PNG if agent_extension.py is absent
 12. Generate analysis.md (orchestrator writes via <prefix> tee), optional extension, embed PNG
@@ -50,7 +50,7 @@ Follow **[reference.md](reference.md)** for every step (user prompts, `<prefix>`
 ## Primary outputs
 
 - **Deliverable:** `<output_dir>/analysis.md`
-- **Internals:** `system_findings/`, `category_findings/`, `category_data/`, `metadata/`, `perf_report*.xlsx`, CSV folders — see package README for layout.
+- **Internals:** `system_findings/`, `category_findings/`, `category_data/`, `cache/`, `perf_report*.xlsx`, CSV folders — see package README for layout.
 
 ## Agent layout
 

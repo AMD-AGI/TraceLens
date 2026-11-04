@@ -223,7 +223,6 @@ generate_single_ref() {
         rm -rf "$REF_DIR/category_data" \
                "$REF_DIR/category_findings" \
                "$REF_DIR/system_findings" \
-               "$REF_DIR/metadata" \
                "$REF_DIR/cache" \
                "$REF_DIR/perf_improvement.png" \
                "$REF_DIR/perf_improvement_base64.txt" \

@@ -53,7 +53,7 @@ section that has STANDALONE / COMPARATIVE variants. Delete the unused variant.
    - Kernel Fusion blocks:    **Identification:** / **Data:** / **Resolution:** / **Impact estimate:**
 
 10. Detailed Analysis: three subsections (`### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights`) with `#### 🔴/🟡/🟢 Pn: <Brief Title>` blocks matching card titles and order.
-11. Model and appendix: Use `model_info["model"]` from `metadata/model_info.json` for the
+11. Model and appendix: Use `model_info["model"]` from `cache/model_info.json` for the
     report title (fall back to "Workload" if "Cannot be inferred from trace"). Fill Appendix
     **Model Architecture** with the raw `model`, `architecture`, `scale`, `precision` values.
 12. Library parenthetical: Compute Kernel card titles and Detailed Analysis headings must include

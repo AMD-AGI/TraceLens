@@ -22,6 +22,7 @@ import sys
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import PEAK_MEM_BW_KEY
 from TraceLens.Agent.Analysis.utils import write_csv
+from TraceLens.Agent.Analysis.utils.report_utils import MODEL_INFO_FIELDS
 
 CSV_COLUMNS = [
     "index",
@@ -32,7 +33,6 @@ CSV_COLUMNS = [
     "root_cause",
     "recommended_fix",
 ]
-_REQUIRED_MODEL_KEYS = {"model", "architecture", "scale", "precision"}
 _REQUIRED_PLATFORM_SPECS = {PEAK_MEM_BW_KEY, "max_achievable_tflops", "memory_gb"}
 
 _MIN_REPORT_BYTES = 100
@@ -102,7 +102,7 @@ def _load_manifest(output_dir: str) -> dict | None:
 
 
 def _check_directories(output_dir: str) -> tuple[str, str]:
-    required = ["metadata", "category_data", "system_findings", "category_findings"]
+    required = ["category_data", "system_findings", "category_findings"]
     missing = [d for d in required if not os.path.isdir(os.path.join(output_dir, d))]
     if missing:
         return "FAIL", f"Missing directories: {', '.join(missing)}"
@@ -120,18 +120,18 @@ def _check_platform_specs(output_dir: str) -> tuple[str, str]:
 
 
 def _check_model_info(output_dir: str) -> tuple[str, str]:
-    path = os.path.join(output_dir, "metadata", "model_info.json")
+    path = os.path.join(output_dir, "cache", "model_info.json")
     if not os.path.isfile(path):
-        return "FAIL", "metadata/model_info.json not found"
+        return "FAIL", "cache/model_info.json not found"
     try:
         with open(path) as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
         return "FAIL", f"Invalid JSON: {e}"
-    missing = _REQUIRED_MODEL_KEYS - data.keys()
+    missing = [k for k in MODEL_INFO_FIELDS if k not in data]
     if missing:
         return "FAIL", f"Missing keys: {', '.join(missing)}"
-    empty = [k for k in _REQUIRED_MODEL_KEYS if not str(data[k]).strip()]
+    empty = [k for k in MODEL_INFO_FIELDS if not str(data[k]).strip()]
     if empty:
         return "FAIL", f"Empty values: {', '.join(empty)}"
     return "PASS", ""
@@ -744,12 +744,9 @@ def _check_issue_template(output_dir, comparison_scope="standalone"):
     return rows
 
 
-_MODEL_INFO_FIELDS = ["model", "architecture", "scale", "precision"]
-
-
 def _check_model_id(output_dir, comparison_scope=None):
     """Eval 12 — per-field check for model_info.json values in Appendix."""
-    model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
+    model_info_path = os.path.join(output_dir, "cache", "model_info.json")
     report_path = os.path.join(output_dir, "analysis.md")
 
     if not os.path.isfile(model_info_path):
@@ -758,7 +755,7 @@ def _check_model_id(output_dir, comparison_scope=None):
                 "workflow_eval_12",
                 "Model identification in report",
                 "FAIL",
-                "metadata/model_info.json not found",
+                "cache/model_info.json not found",
                 "pipeline",
                 "Run model identification subagent",
             )
@@ -808,7 +805,7 @@ def _check_model_id(output_dir, comparison_scope=None):
 
     appendix_lower = appendix.lower()
     rows = []
-    for field in _MODEL_INFO_FIELDS:
+    for field in MODEL_INFO_FIELDS:
         value = str(model_info.get(field, "")).strip()
         if not value or value.lower() == "cannot be inferred from trace":
             rows.append(

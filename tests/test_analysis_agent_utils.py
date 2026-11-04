@@ -2790,6 +2790,9 @@ def test_orchestrator_main_writes_manifest(orchestrator_prepared_output):
     }
     assert manifest["capture_folder"] is None
     assert "focus_job" not in manifest
+    assert os.path.isfile(
+        os.path.join(orchestrator_prepared_output, "cache", "model_info.json")
+    )
 
 
 def test_orchestrator_main_exports_category_data(orchestrator_prepared_output):
@@ -3475,8 +3478,8 @@ def test_prepare_model_identification_standalone(tmp_path, perf_csv_dir):
     dst = os.path.join(out, "perf_report_csvs", "unified_perf_summary.csv")
     pd.read_csv(src).to_csv(dst, index=False)
     assert prepare_model_identification_data(out) is True
-    assert os.path.isfile(os.path.join(out, "metadata", "condensed_op_info.csv"))
-    nn = open(os.path.join(out, "metadata", "nn_modules.txt")).read()
+    assert os.path.isfile(os.path.join(out, "cache", "condensed_op_info.csv"))
+    nn = open(os.path.join(out, "cache", "nn_modules.txt")).read()
     assert "LlamaMLP" in nn
 
 

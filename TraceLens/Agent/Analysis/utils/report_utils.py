@@ -39,10 +39,13 @@ def write_csv(path, rows, fieldnames, verbose=False):
         print("  Written: {} ({} rows)".format(path, len(rows)))
 
 
-def prepare_model_identification_data(output_dir: str) -> bool:
-    """Prepare metadata files for the model-identification subagent.
+MODEL_INFO_FIELDS = ("model", "architecture", "scale", "precision")
 
-    Reads unified_perf_summary.csv and writes two files under metadata/:
+
+def prepare_model_identification_data(output_dir: str) -> bool:
+    """Prepare input files for the model-identification subagent.
+
+    Reads unified_perf_summary.csv and writes two files under cache/:
     - condensed_op_info.csv: name, Input type, Input Dims columns for op-level inference.
     - nn_modules.txt: unique nn.Module class names from trace.
 
@@ -64,11 +67,11 @@ def prepare_model_identification_data(output_dir: str) -> bool:
     except (ValueError, KeyError):
         return False
 
-    metadata_dir = os.path.join(output_dir, "metadata")
-    os.makedirs(metadata_dir, exist_ok=True)
+    cache_dir = os.path.join(output_dir, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
 
     df[["name", "Input type", "Input Dims"]].to_csv(
-        os.path.join(metadata_dir, "condensed_op_info.csv"), index=False
+        os.path.join(cache_dir, "condensed_op_info.csv"), index=False
     )
 
     nn_modules = sorted(
@@ -78,7 +81,7 @@ def prepare_model_identification_data(output_dir: str) -> bool:
             for m in re.findall(r"nn\.Module:\s*([^\s',\]]+)", str(cell))
         }
     )
-    with open(os.path.join(metadata_dir, "nn_modules.txt"), "w") as f:
+    with open(os.path.join(cache_dir, "nn_modules.txt"), "w") as f:
         f.write("\n".join(nn_modules) + "\n" if nn_modules else "")
 
     return True

@@ -30,6 +30,7 @@ from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     FusionForms,
     FusionLabeler,
 )
+from TraceLens.Agent.Analysis.utils.report_utils import MODEL_INFO_FIELDS
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 from TraceLens.Reporting.generate_perf_report_from_config import (
     AGGREGATED_CSVS_DIR,
@@ -267,7 +268,7 @@ def main():
     # Create directory structure
     for d in [
         output_dir,
-        f"{output_dir}/metadata",
+        f"{output_dir}/cache",
         f"{output_dir}/category_data",
         f"{output_dir}/category_findings",
         f"{output_dir}/system_findings",
@@ -856,13 +857,8 @@ def main():
     with open(manifest_file, "w") as f:
         json.dump(manifest, f, indent=2)
 
-    model_info_path = os.path.join(output_dir, "metadata", "model_info.json")
-    default_info = {
-        "model": "Cannot be inferred from trace",
-        "architecture": "Cannot be inferred from trace",
-        "scale": "Cannot be inferred from trace",
-        "precision": "Cannot be inferred from trace",
-    }
+    model_info_path = os.path.join(output_dir, "cache", "model_info.json")
+    default_info = dict.fromkeys(MODEL_INFO_FIELDS, "Cannot be inferred from trace")
     if os.path.exists(model_info_path):
         with open(model_info_path) as f:
             existing = json.load(f)
