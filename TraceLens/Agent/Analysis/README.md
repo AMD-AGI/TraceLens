@@ -275,7 +275,7 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 0.   Query User Inputs (interactive answers or a run YAML, Environment Setup) → cache/run_config.yaml
 1.   Generate Performance Report (one wrapper call on cache/run_config.yaml; semantic pre-processing first)
 2.   Trace-Quality Gate (deterministic fallback branch for graph-under-recorded traces)
-3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json
+3-6. Prepare Category Data (GPU Util, Top Ops, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json
 7.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
 8.   Compute Kernel Subagents (PARALLEL) → category_findings/
 8.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)

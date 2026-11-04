@@ -28,7 +28,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 0. Query User Inputs (interactive answers or a run YAML, Environment Setup) → cache/run_config.yaml
 1. Generate Performance Report (one wrapper call on cache/run_config.yaml; semantic pre-processing first)
 2. Trace-Quality Gate (deterministic fallback branch for graph-under-recorded traces)
-3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering)
+3-6. Prepare Category Data (GPU Util, Top Ops, Multi-Kernel Data, Category Filtering)
 7. System-Level Analysis (PARALLEL, CPU/Idle + Kernel Fusion + Multi-Kernel) → system_findings/
 8. Invoke Compute Kernel Subagents (PARALLEL, read category_findings[] from _metrics.json) → category_findings/
    8.5. Aggregate per-category category_findings[] → priority_data.json::findings[] (globally sorted)
@@ -323,7 +323,7 @@ Pass `--platform2` only for comparative and `--capture-folder` only if `config_u
 This script performs:
 - **Step 3:** Assess GPU utilization (computation, idle, communication times)
 - **Step 4:** Identify top 10 operations by GPU time
-- **Step 5:** Pre-compute tree data for bottleneck operations (load trace ONCE)
+- **Step 5:** Load the trace tree once (shared by Steps 5.5 and 5b)
 - **Step 5.5:** Pre-compute multi-kernel issue data (memcpy by direction, NCCL events, overlap metrics)
 - **Step 6:** Filter and export category-specific data
 

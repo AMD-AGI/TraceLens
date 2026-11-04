@@ -4394,62 +4394,6 @@ class TestOrchestratorPhase11:
         finally:
             sys.argv = old_argv
 
-    def test_orchestrator_bottleneck_top5_fallback(self, tmp_path, monkeypatch):
-
-        out = str(tmp_path / "orch_out")
-        _write_minimal_orchestrator_csvs(out, comparative=False)
-        csv_dir = os.path.join(out, "perf_report_csvs")
-        rows = []
-        for i in range(8):
-            rows.append(
-                {
-                    "name": f"aten::op_{i}",
-                    "op category": "GEMM",
-                    "Kernel Time (µs)_sum": float(100 + i),
-                    "total_duration_us": 60000.0,
-                    "kernel_details_summary": f"[{{'name': 'k{i}'}}]",
-                    "Data Moved (MB)": 1.0,
-                    "perf_params": "{}",
-                    "Input Dims": "[[2,3]]",
-                }
-            )
-        pd.DataFrame(rows).to_csv(
-            os.path.join(csv_dir, "unified_perf_summary.csv"), index=False
-        )
-        pd.DataFrame({"name": ["aten::op_0"], "op category": ["GEMM"]}).to_csv(
-            os.path.join(csv_dir, "ops_summary.csv"), index=False
-        )
-
-        class _FakeTPA:
-            @classmethod
-            def from_file(cls, *args, **kwargs):
-                k = _kernel_event(0, "k0", dur=100)
-                mod = {
-                    "name": "aten::mm",
-                    "_category": "aten",
-                    "gpu_events": [0],
-                    "ts": 0,
-                }
-                tree = _StubTree([mod, k], {0: k})
-                return _StubAnalyzer(tree)
-
-        monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTPA)
-        old_argv = sys.argv
-        sys.argv = [
-            "orchestrator_prepare",
-            "--trace-path",
-            NORM_TRACE,
-            "--platform",
-            "MI300X",
-            "--output-dir",
-            out,
-        ]
-        try:
-            op.main()
-        finally:
-            sys.argv = old_argv
-        assert os.path.isdir(os.path.join(out, "category_data"))
-
 
 class TestOrchestratorPhase12B:
     def _run_orch(self, tmp_path, monkeypatch, unified_rows, tree_events=None):

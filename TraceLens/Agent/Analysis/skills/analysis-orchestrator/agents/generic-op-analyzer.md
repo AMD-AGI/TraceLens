@@ -70,7 +70,7 @@ Use vendor-agnostic terminology:
   --comparison_scope <comparison_scope>
 ```
 
-### Step 2: Read Metrics and Tree Data
+### Step 2: Read Metrics
 
 ```bash
 cat <output_dir>/category_data/<cat>_metrics.json

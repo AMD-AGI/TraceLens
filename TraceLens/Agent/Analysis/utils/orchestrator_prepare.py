@@ -7,7 +7,7 @@
 
 """
 TraceLens Agent - Orchestrator Preparation Script
-Steps 3-6: GPU Utilization, Top Ops, Tree Data Pre-computation, Category Filtering
+Steps 3-6: GPU Utilization, Top Ops, Multi-Kernel and Fusion Data, Category Filtering
 """
 
 import argparse
@@ -358,9 +358,9 @@ def main():
             print(f"  {op_name:50s} | {time_val:10.2f} | {category}")
 
     # ============================================================================
-    # STEP 5: Pre-compute Tree Data (Optimization)
+    # STEP 5: Load trace tree
     # ============================================================================
-    print("\n[STEP 5] Pre-computing Tree Data for Bottleneck Operations...")
+    print("\n[STEP 5] Loading trace tree...")
 
     merged_tree = None
     try:
@@ -394,55 +394,6 @@ def main():
         tree = analyzer.tree
         print(f"  ✓ Trace loaded successfully")
         print(f"  ✓ Tree has {len(tree.events)} events")
-
-        # Read unified performance summary
-        unified_df = pd.read_csv(
-            os.path.join(trace1_csv_dir, "unified_perf_summary.csv")
-        )
-
-        # Get unique categories
-        categories = unified_df["op category"].unique()
-        print(f"\n  Found {len(categories)} categories")
-
-        # For each category, pre-compute tree data for bottlenecks
-        for category in categories:
-            if pd.isna(category) or category == "":
-                category_name = "other"
-                display_name = "Other"
-            else:
-                category_name = category.replace(" ", "_").replace("/", "_").lower()
-                display_name = category
-
-            # Filter operations for this category
-            if pd.isna(category) or category == "":
-                category_df = unified_df[
-                    unified_df["op category"].isna() | (unified_df["op category"] == "")
-                ]
-            else:
-                category_df = unified_df[unified_df["op category"] == category]
-
-            if len(category_df) == 0:
-                continue
-
-            # Identify bottlenecks: ops with >10% of category time
-            if "Kernel Time (µs)_sum" in category_df.columns:
-                category_total_time = category_df["Kernel Time (µs)_sum"].sum()
-                category_df = category_df.copy()
-                category_df["category_percent"] = (
-                    (category_df["Kernel Time (µs)_sum"] / category_total_time) * 100
-                    if category_total_time > 0
-                    else 0
-                )
-
-                bottleneck_ops = category_df[category_df["category_percent"] > 10]
-
-                # If no ops > 10%, take top 5 by time
-                if len(bottleneck_ops) == 0:
-                    bottleneck_ops = category_df.nlargest(
-                        min(5, len(category_df)), "Kernel Time (µs)_sum"
-                    )
-
-        print(f"  ✓ Identified bottleneck operations")
 
         # ====================================================================
         # STEP 5.5: Pre-compute Multi-Kernel Issue Data
@@ -656,7 +607,7 @@ def main():
 
     except Exception as e:
         print(
-            f"  [DIAG:pipeline:STEP3_6_FAIL] Error during tree data pre-computation: {e}"
+            f"  [DIAG:pipeline:STEP3_6_FAIL] Error loading trace tree or extracting multi-kernel/fusion data: {e}"
         )
         traceback.print_exc()
 
