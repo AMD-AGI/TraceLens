@@ -164,7 +164,7 @@ ssh <node> "cd <TraceLens_repo> && \
     -t tracelens-atom"
 ```
 
-The script applies every patch in `atom_roofline_patches/atom_0_1_*/` (auto-derived from the version tag) to the atom package inside the image. As with vLLM, it only carries arms for versions that still need a patch; if the user asks for a newer nightly, tell them to run the stock image instead.
+The script applies every patch in `atom_patches/atom_0_1_*/` (auto-derived from the version tag) to the atom package inside the image. As with vLLM, it only carries arms for versions that still need a patch; if the user asks for a newer nightly, tell them to run the stock image instead.
 
 **After building:** Update the `docker_image` field in the benchmark YAML config to use the newly built image:
 

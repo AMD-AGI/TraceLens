@@ -16,7 +16,7 @@ usage() {
     echo "  --atom-dir      Override the directory containing the atom package"
     echo "                  (default: derived from 'import atom')"
     echo ""
-    echo "  Each version applies the matching atom_roofline_patches/atom_0_1_*/ patches, which add"
+    echo "  Each version applies the matching atom_patches/atom_0_1_*/ patches, which add"
     echo "  the ATOM_ENABLE_DETAILED_ANNOTATION environment variable, the detailed prefill/decode"
     echo "  annotations, and the graph-capture profiler. ATOM merged these upstream on 2026-07-21"
     echo "  (ROCm/ATOM#477), so nightly builds from 2026-07-22 onward need no image from this"
@@ -94,7 +94,7 @@ if [ -n "${CUSTOM_BASE_IMAGE}" ]; then
     BASE_IMAGE="${CUSTOM_BASE_IMAGE}"
 fi
 
-PATCH_DIR_PATH="examples/custom_workflows/inference_analysis/atom_roofline_patches/${PATCH_DIR}"
+PATCH_DIR_PATH="examples/custom_workflows/inference_analysis/atom_patches/${PATCH_DIR}"
 
 if [ ! -d "${TRACELENS_REPO}/${PATCH_DIR_PATH}" ]; then
     echo "Error: patch directory not found: ${TRACELENS_REPO}/${PATCH_DIR_PATH}"
@@ -115,7 +115,7 @@ echo "  TraceLens       : ${TRACELENS_REPO}"
 echo "  Patch directory : ${PATCH_DIR_PATH}"
 
 # Only the patches are copied in: the image is used to collect traces 
-PATCH_DIR_CONTAINER="/tmp/atom_roofline_patches"
+PATCH_DIR_CONTAINER="/tmp/atom_patches"
 docker build "${REMAINING_ARGS[@]}" -f - "${TRACELENS_REPO}" <<DOCKERFILE
 FROM ${BASE_IMAGE}
 
