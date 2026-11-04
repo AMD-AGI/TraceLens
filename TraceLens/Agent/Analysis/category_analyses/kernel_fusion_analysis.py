@@ -24,8 +24,8 @@ sys.path.insert(0, _ANALYSIS_DIR)
 
 from analysis_utils import (
     HIGH_CONFIDENCE_OP_KEYS,
+    PEAK_MEM_BW_KEY,
     focus_job_utilization,
-    get_peak_mem_bw_tbs,
     load_manifest,
     load_perf_rows,
     perf_report_csv_dir,
@@ -109,9 +109,7 @@ def main():
         return
 
     platform = manifest["platform"]
-    specs = manifest["platform_specs"]
-    peak_bw_tbs = get_peak_mem_bw_tbs(specs)
-    peak_maf_tflops = specs["max_achievable_tflops"]
+    peak_bw_tbs = manifest["platform_specs"][PEAK_MEM_BW_KEY]
 
     trace2_kwargs = {}
     if is_comparative:
@@ -133,7 +131,7 @@ def main():
 
     pricer = FusionPricer(
         FusionForms(TAXONOMY),
-        (peak_bw_tbs, peak_maf_tflops),
+        (peak_bw_tbs, manifest["platform_specs"]["max_achievable_tflops"]),
         load_perf_rows(csv_path),
         baseline_ms,
         display_ms=focus_job_utilization(manifest).get("total_time_ms", 0),

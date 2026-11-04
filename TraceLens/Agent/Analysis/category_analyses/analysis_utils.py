@@ -591,7 +591,7 @@ def build_operation_metrics(
         category_config: Optional extra_fields / operation_classifier
         comparison_scope: ``"standalone"`` or ``"comparative"``
     """
-    peak_mem_bw = get_peak_mem_bw_tbs(metadata)
+    peak_mem_bw = metadata[PEAK_MEM_BW_KEY]
     maf = metadata["max_achievable_tflops"]
     fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
     gpu_util = metadata.get("gpu_utilization", {})
@@ -1112,11 +1112,6 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     return output_path
 
 
-def get_peak_mem_bw_tbs(metadata: dict) -> float:
-    """Peak memory bandwidth (TB/s) of a metadata dict; a missing key raises."""
-    return metadata[PEAK_MEM_BW_KEY]
-
-
 def get_matrix_maf_tflops(maf: dict) -> float:
     """Peak bf16 matrix TFLOPS of a max_achievable_tflops dict; 1 when absent."""
     return maf.get("matrix_bf16", 1)
@@ -1126,7 +1121,7 @@ def get_peak_specs(metadata: dict) -> dict:
     """Extract peak MAF and memory bandwidth from metadata dict."""
     return {
         "peak_maf_tflops": get_matrix_maf_tflops(metadata["max_achievable_tflops"]),
-        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
+        "peak_mem_bw_tbs": metadata[PEAK_MEM_BW_KEY],
     }
 
 
