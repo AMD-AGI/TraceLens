@@ -1286,3 +1286,106 @@ class sgl_kernel_fast_topk_transform_fused:
 
     def get_maf_type(self):
         return "vector"
+
+
+class paged_mqa_logits_preshuffle_synthetic:
+    """
+    Performance model for the DSA lightning-indexer paged MQA logits kernel
+    when it appears as a Synthetic Op (``hipModuleLaunchKernel`` launch,
+    no parent cpu_op, no ``Input Dims``).
+
+    Reference implementation:
+        aiter/ops/triton/gluon/pa_mqa_logits.py
+        aiter/ops/triton/attention/pa_mqa_logits.py
+
+    Computes scoring logits for top-k KV selection in MLA decode:
+        logits[i,j] = sum_h( w[i,h] * relu(Q[i,h,:] . K[j,:]) * kv_scale[j] )
+
+    NOT standard attention — no softmax, no V projection.
+
+    Roofline -- FLOPs:
+        2 * H * D * sum_len    (MFMA mat-vec; ReLU/weight/reduction not counted)
+
+    Roofline -- bytes moved:
+        bytes_read_Q   = seq_q * H * D * bpe_q          (FP8 = 1 byte)
+        bytes_read_W   = seq_q * H * 4                  (float32 weights)
+        bytes_read_KV  = kv_touched * (D * bpe_kv + 4)  (FP8 data + fp32 scale)
+        bytes_read_meta = 2 * seq_q * 4                 (cu_starts + cu_ends)
+        bytes_write    = sum_len * 4                     (float32 logits)
+
+    Parameters H, D are model-architecture constants (no tensor metadata
+    available on orphan Synthetic Ops).  Defaults: H=32, D=128 (GLM-52 MLA
+    indexer with TP=4).  Override via subclassing for other models.
+
+    sum_len and seq_q are derived from the iteration annotation's chunk
+    stats (g_sqsk, g_sq).  When the annotation is missing or unparseable,
+    flops() and bytes() return None.
+
+    Vendor roofline reference:
+        aiter/op_tests/op_benchmarks/triton/bench_fp8_mqa_logits.py
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    NUM_HEADS = 32
+    HEAD_DIM = 128
+    BPE_Q = 1
+    BPE_KV = 1
+    BPE_W = 4
+    BPE_OUT = 4
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @classmethod
+    def get_param_details(cls, event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+            sum_len = stats["c_sqsk"] + stats["g_sqsk"]
+            seq_q = stats["c_sq"] + stats["g_sq"]
+            kv_touched = stats["c_sk"] + stats["g_sk"]
+            return {
+                "H": cls.NUM_HEADS,
+                "D": cls.HEAD_DIM,
+                "sum_len": sum_len,
+                "seq_q": seq_q,
+                "kv_touched": kv_touched,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return 2 * p["H"] * p["D"] * p["sum_len"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        H, D, seq_q = p["H"], p["D"], p["seq_q"]
+        kv_touched, sum_len = p["kv_touched"], p["sum_len"]
+        return (
+            seq_q * H * D * self.BPE_Q
+            + seq_q * H * self.BPE_W
+            + kv_touched * (D * self.BPE_KV + self.BPE_OUT)
+            + 2 * seq_q * self.BPE_OUT
+            + sum_len * self.BPE_OUT
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError
+
+    def bytes_bwd(self):
+        raise NotImplementedError
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        return "fp8"
