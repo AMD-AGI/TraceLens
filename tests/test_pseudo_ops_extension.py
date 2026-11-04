@@ -1674,7 +1674,7 @@ class TestMegaMoEPseudoOps:
 
     def test_each_kernel_gets_its_pseudo_op(self):
         tree = _build_tree(_mega_moe_events())
-        apply_pseudo_op_extensions(tree)
+        apply_pseudo_op_extensions(tree, verbose=True)
         pseudo_ops = self._pseudo_ops(tree)
         expected = {name for _, _, name in _MEGA_KERNELS if name}
         assert set(pseudo_ops) == expected
