@@ -159,6 +159,7 @@ class KernelRecord:
     dur_us: float
     perf_key: list | None = None
     gpu_op_uid: int | None = None
+    op_uid: int | None = None
     data_in_mb: float | None = None
     data_out_mb: float | None = None
 
@@ -476,8 +477,8 @@ def _efficiency_parts(eff: dict) -> tuple:
 class _Group:
     """The instances of one module (or sibling parent) found in the trace.
 
-    Each instance is a list of (kernel record, launching-op UID) pairs, in stream
-    order; ``instances2`` holds trace 2's kernels of a comparative group.
+    Each instance is a list of kernel records in stream order; ``instances2`` holds
+    trace 2's kernels of a comparative group.
     """
 
     module_name: str
@@ -499,7 +500,7 @@ class FusionCandidateBuilder:
         self.categorizer = analyzer.event_to_category
         self.perf_ops = analyzer.collect_unified_perf_events()
         self.resolver = OpResolver(tree, self.perf_ops)
-        self._launches: dict[int, tuple[KernelRecord, int] | None] = {}
+        self._launches: dict[int, KernelRecord | None] = {}
 
     # -- standalone ---------------------------------------------------------
 
@@ -514,7 +515,7 @@ class FusionCandidateBuilder:
         candidates = [c for g in modules for c in [self._candidate(g)] if c]
         accepted = [tuple(k.name for k in c.kernels) for c in candidates]
         for g in self._sibling_groups():
-            names = tuple(k.name for k, _ in g.instances[0])
+            names = tuple(k.name for k in g.instances[0])
             if any(self._contains_run(names, hay) for hay in accepted):
                 continue
             if c := self._candidate(g, "sibling_sequence"):
@@ -571,8 +572,9 @@ class FusionCandidateBuilder:
                 groups[base] = _Group(name, base, [], [launches])
         return list(groups.values())
 
-    def _launch(self, uid) -> tuple[KernelRecord, int] | None:
-        """Kernel ``uid`` as (record, launching-op UID); None if it is not a kernel.
+    def _launch(self, uid) -> KernelRecord | None:
+        """Kernel ``uid`` as a record carrying its launching-op UID; None if it is not
+        a kernel.
 
         Memoized: the module walk meets each kernel once per ancestor.
         """
@@ -580,21 +582,21 @@ class FusionCandidateBuilder:
             self._launches[uid] = self._resolve_launch(uid)
         return self._launches[uid]
 
-    def _resolve_launch(self, uid) -> tuple[KernelRecord, int] | None:
+    def _resolve_launch(self, uid) -> KernelRecord | None:
         try:
             k = self.tree.get_UID2event(uid)
             if self.categorizer(k) != TraceEventUtils.GpuEventCategories.Kernel:
                 return None
             name = k.get("name", "")
             op = self.resolver.fields(uid)
-            record = KernelRecord(
+            return KernelRecord(
                 name=name,
                 type=self.taxonomy.classify(name).type,
                 dur_us=k.get("dur", 0),
                 perf_key=op["perf_key"],
                 gpu_op_uid=uid,
+                op_uid=op["op_uid"],
             )
-            return record, op["op_uid"]
         except (KeyError, IndexError):
             return None
 
@@ -611,7 +613,7 @@ class FusionCandidateBuilder:
                 for inst, lab in zip(instances, labels)
                 if lab is not None and lab.span is not None
             ]
-        kernels = tuple(self._with_data_moved(k) for k, _ in instances[0])
+        kernels = tuple(self._with_data_moved(k) for k in instances[0])
         signature, summary = self._type_summary(kernels)
         return FusionCandidate(
             module_name=group.module_name,
@@ -625,14 +627,14 @@ class FusionCandidateBuilder:
             fusion_kind=label.kind,
             confidence=label.confidence,
             source=source,
-            total_kernel_time_us=sum(k.dur_us for inst in instances for k, _ in inst),
+            total_kernel_time_us=sum(k.dur_us for inst in instances for k in inst),
             ops=self._group_ops(instances),
         )
 
     def _label(self, instance: list) -> Label | None:
-        """The label of one instance's (kernel, op UID) pairs."""
+        """The label of one instance's kernel records."""
         return self.labeler.label(
-            [k.name for k, _ in instance], [k.perf_key for k, _ in instance]
+            [k.name for k in instance], [k.perf_key for k in instance]
         )
 
     def _with_data_moved(self, k: KernelRecord) -> KernelRecord:
@@ -686,12 +688,14 @@ class FusionCandidateBuilder:
                 if uid in uid_to_t1:
                     record, lca_id = uid_to_t1[uid]
                     op = self.resolver.fields(uid)
-                    t1.append((replace(record, perf_key=op["perf_key"]), op["op_uid"]))
+                    t1.append(
+                        replace(record, perf_key=op["perf_key"], op_uid=op["op_uid"])
+                    )
                     lca_ids.add(lca_id)
             if len(t1) < 2:
                 continue
-            t2 = [pair for lca_id in lca_ids for pair in lca_to_t2.get(lca_id, [])]
-            if not self._passes_gates([k for k, _ in t1], [k for k, _ in t2]):
+            t2 = [k for lca_id in lca_ids for k in lca_to_t2.get(lca_id, [])]
+            if not self._passes_gates(t1, t2):
                 continue
 
             if base in groups:
@@ -709,15 +713,15 @@ class FusionCandidateBuilder:
         # Per-instance += keeps the totals reproducible against earlier runs.
         total1 = total2 = 0
         for inst1, inst2 in zip(group.instances, group.instances2, strict=True):
-            total1 += sum(k.dur_us for k, _ in inst1)
-            total2 += sum(k.dur_us for k, _ in inst2)
+            total1 += sum(k.dur_us for k in inst1)
+            total2 += sum(k.dur_us for k in inst2)
         if total1 < total2:
             return None
         label = self._label(group.instances[0])
         if label is None:
             return None
-        kernels1 = tuple(k for k, _ in group.instances[0])
-        kernels2 = tuple(k for k, _ in group.instances2[0])
+        kernels1 = tuple(group.instances[0])
+        kernels2 = tuple(group.instances2[0])
         signature, summary = self._type_summary(kernels1)
         return FusionCandidate(
             module_name=group.module_name,
@@ -740,7 +744,7 @@ class FusionCandidateBuilder:
         )
 
     def _diff_stats_lookups(self, df: pd.DataFrame) -> tuple[dict, dict]:
-        """UID to (trace 1 kernel, LCA id) and LCA id to trace 2 (kernel, op UID) pairs."""
+        """UID to (trace 1 kernel, LCA id) and LCA id to trace 2 kernels."""
         uid_to_t1 = {}
         lca_to_t2: dict = defaultdict(list)
 
@@ -771,9 +775,12 @@ class FusionCandidateBuilder:
                     )
                 )
                 lca_to_t2[lca_id].append(
-                    (
-                        KernelRecord(name, ktype, dur_us, perf_key),
-                        row.get("gpu_op_uid") if pd.isna(op_uid) else op_uid,
+                    KernelRecord(
+                        name,
+                        ktype,
+                        dur_us,
+                        perf_key,
+                        op_uid=row.get("gpu_op_uid") if pd.isna(op_uid) else op_uid,
                     )
                 )
         return uid_to_t1, dict(lca_to_t2)
@@ -835,8 +842,8 @@ class FusionCandidateBuilder:
         """
         groups: dict = {}
         op_uids: dict = defaultdict(set)
-        for pairs in instances:
-            for k, op_uid in pairs:
+        for instance in instances:
+            for k in instance:
                 # A kernel with no perf row is its own row, keyed by kernel name.
                 key = tuple(k.perf_key) if k.perf_key else (None, k.name)
                 g = groups.setdefault(
@@ -846,7 +853,7 @@ class FusionCandidateBuilder:
                 if k.name not in g["kernel_names"]:
                     g["kernel_names"].append(k.name)
                 g["time_us"] += k.dur_us
-                op_uids[key].add(op_uid)
+                op_uids[key].add(k.op_uid)
         return [{**g, "count": len(op_uids[key])} for key, g in groups.items()]
 
     @staticmethod
