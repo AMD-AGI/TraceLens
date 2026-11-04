@@ -1604,6 +1604,8 @@ _MEGA_W1 = [_MEGA_E, 2 * _MEGA_I, _MEGA_H // 2]
 _MEGA_W2 = [_MEGA_E, _MEGA_H, _MEGA_I // 2]
 _MEGA_W1_SCALE = [_MEGA_E, 192, _MEGA_H]
 _MEGA_W2_SCALE = [_MEGA_E, 224, _MEGA_I]
+# Traced receive-arena row: 3584 B payload + 224 B scales, padded to 128 B.
+_MEGA_WIRE_STRIDE = 3840
 _MEGA_KERNELS = [
     ("moe_forward", "tdm_compact_plan", "pseudo_op::mega_moe_plan"),
     ("moe_forward", "ep_dispatch_tdm_64x8", "pseudo_op::mega_moe_dispatch"),
@@ -1638,6 +1640,8 @@ def _mega_moe_events(with_weights=True):
         },
     )
     fused_dims = [[] for _ in range(36)]
+    fused_strides = [[] for _ in range(36)]
+    fused_strides[0] = [_MEGA_WIRE_STRIDE, 1]
     if with_weights:
         fused_dims[0] = [417792, _MEGA_H // 2]
         fused_dims[1] = _MEGA_W1
@@ -1653,7 +1657,11 @@ def _mega_moe_events(with_weights=True):
         dur=300,
         pid=1,
         tid=1,
-        args={"Input Dims": fused_dims, "Input type": ["unsigned char"] * 36},
+        args={
+            "Input Dims": fused_dims,
+            "Input Strides": fused_strides,
+            "Input type": ["unsigned char"] * 36,
+        },
     )
     events = [moe_forward, fused_moe]
     launch = {"moe_forward": [100, 150, 700, 750, 800], "fused_moe": [350, 400]}
@@ -1688,6 +1696,7 @@ class TestMegaMoEPseudoOps:
             assert args["mega_moe_topk"] == _MEGA_TOPK
             assert args["mega_moe_inter_dim"] == _MEGA_I
             assert args["mega_moe_wire_row_bytes"] == _MEGA_H // 2
+            assert args["mega_moe_wire_row_stride"] == _MEGA_WIRE_STRIDE
         assert (
             categorize_torch_op({"name": "pseudo_op::mega_moe_combine_sync"})
             == "MoE_comm_fwd"
@@ -1727,7 +1736,7 @@ class TestMegaMoEPseudoOps:
 
         dispatch = models["pseudo_op::mega_moe_dispatch"]
         assert dispatch.flops() == 0
-        assert dispatch.bytes() == _MEGA_T * wire_row + routes * (wire_row + 8)
+        assert dispatch.bytes() == _MEGA_T * wire_row + routes * (_MEGA_WIRE_STRIDE + 8)
         assert dispatch.get_maf_type() is None
         assert dispatch.get_compute_precision() is None
 

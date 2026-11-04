@@ -1592,6 +1592,7 @@ class _MegaMoE:
                 "input_dtype": args["Input type"][0],
                 "wire_row_bytes": args["mega_moe_wire_row_bytes"],
                 "wire_scale_bytes": args["mega_moe_wire_scale_bytes"],
+                "wire_row_stride": args["mega_moe_wire_row_stride"],
                 "w1_shape": tuple(args["mega_moe_w1_shape"]),
                 "w2_shape": tuple(args["mega_moe_w2_shape"]),
                 "w1_scale_shape": tuple(args["mega_moe_w1_scale_shape"]),
@@ -1670,7 +1671,7 @@ class mega_moe_gemm_down(_MegaMoE, UnfusedMoE_Down):
 
 
 class mega_moe_dispatch(_MegaMoE):
-    """Bytes of each local token's wire row read once, and one row plus its route metadata written per route; no FLOPs."""
+    """Bytes of each local token's packed wire row read once, and one padded row plus its route metadata written per route; no FLOPs."""
 
     category = "MoE_comm_fwd"
     bwd_category = None
@@ -1680,8 +1681,9 @@ class mega_moe_dispatch(_MegaMoE):
 
     def bytes(self):
         p = self.param_details
-        row = p["wire_row_bytes"] + p["wire_scale_bytes"]
-        return p["num_tokens"] * row + p["routes"] * (row + _MEGA_MOE_ROUTE_META_BYTES)
+        packed_row = p["wire_row_bytes"] + p["wire_scale_bytes"]
+        sent_row = p["wire_row_stride"] + _MEGA_MOE_ROUTE_META_BYTES
+        return p["num_tokens"] * packed_row + p["routes"] * sent_row
 
     def get_maf_type(self):
         return None

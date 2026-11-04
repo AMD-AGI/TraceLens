@@ -67,7 +67,7 @@ def _find_expert_gemm_op(trace_tree, evt):
 
 def _inject_layer(trace_tree, moe_forward_evt, fused_moe_evt):
     args = moe_forward_evt["args"]
-    geometry = _expert_geometry(fused_moe_evt["args"]["Input Dims"])
+    geometry = _expert_geometry(fused_moe_evt["args"])
     hidden_dim = args["Input Dims"][0][-1]
     seq_num = args.get("Sequence number", moe_forward_evt["UID"])
     injected = 0
@@ -90,7 +90,8 @@ def _inject_layer(trace_tree, moe_forward_evt, fused_moe_evt):
     return injected
 
 
-def _expert_geometry(dims):
+def _expert_geometry(fused_moe_args):
+    dims = fused_moe_args["Input Dims"]
     w1, w2 = dims[_W1], dims[_W2]
     return {
         "mega_moe_topk": dims[_TOPK_WEIGHTS][-1],
@@ -102,6 +103,8 @@ def _expert_geometry(dims):
         "mega_moe_w2_scale_shape": list(dims[_W2_SCALE]),
         "mega_moe_wire_row_bytes": dims[_RECV_PAYLOAD][-1],
         "mega_moe_wire_scale_bytes": dims[_RECV_SCALE][-1],
+        # Payload and scale row share one row, padded for the bulk copy engine.
+        "mega_moe_wire_row_stride": fused_moe_args["Input Strides"][_RECV_PAYLOAD][0],
     }
 
 
