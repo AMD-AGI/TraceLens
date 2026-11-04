@@ -17,22 +17,36 @@ hardware and software versions validated for a release, see the
 
 ## TraceLens 1.1.0
 
-This release adds profiling support for SGLang 0.5.18 and for vLLM 0.26.0 through
+### Release highlights
+
+This release adds profiling support for SGLang 0.5.18 and vLLM 0.26.0 through
 0.28.0, including graph-capture tracing for the vLLM V2 model runner. The
 TraceLens library, command-line tools, and compatibility matrix are unchanged
 from 1.0.0.
 
+### What's new
+
+#### Added
+
+- **SGLang 0.5.18:** Profiling support including graph-capture tracing.
+- **vLLM 0.26.0–0.28.0:** Profiling support including graph-capture tracing for
+  the vLLM V2 model runner.
+
 ## TraceLens 1.0.0
 
-The release expands performance-model coverage; extends profiling support to
+### Release highlights
+
+This release expands performance-model coverage; extends profiling support to
 newer vLLM and SGLang versions along with xDiT diffusion and Genesis
 physics-simulation workloads; strengthens the TraceLens Analysis Agent with a
 portable skill layout and comparative graph-capture support; and overhauls
 TraceDiff's name disambiguation. It also adds production-grade unit-test coverage.
 
-### Performance models
+### What's new
 
-This release adds the following performance models and classifications:
+#### Added
+
+**Performance models**
 
 - **DeepSeek-V4 support:** Sparse paged-decode modes (sliding-window,
   compressed, and hybrid) and a sparse-prefill model, plus the
@@ -43,9 +57,7 @@ This release adds the following performance models and classifications:
 - **Block-scaled GEMM detection:** Detection of block-scaled MXFP4/MXFP6 GEMM
   paths for roofline modeling.
 
-### Frameworks and profiling
-
-This release extends framework and profiling support:
+**Frameworks and profiling**
 
 - **vLLM and SGLang:** Profiling support through recent vLLM and SGLang releases,
   using stock upstream images where a patched image is no longer required.
@@ -55,9 +67,7 @@ This release extends framework and profiling support:
   report generator for Genesis/Taichi workloads that isolates the steady-state
   simulation window from JIT and build overhead.
 
-### TraceLens Analysis Agent
-
-This release includes the following agent improvements:
+**TraceLens Analysis Agent**
 
 - **Portable skill layout:** Agent orchestrator, sub-agent, and template specs
   ship in a portable `skills/` layout discoverable by any agentic runner that
@@ -68,22 +78,21 @@ This release includes the following agent improvements:
 - **Local evaluation:** Repeatability evals can run against a local serving
   backend for fully offline eval loops.
 
-### TraceDiff
-
-This release overhauls trace-tree matching:
-
-- **Name disambiguation:** Same-named sibling nodes are matched by structure
-  rather than position, with an additional aggressive matching pass for
-  slightly-differing Python-function names.
-- **Correctness fixes:** The same-name candidate-matching path is rewritten to
-  fix several matching correctness issues.
-
-### Test coverage
-
-This release strengthens automated testing:
+**Test coverage**
 
 - **Unit coverage:** New unit-test suites span every SDK subpackage, including
   Trace2Tree, TreePerf, PerfModel, NcclAnalyser, TraceFusion, TraceDiff,
   EventReplay, Reporting, and the shared utilities.
 - **Coverage reporting:** Coverage tracking and a coverage-regression gate run in
   continuous integration to guard against regressions.
+
+#### Improved
+
+- **TraceDiff name disambiguation:** Same-named sibling nodes are matched by
+  structure rather than position, with an additional aggressive matching pass for
+  slightly-differing Python-function names.
+
+#### Fixed
+
+- **TraceDiff correctness:** The same-name candidate-matching path is rewritten to
+  fix several matching correctness issues.

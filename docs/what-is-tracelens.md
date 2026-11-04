@@ -22,7 +22,7 @@ diagnostics.
 TraceLens can pinpoint whether a kernel is compute-bound or memory-bound,
 separate true communication time from synchronization skew in distributed
 workloads, and compare traces side-by-side to quantify the impact of code or
-configuration changes. It's available as a set of command-line tools for
+configuration changes. It is available as a set of command-line tools for
 quick report generation and as a Python SDK for building custom analysis
 workflows, making it useful for one-off debugging and repeatable performance
 regression testing alike.

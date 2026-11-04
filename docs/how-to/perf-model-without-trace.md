@@ -84,7 +84,7 @@ def roofline_time_us(flops, bytes_):
     return max(compute_us, bandwidth_us)
 ```
 
-This is the same analytical model TraceLens's built-in roofline analysis uses —
+This is the same analytical model that TraceLens uses for its built-in roofline analysis —
 here applied to shapes directly instead of to a trace. The roofline is an upper
 bound on achievable performance (a real kernel won't reach it), but the *ratios*
 between layers and regimes are solid planning numbers that fall out of pure
