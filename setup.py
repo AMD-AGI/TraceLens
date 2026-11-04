@@ -114,7 +114,7 @@ setup(
         # 'License :: OSI Approved :: MIT License',
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.10",
+    python_requires=">=3.6",
     entry_points={
         "console_scripts": [
             "TraceLens_generate_perf_report_jax = TraceLens.Reporting.generate_perf_report_jax:main",
