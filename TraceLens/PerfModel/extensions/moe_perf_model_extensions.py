@@ -1551,6 +1551,192 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
 
 
 # ==============================================================================
+# Expert-parallel mega-MoE (pseudo ops under aiter::moe_forward)
+# ==============================================================================
+
+# Packed source route id and its weight, written to the row map per dispatched row.
+_MEGA_MOE_ROUTE_META_BYTES = 2 * 4
+# One e8m0 scale byte per 32-element MX block.
+_MX_BLOCK = 32
+# int32 topk_ids read, then the int32 row map written, read back and rewritten.
+_MEGA_MOE_PLAN_BYTES_PER_ROUTE = 4 * 4
+
+
+class _MegaMoE:
+    """
+    Shapes shared by the mega-MoE pseudo ops (see
+    TraceLens/Trace2Tree/extensions/moe_mega_ep_pseudo_ops.py): tokens and
+    hidden size come from aiter::moe_forward, the expert geometry from
+    aiter::fused_moe_. Routing is assumed balanced, so each GPU receives
+    tokens x topk rows over its local experts.
+    """
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        num_tokens, hidden_dim = args["Input Dims"][0]
+        topk = args["mega_moe_topk"]
+        return add_logical_batch_size(
+            {
+                "num_tokens": num_tokens,
+                "hidden_dim": hidden_dim,
+                "inter_dim": args["mega_moe_inter_dim"],
+                "num_experts": args["mega_moe_local_experts"],
+                "topk": topk,
+                "routes": num_tokens * topk,
+                "input_dtype": args["Input type"][0],
+                "wire_row_bytes": args["mega_moe_wire_row_bytes"],
+                "wire_scale_bytes": args["mega_moe_wire_scale_bytes"],
+                "wire_row_stride": args["mega_moe_wire_row_stride"],
+                "w1_shape": tuple(args["mega_moe_w1_shape"]),
+                "w2_shape": tuple(args["mega_moe_w2_shape"]),
+                "w1_scale_shape": tuple(args["mega_moe_w1_scale_shape"]),
+                "w2_scale_shape": tuple(args["mega_moe_w2_scale_shape"]),
+            },
+            event,
+        )
+
+    def _wire_bpe(self):
+        """Bytes per activation element on the dispatch wire (0.5 for MXFP4)."""
+        return self.param_details["wire_row_bytes"] / self.param_details["hidden_dim"]
+
+    def _active_experts(self):
+        E = self.param_details["num_experts"]
+        return E * (1 - (1 - 1 / E) ** self.param_details["routes"])
+
+    def _intermediate_row_bytes(self):
+        """The gate/up output, quantized to the wire format with its MX scales."""
+        inter = self.param_details["inter_dim"]
+        scales = inter // _MX_BLOCK if self.param_details["wire_scale_bytes"] else 0
+        return inter * self._wire_bpe() + scales
+
+    def _expert_bytes(self, weight_shape, scale_shape):
+        """Packed weight and e8m0 scale bytes of the experts the routes touch."""
+        per_expert = (prod(weight_shape) + prod(scale_shape)) / weight_shape[0]
+        return self._active_experts() * per_expert
+
+    def get_compute_precision(self):
+        return torch_dtype_map("mxfp4" if self._wire_bpe() == 0.5 else "fp8")
+
+
+class mega_moe_gemm_up(_MegaMoE, UnfusedMoE_Up):
+    """HBM bytes of the received MX rows, the touched gate/up experts, and the quantized intermediate."""
+
+    def flops(self):
+        p = self.param_details
+        return self.flops_func(
+            p["num_tokens"], p["hidden_dim"], p["inter_dim"], p["topk"], True
+        )
+
+    def bytes(self):
+        p = self.param_details
+        rows = p["routes"]
+        activations = rows * (p["wire_row_bytes"] + p["wire_scale_bytes"])
+        weights = self._expert_bytes(p["w1_shape"], p["w1_scale_shape"])
+        return activations + weights + rows * self._intermediate_row_bytes()
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class mega_moe_gemm_down(_MegaMoE, UnfusedMoE_Down):
+    """HBM bytes of the quantized intermediate, the touched down experts, and the BF16 rows scattered to the source GPUs."""
+
+    def flops(self):
+        p = self.param_details
+        return self.flops_func(
+            p["num_tokens"], p["hidden_dim"], p["inter_dim"], p["topk"]
+        )
+
+    def bytes(self):
+        p = self.param_details
+        rows = p["routes"]
+        out_bpe = name2bpe(p["input_dtype"])
+        if out_bpe is None:
+            return None
+        weights = self._expert_bytes(p["w2_shape"], p["w2_scale_shape"])
+        return (
+            rows * self._intermediate_row_bytes()
+            + weights
+            + rows * p["hidden_dim"] * out_bpe
+        )
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class mega_moe_dispatch(_MegaMoE):
+    """Bytes of each local token's packed wire row read once, and one padded row plus its route metadata written per route; no FLOPs."""
+
+    category = "MoE_comm_fwd"
+    bwd_category = None
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        p = self.param_details
+        packed_row = p["wire_row_bytes"] + p["wire_scale_bytes"]
+        sent_row = p["wire_row_stride"] + _MEGA_MOE_ROUTE_META_BYTES
+        return p["num_tokens"] * packed_row + p["routes"] * sent_row
+
+    def get_maf_type(self):
+        return None
+
+    def get_compute_precision(self):
+        return None
+
+
+class mega_moe_combine(_MegaMoE):
+    """Sum of each token's topk BF16 expert rows: reads every route's row and writes one row per token."""
+
+    category = "MoE_comm_fwd"
+    bwd_category = None
+
+    def flops(self):
+        p = self.param_details
+        return p["num_tokens"] * (p["topk"] - 1) * p["hidden_dim"]
+
+    def bytes(self):
+        p = self.param_details
+        bpe = name2bpe(p["input_dtype"])
+        if bpe is None:
+            return None
+        return (p["routes"] + p["num_tokens"]) * p["hidden_dim"] * bpe
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.param_details["input_dtype"])
+
+
+class mega_moe_plan(_MegaMoE):
+    """Routing plan built from topk_ids: reads each route's expert id and writes its row slot; no FLOPs."""
+
+    category = "MoE_aux"
+    bwd_category = None
+    sheet_category = "MoE_aux"
+
+    def flops(self):
+        return 0
+
+    def bytes(self):
+        return self.param_details["routes"] * _MEGA_MOE_PLAN_BYTES_PER_ROUTE
+
+    def get_maf_type(self):
+        return "vector"
+
+    def get_compute_precision(self):
+        return None
+
+
+# ==============================================================================
 # SGLang Triton fused-MoE grouped GEMM (single invoke_fused_moe_kernel launch)
 # ==============================================================================
 
