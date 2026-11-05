@@ -213,6 +213,114 @@ def test_index_put_of_an_integer_table_uses_the_values_tensor():
     assert model.bytes() == 2 * 16 * 4
 
 
+def test_index_select_accepts_an_integer_dim_and_an_empty_axis():
+    event = _event(
+        [[2, 100, 8], [], [4]],
+        ["c10::Half", "Scalar", "long int"],
+        concrete=["", 1, ""],
+        name="aten::index_select",
+    )
+    along_axis = aten_index_select(event)
+    assert along_axis.param_details["hidden"] == 16
+
+    empty_axis = _event(
+        [[2, 0, 8], [], [4]],
+        ["c10::Half", "Scalar", "long int"],
+        concrete=["", "1", ""],
+        name="aten::index_select",
+    )
+    assert aten_index_select(empty_axis).param_details["hidden"] == 0
+
+    # A dim that is not an axis falls back to axis 0.
+    out_of_range = _event(
+        [[2, 100, 8], [], [4]],
+        ["c10::Half", "Scalar", "long int"],
+        concrete=["", "9", ""],
+        name="aten::index_select",
+    )
+    assert aten_index_select(out_of_range).param_details["hidden"] == 800
+
+
+def test_unparsable_shapes_are_skipped():
+    event = _event([[32000, "bad"], [4]], ["c10::BFloat16", "long int"])
+    with pytest.raises(ValueError):
+        aten_embedding(event)
+
+    # A bool is not a dimension, so that tensor is not the table.
+    indexed = _event(
+        [[True], [8, 4], [2]],
+        ["", "c10::BFloat16", "long int"],
+        name="aten::index",
+    )
+    model = aten_index(indexed)
+    assert model.param_details["tokens"] == 2
+    assert model.param_details["hidden"] == 4
+
+
+def test_index_without_a_tensor_is_rejected():
+    event = _event([[], []], ["", ""], name="aten::index")
+    with pytest.raises(ValueError, match="tensor being indexed"):
+        aten_index(event)
+
+
+def test_index_put_with_a_blank_index_dtype_still_counts_the_index():
+    event = _event(
+        [[8, 16], [4], [4, 16]],
+        ["c10::BFloat16", "", "c10::BFloat16"],
+        concrete=["", "", "", "False"],
+        name="aten::index_put",
+    )
+    model = aten_index_put(event)
+    assert model.param_details["dtype_index"] == "long int"
+    assert model.bytes() == 2 * 4 * 16 * 2 + 4 * 8
+
+
+def test_index_put_accumulate_reads_a_bool_and_defaults_off():
+    missing = _event(
+        [[100, 16], [4], [4, 16]],
+        ["c10::BFloat16", "long int", "c10::BFloat16"],
+        name="aten::index_put",
+    )
+    assert aten_index_put(missing).param_details["value_copies"] == 2
+
+    accumulating = _event(
+        [[100, 16], [4], [4, 16]],
+        ["c10::BFloat16", "long int", "c10::BFloat16"],
+        concrete=["", "", "", True],
+        name="aten::index_put_",
+    )
+    assert aten_index_put(accumulating).param_details["value_copies"] == 3
+    assert aten_index_put(accumulating).bytes() == 3 * 4 * 16 * 2 + 4 * 8
+
+
+def test_tensor_list_skips_slices_and_rejects_a_malformed_list():
+    sliced = _event(
+        [[8, 16, 32], [[4], None]],
+        ["c10::BFloat16", "TensorList"],
+        name="aten::index",
+    )
+    model = aten_index(sliced)
+    assert model.param_details["tokens"] == 4
+    assert model.param_details["hidden"] == 16 * 32
+    assert model.param_details["index_elems"] == 4
+
+    malformed = _event(
+        [[8, 16], ["nope", [4]]],
+        ["c10::BFloat16", "TensorList"],
+        name="aten::index",
+    )
+    whole = aten_index(malformed)
+    assert whole.param_details["index_elems"] == 0
+    assert whole.bytes() == 2 * (8 * 16) * 2
+
+    non_numeric = _event(
+        [[8, 16], [[4, "x"]]],
+        ["c10::BFloat16", "TensorList"],
+        name="aten::index",
+    )
+    assert aten_index(non_numeric).param_details["index_elems"] == 0
+
+
 def test_unknown_dtype_has_no_byte_count():
     event = _event([[8, 4], [8]], ["not_a_dtype", "long int"])
     model = aten_embedding(event)
