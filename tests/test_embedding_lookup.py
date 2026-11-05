@@ -16,6 +16,8 @@ from TraceLens.PerfModel.perf_model import (
     aten_embedding_bag_dense_backward,
     aten_embedding_dense_backward,
     aten_gather,
+    aten_index,
+    aten_index_put,
     aten_index_select,
     aten_index_select_backward,
 )
@@ -136,6 +138,65 @@ def test_gather_moves_one_element_per_index():
     assert model.bytes() == 2 * elems * 2 + elems * 8
 
 
+def test_aten_index_gathers_rows_from_an_index_vector():
+    event = _event(
+        [[32000, 4096], [2, 128]],
+        ["c10::BFloat16", "long int"],
+        name="aten::index",
+    )
+    model = aten_index(event)
+    assert model.flops() == 0
+    assert model.param_details["tokens"] == 256
+    assert model.param_details["hidden"] == 4096
+    assert model.bytes() == 2 * 256 * 4096 * 2 + 256 * 8
+
+
+def test_aten_index_reads_a_tensor_list_of_indices():
+    # Two leading axes, each with its own index. The tail (32,) is the row.
+    event = _event(
+        [[8, 16, 32], [[4], [4]]],
+        ["c10::BFloat16", "TensorList"],
+        name="aten::index",
+    )
+    model = aten_index(event)
+    assert model.param_details["tokens"] == 4
+    assert model.param_details["hidden"] == 32
+    assert model.param_details["index_elems"] == 8
+    assert model.bytes() == 2 * 4 * 32 * 2 + 8 * 8
+
+
+def test_aten_index_with_an_unrecorded_index_list_charges_the_tensor():
+    # Kineto records Tensor?[] as an empty placeholder. The indexed tensor is
+    # the only shape in the event, so the read and the write are that tensor.
+    event = _event(
+        [[1, 77, 1280], []],
+        ["c10::BFloat16", ""],
+        name="aten::index",
+    )
+    model = aten_index(event)
+    assert model.param_details["index_elems"] == 0
+    assert model.bytes() == 2 * (1 * 77 * 1280) * 2
+
+
+def test_index_put_writes_values_and_rereads_when_accumulating():
+    event = _event(
+        [[100, 16], [4], [4, 16]],
+        ["c10::BFloat16", "long int", "c10::BFloat16"],
+        concrete=["", "", "", "False"],
+        name="aten::index_put",
+    )
+    model = aten_index_put(event)
+    assert model.bytes() == 2 * 4 * 16 * 2 + 4 * 8
+
+    accumulating = _event(
+        [[100, 16], [4], [4, 16]],
+        ["c10::BFloat16", "long int", "c10::BFloat16"],
+        concrete=["", "", "", "True"],
+        name="aten::index_put_",
+    )
+    assert aten_index_put(accumulating).bytes() == 3 * 4 * 16 * 2 + 4 * 8
+
+
 def test_unknown_dtype_has_no_byte_count():
     event = _event([[8, 4], [8]], ["not_a_dtype", "long int"])
     model = aten_embedding(event)
@@ -162,6 +223,10 @@ def test_missing_index_tensor_is_rejected():
         ("aten::index_select_backward", aten_index_select_backward),
         ("aten::_embedding_bag_dense_backward", aten_embedding_bag_dense_backward),
         ("aten::gather", aten_gather),
+        ("aten::index", aten_index),
+        ("aten::index_put", aten_index_put),
+        ("aten::index_put_", aten_index_put),
+        ("aten::_index_put_impl_", aten_index_put),
     ],
 )
 def test_common_ops_resolve_to_the_lookup_model(name, cls):

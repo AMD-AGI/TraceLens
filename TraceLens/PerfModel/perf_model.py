@@ -3139,6 +3139,10 @@ class EmbeddingLookup:
     * ``rows`` — ``aten::embedding`` and embedding-bag. The value tensor's
       last dimension is the row width and the index tensor counts rows.
     * ``index_select`` — one axis of the input is replaced by the index.
+    * ``index`` — ``aten::index`` / ``aten::index_put``. Integer indices
+      replace that many leading axes; the tail is the row that is copied.
+      A trace that records the index list as an empty placeholder charges a
+      read and a write of the indexed tensor.
     * ``gather`` — one gathered element per index element.
     * ``gathered`` — the value tensor is already the gathered result
       (embedding and index-select backward).
@@ -3169,6 +3173,8 @@ class EmbeddingLookup:
 
     @classmethod
     def get_param_details(cls, event):
+        if cls.kind in {"index", "index_put"}:
+            return cls._index_param_details(event)
         values, indices = cls._split_tensors(event)
         if not values or not indices:
             raise ValueError(f"{cls.__name__} needs a value tensor and an index tensor")
@@ -3245,6 +3251,131 @@ class EmbeddingLookup:
                 return dim
         return 0
 
+    @classmethod
+    def _index_param_details(cls, event):
+        """``self[indices]`` or ``index_put(self, indices, values)``.
+
+        A TensorList of indices is stored nested (``[[2, 128], []]``). Kineto
+        often records that list as an empty placeholder, in which case the
+        only known traffic is the indexed tensor itself.
+        """
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        value_tensors = []
+        index_shapes = []
+        index_dtype = None
+        for i, shape in enumerate(dims):
+            dtype = types[i] if i < len(types) else None
+            nested = cls._tensor_list_shapes(shape)
+            if nested is not None:
+                index_shapes.extend(nested)
+                if nested and index_dtype is None:
+                    index_dtype = dtype if cls._is_index_dtype(dtype) else "long int"
+                continue
+            parsed = cls._flat_shape(shape)
+            if parsed is None:
+                continue
+            if cls._is_index_dtype(dtype):
+                index_shapes.append(parsed)
+                index_dtype = dtype
+            else:
+                value_tensors.append((parsed, dtype))
+        if not value_tensors:
+            raise ValueError(f"{cls.__name__} needs the tensor being indexed")
+        value_shape, row_dtype = value_tensors[0]
+        out_dtype = row_dtype
+        if index_shapes:
+            tokens = cls._broadcast_numel(index_shapes)
+            index_elems = sum(prod(shape) for shape in index_shapes)
+            if cls.kind == "index_put" and len(value_tensors) > 1:
+                payload = value_tensors[-1][0]
+                out_dtype = value_tensors[-1][1]
+                gathered = prod(payload)
+            else:
+                n_index = len(index_shapes)
+                tail = value_shape[n_index:] if n_index < len(value_shape) else ()
+                gathered = tokens * (prod(tail) if tail else 1)
+            hidden = gathered // tokens if tokens else 0
+        else:
+            # The index list was not recorded. Charge the indexed tensor.
+            tokens = prod(value_shape)
+            hidden = 1
+            index_elems = 0
+            index_dtype = "long int"
+        copies = cls.value_copies
+        if cls.kind == "index_put" and cls._accumulate(event):
+            copies = 3
+        return {
+            "tokens": tokens,
+            "hidden": hidden,
+            "index_elems": index_elems,
+            "dtype_row": row_dtype,
+            "dtype_index": index_dtype,
+            "dtype_out": out_dtype,
+            "value_copies": copies,
+        }
+
+    @classmethod
+    def _is_index_dtype(cls, dtype):
+        return isinstance(dtype, str) and dtype.lower() in cls._INDEX_DTYPES
+
+    @staticmethod
+    def _flat_shape(shape):
+        if not isinstance(shape, (list, tuple)) or not shape:
+            return None
+        if not all(
+            isinstance(dim, (int, float)) and not isinstance(dim, bool) for dim in shape
+        ):
+            return None
+        return tuple(int(dim) for dim in shape)
+
+    @staticmethod
+    def _tensor_list_shapes(shape):
+        """Shapes inside a TensorList, or None when ``shape`` is not one.
+
+        Empty entries are ``None`` indices (a slice) and are skipped.
+        """
+        if not isinstance(shape, (list, tuple)) or not shape:
+            return None
+        if all(
+            isinstance(dim, (int, float)) and not isinstance(dim, bool) for dim in shape
+        ):
+            return None
+        shapes = []
+        for item in shape:
+            if item in (None, [], (), ""):
+                continue
+            if not isinstance(item, (list, tuple)) or not item:
+                return None
+            if not all(
+                isinstance(dim, (int, float)) and not isinstance(dim, bool)
+                for dim in item
+            ):
+                return None
+            shapes.append(tuple(int(dim) for dim in item))
+        return shapes
+
+    @staticmethod
+    def _broadcast_numel(shapes):
+        rank = max(len(shape) for shape in shapes)
+        aligned = [(1,) * (rank - len(shape)) + tuple(shape) for shape in shapes]
+        dims = []
+        for axis in range(rank):
+            sizes = [shape[axis] for shape in aligned]
+            dims.append(max(sizes))
+        return prod(dims)
+
+    @staticmethod
+    def _accumulate(event):
+        concrete = (event.get("args") or {}).get("Concrete Inputs") or []
+        if not concrete:
+            return False
+        last = concrete[-1]
+        if isinstance(last, bool):
+            return last
+        return isinstance(last, str) and last.strip().lower() == "true"
+
     @staticmethod
     def flops_func(tokens, hidden):
         del tokens, hidden
@@ -3287,7 +3418,7 @@ class EmbeddingLookup:
             self.bpe_index,
             out_bpe=self.bpe_out,
             index_elems=self.param_details["index_elems"],
-            value_copies=self.value_copies,
+            value_copies=self.param_details.get("value_copies", self.value_copies),
         )
 
     def bytes_bwd(self, bytes_per_element=None):
@@ -3356,6 +3487,19 @@ class aten_gather(EmbeddingLookup):
     """
 
     kind = "gather"
+
+
+class aten_index(EmbeddingLookup):
+    """``aten::index``: ``self[indices]``, including a TensorList of indices."""
+
+    kind = "index"
+
+
+class aten_index_put(EmbeddingLookup):
+    """``index_put`` writes ``values`` at ``indices``. ``accumulate=True``
+    re-reads the updated elements."""
+
+    kind = "index_put"
 
 
 class UnaryElementwise:

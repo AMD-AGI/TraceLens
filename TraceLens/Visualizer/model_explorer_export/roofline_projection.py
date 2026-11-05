@@ -215,10 +215,11 @@ _SOFTMAX_COMPUTATION = "Softmax"
 
 # Pointwise/reduction computation labels mapped to UnaryElementwise/
 # BinaryElementwise/Reduce. Shape-shuffling ops (reshape/transpose/concat/
-# index/...) are deliberately left out of these sets -- they are usually free
+# slice/...) are deliberately left out of these sets -- they are usually free
 # views or fused into a neighboring kernel, and PerfModel has no formula for
 # them; they fall into "unmodeled" rather than being charged a cost they may
-# not actually incur.
+# not actually incur. Tensor indexing (``Indexing``, ``Index select``,
+# ``aten::index``) is a gather and is costed with the embedding lookup.
 _UNARY_POINTWISE_COMPUTATIONS = frozenset(
     {
         "sigmoid",
@@ -3434,15 +3435,23 @@ def _dispatch_op_cost(
 
 
 def _is_embedding_lookup(computation: str) -> bool:
-    """True for an embedding gather, including the collapsed ``Token Embedding`` tile.
+    """True for an embedding gather or a tensor index that copies those rows.
 
-    Also matches the ATen and module labels a graph export uses for the same
-    lookup (``aten::embedding``, ``EmbeddingBag``). ``index_select`` and a
-    general ``gather`` stay unmodeled here: on a graph they are often views
-    or fused, while a trace still costs them through the perf model.
+    Matches module labels (``Embedding``, ``Token Embedding``, ``EmbeddingBag``)
+    and the graph's indexing labels (``Indexing``, ``Index select``,
+    ``aten::index``). A general ``Gather`` stays unmodeled: on a graph that
+    name is overloaded and is often one element per index, which this row
+    formula does not describe. Traces still cost ``aten::gather`` directly.
     """
     text = computation.lower().replace("_", " ").strip()
-    labels = {"embedding", "tokenembedding", "embeddingbag"}
+    labels = {
+        "embedding",
+        "tokenembedding",
+        "embeddingbag",
+        "indexing",
+        "indexselect",
+        "index",
+    }
     squashed = text.replace(" ", "")
     if squashed in labels:
         return True
@@ -3458,13 +3467,19 @@ def _embedding_lookup_cost(
     """Bytes for the rows the lookup gathers. The lookup itself is not a GEMM."""
     if not output_shape or bpe is None:
         return None
-    hidden = output_shape[-1]
-    tokens = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
-    index_bpe = 8
+    gathered = prod(output_shape)
+    tokens = None
     for shape in input_shapes:
-        if shape and len(shape) < len(output_shape):
-            tokens = prod(shape)
+        if not shape or len(shape) >= len(output_shape):
+            continue
+        candidate = prod(shape)
+        if candidate and gathered % candidate == 0:
+            tokens = candidate
             break
+    if not tokens:
+        tokens = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
+    hidden = gathered // tokens if tokens else 0
+    index_bpe = 8
     flops = EmbeddingLookup.flops_func(tokens, hidden)
     bytes_moved = EmbeddingLookup.bytes_func(tokens, hidden, bpe, index_bpe)
     return EmbeddingLookup.category, "vector", flops, bytes_moved

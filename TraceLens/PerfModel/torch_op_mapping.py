@@ -421,6 +421,11 @@ embedding_lookup_ops = {
     "aten::index_select": perf_model.aten_index_select,
     "aten::index_select_backward": perf_model.aten_index_select_backward,
     "aten::gather": perf_model.aten_gather,
+    # tensor[indices], and the write side of the same indexing.
+    "aten::index": perf_model.aten_index,
+    "aten::index_put": perf_model.aten_index_put,
+    "aten::index_put_": perf_model.aten_index_put,
+    "aten::_index_put_impl_": perf_model.aten_index_put,
 }
 for op_name, op_class in embedding_lookup_ops.items():
     op_to_perf_model_class_map[op_name] = op_class

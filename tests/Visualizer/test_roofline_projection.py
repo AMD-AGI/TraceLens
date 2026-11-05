@@ -744,7 +744,15 @@ def test_project_op_costs_an_embedding_lookup_as_gathered_rows():
 
 
 @pytest.mark.parametrize(
-    "computation", ["aten::embedding", "EmbeddingBag", "Token Embedding"]
+    "computation",
+    [
+        "aten::embedding",
+        "EmbeddingBag",
+        "Token Embedding",
+        "Indexing",
+        "Index select",
+        "aten::index",
+    ],
 )
 def test_project_op_costs_common_embedding_labels(computation):
     op = _project_op(
@@ -765,6 +773,45 @@ def test_project_op_costs_common_embedding_labels(computation):
     assert op.category == "Embedding"
     assert op.flops == 0
     assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
+
+
+def test_project_op_costs_indexing_a_wider_tail_as_one_row():
+    # ``x[idx]`` on a rank-3 table keeps the tail, so one index selects H*D.
+    op = _project_op(
+        "idx",
+        "idx",
+        "Indexing",
+        "Indexing",
+        "aten_op",
+        "[B, S, H, D] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8, "D": 4},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.flops == 0
+    assert op.bytes == 2 * 8 * 32 * 2 + 8 * 8
+
+
+def test_project_op_leaves_a_general_gather_unmodeled():
+    op = _project_op(
+        "g",
+        "g",
+        "Gather",
+        "Gather",
+        "aten_op",
+        "[B, S, H] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is False
 
 
 def test_project_op_records_an_unmapped_computation():
