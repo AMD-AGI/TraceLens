@@ -617,6 +617,7 @@ def generate_perf_report_pytorch(
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
+    graph_model=None,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -643,6 +644,7 @@ def generate_perf_report_pytorch(
             rebuild_tree=False,
             enable_origami_gemm=enable_origami_gemm,
             enable_origami_sdpa_tile=enable_origami_sdpa_tile,
+            graph_model=graph_model,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
@@ -653,6 +655,7 @@ def generate_perf_report_pytorch(
             enable_pseudo_ops=enable_pseudo_ops,
             enable_origami_gemm=enable_origami_gemm,
             enable_origami_sdpa_tile=enable_origami_sdpa_tile,
+            graph_model=graph_model,
         )
 
         graph_launch_events = [
@@ -992,6 +995,7 @@ def generate_perf_report_pytorch(
                     add_python_func=add_python_func,
                     enable_pseudo_ops=enable_pseudo_ops,
                     rebuild_tree=False,
+                    graph_model=graph_model,
                 )
             else:
                 perf_analyzer2 = TreePerfAnalyzer.from_file(

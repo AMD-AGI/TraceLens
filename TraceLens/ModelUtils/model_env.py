@@ -22,8 +22,11 @@ Nothing here keys off a model name or a version table. The flow is:
    that pin is not on PyPI, :func:`_transformers_install_spec` selects the
    newest published release still newer than the pin, or the current
    transformers ``main`` commit when no published release is newer.
-3. Otherwise :func:`detect_env_mismatch` probes THIS interpreter, and an older
-   pin is used only when that import genuinely fails.
+3. Otherwise :func:`detect_env_mismatch` probes THIS interpreter. An older
+   pin is used only when that import genuinely fails. An architecture the
+   installed release does not recognize is not that case: it asks for a
+   release newer than the one installed, even when the checkpoint's own pin
+   is older or absent.
 4. :func:`ensure_model_dependencies` creates (or reuses) a directory for that
    pin and installs what the model needs, discovering extra third-party
    requirements from the import errors the model itself raises.
@@ -65,6 +68,14 @@ _TRACELENS_RUNTIME_REQUIREMENTS = (
 #: Bound on the "install what the failing import names" discovery loop.
 _MAX_DEPENDENCY_ROUNDS = 6
 
+#: Prefix :func:`detect_env_mismatch` uses when the installed transformers has
+#: no class for the checkpoint's model type. :func:`reexec_in_model_env` reads
+#: it as "install something newer than what is running", not "install the pin".
+NEWER_TRANSFORMERS_REASON = (
+    "installed transformers does not recognize this architecture; "
+    "a newer release is required"
+)
+
 
 def default_env_root() -> Path:
     """Directory holding per-model environments."""
@@ -81,6 +92,10 @@ def detect_env_mismatch(checkpoint: str | Path) -> str | None:
     every natively supported architecture, and for any failure that is NOT an
     import problem (a missing config key, a download error and so on are real
     errors to surface, not reasons to build a second environment).
+
+    An architecture this release does not recognize is not "fine": the reason
+    starts with :data:`NEWER_TRANSFORMERS_REASON`, which asks for a newer
+    transformers than the one installed.
     """
     try:
         import transformers
@@ -92,7 +107,11 @@ def detect_env_mismatch(checkpoint: str | Path) -> str | None:
         config = AutoConfig.from_pretrained(str(checkpoint), trust_remote_code=True)
     except ImportError as exc:
         return f"config code could not be imported: {exc}"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if _architecture_unrecognized(exc) and not _checkpoint_declares_remote_code(
+            checkpoint
+        ):
+            return f"{NEWER_TRANSFORMERS_REASON}: {exc}"
         return None
 
     architectures = list(getattr(config, "architectures", None) or [])
@@ -122,6 +141,33 @@ def detect_env_mismatch(checkpoint: str | Path) -> str | None:
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def _checkpoint_declares_remote_code(checkpoint: str | Path) -> bool:
+    """True when the checkpoint's own ``config.json`` names modeling code.
+
+    A private ``model_type`` plus ``auto_map`` is the checkpoint saying the
+    class lives in its repo. Transformers reports that the same way it reports
+    a model type a newer release would know, so the two have to be told apart
+    from the config file rather than from the exception text.
+    """
+    try:
+        from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
+
+        config, _source = load_checkpoint_config(checkpoint)
+    except Exception:  # noqa: BLE001 - an unreadable config is not remote code
+        return False
+    auto_map = config.get("auto_map") if isinstance(config, dict) else None
+    return isinstance(auto_map, dict) and bool(auto_map)
+
+
+def _architecture_unrecognized(exc: BaseException) -> bool:
+    """True when ``exc`` is transformers refusing a model type it has no class for.
+
+    The installed message is ``Transformers does not recognize this architecture``.
+    A download failure, a parse error, or a missing config key must not match.
+    """
+    return "does not recognize this architecture" in str(exc)
 
 
 def _version_relation(requested: str, installed: str | None) -> str | None:
@@ -229,6 +275,24 @@ def _transformers_head_commit() -> str | None:
     if not line or not re.fullmatch(r"[0-9a-f]{40}", line[0]):
         return None
     return line[0]
+
+
+def _transformers_release_after(installed: str) -> tuple[str, str] | None:
+    """Newest published release strictly after ``installed``, else git ``HEAD``.
+
+    ``None`` when the index cannot be read and ``HEAD`` cannot be resolved, or
+    when nothing published is newer and ``HEAD`` cannot be resolved. The caller
+    then stays in the current interpreter.
+    """
+    published = _published_transformers_versions()
+    if published is not None:
+        newer = _newest_published_after(installed, published)
+        if newer is not None:
+            return newer, f"transformers=={newer}"
+    commit = _transformers_head_commit()
+    if commit is None:
+        return None
+    return commit, f"git+{_TRANSFORMERS_GIT}@{commit}"
 
 
 def _transformers_install_spec(requested: str) -> tuple[str, str]:
@@ -513,7 +577,10 @@ def reexec_in_model_env(
     git ``HEAD`` when no published release is newer. An older pin switches
     only when this interpreter cannot import the checkpoint. The same pin
     still provisions when that import fails, so a missing third-party
-    dependency can be installed without changing ``transformers``.
+    dependency can be installed without changing ``transformers``. An
+    architecture the installed release does not recognize upgrades to a
+    release newer than the one installed, even when the checkpoint pin is
+    older or missing.
 
     Returns the child's exit status, or ``None`` when nothing was re-executed --
     because this process already IS the child, because the installed release
@@ -535,7 +602,23 @@ def reexec_in_model_env(
         reason = detect_env_mismatch(checkpoint)
         if reason is None:
             return None
-        if version is None:
+        if reason.startswith(NEWER_TRANSFORMERS_REASON):
+            upgraded = _transformers_release_after(installed or "0")
+            if upgraded is None:
+                _log.warning(
+                    "%s needs a newer transformers (%s) but no newer release "
+                    "or git HEAD could be resolved; continuing in the current "
+                    "environment",
+                    checkpoint,
+                    reason,
+                )
+                return None
+            install_version, requirement = upgraded
+            reason = (
+                f"{reason}; upgrading past installed {installed or 'none'} "
+                f"to {requirement}"
+            )
+        elif version is None:
             _log.warning(
                 "%s needs different model code (%s) but its config names no "
                 "transformers version to pin; continuing in the current environment",
@@ -543,13 +626,14 @@ def reexec_in_model_env(
                 reason,
             )
             return None
-        install_version = version
-        requirement = f"transformers=={version}"
-        if relation == "older":
-            reason = (
-                f"{reason}; config requests older transformers=={version} "
-                f"than installed {installed}"
-            )
+        else:
+            install_version = version
+            requirement = f"transformers=={version}"
+            if relation == "older":
+                reason = (
+                    f"{reason}; config requests older transformers=={version} "
+                    f"than installed {installed}"
+                )
 
     _log.warning("%s will run with %s (%s)", checkpoint, requirement, reason)
     target = ensure_model_dependencies(

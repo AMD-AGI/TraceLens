@@ -1455,6 +1455,43 @@ class TestTreePerfCollectPhase12:
         for synthetic_op in synthetic_ops:
             assert synthetic_op["UID"] in analyzer.tree.events_by_uid
             assert analyzer.tree.get_UID2event(synthetic_op["UID"]) is synthetic_op
+            assert [k["name"] for k in synthetic_op["kernel_details"]] == [
+                "triton_kernel_0"
+            ]
+
+    def test_graph_kernel_is_named_as_the_registered_op(self):
+        """A replay kernel whose name contains a registered op is collected as
+        that op, the same identity a capture merge would reparent it onto."""
+        corr = 901
+        kernel = "void aiter::mhc_post_kernel<std::bfloat16_t, 4>"
+        events = [
+            _make_gpu_event(
+                "rt",
+                1000,
+                5,
+                "cuda_runtime",
+                "hipGraphLaunch",
+                args={"correlation": corr},
+            ),
+            _make_gpu_event(
+                "k",
+                1005,
+                10,
+                "kernel",
+                kernel,
+                pid=0,
+                tid=7,
+                args={"correlation": corr, "stream": 7},
+            ),
+            _mk_ac2g(corr, 0, 7, 1005, "s"),
+            _mk_ac2g(corr, 0, 7, 1015, "f"),
+        ]
+        analyzer = _build_analyzer(events)
+        collected = analyzer.collect_unified_perf_events()
+        named = [e for e in collected if e.get("name") == "aiter::mhc_post"]
+        assert len(named) == 1
+        assert "Synthetic Op" not in named[0]["name"]
+        assert [k["name"] for k in named[0]["kernel_details"]] == [kernel]
 
 
 @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet trace missing")

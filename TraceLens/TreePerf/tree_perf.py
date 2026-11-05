@@ -24,10 +24,18 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
+from ..ModelUtils.graph_schedule import (
+    align_kernels,
+    covering_annotation,
+    invocation_from_annotation,
+    schedule_deepseek_v4,
+)
 from ..PerfModel.torch_op_mapping import (
+    OP_CATEGORY_REGISTRY,
     categorize_torch_op,
     get_perf_model_category,
     op_to_perf_model_class_map,
+    registered_op_for_kernel,
     resolve_perf_model_class,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
@@ -284,6 +292,7 @@ class TreePerfAnalyzer:
         metadata_events=None,
         kernel_metadata_keyword_filters=None,
         enable_origami_sdpa_tile=False,
+        graph_model=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -296,6 +305,9 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.enable_origami_gemm = enable_origami_gemm
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
+        # When set, each replayed graph is one run of this model. Its kernels
+        # are paired, in order, with that run's launches and take their shapes.
+        self.graph_model = graph_model
         self.op_projections = default_op_projections(
             enable_origami_gemm, enable_origami_sdpa_tile
         )
@@ -1764,6 +1776,46 @@ class TreePerfAnalyzer:
                 return True
         return False
 
+    def _launches_for(self, event):
+        """The model's launch list for the invocation that replays ``event``.
+
+        Only a graph launch has that list. The step annotation that contains
+        the launch supplies the batch and the sequence length.
+        """
+        if self.graph_model is None:
+            return None
+        if event.get("name") not in ("hipGraphLaunch", "cudaGraphLaunch"):
+            return None
+        steps = getattr(self, "_step_events", None)
+        if steps is None:
+            steps = [
+                candidate
+                for candidate in self.tree.events
+                if "step[" in (candidate.get("name") or "")
+            ]
+            self._step_events = steps
+        name = covering_annotation(steps, event)
+        if name is None:
+            return None
+        invocation = invocation_from_annotation(name)
+        if invocation is None:
+            return None
+        cache = getattr(self, "_launch_cache", None)
+        if cache is None:
+            cache = {}
+            self._launch_cache = cache
+        key = (
+            invocation.batch_size,
+            invocation.seq_len,
+            invocation.past_len,
+            invocation.tokens,
+        )
+        schedule = cache.get(key)
+        if schedule is None:
+            schedule = schedule_deepseek_v4(self.graph_model, invocation)
+            cache[key] = schedule
+        return schedule
+
     def collect_unified_perf_events(self, include_nccl=False):
         """
         Traverse the trace tree and collect events for unified perf analysis.
@@ -1790,10 +1842,25 @@ class TreePerfAnalyzer:
         next_uid = max(self.tree.events_by_uid.keys()) + 1
         _GPU = frozenset(c.value for c in TraceEventUtils.GpuEventCategories)
 
-        def _create_synthetic_op(prefix_name, kernel, cpu_op):
-            """Append one '<prefix_name>-><kernel> (Synthetic Op)' row owning
-            `kernel`, inheriting shape args from `cpu_op` (the enclosing cpu_op,
-            or the launcher when there is no cpu_op on the path)."""
+        def _emit_synthetic_kernels(prefix_name, kernels, cpu_op):
+            """Emit one row per kernel. A graph launch with a model schedule
+            pairs each kernel with the launch at that position."""
+            ordered = sorted(kernels, key=lambda kernel: kernel.get("ts") or 0)
+            launches = self._launches_for(cpu_op) if self.graph_model is not None else None
+            assigned = (
+                align_kernels([kernel.get("name", "") for kernel in ordered], launches)
+                if launches
+                else [None] * len(ordered)
+            )
+            for kernel, launch in zip(ordered, assigned):
+                _create_synthetic_op(prefix_name, kernel, cpu_op, launch)
+
+        def _create_synthetic_op(prefix_name, kernel, cpu_op, launch=None):
+            """Append one row owning `kernel`, inheriting shape args from
+            `cpu_op` (the enclosing cpu_op, or the launcher when there is no
+            cpu_op on the path). A kernel that identifies a registered op is
+            named as that op; otherwise the row is
+            '<prefix_name>-><kernel> (Synthetic Op)'."""
             nonlocal next_uid
             if not include_nccl and TraceEventUtils.is_communication_string(
                 kernel.get("name", "")
@@ -1802,8 +1869,39 @@ class TreePerfAnalyzer:
             synthetic_op = dict(cpu_op)
             synthetic_op["UID"] = next_uid
             next_uid += 1
-            synthetic_op["name"] = f"{prefix_name}->{kernel['name']} (Synthetic Op)"
+            # Name the row as the registered op the kernel identifies, which is
+            # the CPU op a capture merge would have reparented this kernel onto.
+            # An unmatched kernel stays a synthetic launch row.
+            registered = registered_op_for_kernel(
+                kernel.get("name", ""), OP_CATEGORY_REGISTRY
+            )
+            if launch is not None:
+                # The kernel is this launch of the model forward. The row is
+                # that op, and its inputs are the tensors the launch was called
+                # with. Copy args so the launch event keeps its own.
+                synthetic_op["name"] = launch.op_name
+                synthetic_op["args"] = dict(cpu_op.get("args") or {})
+                synthetic_op["args"]["Input Dims"] = [list(shape) for shape in launch.input_shapes]
+            elif registered is not None:
+                synthetic_op["name"] = registered
+            else:
+                synthetic_op["name"] = (
+                    f"{prefix_name}->{kernel['name']} (Synthetic Op)"
+                )
             synthetic_op["gpu_events"] = [kernel["UID"]]
+            # The copy shares the launch's kernel list. This row owns one
+            # kernel, the same way a capture merge attaches one replay kernel
+            # to one CPU op. Categorizing from the launch's first kernel would
+            # label every kernel in the graph with that first kernel's category.
+            synthetic_op.pop("op category", None)
+            synthetic_op["children"] = []
+            synthetic_op["kernel_details"] = [
+                {
+                    "name": kernel.get("name", ""),
+                    "dur": kernel.get("dur"),
+                    "stream": (kernel.get("args") or {}).get("stream"),
+                }
+            ]
             # Seed an empty base; build_df's per-kernel suffix walk reconstructs
             # the full root->kernel chain (the fresh UID never matches, so it
             # climbs all the way to the root).
@@ -1837,8 +1935,9 @@ class TreePerfAnalyzer:
             for child_uid in event.get("children", []):
                 traverse(child_uid, call_stack, child_nearest_cpu_op)
             if is_cpu_op:
-                for kernel in _direct_kernels(event):
-                    _create_synthetic_op(event["name"], kernel, event)
+                _emit_synthetic_kernels(
+                    event["name"], _direct_kernels(event), event
+                )
 
         def traverse(event_uid, call_stack=None, nearest_cpu_op=None):
             if event_uid in visited:
@@ -1898,10 +1997,13 @@ class TreePerfAnalyzer:
             # "<launcher>-><kernel> (Synthetic Op)" row per directly-launched
             # kernel, then recurse to reach any deeper launchers.
             if child_nearest_cpu_op is None:
+                direct = []
                 for child_uid in event.get("children", []):
                     child = self.tree.get_UID2event(child_uid)
                     if child and self.event_to_category(child) in _GPU:
-                        _create_synthetic_op(event["name"], child, event)
+                        direct.append(child)
+                if direct:
+                    _emit_synthetic_kernels(event["name"], direct, event)
 
             # Non-leaf with GPU work but no perf model: recurse for finer ops
             # (and emit own-kernel synthetic ops if this is a cpu_op).

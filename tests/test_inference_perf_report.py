@@ -683,6 +683,47 @@ class TestCaptureMergeHelpers:
         )
         assert "could not determine batch size" in capsys.readouterr().out
 
+    def test_scheduler_run_batch_uses_contained_step_batch(self, tmp_path, capsys):
+        _capture_tree_cache.clear()
+        replay = tmp_path / "replay.json.gz"
+        events = [
+            _mk_event("user_annotation", "scheduler.run_batch", 0, 1000, 1, 1, {}),
+            _mk_event(
+                "user_annotation",
+                "step[DECODE bs=1 g_sq=1 g_sqsq=1 g_sqsk=1 g_sk=1]",
+                10,
+                100,
+                1,
+                1,
+                {},
+            ),
+            _mk_event(
+                "cuda_runtime",
+                "hipGraphLaunch",
+                20,
+                40,
+                1,
+                1,
+                {"correlation": 1},
+            ),
+            _mk_event("kernel", "k", 25, 10, 1, 1, {"correlation": 1}),
+        ]
+        with gzip.open(replay, "wt", encoding="utf-8") as f:
+            json.dump({"traceEvents": events}, f)
+        folder = tmp_path / "cap"
+        folder.mkdir()
+        _write_capture_index(
+            folder,
+            [{"file": "missing.json", "batch_size": 1, "mode": "FULL"}],
+            [],
+        )
+        merge_capture_trace_into_graph(
+            str(folder), str(folder / "execution_details.json"), str(replay)
+        )
+        out = capsys.readouterr().out
+        assert "could not determine batch size" not in out
+        assert "step[DECODE bs=1" in out
+
     def test_align_capture_to_graph_memcpy(self):
         capture = [{"name": "cudaMemcpy", "args": {}}]
         graph = [{"name": "MemcpyHtoD", "args": {}}]

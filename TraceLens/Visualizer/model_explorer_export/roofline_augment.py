@@ -53,7 +53,18 @@ from typing import Any
 # when the roofline has no standalone GEMM category, i.e. projections are folded
 # into the attention/MoE boundary ops).
 _CATEGORY_MATCHERS: dict[str, tuple[str, ...]] = {
-    "Attention": ("rel_attention", "flash_attn", "fmha", "sdpa", "_attn_", "attention"),
+    "Attention": (
+        "rel_attention",
+        "flash_attn",
+        "flashmla",
+        "fmha",
+        "sdpa",
+        "_attn_",
+        "attention",
+        # Fused latent attention. ``mla`` covers ``aiter::mla_*``,
+        # ``opus_mla_v4_*`` and ``flashmla``; it is not a module-name match.
+        "mla",
+    ),
     "MoE": ("fused_moe", "moe_", "_moe", "grouped_gemm", "expert"),
     "GEMM": ("cijk", "tensile", "cutlass", "::mm", "addmm", "gemm"),
 }
@@ -76,9 +87,14 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
     """Collapse a RooflineProjection into per-category roofline facts.
 
     Sums FLOPs/bytes/roofline-time across the modeled ops of each category and
-    derives arithmetic intensity + a per-GPU roofline-time floor (the model
-    declares no TP plan for many custom archs, so FLOPs/bytes are whole-model;
-    dividing by ``tp`` approximates the per-GPU shard)."""
+    derives arithmetic intensity and the per-GPU roofline-time floor. The
+    projection already costs each op on one GPU: tensor-parallel widths and
+    expert-parallel tokens are applied when the op is built, and a graph leaf's
+    shape is the rank-local one. ``tp`` is the degree the caller projected
+    with; it is not applied again.
+    """
+    if tp < 1:
+        raise ValueError(f"tp must be >= 1, got {tp}")
     by_cat: dict[str, dict] = {}
     for op in projection.ops:
         if not op.modeled or op.category is None:
@@ -122,9 +138,7 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
             "bound": bound,
             "arithmetic_intensity": ai,
             "roofline_time_us": acc["roofline_time_us"],
-            "roofline_us_per_gpu": (
-                acc["roofline_time_us"] / tp if tp else acc["roofline_time_us"]
-            ),
+            "roofline_us_per_gpu": acc["roofline_time_us"],
             "flops": acc["flops"],
             "bytes": acc["bytes"],
             "flops_per_invocation": acc["flops_per_invocation"],

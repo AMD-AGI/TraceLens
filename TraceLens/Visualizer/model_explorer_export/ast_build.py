@@ -20,6 +20,9 @@ from TraceLens.ModelUtils.shape_inference import (
     serialize_dim,
 )
 
+from TraceLens.Visualizer.model_explorer_export.computation_roles import (
+    stamp_computation_roles,
+)
 from TraceLens.Visualizer.model_explorer_export.fact_sheet import (
     build_fact_sheet_viewer,
 )
@@ -28,7 +31,11 @@ from TraceLens.Visualizer.model_explorer_export.merge import build_merged_model_
 
 def _export_basic_ops(basic_ops: BasicOpFilter) -> BasicOpFilter:
     """Keep full kernel inline substeps in Model Explorer (not basic-only tails)."""
-    return BasicOpFilter(basic_ops.patterns, basic_only=False)
+    return BasicOpFilter(
+        basic_ops.patterns,
+        basic_only=False,
+        stops_at_grouped_moe=basic_ops.stops_at_grouped_moe,
+    )
 
 
 # Exact convolution op types -- not a ``startswith("Conv")`` test, which would also
@@ -346,6 +353,10 @@ def build_model_explorer_payload(
         shape_inferencer=inferencer,
         inline_expansion=inline_expansion,
     )
+    # A primitive op's role comes from its own computation, not from the name of
+    # the module that holds it. The attention score/softmax/value path is read
+    # off the dataflow here, once the edges are final.
+    stamp_computation_roles(graph)
     if spec.nested_module_groups and meta_shapes_checkpoint is not None:
         # A non-uniform CNN's convs are emitted per stage, but symbolic [B, S, H]
         # inference cannot size them. Overwrite with the concrete per-instance

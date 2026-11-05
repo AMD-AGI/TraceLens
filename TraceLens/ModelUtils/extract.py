@@ -2585,6 +2585,22 @@ def _append_vision_section_tree(
     spec.export_block_trees.append((component.label, tree))
 
 
+def _collapse_variant_expert_leaves(
+    spec: ArchitectureSpec, basic_ops: BasicOpFilter
+) -> None:
+    """Apply the roofline MoE stop to variant trees built before the filter existed."""
+    if not basic_ops.stops_at_grouped_moe:
+        return
+    from TraceLens.ModelUtils.block_tree import collapse_grouped_expert_leaves
+
+    registry = spec.class_registry or {}
+    for variant in spec.layer_variants or []:
+        for stored in variant.component_trees.values():
+            node = stored[1] if isinstance(stored, tuple) else stored
+            if getattr(node, "children", None) is not None:
+                collapse_grouped_expert_leaves(node, registry, basic_ops)
+
+
 def _build_export_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) -> None:
     if not spec.class_registry:
         spec.export_block_trees = []
@@ -2603,6 +2619,7 @@ def _build_export_block_trees(spec: ArchitectureSpec, basic_ops: BasicOpFilter) 
         infer_init_steps=True,
     )
     _append_vision_section_tree(spec, basic_ops)
+    _collapse_variant_expert_leaves(spec, basic_ops)
 
 
 def architecture_section_trees(spec: ArchitectureSpec) -> list[tuple[str, BlockNode]]:

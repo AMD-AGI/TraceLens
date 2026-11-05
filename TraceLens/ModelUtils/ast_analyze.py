@@ -1829,7 +1829,10 @@ def _dispatches_to_imported_kernel(
 
     The import can sit inside the forward OR at the top of the defining file, so
     both are considered. A class whose forward does its own arithmetic is
-    expanded normally.
+    expanded normally. An embedding module is the same kind of exception: the
+    gather is the kernel, and the Python around it is the module. A local
+    helper next to an imported kernel does not open the class -- that kernel
+    is still the boundary.
 
     A third shape never names an import at all: ``ColumnParallelLinear.forward``
     reads ``output = self.quant_method.apply(self, x, bias)``, where
@@ -1878,6 +1881,12 @@ def _dispatches_to_imported_kernel(
         for stmt in ast.walk(scope):
             if isinstance(stmt, ast.ImportFrom):
                 imported.update(alias.asname or alias.name for alias in stmt.names)
+    # ``VocabParallelEmbedding.forward`` gathers rows, then may mask and
+    # all-reduce. The gather is the kernel; the module around it is not, so
+    # the class stays open. A vision tower that calls one local helper and
+    # one imported kernel does not match this and stays a boundary.
+    if _forward_calls_embedding_kernel(forward):
+        return False
     for stmt in ast.walk(forward):
         if (
             isinstance(stmt, ast.Call)
@@ -1886,6 +1895,38 @@ def _dispatches_to_imported_kernel(
         ):
             return True
     return _calls_a_runtime_selected_attribute(node, forward)
+
+
+def _forward_calls_embedding_kernel(forward: ast.FunctionDef) -> bool:
+    """True when *forward* itself performs an embedding lookup."""
+    for stmt in ast.walk(forward):
+        if isinstance(stmt, ast.Call) and _is_embedding_kernel_call(stmt):
+            return True
+    return False
+
+
+def _is_embedding_kernel_call(node: ast.Call) -> bool:
+    """True for an embedding lookup, which is a kernel and not a GEMM.
+
+    ``F.embedding`` is already a functional op. The other two spellings are the
+    ones vLLM's ``VocabParallelEmbedding`` actually calls: a strategy method
+    ``self.quant_method.embedding(...)`` whose body is ``F.embedding``, and the
+    fused ``ops.vocab_parallel_embedding(...)``. Both stop here. A call on a
+    registered submodule was recorded before this check.
+    """
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr == "vocab_parallel_embedding":
+        return True
+    if func.attr != "embedding":
+        return False
+    receiver = func.value
+    return (
+        isinstance(receiver, ast.Attribute)
+        and isinstance(receiver.value, ast.Name)
+        and receiver.value.id == "self"
+    )
 
 
 def _calls_a_runtime_selected_attribute(
@@ -3217,6 +3258,14 @@ def _extract_self_calls_ordered(
             _append_forward_call(
                 out, positional_synthetic_attr(target, node.lineno, discriminator)
             )
+            return
+        if _is_embedding_kernel_call(node):
+            # The lookup is the kernel. Record it once, whichever branch
+            # spelled it, so the two arms of a sharded embedding do not become
+            # two gathers.
+            embedding_attr = functional_synthetic_attr("embedding")
+            if embedding_attr not in out:
+                _append_forward_call(out, embedding_attr)
             return
         if not skip_free_fn and _is_emittable_free_function(func, target):
             # Any other module-level free function still runs real computation the
@@ -5078,7 +5127,12 @@ def _register_forward_calls(
     norm_before: list[str],
     pending_norm: str | None,
 ) -> str | None:
+    embedding = functional_synthetic_attr("embedding")
     for attr in stmt_calls:
+        # Both spellings of one lookup share this attr. A forward that names
+        # the gather twice still performs it once.
+        if attr == embedding and attr in calls:
+            continue
         if attr == SYNTHETIC_ATTENTION:
             _append_forward_call(calls, attr)
             pending_norm = None
