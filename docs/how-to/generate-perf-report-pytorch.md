@@ -96,7 +96,8 @@ trace, with the name inferred from the trace (`profile.json` →
 `--output_csvs_dir` writes one CSV per sheet; passing it alone replaces the Excel
 output, while passing it together with `--output_xlsx_path` produces both. The
 `openpyxl` package is only needed for Excel output and is auto-installed if
-missing.
+missing. A `trace_checks.json` file is also written to the output directory with
+the pass/warn/error status of each [trace quality check](../reference/trace-quality.md).
 
 ## The report sheets
 

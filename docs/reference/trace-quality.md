@@ -65,6 +65,20 @@ Checks are organized into three stages:
 | error | `log_findings()` raises a `ValueError` and analysis stops. |
 | warn  | `log_findings()` emits a `UserWarning`. Analysis continues. |
 
+## Output file
+
+When a report is written, a `trace_checks.json` file is placed in the output directory. It contains the
+result of every check that ran.
+
+Ex:
+```json
+{
+  "_check_trace_file_size": { "status": "PASS", "message": "" },
+  "_check_kernels_present": { "status": "PASS", "message": "" },
+  "_check_gpu_busy_idle":   { "status": "WARN", "message": "GPU idle 45.2% (>= 30.0%)." }
+}
+```
+
 ## Environment variables
 
 | Variable | Effect |
