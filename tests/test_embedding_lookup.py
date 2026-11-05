@@ -4,13 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Embedding lookup is a gather: zero FLOPs, bytes for the rows plus indices."""
+"""IndexedCopy is the shared gather formula. An embedding lookup is one caller."""
 
 import pytest
 
 from TraceLens.PerfModel.op_projections import op_work
 from TraceLens.PerfModel.perf_model import (
-    EmbeddingLookup,
+    IndexedCopy,
     aten_embedding,
     aten_embedding_bag,
     aten_embedding_bag_dense_backward,
@@ -37,10 +37,10 @@ def _event(dims, types, concrete=None, name="aten::embedding"):
 
 def test_bytes_func_counts_row_read_write_and_indices():
     # 4 tokens, hidden 8, bf16 rows, int64 indices.
-    assert EmbeddingLookup.bytes_func(4, 8, 2, 8) == 2 * 4 * 8 * 2 + 4 * 8
-    assert EmbeddingLookup.flops_func(4, 8) == 0
-    assert EmbeddingLookup.bytes_func(4, 8, None, 8) is None
-    assert EmbeddingLookup.bytes_func(4, 8, 2, None) is None
+    assert IndexedCopy.bytes_func(4, 8, 2, 8) == 2 * 4 * 8 * 2 + 4 * 8
+    assert IndexedCopy.flops_func(4, 8) == 0
+    assert IndexedCopy.bytes_func(4, 8, None, 8) is None
+    assert IndexedCopy.bytes_func(4, 8, 2, None) is None
 
 
 def test_aten_embedding_gathers_weight_rows():

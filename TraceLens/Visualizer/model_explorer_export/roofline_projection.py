@@ -109,8 +109,8 @@ from TraceLens.PerfModel.perf_model import (
     GEMM,
     SDPA,
     BinaryElementwise,
-    EmbeddingLookup,
     GroupedGemm,
+    IndexedCopy,
     Normalization,
     Reduce,
     Softmax,
@@ -3480,9 +3480,9 @@ def _embedding_lookup_cost(
         tokens = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
     hidden = gathered // tokens if tokens else 0
     index_bpe = 8
-    flops = EmbeddingLookup.flops_func(tokens, hidden)
-    bytes_moved = EmbeddingLookup.bytes_func(tokens, hidden, bpe, index_bpe)
-    return EmbeddingLookup.category, "vector", flops, bytes_moved
+    flops = IndexedCopy.flops_func(tokens, hidden)
+    bytes_moved = IndexedCopy.bytes_func(tokens, hidden, bpe, index_bpe)
+    return IndexedCopy.category, "vector", flops, bytes_moved
 
 
 def _linear_has_bias(details: str) -> bool:

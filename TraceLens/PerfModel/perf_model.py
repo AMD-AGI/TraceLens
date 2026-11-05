@@ -3127,12 +3127,12 @@ class evoformer_attention(SDPA):
         }
 
 
-class EmbeddingLookup:
-    """One table row per token. A gather, not a GEMM: there are no multiply-adds.
+class IndexedCopy:
+    """Copy the rows an index selects. An embedding lookup is one producer of this.
 
-    Bytes are the gathered rows read from the table, those same rows written
-    out, and the index vector that selects them. Duplicate indices are not
-    coalesced: each lookup pays for its row again.
+    There are no multiply-adds. Bytes are the gathered rows read from the
+    table, those same rows written out, and the index vector that selects
+    them. Duplicate indices are not coalesced: each copy pays for its row again.
 
     ``kind`` selects how a trace event maps onto ``(tokens, hidden)``:
 
@@ -3459,11 +3459,11 @@ class EmbeddingLookup:
         return "vector"
 
 
-class aten_embedding(EmbeddingLookup):
+class aten_embedding(IndexedCopy):
     """``aten::embedding(weight[V, H], indices[*]) -> [*, H]``."""
 
 
-class aten_embedding_dense_backward(EmbeddingLookup):
+class aten_embedding_dense_backward(IndexedCopy):
     """Scatter-add of ``grad[* , H]`` into the table. Reads the grad row and
     reads plus writes the table row it updates."""
 
@@ -3471,7 +3471,7 @@ class aten_embedding_dense_backward(EmbeddingLookup):
     value_copies = 3
 
 
-class aten_embedding_bag(EmbeddingLookup):
+class aten_embedding_bag(IndexedCopy):
     """``embedding_bag(weight[V, H], indices[N], offsets[B])``. Offsets are
     extra index traffic; per-sample weights are not counted."""
 
@@ -3482,20 +3482,20 @@ class aten_embedding_bag_dense_backward(aten_embedding_bag):
     value_copies = 3
 
 
-class aten_index_select(EmbeddingLookup):
+class aten_index_select(IndexedCopy):
     """``index_select(input, dim, index)``. The selected slice is copied."""
 
     kind = "index_select"
 
 
-class aten_index_select_backward(EmbeddingLookup):
+class aten_index_select_backward(IndexedCopy):
     """Scatter of ``grad`` back to the selected input rows."""
 
     kind = "gathered"
     value_copies = 3
 
 
-class aten_gather(EmbeddingLookup):
+class aten_gather(IndexedCopy):
     """``gather``: one element read and written per index element.
 
     ``aten::embedding`` lowers to this in some builds. The index tensor then
@@ -3506,13 +3506,13 @@ class aten_gather(EmbeddingLookup):
     kind = "gather"
 
 
-class aten_index(EmbeddingLookup):
+class aten_index(IndexedCopy):
     """``aten::index``: ``self[indices]``, including a TensorList of indices."""
 
     kind = "index"
 
 
-class aten_index_put(EmbeddingLookup):
+class aten_index_put(IndexedCopy):
     """``index_put`` writes ``values`` at ``indices``. ``accumulate=True``
     re-reads the updated elements."""
 
