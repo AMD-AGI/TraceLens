@@ -480,7 +480,11 @@ register_perf_model_matcher(_match_allreduce_fusion_1stage)
 
 def _match_mqa_logits(name):
     """Resolve gluon/deepgemm MQA logits kernels (DSA indexer) when they
-    appear as Synthetic Ops — both paged (preshuffle) and non-paged variants."""
+    appear as Synthetic Ops or cpu_ops — both paged and non-paged variants.
+    Excludes python_function paths (e.g. 'fp8_mqa_logits.py(82): ...')
+    to avoid intercepting the parent before the Synthetic Op is created."""
+    if ".py(" in name:
+        return None
     if "mqa_logits" in name:
         from TraceLens.PerfModel.extensions import (
             attention_perf_model_extensions as _a,

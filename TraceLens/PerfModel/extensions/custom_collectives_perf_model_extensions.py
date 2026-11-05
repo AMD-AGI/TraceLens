@@ -569,12 +569,3 @@ class allreduce_fusion_kernel_1stage_synthetic(CustomCollective):
         bytes_read = 2 * self.num_elems * self.bpe_in + self.num_channels * self.bpe_in
         bytes_write = 2 * self.num_elems * self.bpe_in
         return bytes_read + bytes_write
-
-    def get_maf_type(self):
-        return "vector"
-
-    def get_compute_precision(self):
-        if self.param_details.get("_no_perf"):
-            return None
-        dtype = self.param_details.get("dtype_in")
-        return torch_dtype_map(dtype) if dtype else None

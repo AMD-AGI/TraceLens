@@ -1340,10 +1340,17 @@ class paged_mqa_logits_preshuffle_synthetic:
     _NAME_PARAMS_RE = re.compile(r"NUM_HEADS_(\d+)_HEAD_SIZE_(\d+)")
 
     @classmethod
-    def _parse_dims_from_name(cls, name):
-        m = cls._NAME_PARAMS_RE.search(name)
+    def _parse_dims_from_event(cls, event):
+        """Try to extract NUM_HEADS and HEAD_SIZE from the event name or
+        its kernel_details (the GPU kernel name may carry Triton autotuned
+        config suffixes even when the parent event name does not)."""
+        m = cls._NAME_PARAMS_RE.search(event.get("name", ""))
         if m:
             return int(m.group(1)), int(m.group(2))
+        for kd in event.get("kernel_details") or []:
+            m = cls._NAME_PARAMS_RE.search(kd.get("name", ""))
+            if m:
+                return int(m.group(1)), int(m.group(2))
         return None, None
 
     def __init__(self, event, arch=None, python_path=None):
@@ -1359,10 +1366,10 @@ class paged_mqa_logits_preshuffle_synthetic:
             sum_len = stats["c_sqsk"] + stats["g_sqsk"]
             seq_q = stats["c_sq"] + stats["g_sq"]
             kv_touched = stats["c_sk"] + stats["g_sk"]
-            # Try parsing H and D from the kernel name first (non-paged
-            # variant embeds NUM_HEADS and HEAD_SIZE in the Triton
-            # kernel name). Fall back to TOTAL_HEADS / TP from arch.
-            H_Q, d_h_qk = cls._parse_dims_from_name(event.get("name", ""))
+            # Try parsing H and D from the event name or kernel_details
+            # (the Triton autotuned kernel name carries NUM_HEADS and
+            # HEAD_SIZE). Fall back to TOTAL_HEADS / TP from arch.
+            H_Q, d_h_qk = cls._parse_dims_from_event(event)
             if H_Q is None:
                 tp = (arch or {}).get("tp_world_size")
                 if tp is None:

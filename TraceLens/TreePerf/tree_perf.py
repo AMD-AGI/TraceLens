@@ -187,6 +187,31 @@ def _detect_tp_world_size(events):
     return None
 
 
+def _propagate_annotation_to_synthetic_ops(tree, events):
+    """Copy the enclosing iteration annotation onto Synthetic Op events
+    that were created after ``apply_annotation`` ran.
+
+    Synthetic Ops are generated during ``collect_unified_perf_events``
+    which runs after the tree's ``apply_annotation``, so they miss the
+    annotation pass.  This back-fills them using the same timestamp
+    containment logic.
+    """
+    annotation_events = sorted(
+        (e for e in tree.events if "user_annotation" in (e.get("cat") or "")),
+        key=lambda e: e.get("ts", 0),
+    )
+    if not annotation_events:
+        return
+    for e in events:
+        if "annotation" in e:
+            continue
+        ts, dur = e.get("ts", 0), e.get("dur", 0)
+        for ann in annotation_events:
+            if ann["ts"] <= ts and (ts + dur) < ann["ts"] + ann["dur"]:
+                e["annotation"] = ann.get("name")
+                break
+
+
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(
@@ -1980,6 +2005,8 @@ class TreePerfAnalyzer:
             if self.arch is None:
                 self.arch = {}
             self.arch.setdefault("tp_world_size", tp)
+
+        _propagate_annotation_to_synthetic_ops(self.tree, events)
 
         if len(events) == 0:
             warnings.warn(
