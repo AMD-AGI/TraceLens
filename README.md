@@ -69,7 +69,7 @@ pip install 'TraceLens[all] @ git+https://github.com/AMD-AGI/TraceLens.git'
 | `kernel_source` | [Kernel source mapping](docs/how-to/map-kernel-source.md) (`itanium-demangler`) |
 | `comparative` | LLM clients for comparative analysis (`slodels` with OpenAI, Anthropic, and Google) |
 | `dev` | Test and format tools (`pytest`, `setuptools`, `black`) |
-| `Visualizer` | [Model architecture visualizer](docs/install/install.md#optional-visualizer-model-explorer-export) (CPU PyTorch wheel, `transformers`, `huggingface_hub`) |
+| `Visualizer` | [Model architecture visualizer](docs/install/install.md#optional-visualizer-model-explorer-export) (CPU PyTorch wheel, `transformers`, `huggingface_hub`, `visualize_model_in_explorer`, `TraceLens_model_roofline_projection`) |
 | `all` | Every extra in this table |
 
 ### 2. Collect Traces
