@@ -9,6 +9,41 @@ from datetime import datetime
 from setuptools import setup, find_packages
 
 _BASE_VERSION = "0.1.0"
+# Same pin as the Visualizer CI job. PyPI's `torch` wheel is the CUDA build;
+# the visualizer only meta-traces, so the extra installs these CPU wheels.
+_TORCH_CPU_VERSION = "2.14.0"
+_TORCH_CPU_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
+# (platform_system, platform_machine, wheel platform tag, filename has +cpu)
+_TORCH_CPU_PLATFORMS = (
+    ("Linux", "x86_64", "manylinux_2_28_x86_64", True),
+    ("Linux", "aarch64", "manylinux_2_28_aarch64", True),
+    ("Windows", "AMD64", "win_amd64", True),
+    ("Darwin", "arm64", "macosx_14_0_arm64", False),
+)
+
+
+def _torch_cpu_requirements():
+    """Direct CPU wheel URLs.
+
+    Package metadata cannot select an index, and ``pip install torch`` resolves
+    the CUDA build on PyPI. A direct URL is what makes ``.[Visualizer]`` fetch
+    the CPU wheel on its own.
+    """
+    requirements = []
+    for python in _TORCH_CPU_PYTHONS:
+        abi = "cp" + python.replace(".", "")
+        for system, machine, platform_tag, cpu_local in _TORCH_CPU_PLATFORMS:
+            local = "%2Bcpu" if cpu_local else ""
+            url = (
+                "https://download.pytorch.org/whl/cpu/"
+                f"torch-{_TORCH_CPU_VERSION}{local}-{abi}-{abi}-{platform_tag}.whl"
+            )
+            requirements.append(
+                f'torch @ {url} ; python_version == "{python}" '
+                f'and platform_system == "{system}" '
+                f'and platform_machine == "{machine}"'
+            )
+    return requirements
 
 
 def _wheel_version():
@@ -42,7 +77,7 @@ def _extras_require():
             "slodels[openai,anthropic,google-genai]",
         ],
         "Visualizer": [
-            "torch",
+            *_torch_cpu_requirements(),
             "transformers",
             "huggingface_hub>=0.20",
             # fla-core imports Triton at package import. The visualizer never

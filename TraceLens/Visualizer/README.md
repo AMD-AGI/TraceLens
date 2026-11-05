@@ -38,6 +38,8 @@ From the TraceLens repository root:
 pip install -e ".[Visualizer]"
 ```
 
+That extra installs the CPU PyTorch 2.14 wheel. The `torch` package on PyPI is the CUDA build, and the visualizer does not use it.
+
 For local development and tests, also install the dev extra:
 
 ```bash
