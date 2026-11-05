@@ -8,7 +8,7 @@
 
 TraceLens authors the human-readable ``analysis.md`` perf report; this module
 reads only that md and emits a structured, operation-grouped ``analysis.json``
-beside it (compute and fusion tiers, standalone only, v1). The parse anchors on the ``MarkerValidator``
+beside it (compute, fusion and system tiers, standalone only, v1). The parse anchors on the ``MarkerValidator``
 marker grammar so the renderer moves in lockstep with the writer. Byte-identical
 on rerun. Fallback and agentic single-trace variants share one parser; the only
 mode-conditional is the deterministic-fallback grouping key.
@@ -21,22 +21,25 @@ from pathlib import Path
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
+    SystemFindings,
     _arg_pairs,
     _kernel_name_list,
     node_field,
 )
 from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
     ComputeTask,
+    SystemTask,
     TaskMember,
 )
-from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
-from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms, _efficiency_parts
+from TraceLens.Agent.Analysis.utils.kernel_fusion import _efficiency_parts
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     EXEC_TOTAL_COL,
     PCT_OF_NODE_COL,
     TIER_COMPUTE,
     TIER_FUSION,
+    TIER_SYSTEM,
     MarkerValidator,
+    PRIORITY_PREFIX_RE,
     _find_data_table,
     _iter_candidate_blocks,
     _marker_attrs,
@@ -60,12 +63,9 @@ _LABEL_RE = re.compile(
     r"(?=\n\s*\n|\n\*\*|\Z)",
     re.DOTALL,
 )
-_KIND_RE = re.compile(r"surfaced as\s+`(\w+)`", re.IGNORECASE)
-_FUSION_KINDS = FusionForms(TAXONOMY).kinds
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
 _LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
-_PRIORITY_PREFIX_RE = re.compile(r"^(?:[🔴🟡🟢]\s*)?(?:P\d+:\s*)?")
 _TOTAL_TIME_RE = re.compile(
     r"^\|\s*Total Time\s*\|\s*(\d+(?:\.\d+)?) ms\s*\|", re.MULTILINE
 )
@@ -144,6 +144,8 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
             parser.findings(tier), tier, mode
         ).group()
 
+    report["system_optimizations"] = system_tasks(parser.findings(TIER_SYSTEM))
+
     appendix = parser.appendix()
     if appendix is not None:
         report["appendix"] = appendix
@@ -166,6 +168,21 @@ def compute_tasks(op_metrics: list[dict]) -> list[ComputeTask]:
     return TaskGrouper(
         [_op_finding(op) for op in op_metrics], TIER_COMPUTE, "non-llm"
     ).group()
+
+
+def system_tasks(findings: list) -> list[SystemTask]:
+    """One task per ``tier=system`` finding, in md order, prioritized by its block rank."""
+    return [
+        {
+            "operation": finding["title"],
+            NODE_COL: finding["node"],
+            "members": finding["members"],
+            "impact": None,
+            **accumulate_prose([finding]),
+            "priority": finding["block_rank"],
+        }
+        for finding in findings
+    ]
 
 
 def _op_finding(op: dict) -> dict:
@@ -363,7 +380,7 @@ class AnalysisMdParser:
             lib_m = _LIBRARY_PARENS_RE.search(heading) if heading else None
             library = lib_m.group(1).strip() if lib_m else None
         elif heading:
-            title = _PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
+            title = PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
 
         prose = {"identification": None, "reasoning": None, "resolution": None}
         for label, body in _LABEL_RE.findall(block):
@@ -375,16 +392,14 @@ class AnalysisMdParser:
             else:
                 prose["resolution"] = cleaned
 
-        kind_m = _KIND_RE.search(prose["identification"] or "")
-        kind = kind_m.group(1).lower() if kind_m else None
-        if kind not in _FUSION_KINDS:
-            kind = None
-
-        members = self._parse_data_table(start, end)
-        for member in members:
-            member["category"] = category
-            member["library"] = library
-            member["analysis_md_rank"] = md_rank
+        if tier == TIER_SYSTEM:
+            members = self._parse_system_members(start, end)
+        else:
+            members = self._parse_data_table(start, end)
+            for member in members:
+                member["category"] = category
+                member["library"] = library
+                member["analysis_md_rank"] = md_rank
         impacts = self._parse_op_row_marker(block)
         low, mid, high = self._parse_finding_range(block)
         return {
@@ -392,13 +407,21 @@ class AnalysisMdParser:
             "impacts": impacts,
             "prose": prose,
             "rank": md_rank,
+            "block_rank": rank,
             "title": title,
-            "kind": kind,
             "low": low,
             "mid": mid,
             "high": high,
             "node": node,
         }
+
+    def _parse_system_members(self, start: int, end: int) -> list:
+        """Parse the block's **Data:** table into system rows, dropping non-contract rows."""
+        table = _find_data_table(self.lines, start, end)
+        if table is None:
+            return []
+        rows = (SystemFindings.from_cells(cells) for _, cells in table[2])
+        return [row for row in rows if row is not None]
 
     def _parse_data_table(self, start: int, end: int) -> list:
         """Parse the block's **Data:** table into per-row member dicts."""
@@ -755,12 +778,15 @@ class TaskGrouper:
         else:
             mid = sum(m["impact_score"] for m in members)
 
-        prose = self._accumulate_prose(ordered_fi, bucket["findings"])
+        prose = accumulate_prose([bucket["findings"][fi] for fi in ordered_fi])
 
-        task = {"operation": bucket["operation"], NODE_COL: bucket["node"]}
-        if self.tier == TIER_FUSION:
-            task["kind"] = bucket["findings"][ordered_fi[0]]["kind"]
-        return {**task, "members": members, "impact": {"mid": mid}, **prose}
+        return {
+            "operation": bucket["operation"],
+            NODE_COL: bucket["node"],
+            "members": members,
+            "impact": {"mid": mid},
+            **prose,
+        }
 
     def _finalize(self, tasks: list) -> list:
         # Python's sort is stable, so fusion ties keep block order.
@@ -790,46 +816,46 @@ class TaskGrouper:
             "".join(task["members"][0]["kernel_name"]) if task["members"] else "",
         )
 
-    @staticmethod
-    def _accumulate_prose(ordered_fi: list, findings: dict) -> dict:
-        """Concatenate per-finding prose under fixed caps; prefix ``[P<rank>]`` only when merged."""
-        caps = {
-            "identification": IDENTIFICATION_CAP,
-            "reasoning": REASONING_CAP,
-            "resolution": RESOLUTION_CAP,
-        }
-        label = len(ordered_fi) > 1
-        out: dict = {}
-        truncated = False
-        for field, cap in caps.items():
-            blocks = []
-            for fi in ordered_fi:
-                body = findings[fi]["prose"].get(field)
-                if not body:
-                    continue
-                rank = findings[fi]["rank"]
-                blocks.append(f"[{rank}] {body}" if (label and rank) else body)
-            if not blocks:
-                out[field] = None
-                continue
-            value, clipped = TaskGrouper._clip_blocks(blocks, cap)
-            out[field] = value
-            truncated = truncated or clipped
-        out["prose_truncated"] = truncated
-        return out
 
-    @staticmethod
-    def _clip_blocks(blocks: list, cap: int) -> tuple:
-        """Join blocks with blank lines, dropping whole trailing blocks past ``cap``."""
-        kept: list = []
-        clipped = False
-        for block in blocks:
-            candidate = "\n\n".join(kept + [block])
-            if len(candidate) <= cap:
-                kept.append(block)
-            else:
-                clipped = True
-                break
-        if not kept:
-            return blocks[0][:cap], True
-        return "\n\n".join(kept), clipped
+def accumulate_prose(findings: list) -> dict:
+    """Concatenate per-finding prose under fixed caps; prefix ``[P<rank>]`` only when merged."""
+    caps = {
+        "identification": IDENTIFICATION_CAP,
+        "reasoning": REASONING_CAP,
+        "resolution": RESOLUTION_CAP,
+    }
+    label = len(findings) > 1
+    out: dict = {}
+    truncated = False
+    for field, cap in caps.items():
+        blocks = []
+        for finding in findings:
+            body = finding["prose"].get(field)
+            if not body:
+                continue
+            rank = finding["rank"]
+            blocks.append(f"[{rank}] {body}" if (label and rank) else body)
+        if not blocks:
+            out[field] = None
+            continue
+        value, clipped = _clip_blocks(blocks, cap)
+        out[field] = value
+        truncated = truncated or clipped
+    out["prose_truncated"] = truncated
+    return out
+
+
+def _clip_blocks(blocks: list, cap: int) -> tuple:
+    """Join blocks with blank lines, dropping whole trailing blocks past ``cap``."""
+    kept: list = []
+    clipped = False
+    for block in blocks:
+        candidate = "\n\n".join(kept + [block])
+        if len(candidate) <= cap:
+            kept.append(block)
+        else:
+            clipped = True
+            break
+    if not kept:
+        return blocks[0][:cap], True
+    return "\n\n".join(kept), clipped

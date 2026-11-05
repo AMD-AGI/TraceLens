@@ -41,6 +41,7 @@ from TraceLens.Agent.Analysis.post_processing import (
 )
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
+    SystemFindings,
     build_operation_metrics,
 )
 from TraceLens.Agent.Analysis.post_processing.analysis_json import (
@@ -386,7 +387,6 @@ _FUSION_MD = """# ExampleNet - OTHER_GPU Standalone Analysis
 
 _FUSION_P2_GOLDEN = {
     "operation": "Unfused Activation",
-    "kind": None,
     "members": [
         {
             "kernel_launcher_path": "linear.py(30): forward",
@@ -466,6 +466,7 @@ def _assert_schema_valid(report):
         "top_operations",
         "compute_optimizations",
         "fusion_optimizations",
+        "system_optimizations",
         "appendix",
     }
     # No dropped/forbidden top-level fields (envelope rules §2).
@@ -517,6 +518,7 @@ def _assert_schema_valid(report):
 
     keys = list(report)
     assert keys.index("fusion_optimizations") == keys.index("compute_optimizations") + 1
+    assert keys.index("system_optimizations") == keys.index("fusion_optimizations") + 1
 
 
 # --------------------------------------------------------------------------- #
@@ -1290,6 +1292,7 @@ def test_no_compute_findings_empty_list(tmp_path):
     )
     report, _ = _render_text(md, tmp_path)
     assert report["compute_optimizations"] == []
+    assert report["system_optimizations"] == []
     _assert_schema_valid(report)
 
 
@@ -1304,7 +1307,6 @@ def test_fusion_tier_golden(tmp_path):
     p1, p2 = report["fusion_optimizations"]
     assert p2 == _FUSION_P2_GOLDEN
     assert p1["operation"] == "Unfused Attention"
-    assert p1["kind"] == "attention"
     assert p1["impact"] == {"mid": 13.5}
     softmax = p1["members"][1]
     assert softmax["flops_per_byte"] is None
@@ -1328,21 +1330,6 @@ def test_fusion_task_takes_node_from_card_p_item(tmp_path):
     }
 
 
-@pytest.mark.parametrize(
-    "surfaced,expected",
-    [
-        ("surfaced as `Gemm_Epilogue`", "gemm_epilogue"),
-        # A kind outside the Identification is not read.
-        ("Surfaced as attention.\n\nSurfaced as `attention`", None),
-        ("Surfaced as `mystery_kind`", None),
-    ],
-)
-def test_fusion_kind_parsing(surfaced, expected, tmp_path):
-    md = _FUSION_MD.replace("Surfaced as `attention`", surfaced)
-    p1 = _render_text(md, tmp_path)[0]["fusion_optimizations"][0]
-    assert p1["kind"] == expected
-
-
 def test_fusion_priority_is_impact_order_then_rank(tmp_path):
     # md rank P1 now has the smaller mid, so the P2 block is emitted first.
     low_p1 = _FUSION_MD.replace("mid=13.5", "mid=0.5")
@@ -1362,6 +1349,67 @@ def test_fusion_blocks_do_not_change_compute_tasks(tmp_path):
     assert base["fusion_optimizations"] == []
     assert both["compute_optimizations"] == base["compute_optimizations"]
     assert len(both["fusion_optimizations"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# System tier.
+# --------------------------------------------------------------------------- #
+
+
+def test_system_tier_golden(tmp_path):
+    md = (
+        "# ExampleNet - OTHER_GPU Standalone Analysis\n"
+        "## System-Level Optimizations\n\n"
+        "### P1: High GPU Idle Time\n"
+        "<!-- impact-begin kind=p_item low=null mid=null high=null node=n0 -->\n"
+        "<!-- impact-end -->\n\n"
+        "→ *See [Detailed Analysis](#detailed-analysis-system-p1) for details*\n\n"
+        "## Detailed Analysis\n\n"
+        "### System-Level Insights\n\n"
+        "<!-- reasoning-candidate tier=system rank=1 -->\n"
+        "#### P1: High GPU Idle Time\n\n"
+        "**Identification:** Idle exceeds the threshold.\n\n"
+        "**Data:**\n\n"
+        "| Metric | Value |\n"
+        "|---|---|\n"
+        "| Idle Time | 100.25 ms |\n"
+        "| Idle % | 20.5% |\n\n"
+        "**Reasoning for Slowdown:** The host stalls.\n\n"
+        "**Resolution:** Prefetch.\n"
+    )
+    report, _ = _render_text(md, tmp_path)
+    _assert_schema_valid(report)
+    assert report["system_optimizations"] == [
+        {
+            "operation": "High GPU Idle Time",
+            "node": "n0",
+            "members": [
+                {"metric": "Idle Time", "value": 100.25, "unit": "ms"},
+                {"metric": "Idle %", "value": 20.5, "unit": "%"},
+            ],
+            "impact": None,
+            "identification": "Idle exceeds the threshold.",
+            "reasoning": "The host stalls.",
+            "resolution": "Prefetch.",
+            "prose_truncated": False,
+            "priority": 1,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "cells,expected",
+    [
+        (["Idle %", "—"], {"metric": "Idle %", "value": None, "unit": "%"}),
+        (
+            ["Idle %", "20.5% of total"],
+            {"metric": "Idle %", "value": None, "unit": "%"},
+        ),
+        (["Utilization", "20.5%"], None),
+    ],
+)
+def test_system_row_from_cells_never_guesses(cells, expected):
+    assert SystemFindings.from_cells(cells) == expected
 
 
 # --------------------------------------------------------------------------- #

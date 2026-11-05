@@ -20,6 +20,7 @@ import re
 import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    SystemFindings,
     focus_job_utilization,
     load_manifest,
     node_field,
@@ -256,7 +257,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
     deterministic source of truth for report P-item ordering, the Top-Ops
     table, and the optional detailed extension plot.
 
-    Produces four top-level arrays:
+    Produces five top-level arrays:
       - ``findings``: per-(category, bound_type, library, eff_bucket) groups
         from each ``_metrics.json::category_findings``. Sorted
         globally by ``impact_score`` with ``global_rank`` / ``category_rank``
@@ -270,6 +271,9 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
         applies to each node's category time.
       - ``recommendations``: the per-category quantified rollup, capped, used by
         the extension plot.
+      - ``system_findings``: every system script's ``system_findings`` merged
+        and ranked globally by share of GPU time. The rank is the report's
+        System-Level P-number.
       - ``all_estimates``: flat unfiltered audit trail of every per-op
         estimate the analyzers emitted.
 
@@ -296,6 +300,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
 
         all_estimates: List[dict] = []
         findings: List[dict] = []
+        system_findings: List[dict] = []
         for fname in sorted(os.listdir(category_data_dir)):
             if not fname.endswith("_metrics.json"):
                 continue
@@ -310,6 +315,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 cf["category"] = cat
                 cf["category_rank"] = cf.pop("rank", 0)
                 findings.append(cf)
+            system_findings.extend(metrics.get("system_findings", []))
 
         node_recs = _rollup_quantified(findings, per_node=True)
         plot_recs = _rollup_quantified(findings, per_node=False)[:max_recommendations]
@@ -394,6 +400,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             "priorities": priorities,
             "recommendations": plot_recs,
             "findings": findings,
+            "system_findings": SystemFindings.rank(system_findings),
             "all_estimates": all_estimates,
         }
     except Exception:
@@ -402,6 +409,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             "priorities": [],
             "recommendations": [],
             "findings": [],
+            "system_findings": [],
             "all_estimates": [],
         }
 

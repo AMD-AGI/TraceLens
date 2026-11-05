@@ -31,6 +31,7 @@ from math import prod
 import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    NO_VALUE,
     PERF_ARG_COLS,
     PERF_THREAD_COLS,
     TARGET_HIGH,
@@ -111,7 +112,6 @@ MIN_SAVINGS_MS = 0.1
 MIN_MODELED_FRAC = 0.5
 MIN_MODELED_FRAC_LONG = 0.75
 LONG_GROUP_KERNELS = 5
-NO_VALUE = "—"  # Table cell for a value the perf report does not provide
 
 # ---------------------------------------------------------------------------
 # Records

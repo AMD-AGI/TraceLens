@@ -1720,12 +1720,24 @@ def test_driver_cpu_idle_main(tmp_path, monkeypatch):
     pd.DataFrame({"Kernel Time (µs)_sum": [50.0], "Count": [5]}).to_csv(
         os.path.join(csv_dir, "ops_summary.csv"), index=False
     )
+    with open(os.path.join(base, "category_data", "category_manifest.json"), "w") as f:
+        json.dump({"focus_csv_dir": "perf_report_csvs", "focus_job": "node_a"}, f)
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     cpu_idle_analysis.main()
     metrics = _read_metrics(base, "cpu_idle")
     assert metrics["status"] == "OK"
+    assert metrics["node"] == "node_a"
     # idle 20% > 15% threshold
-    assert metrics["idle_flagged"] is True
+    assert metrics["system_findings"] == [
+        {
+            "rank": 1,
+            "title": "High GPU Idle Time",
+            "members": [
+                {"metric": "Idle Time", "value": 20.0, "unit": "ms"},
+                {"metric": "Idle %", "value": 20.0, "unit": "%"},
+            ],
+        }
+    ]
 
 
 # ----- kernel_fusion_analysis.main() end-to-end -----
@@ -1897,15 +1909,35 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
             "percent": [100.0, 4.0],
         }
     ).to_csv(os.path.join(csv_dir, "gpu_timeline.csv"), index=False)
+    with open(os.path.join(base, "category_data", "category_manifest.json"), "w") as f:
+        json.dump({"focus_csv_dir": "perf_report_csvs", "focus_job": "node_a"}, f)
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     multi_kernel_analysis.main()
     metrics = _read_metrics(base, "multi_kernel")
     assert metrics["status"] == "SUCCESS"
-    assert metrics["memcpy_assessment"]["flagged"] is True
-    assert metrics["overlap_assessment"]["flagged"] is True
-    assert len(metrics["patterns_detected"]) >= 1
+    assert metrics["node"] == "node_a"
     # 11 D2D copies at 0.5% of total time: count alone does not flag D2D
-    assert "high_d2d_memcpy" not in {p["pattern"] for p in metrics["patterns_detected"]}
+    assert metrics["system_findings"] == [
+        {
+            "rank": 1,
+            "title": "D2H Memory Copy Overhead",
+            "members": [
+                {"metric": "Copy Count", "value": 3, "unit": "count"},
+                {"metric": "Copy Time", "value": 100.0, "unit": "ms"},
+                {"metric": "Copy %", "value": 50.0, "unit": "%"},
+            ],
+        },
+        {
+            "rank": 2,
+            "title": "Exposed Collective Communication",
+            "members": [
+                {"metric": "Exposed Communication Time", "value": 8.0, "unit": "ms"},
+                {"metric": "Exposed Communication %", "value": 8.0, "unit": "%"},
+                {"metric": "Compute/Comm Overlap %", "value": 20.0, "unit": "%"},
+                {"metric": "Total Communication Time", "value": 10.0, "unit": "ms"},
+            ],
+        },
+    ]
 
 
 class TestArchUtils:

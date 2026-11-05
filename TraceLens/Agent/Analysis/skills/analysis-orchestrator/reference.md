@@ -31,7 +31,7 @@ Use vendor-agnostic terminology throughout such as GPU kernels, collective commu
 3-6. Prepare Category Data (GPU Util, Top Ops, Multi-Kernel Data, Category Filtering)
 7. System-Level Analysis (PARALLEL, CPU/Idle + Kernel Fusion + Multi-Kernel) → system_findings/
 8. Invoke Compute Kernel Subagents (PARALLEL, read category_findings[] from _metrics.json) → category_findings/
-   8.5. Aggregate per-category category_findings[] → priority_data.json::findings[] (globally sorted)
+   8.5. Aggregate per-category category_findings[] → priority_data.json::findings[] (globally sorted) and the system metrics' system_findings[] → priority_data.json::system_findings (globally ranked)
 9. Validate Subagent Outputs (system_findings/ + category_findings/)
 10. Prepare Report Data (load_findings) + Model Identification (subagent) → cache/model_info.json
     10.2. Analytical Roofline Augmentation (optional; only when <augment_analytical_roofline> is set)
@@ -504,7 +504,7 @@ After all compute kernel subagents complete:
 
 ### 8.5 Aggregate findings → priority_data.json
 
-After all compute sub-agent `_metrics.json` files exist (each carrying its own `category_findings[]`), concatenate them into a globally-sorted `priority_data.json::findings[]` for the report template.
+Once all compute sub-agent `_metrics.json` files exist, this call writes the globally sorted `priority_data.json::findings[]` from their `category_findings[]` and `priority_data.json::system_findings`, the system metrics' `system_findings[]` ranked globally by share.
 
 ```bash
 <prefix> python3 -c \"
@@ -623,7 +623,7 @@ If the plot fails (extension-absent branch), retry once. If still failing, proce
       - `multi_trace`: add the template's scope line.
 
    d. **System-Level** — append `## System-Level Optimizations`. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
-      - Data sources: remaining `system_findings/*.md` (cpu_idle, multi_kernel).
+      - Data source: `priority_data.json::system_findings`, one card per entry in array order. Copy each card and its Detailed Analysis block from `system_findings/cpu_idle_findings.md` or `multi_kernel_findings.md`, matched by title.
       - `multi_trace`: add the template's scope line.
 
    e. **Detailed Analysis** — append `## Detailed Analysis` with `### Compute Kernel Insights`, `### Kernel Fusion Insights`, `### System-Level Insights` subsections. Use `<prefix> tee -a <output_dir>/analysis.md << 'SECTION_EOF'`.
@@ -675,7 +675,7 @@ d. For placeholder values (`X ms`, `Y%`, `Z%`, `W%`) in the Executive Summary me
 e. For unfilled `<Brief Title>` / `<Library>` / `<platform>` placeholders: substitute the real title/backend/platform from the corresponding findings file or `category_manifest.json`.
 f. For Args cell mismatches: copy the matching `operations[].args` value verbatim (preserving `<br>`) from the corresponding `category_data/<cat>_metrics.json` and string-replace the bad cell.
 g. For marker errors: restore or add the missing/broken marker in place — never delete a card or block to silence an error. Source numeric values from `priority_data.json` (P-items) or `<cat>_metrics.json::impact_estimates[]` (detail estimates); use `null` or the sentinel `not quantifiable from trace data` for non-quantifiable items.
-h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category-order mismatch, R3 marker numeric mismatch, R4 Top Ops row-count mismatch, R6 node mismatch): re-render the affected card(s) by re-reading `priority_data.json::findings[N-1]` for `category`, `node` (fusion markers: `kernel_fusion_metrics.json::node`), `low` (impact_score_low), `mid` (impact_score), `high` (impact_score_high), and `priorities[]` for the Top Operations table rows (one row per entry, in array order; under `multi_trace`, each node's table takes the entries with that `node`).
+h. For priority-consistency errors (R1 P-item count mismatch, R2 P-item category-order mismatch, R3 marker numeric mismatch, R4 Top Ops row-count mismatch, R6 node mismatch, R7 System-Level card mismatch): re-render the affected card(s) by re-reading `priority_data.json::findings[N-1]` for `category`, `node` (fusion and system markers: the `node` of that analyzer's `<cat>_metrics.json`), `low` (impact_score_low), `mid` (impact_score), `high` (impact_score_high), and `priorities[]` for the Top Operations table rows (one row per entry, in array order; under `multi_trace`, each node's table takes the entries with that `node`). For R7, re-render the System-Level cards from `priority_data.json::system_findings` in array order.
 2. Run validation again.
 3. Maximum 2 retry attempts. If still failing after retry, proceed with a warning.
 

@@ -22,7 +22,16 @@ from typing import Dict, Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import perf_report_csv_dir, write_metrics_json
+from analysis_utils import (
+    SystemFindings,
+    load_manifest,
+    perf_report_csv_dir,
+    write_metrics_json,
+)
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
+
+# Constants
+IDLE_PCT_THRESHOLD = 15
 
 
 def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
@@ -128,20 +137,32 @@ def main():
         print(f"  Short Kernels (<10µs): {kernel_patterns['short_kernel_count']}")
         print(f"  Avg Kernel Time: {kernel_patterns['avg_kernel_time_us']:.1f} µs")
 
-        idle_flagged = idle_percent > 15
-        print(f"\n  Idle Flagged: {idle_flagged} ({idle_percent:.1f}%)")
+        gpu_utilization = {
+            "total_time_ms": round(total_time_ms, 2),
+            "idle_time_ms": round(idle_ms, 2),
+            "idle_time_percent": round(idle_percent, 2),
+            "computation_percent": round(computation_percent, 2),
+            "communication_percent": round(comm_percent, 2),
+            "memcpy_percent": round(memcpy_percent, 2),
+        }
+        system_findings = SystemFindings.rank(
+            [
+                SystemFindings.make(
+                    "High GPU Idle Time",
+                    gpu_utilization["idle_time_ms"],
+                    gpu_utilization["idle_time_percent"],
+                )
+            ]
+            if idle_percent > IDLE_PCT_THRESHOLD
+            else []
+        )
+        print(f"\n  System findings: {len(system_findings)} (idle {idle_percent:.1f}%)")
 
         metrics = {
             "status": "OK",
-            "idle_flagged": idle_flagged,
-            "gpu_utilization": {
-                "total_time_ms": round(total_time_ms, 3),
-                "idle_time_ms": round(idle_ms, 3),
-                "idle_time_percent": round(idle_percent, 2),
-                "computation_percent": round(computation_percent, 2),
-                "communication_percent": round(comm_percent, 2),
-                "memcpy_percent": round(memcpy_percent, 2),
-            },
+            NODE_COL: load_manifest(output_dir).get("focus_job"),
+            "system_findings": system_findings,
+            "gpu_utilization": gpu_utilization,
             "kernel_analysis": kernel_patterns,
             "impact_estimates": [],
         }

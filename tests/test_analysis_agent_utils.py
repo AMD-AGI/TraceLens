@@ -22,6 +22,7 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, ANALYSIS_DIR)
 sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    SystemFindings,
     _eff_bucket,
     _extract_call_chain,
     _extract_kernel_names,
@@ -55,7 +56,7 @@ from TraceLens.Agent.Analysis.utils.report_utils import (
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     MarkerValidator,
     _ROLLUP_IMPACT_TOL,
-    _category_findings_empty,
+    _load_findings_metrics,
     _check_coverage,
     _check_priority_consistency,
     _check_time_sanity,
@@ -561,6 +562,29 @@ def test_generate_priority_data_skips_error_metrics(tmp_path):
     assert data["baseline_ms"] == 100.0
     assert len(data["recommendations"]) == 0
     assert len(data["all_estimates"]) == 0
+
+
+def test_generate_priority_data_ranks_system_findings(tmp_path):
+    cat_data = tmp_path / "category_data"
+    cat_data.mkdir()
+    (cat_data / "category_manifest.json").write_text("{}")
+    for name, entries in {
+        "cpu_idle": [SystemFindings.make("High GPU Idle Time", 1.0, 5.0)],
+        "multi_kernel": [
+            SystemFindings.make("H2D Memory Copy Overhead", 1, 1.0, 2.0),
+            SystemFindings.make("D2H Memory Copy Overhead", 1, 1.0, 2.0),
+        ],
+    }.items():
+        (cat_data / f"{name}_metrics.json").write_text(
+            json.dumps({"system_findings": entries})
+        )
+    with open(generate_priority_data(str(tmp_path))) as f:
+        ranked = json.load(f)["system_findings"]
+    assert [(e["rank"], e["title"]) for e in ranked] == [
+        (1, "High GPU Idle Time"),
+        (2, "D2H Memory Copy Overhead"),
+        (3, "H2D Memory Copy Overhead"),
+    ]
 
 
 # ----- Unit tests: write_metrics_json -----
@@ -1500,6 +1524,59 @@ def test_priority_consistency_r6_node_mismatch(tmp_path):
     assert any(e.startswith("R6:") for e in errors)
 
 
+@pytest.mark.parametrize(
+    "report_cards, pd_cards, cell_edit, needle",
+    [
+        ("CI", "CI", None, None),
+        ("IC", "CI", None, "'P1: Exposed Collective Communication', 'P2: High GPU"),
+        ("C", "CI", None, "'P2: High GPU Idle Time'"),
+        ("CI", "CI", ("60.0%", "61.0%"), "Data rows"),
+        ("CI", "", None, "must be []"),
+    ],
+)
+def test_priority_consistency_r7_system_cards(
+    tmp_path, report_cards, pd_cards, cell_edit, needle
+):
+    entries = {
+        "C": {
+            "rank": 1,
+            **SystemFindings.make(
+                "Exposed Collective Communication", 600.0, 60.0, 5.0, 700.0
+            ),
+        },
+        "I": {"rank": 2, **SystemFindings.make("High GPU Idle Time", 100.0, 17.0)},
+    }
+    report = "## System-Level Optimizations\n\n"
+    report += "".join(
+        f"### P{i + 1}: {entries[c]['title']}\n\n" for i, c in enumerate(report_cards)
+    )
+    report += "## Detailed Analysis\n\n### System-Level Insights\n\n"
+    for i, c in enumerate(report_cards):
+        rows = "".join(
+            "| {} | {} |\n".format(*SystemFindings.to_cells(m))
+            for m in entries[c]["members"]
+        )
+        report += (
+            f"<!-- reasoning-candidate tier=system rank={i + 1} -->\n"
+            f"#### P{i + 1}: {entries[c]['title']}\n\n"
+            f"**Data:**\n\n| Metric | Value |\n|---|---|\n{rows}\n"
+        )
+    if cell_edit:
+        report = report.replace(*cell_edit)
+    (tmp_path / "priority_data.json").write_text(
+        json.dumps({"system_findings": [entries[c] for c in pd_cards]})
+    )
+    errors = [
+        e
+        for e in _validate_report_priority_consistency(report, str(tmp_path))
+        if e.startswith("R7:")
+    ]
+    if needle is None:
+        assert errors == []
+    else:
+        assert needle in "\n".join(errors)
+
+
 def test_priority_consistency_r4_top_ops_row_count(tmp_path):
     # Only one priority but the top_ops table has two data rows -> R4.
     content = _passing_report()
@@ -1543,6 +1620,9 @@ def test_priority_consistency_r6_detail_estimate_and_fusion_node(tmp_path):
         "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n0 -->\n"
         "<!-- impact-end -->\n"
         "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n1 -->\n"
+        "<!-- impact-end -->\n\n"
+        "## System-Level Optimizations\n\n"
+        "<!-- impact-begin kind=p_item low=null mid=null high=null node=n1 -->\n"
         "<!-- impact-end -->\n"
     )
     pd_data = {"findings": [{"category": "gemm", "node": "n0"}], "priorities": []}
@@ -1553,8 +1633,9 @@ def test_priority_consistency_r6_detail_estimate_and_fusion_node(tmp_path):
     )
     errors = _validate_report_priority_consistency(content, str(tmp_path))
     r6 = [e for e in errors if e.startswith("R6:")]
-    assert len(r6) == 2
+    assert len(r6) == 3
     assert "detail_estimate" in r6[0] and "fusion P-item marker #2" in r6[1]
+    assert "system P-item marker #1" in r6[2]
 
 
 def test_priority_consistency_absent_json_is_silent(tmp_path):
@@ -2840,19 +2921,38 @@ def _valid_compute_findings(rank=1, row=None):
     )
 
 
+_IDLE_ENTRY = {"rank": 1, **SystemFindings.make("High GPU Idle Time", 20.0, 20.0)}
+
+
 def _valid_system_findings():
     return (
         "## Recommendations\n\n"
-        "### P1: Fix idle\n"
-        "**Insight**\n idle high\n**Action**\n overlap\n**Impact**\n medium\n"
-        "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 -->\n"
+        "### P1: High GPU Idle Time\n"
+        "**Insight**: idle is high\n"
+        "**Action**: overlap host work\n"
+        "<!-- impact-begin kind=p_item low=null mid=null high=null -->\n"
+        "**Impact**: Not quantifiable from trace data\n"
         "<!-- impact-end -->\n\n"
         "## Detailed Analysis\n\n"
         "<!-- reasoning-candidate tier=system rank=1 -->\n"
-        "System detail block.\n"
-        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
-        "<!-- impact-end -->\n"
+        "#### High GPU Idle Time\n\n"
+        "**Identification:** Idle is 20.0%, above the 15% threshold.\n\n"
+        "**Data:**\n\n"
+        "| Metric | Value |\n|---|---|\n"
+        "| Idle Time | 20.0 ms |\n| Idle % | 20.0% |\n\n"
+        "**Impact estimate:** Impact estimate is not quantifiable from trace data.\n"
     )
+
+
+def _write_system_findings(tmp_path, content, entries):
+    (tmp_path / "category_data").mkdir()
+    (tmp_path / "category_data" / "cpu_idle_metrics.json").write_text(
+        json.dumps({"system_findings": entries})
+    )
+    (tmp_path / "system_findings").mkdir()
+    fp = tmp_path / "system_findings" / "cpu_idle_findings.md"
+    _write(str(fp), content)
+    return str(fp)
 
 
 @pytest.fixture
@@ -3010,24 +3110,54 @@ def test_validate_findings_file_p_item_count_mismatch(tmp_path):
 
 
 def test_validate_findings_file_system_pass(tmp_path):
-    fp = tmp_path / "cpu_idle_findings.md"
-    _write(str(fp), _valid_system_findings())
-    passed, errors = validate_findings_file(str(fp), "system")
+    fp = _write_system_findings(tmp_path, _valid_system_findings(), [_IDLE_ENTRY])
+    passed, errors = validate_findings_file(fp, "system")
     assert passed, errors
 
 
-def test_metrics_json_for_findings_and_empty_category(tmp_path):
+@pytest.mark.parametrize(
+    "old, new, entries",
+    [
+        ("### P1: High GPU Idle Time", "### P1: Idle", [_IDLE_ENTRY]),
+        ("### P1:", "### System P1:", [_IDLE_ENTRY]),
+        ("### P1: High GPU Idle Time", "### P1: No Actionable Issues", []),
+        ("**Action**: overlap host work\n", "", [_IDLE_ENTRY]),
+        ("| Idle % | 20.0% |", "| Idle % | 21.0% |", [_IDLE_ENTRY]),
+        (
+            "| Metric | Value |\n|---|---|",
+            "| Metric | Value | Flagged |\n|---|---|---|",
+            [_IDLE_ENTRY],
+        ),
+        ("tier=system rank=1", "tier=system rank=2", [_IDLE_ENTRY]),
+    ],
+)
+def test_validate_findings_file_system_rejects_drift(tmp_path, old, new, entries):
+    content = _valid_system_findings().replace(old, new)
+    fp = _write_system_findings(tmp_path, content, entries)
+    passed, _ = validate_findings_file(fp, "system")
+    assert not passed
+
+
+def test_validate_findings_file_system_empty_list_passes(tmp_path):
+    fp = _write_system_findings(
+        tmp_path, "## Recommendations\n\n## Detailed Analysis\n", []
+    )
+    passed, errors = validate_findings_file(fp, "system")
+    assert passed, errors
+
+
+def test_metrics_json_for_findings_and_load(tmp_path):
     fp = tmp_path / "category_findings" / "gemm_findings.md"
     fp.parent.mkdir(parents=True)
     fp.write_text("x")
     mp = _metrics_json_for_findings(str(fp))
     assert mp.endswith("category_data/gemm_metrics.json")
-    assert _category_findings_empty(str(fp)) is False
+    assert _load_findings_metrics(str(fp)) == {}
     (tmp_path / "category_data").mkdir()
     (tmp_path / "category_data" / "gemm_metrics.json").write_text(
         json.dumps({"category_findings": []})
     )
-    assert _category_findings_empty(str(fp)) is True
+    assert _load_findings_metrics(str(fp)) == {"category_findings": []}
 
 
 def test_scan_args_cells_and_load_valid_args(tmp_path):
@@ -3693,6 +3823,7 @@ def test_generate_priority_data_exception_fallback(tmp_path):
         data = json.load(f)
     assert data["baseline_ms"] == 0
     assert data["findings"] == []
+    assert data["system_findings"] == []
 
 
 # ----- plot_utils -----
