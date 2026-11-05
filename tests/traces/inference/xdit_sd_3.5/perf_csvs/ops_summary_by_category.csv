@@ -28,12 +28,13 @@ elementwise,nn.Module: T5DenseGatedActDense,48,"['aten::mul', 'nn.Module: T5Dens
 elementwise,nn.Module: T5LayerFF,48,"['aten::add', 'nn.Module: T5LayerFF_0', 'nn.Module: T5Block_0', 'nn.Module: T5Stack_0', 'nn.Module: T5EncoderModel_0']",0.1861904296875,0.02613235774322053,99.8888216953419
 CONV_fwd,nn.Module: SD3Transformer2DModel,4,"['aten::miopen_convolution', 'nn.Module: SD3Transformer2DModel_0']",0.17227978515625,0.024179959115968184,99.91300165445787
 elementwise,nn.Module: CLIPAttention,88,"['aten::fill_', 'nn.Module: CLIPAttention_0', 'nn.Module: CLIPEncoderLayer_0', 'nn.Module: CLIPEncoder_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.167517578125,0.02351156977932625,99.9365132242372
-other,nn.Module: Embedding,12,"['aten::gather', 'nn.Module: Embedding_0', 'nn.Module: CLIPTextEmbeddings_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.1064677734375,0.014943055603140328,99.95145627984034
+Embedding,nn.Module: Embedding,12,"['aten::gather', 'nn.Module: Embedding_0', 'nn.Module: CLIPTextEmbeddings_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.1064677734375,0.014943055603140328,99.95145627984034
 elementwise,nn.Module: Attention,2,"['aten::add', 'nn.Module: Attention_0', 'nn.Module: UNetMidBlock2D_0', 'nn.Module: Decoder_0']",0.10243115234375,0.014376504321891595,99.96583278416223
 other,NA,15,['aten::cat'],0.09416015625,0.013215646434741206,99.97904843059698
 elementwise,nn.Module: Linear,3,"['aten::add_', 'nn.Module: Linear_434', 'nn.Module: Attention_0', 'nn.Module: UNetMidBlock2D_0', 'nn.Module: Decoder_0']",0.05952490234375,0.008354489783862249,99.98740292038084
-elementwise,nn.Module: CLIPTextTransformer,8,"['aten::copy_', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.04053369140625,0.005689019173860048,99.9930919395547
-reduce,nn.Module: CLIPTextTransformer,4,"['aten::argmax', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.022390625,0.0031425880673692837,99.99623452762206
+reduce,nn.Module: CLIPTextTransformer,4,"['aten::argmax', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.022390625,0.0031425880673692837,99.9905455084482
+Embedding,nn.Module: CLIPTextTransformer,4,"['aten::index', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.02230908203125,0.003131143279179065,99.99367665172738
+elementwise,nn.Module: CLIPTextTransformer,4,"['aten::copy_', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.018224609375,0.0025578758946809828,99.99623452762206
 elementwise,nn.Module: CLIPTextEmbeddings,4,"['aten::add', 'nn.Module: CLIPTextEmbeddings_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.0158603515625,0.002226045568830449,99.9984605731909
 other,nn.Module: CLIPTextTransformer,4,"['aten::arange', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModelWithProjection_0']",0.00584326171875,0.0008201184447445966,99.99928069163565
 elementwise,nn.Module: SD3Transformer2DModel,3,"['aten::copy_', 'nn.Module: SD3Transformer2DModel_0']",0.005125,0.0007193083643385382,99.99999999999999

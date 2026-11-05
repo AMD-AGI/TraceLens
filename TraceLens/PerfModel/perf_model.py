@@ -3262,7 +3262,7 @@ class EmbeddingLookup:
         args = event.get("args") or {}
         dims = args.get("Input Dims") or []
         types = args.get("Input type") or []
-        value_tensors = []
+        tensors = []
         index_shapes = []
         index_dtype = None
         for i, shape in enumerate(dims):
@@ -3276,27 +3276,44 @@ class EmbeddingLookup:
             parsed = cls._flat_shape(shape)
             if parsed is None:
                 continue
-            if cls._is_index_dtype(dtype):
-                index_shapes.append(parsed)
-                index_dtype = dtype
-            else:
-                value_tensors.append((parsed, dtype))
-        if not value_tensors:
+            tensors.append((parsed, dtype))
+        if not tensors:
             raise ValueError(f"{cls.__name__} needs the tensor being indexed")
-        value_shape, row_dtype = value_tensors[0]
+        # The first tensor is the table, even when it stores integers. Later
+        # integer tensors are indices. ``index_put`` writes a values tensor
+        # after the index list, and that tensor is an integer as often as not.
+        value_shape, row_dtype = tensors[0]
+        rest = tensors[1:]
+        values_tensor = None
+        if cls.kind == "index_put" and rest:
+            values_tensor = rest[-1]
+            rest = rest[:-1]
+        for shape, dtype in rest:
+            if cls._is_index_dtype(dtype) or not dtype:
+                index_shapes.append(shape)
+                if cls._is_index_dtype(dtype):
+                    index_dtype = dtype
+                elif index_dtype is None:
+                    index_dtype = "long int"
         out_dtype = row_dtype
         if index_shapes:
             tokens = cls._broadcast_numel(index_shapes)
             index_elems = sum(prod(shape) for shape in index_shapes)
-            if cls.kind == "index_put" and len(value_tensors) > 1:
-                payload = value_tensors[-1][0]
-                out_dtype = value_tensors[-1][1]
-                gathered = prod(payload)
+            if values_tensor is not None:
+                out_dtype = values_tensor[1]
+                gathered = prod(values_tensor[0])
             else:
                 n_index = len(index_shapes)
                 tail = value_shape[n_index:] if n_index < len(value_shape) else ()
                 gathered = tokens * (prod(tail) if tail else 1)
             hidden = gathered // tokens if tokens else 0
+        elif values_tensor is not None:
+            # Indices were not recorded. The values tensor is the payload.
+            tokens = prod(values_tensor[0])
+            hidden = 1
+            index_elems = 0
+            index_dtype = "long int"
+            out_dtype = values_tensor[1]
         else:
             # The index list was not recorded. Charge the indexed tensor.
             tokens = prod(value_shape)

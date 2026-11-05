@@ -197,6 +197,22 @@ def test_index_put_writes_values_and_rereads_when_accumulating():
     assert aten_index_put(accumulating).bytes() == 3 * 4 * 16 * 2 + 4 * 8
 
 
+def test_index_put_of_an_integer_table_uses_the_values_tensor():
+    # A cache write records the table as ``int`` and the index list as an empty
+    # placeholder. The table is not an index, and the last tensor is the payload.
+    event = _event(
+        [[3682, 131076], [], [16], []],
+        ["int", "", "int", "Scalar"],
+        concrete=["", "", "", "False"],
+        name="aten::index_put_",
+    )
+    model = aten_index_put(event)
+    assert model.param_details["tokens"] == 16
+    assert model.param_details["hidden"] == 1
+    assert model.param_details["index_elems"] == 0
+    assert model.bytes() == 2 * 16 * 4
+
+
 def test_unknown_dtype_has_no_byte_count():
     event = _event([[8, 4], [8]], ["not_a_dtype", "long int"])
     model = aten_embedding(event)
