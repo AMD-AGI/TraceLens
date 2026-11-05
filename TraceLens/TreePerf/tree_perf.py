@@ -1894,7 +1894,9 @@ class TreePerfAnalyzer:
             # to one CPU op. Categorizing from the launch's first kernel would
             # label every kernel in the graph with that first kernel's category.
             synthetic_op.pop("op category", None)
-            synthetic_op["children"] = []
+            # The row's subtree is its own kernel. Perf-modeled rows time their
+            # subtree, so an empty children list reads as zero kernel time.
+            synthetic_op["children"] = [kernel["UID"]]
             synthetic_op["kernel_details"] = [
                 {
                     "name": kernel.get("name", ""),

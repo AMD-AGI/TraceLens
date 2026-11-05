@@ -37,6 +37,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     CaptureAnnotation,
     filename_request_bs,
 )
+from TraceLens.ModelUtils.graph_schedule import graph_model_from_config
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -618,7 +619,14 @@ def generate_perf_report_pytorch(
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
     graph_model=None,
+    # Hugging Face config.json of the served model, and the tensor-parallel
+    # degree of this trace. Builds graph_model when graph_model is not given.
+    graph_model_config_path: Optional[str] = None,
+    graph_model_tp: int = 1,
 ) -> Dict[str, pd.DataFrame]:
+    if graph_model is None and graph_model_config_path is not None:
+        with open(graph_model_config_path, "r", encoding="utf-8") as handle:
+            graph_model = graph_model_from_config(json.load(handle), graph_model_tp)
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
         gpu_arch_platform=gpu_arch_platform,
@@ -1424,6 +1432,20 @@ def main():
         "per-category *_kl_overlap / *_fwd_kl_overlap / *_bwd_kl_overlap sheets when data exists.",
     )
 
+    parser.add_argument(
+        "--graph_model_config",
+        type=str,
+        required=False,
+        help="Hugging Face config.json of the model. With --graph_model_tp, it "
+        "schedules each graph kernel to its model launch and fills input shapes.",
+    )
+    parser.add_argument(
+        "--graph_model_tp",
+        type=int,
+        default=1,
+        help="Tensor-parallel degree of the traced rank, used with --graph_model_config.",
+    )
+
     args = parser.parse_args()
     if args.comparison_json_path and args.precomputed_diff_stats:
         parser.error(
@@ -1484,6 +1506,8 @@ def main():
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,
+        graph_model_config_path=args.graph_model_config,
+        graph_model_tp=args.graph_model_tp,
     )
 
 

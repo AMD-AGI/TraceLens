@@ -1492,6 +1492,9 @@ class TestTreePerfCollectPhase12:
         assert len(named) == 1
         assert "Synthetic Op" not in named[0]["name"]
         assert [k["name"] for k in named[0]["kernel_details"]] == [kernel]
+        # The row times its own kernel. A perf-modeled row reads its subtree, so
+        # a row with no subtree kernel would report zero time.
+        assert analyzer.agg_kernels_in_subtree(named[0])[0] == 10
 
 
 @pytest.mark.skipif(not os.path.isfile(RESNET_TRACE), reason="resnet trace missing")
