@@ -9,7 +9,7 @@
 The contract between the ``render_analysis_json`` producer and any downstream
 consumer of ``analysis.json``. Additive-only: a drifted field surfaces as a
 ``TypedDict`` mismatch at the read boundary, never a silent mis-parse. Carries
-the compute and fusion tiers (standalone only); there is no system task yet.
+the compute, fusion and system tiers (standalone only).
 ``impact.mid`` is not additive across tiers: medium/low-confidence fusion
 candidates do not null out their compute rows, so the same time can appear in
 both ``compute_optimizations`` and ``fusion_optimizations``.
@@ -57,7 +57,7 @@ class ComputeMember(TaskMember):
 
 
 class _TaskBase(TypedDict):
-    """Fields shared by both task tiers."""
+    """Fields shared by all task tiers."""
 
     priority: int
     operation: Optional[str]
@@ -65,13 +65,13 @@ class _TaskBase(TypedDict):
     reasoning: Optional[str]
     resolution: Optional[str]
     prose_truncated: bool
-    impact: Impact
     node: Optional[str]
 
 
 class ComputeTask(_TaskBase):
     """An operation-grouped compute optimization task."""
 
+    impact: Impact
     members: list[ComputeMember]
 
 
@@ -80,14 +80,31 @@ class FusionTask(_TaskBase):
 
     The severity color and ``P<N>:`` prefix are stripped from the heading.
 
-    ``kind`` is the fusion kind named in the Identification's "Surfaced as"
-    sentence (null when it names none), ``reasoning`` is always null (fusion blocks
-    carry no such label) and ``priority`` is the rank within fusion by
-    ``impact.mid``.
+    ``reasoning`` is always null (fusion blocks carry no such label) and
+    ``priority`` is the rank within fusion by ``impact.mid``.
     """
 
-    kind: Optional[str]
+    impact: Impact
     members: list[TaskMember]
+
+
+class SystemMember(TypedDict):
+    """One ``| Metric | Value |`` row of a system finding; ``value`` is null when unreadable."""
+
+    metric: str
+    value: Optional[float]
+    unit: str
+
+
+class SystemTask(_TaskBase):
+    """One system finding; ``operation`` is its fixed title.
+
+    System impact is not quantifiable from trace data, so ``impact`` is always
+    null, and ``priority`` is the report P-number.
+    """
+
+    impact: None
+    members: list[SystemMember]
 
 
 class ReportInfo(TypedDict):
@@ -135,4 +152,5 @@ class AnalysisReport(TypedDict):
     top_operations: NotRequired[list[TopOperationRow]]
     compute_optimizations: list[ComputeTask]
     fusion_optimizations: list[FusionTask]
+    system_optimizations: list[SystemTask]
     appendix: NotRequired[Appendix]

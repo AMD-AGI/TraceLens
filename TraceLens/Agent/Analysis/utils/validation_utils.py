@@ -30,12 +30,14 @@ from dataclasses import fields
 
 from .kernel_fusion import FusionEstimate
 from .report_utils import load_manifest, _scan_findings_dir
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import SystemFindings
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 # Constants
 
 TIER_COMPUTE = "compute"
 TIER_FUSION = "fusion"
+TIER_SYSTEM = "system"
 # multi_trace report vocabulary: the Executive Summary's all-nodes column and the
 # per-node percent column that replaces %E2E.
 EXEC_TOTAL_COL = "Total"
@@ -45,13 +47,15 @@ _FUSION_ROW_KEYS = tuple(
 )
 
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
-_COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
-_SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
+_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
 # Optional icon / prefix before P<N> (e.g. kernel fusion `### 🔴 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
 _FUSION_EMPTY_SENTENCE = "No kernel fusion opportunities detected."
 _DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
+_PRIORITY_ICONS = "🔴🟡🟢"
+PRIORITY_PREFIX_RE = re.compile(rf"^(?:[{_PRIORITY_ICONS}]\s*)?(?:P\d+:\s*)?")
+_SYSTEM_DATA_HEADER = ["Metric", "Value"]
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
 )
@@ -139,25 +143,13 @@ def _metrics_json_for_findings(filepath):
     return os.path.join(output_dir, "category_data", f"{stem}_metrics.json")
 
 
-def _category_findings_empty(filepath):
-    """True when metrics JSON exists and category_findings is an empty list (sub_agent_spec § empty)."""
-    mp = _metrics_json_for_findings(filepath)
-    try:
-        with open(mp) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-    cf = data.get("category_findings")
-    return isinstance(cf, list) and len(cf) == 0
-
-
-def _fusion_estimates_empty(filepath):
-    """True when the fusion metrics JSON has no impact_estimates (kernel-fusion-analyzer § empty)."""
+def _load_findings_metrics(filepath):
+    """Parsed metrics JSON for a *_findings.md, or {} when missing or unreadable."""
     try:
         with open(_metrics_json_for_findings(filepath)) as f:
-            return not json.load(f).get("impact_estimates")
+            return json.load(f)
     except (OSError, json.JSONDecodeError):
-        return False
+        return {}
 
 
 def _load_manifest_if_present(output_dir):
@@ -198,8 +190,10 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     with open(filepath, "r") as f:
         content = f.read()
 
+    metrics = _load_findings_metrics(filepath)
+
     # With no impact_estimates the spec's file is a heading and this one sentence.
-    if tier == TIER_FUSION and _fusion_estimates_empty(filepath):
+    if tier == TIER_FUSION and metrics and not metrics.get("impact_estimates"):
         if _FUSION_EMPTY_SENTENCE in content:
             return True, []
         return False, [
@@ -222,7 +216,19 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     rec_start = content.find("## Recommendations")
     da_start = content.find("## Detailed Analysis")
 
-    relaxed_empty = tier == "compute" and _category_findings_empty(filepath)
+    system_entries = None
+    if tier == TIER_SYSTEM:
+        if isinstance(metrics.get("system_findings"), list):
+            system_entries = metrics["system_findings"]
+        else:
+            errors.append(
+                f"system_findings is not a list in the metrics JSON "
+                f"(status={metrics.get('status')!r}); the analyzer script did not succeed"
+            )
+
+    relaxed_empty = (
+        tier == "compute" and metrics.get("category_findings") == []
+    ) or system_entries == []
 
     p_items = []
     if rec_start >= 0:
@@ -234,15 +240,28 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
         if not relaxed_empty:
             if not p_items:
                 errors.append("No ### P<N>: items found under ## Recommendations")
-            expected_labels = (
-                _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
-            )
-            for label in expected_labels:
-                if label not in rec_section:
-                    errors.append(
-                        f"Missing label {label} in ## Recommendations "
-                        f"(required for {tier} tier)"
-                    )
+            if tier != TIER_SYSTEM:
+                for label in _P_ITEM_LABELS:
+                    if label not in rec_section:
+                        errors.append(
+                            f"Missing label {label} in ## Recommendations "
+                            f"(required for {tier} tier)"
+                        )
+
+        if system_entries is not None:
+            expected = [f"### {SystemFindings.card_title(e)}" for e in system_entries]
+            headings = [ln for ln in rec_section.splitlines() if ln.startswith("### ")]
+            if headings != expected:
+                errors.append(
+                    f"## Recommendations headings {headings} must be exactly "
+                    f"{expected}, one card per metrics system_findings entry"
+                )
+            for card in re.split(r"^(?=### )", rec_section, flags=re.MULTILINE)[1:]:
+                errors.extend(
+                    f"Card {card.splitlines()[0]!r} is missing {label}"
+                    for label in _P_ITEM_LABELS
+                    if label not in card
+                )
 
     candidates = []
     if da_start >= 0:
@@ -288,6 +307,9 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     if tier == TIER_FUSION:
         errors.extend(_validate_fusion_data_tables(content, standalone_cols))
+
+    if system_entries is not None:
+        errors.extend(_system_block_errors(content, system_entries))
 
     # Marker structure validation.
     file_class = "category_findings" if tier == "compute" else "system_findings"
@@ -528,6 +550,50 @@ def _validate_fusion_data_tables(
                 f"fusion Data table at line {header_line}: header must start "
                 f"with the {n_cols} canonical columns in order "
                 f"{list(required_cols)}; got {header_cols}"
+            )
+    return errors
+
+
+def _system_block_errors(content, entries):
+    """The tier=system blocks of ``content`` against the system ``entries``: block
+    ranks equal entry ranks, and each block's ``####`` title and Data rows are
+    the entry's verbatim.
+    """
+    lines = content.splitlines()
+    blocks = list(_iter_candidate_blocks(content, TIER_SYSTEM))
+    expected_ranks = [e["rank"] for e in entries]
+    errors = []
+    if [rank for _, _, rank in blocks] != expected_ranks:
+        errors.append(
+            f"tier=system block ranks {[rank for _, _, rank in blocks]} must be "
+            f"{expected_ranks}, one block per system_findings entry"
+        )
+    by_rank = {e["rank"]: e for e in entries}
+    for start, end, rank in blocks:
+        entry = by_rank.get(rank)
+        if entry is None:
+            continue
+        heading = next((ln for ln in lines[start:end] if ln.startswith("#### ")), "")
+        title = PRIORITY_PREFIX_RE.sub("", heading[5:].strip())
+        if title != entry["title"]:
+            errors.append(
+                f"system P{rank} block heading is {title!r}, expected {entry['title']!r}"
+            )
+        table = _find_data_table(lines, start, end)
+        if table is None:
+            errors.append(f"system P{rank} block has no **Data:** table")
+            continue
+        _, header_cols, rows = table
+        if header_cols != _SYSTEM_DATA_HEADER:
+            errors.append(
+                f"system P{rank} Data header {header_cols} must be {_SYSTEM_DATA_HEADER}"
+            )
+        elif [cells for _, cells in rows] != [
+            SystemFindings.to_cells(m) for m in entry["members"]
+        ]:
+            errors.append(
+                f"system P{rank} Data rows must be the metrics members verbatim "
+                f"({[SystemFindings.to_cells(m) for m in entry['members']]})"
             )
     return errors
 
@@ -895,9 +961,9 @@ def _validate_report_args_column(content, output_dir):
     ]
 
 
-def _compute_optimizations_section(content):
-    """The ``## Compute Kernel Optimizations`` section of analysis.md, or None."""
-    sec_start = content.find("## Compute Kernel Optimizations")
+def _report_section(content, header):
+    """The ``header`` section of analysis.md, up to the next ``## ``, or None."""
+    sec_start = content.find(header)
     if sec_start < 0:
         return None
     sec_end = content.find("\n## ", sec_start + 1)
@@ -913,8 +979,10 @@ def _validate_report_priority_consistency(content, output_dir):
     R4: Each Top Operations table's rows == len(priorities), or the priorities of
     its ``node=`` when the marker carries one.
     R6: Each compute kind=p_item and detail_estimate marker's node attr ==
-    findings[N-1].node, and each fusion kind=p_item marker's node attr == the
-    manifest's focus_job (all absent outside multi_trace).
+    findings[N-1].node, and each fusion and system kind=p_item marker's node
+    attr == the manifest's focus_job (all absent outside multi_trace).
+    R7: The System-Level cards are exactly priority_data.json::system_findings,
+    in order, and each tier=system block carries its entry's title and Data rows.
 
     Silently skips when priority_data.json is absent (Step 9 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
@@ -934,7 +1002,22 @@ def _validate_report_priority_consistency(content, output_dir):
     priorities = pd.get("priorities", []) or []
     errors = []
 
-    section = _compute_optimizations_section(content)
+    system_entries = pd.get("system_findings", []) or []
+    expected_cards = [SystemFindings.card_title(e) for e in system_entries]
+    system_section = _report_section(content, "## System-Level Optimizations") or ""
+    headings = [
+        ln[4:].lstrip(_PRIORITY_ICONS + " ")
+        for ln in system_section.splitlines()
+        if ln.startswith("### ")
+    ]
+    if headings != expected_cards:
+        errors.append(
+            f"R7: System-Level cards {headings} must be {expected_cards}, "
+            f"the priority_data.json::system_findings order"
+        )
+    errors.extend(f"R7: {e}" for e in _system_block_errors(content, system_entries))
+
+    section = _report_section(content, "## Compute Kernel Optimizations")
     if section is None:
         return errors
 
@@ -995,17 +1078,15 @@ def _validate_report_priority_consistency(content, output_dir):
         if rank <= len(findings)
         for _, attrs in _marker_attrs("\n".join(lines[start:end]), "detail_estimate")
     ]
-    kf_start = content.find("## Kernel Fusion Opportunities")
-    if kf_start >= 0:
-        kf_end = content.find("\n## ", kf_start + 1)
-        focus_job = _load_manifest_if_present(output_dir).get("focus_job")
+    focus_job = _load_manifest_if_present(output_dir).get("focus_job")
+    for label, header in (
+        ("fusion", "## Kernel Fusion Opportunities"),
+        ("system", "## System-Level Optimizations"),
+    ):
         node_checks.extend(
-            (f"fusion P-item marker #{i + 1}", attrs, focus_job)
+            (f"{label} P-item marker #{i + 1}", attrs, focus_job)
             for i, (_, attrs) in enumerate(
-                _marker_attrs(
-                    content[kf_start:] if kf_end < 0 else content[kf_start:kf_end],
-                    "p_item",
-                )
+                _marker_attrs(_report_section(content, header) or "", "p_item")
             )
         )
     for label, attrs, expected in node_checks:
@@ -1097,7 +1178,7 @@ def _validate_report_reasoning_candidates(content):
     insights = _extract_detailed_analysis_subsection(
         content, "### Compute Kernel Insights"
     )
-    section = _compute_optimizations_section(content)
+    section = _report_section(content, "## Compute Kernel Optimizations")
     if insights is not None and section is not None:
         n_items = len(_P_ITEM_RE.findall(section))
         n_blocks = sum(
@@ -1246,7 +1327,7 @@ class MarkerValidator:
 
         file_class must be "category_findings" or "system_findings". Adds
         the per-tier "p_item required" check on top of `scan`.
-        skip_p_item_required: when True (empty category_findings[] per metrics), omit kind=p_item requirement.
+        skip_p_item_required: when True (empty category_findings[] or system_findings[] per metrics), omit kind=p_item requirement.
         """
         rel = os.path.basename(path)
         with open(path) as f:
@@ -1255,7 +1336,11 @@ class MarkerValidator:
         if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
             if not skip_p_item_required and "p_item" not in seen_kinds:
                 errors.append(f"{rel}: missing required kind=p_item")
-        if file_class == "system_findings" and "p_item" not in seen_kinds:
+        if (
+            file_class == "system_findings"
+            and not skip_p_item_required
+            and "p_item" not in seen_kinds
+        ):
             errors.append(f"{rel}: missing required kind=p_item")
         n_headings = len(_P_ITEM_RE.findall(text))
         n_markers = sum(
