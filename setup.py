@@ -4,45 +4,87 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import re
 import subprocess
+import urllib.request
 from datetime import datetime
 from setuptools import setup, find_packages
 
 _BASE_VERSION = "0.1.0"
-# Same pin as the Visualizer CI job. PyPI's `torch` wheel is the CUDA build;
-# the visualizer only meta-traces, so the extra installs these CPU wheels.
-_TORCH_CPU_VERSION = "2.14.0"
-_TORCH_CPU_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
-# (platform_system, platform_machine, wheel platform tag, filename has +cpu)
-_TORCH_CPU_PLATFORMS = (
-    ("Linux", "x86_64", "manylinux_2_28_x86_64", True),
-    ("Linux", "aarch64", "manylinux_2_28_aarch64", True),
-    ("Windows", "AMD64", "win_amd64", True),
-    ("Darwin", "arm64", "macosx_14_0_arm64", False),
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu/torch/"
+# Wheel files are siblings of the index directory, not children of it.
+_TORCH_CPU_WHEEL_BASE = "https://download.pytorch.org/whl/cpu/"
+_TORCH_CPU_WHEEL = re.compile(
+    r"^torch-(\d+\.\d+\.\d+)((?:\+|%2B)cpu)?-(cp\d+)-(cp\d+)-(.+)\.whl$"
 )
 
 
-def _torch_cpu_requirements():
-    """Direct CPU wheel URLs.
+def _torch_cpu_platform(tag):
+    if tag == "win_amd64":
+        return ("Windows", "AMD64")
+    if re.fullmatch(r"manylinux.+_x86_64", tag):
+        return ("Linux", "x86_64")
+    if re.fullmatch(r"manylinux.+_aarch64", tag):
+        return ("Linux", "aarch64")
+    if re.fullmatch(r"macosx_.+_arm64", tag):
+        return ("Darwin", "arm64")
+    return None
 
-    Package metadata cannot select an index, and ``pip install torch`` resolves
-    the CUDA build on PyPI. A direct URL is what makes ``.[Visualizer]`` fetch
-    the CPU wheel on its own.
+
+def _torch_cpu_requirements():
+    """Newest CPU wheel for each Python version the extra can mark.
+
+    ``pip install torch`` installs the CUDA build from PyPI. The visualizer
+    only meta-traces, and package metadata cannot point at the CPU index, so
+    the extra lists the CPU wheel by URL. The index is read when this package
+    is built. Each Python from 3.10 up gets the newest wheel published for it.
     """
+    request = urllib.request.Request(
+        _TORCH_CPU_INDEX,
+        headers={"User-Agent": "tracelens-setup"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            page = response.read().decode("utf-8", "replace")
+    except OSError as exc:
+        raise RuntimeError(
+            "Could not read the PyTorch CPU wheel index at "
+            f"{_TORCH_CPU_INDEX} to select the Visualizer torch wheel."
+        ) from exc
+
+    newest = {}
+    for name in set(re.findall(r"torch-[^\"'#<>\s]+\.whl", page)):
+        match = _TORCH_CPU_WHEEL.match(name)
+        if not match:
+            continue
+        version, _local, abi, abi2, platform_tag = match.groups()
+        if abi != abi2:
+            continue
+        platform = _torch_cpu_platform(platform_tag)
+        if platform is None:
+            continue
+        python = (int(abi[2]), int(abi[3:]))
+        if python < (3, 10):
+            continue
+        version_key = tuple(int(part) for part in version.split("."))
+        # Prefer manylinux_2_28 when one version publishes more than one tag.
+        rank = 1 if "manylinux_2_28" in platform_tag else 0
+        candidate = (version_key, rank, name.replace("+", "%2B"))
+        key = (python, platform)
+        current = newest.get(key)
+        if current is None or candidate[:2] > current[:2]:
+            newest[key] = candidate
+
+    if not newest:
+        raise RuntimeError(f"No CPU torch wheels found at {_TORCH_CPU_INDEX}.")
+
     requirements = []
-    for python in _TORCH_CPU_PYTHONS:
-        abi = "cp" + python.replace(".", "")
-        for system, machine, platform_tag, cpu_local in _TORCH_CPU_PLATFORMS:
-            local = "%2Bcpu" if cpu_local else ""
-            url = (
-                "https://download.pytorch.org/whl/cpu/"
-                f"torch-{_TORCH_CPU_VERSION}{local}-{abi}-{abi}-{platform_tag}.whl"
-            )
-            requirements.append(
-                f'torch @ {url} ; python_version == "{python}" '
-                f'and platform_system == "{system}" '
-                f'and platform_machine == "{machine}"'
-            )
+    for (python, (system, machine)), (_version, _rank, wheel) in sorted(newest.items()):
+        requirements.append(
+            f'torch @ {_TORCH_CPU_WHEEL_BASE}{wheel} ; python_version == "{python[0]}.{python[1]}" '
+            f'and platform_system == "{system}" '
+            f'and platform_machine == "{machine}"'
+        )
     return requirements
 
 

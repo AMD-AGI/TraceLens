@@ -77,7 +77,7 @@ dependency with the `[Visualizer]` extra:
 pip install -e ".[Visualizer]"
 ```
 
-The extra installs the CPU PyTorch 2.14 wheel from the PyTorch CPU index.
+The extra installs the current CPU PyTorch wheel from the PyTorch CPU index.
 PyPI's `torch` package is the CUDA build, which this extra does not use.
 
 This installs the `TraceLens.ModelUtils` and `TraceLens.Visualizer.model_explorer_export` packages and adds
