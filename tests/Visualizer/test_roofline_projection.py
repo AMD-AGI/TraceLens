@@ -721,6 +721,52 @@ def test_project_op_records_an_unresolved_input_dim():
     assert "unresolved input dim" in op.reason
 
 
+def test_project_op_costs_an_embedding_lookup_as_gathered_rows():
+    op = _project_op(
+        "embed_tokens",
+        "embed_tokens",
+        "Embedding",
+        "Embedding",
+        "nn_module",
+        "[B, S, H] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.category == "Embedding"
+    assert op.flops == 0
+    # 8 tokens, hidden 8, bf16 rows read and written, plus int64 indices.
+    assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
+
+
+@pytest.mark.parametrize(
+    "computation", ["aten::embedding", "EmbeddingBag", "Token Embedding"]
+)
+def test_project_op_costs_common_embedding_labels(computation):
+    op = _project_op(
+        "embed",
+        "embed",
+        computation,
+        computation,
+        "aten_op",
+        "[B, S, H] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.category == "Embedding"
+    assert op.flops == 0
+    assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
+
+
 def test_project_op_records_an_unmapped_computation():
     op = _project_op(
         "n1",
@@ -828,8 +874,10 @@ def test_project_roofline_fixture_coverage():
     ]
     assert rmsnorm_ops
 
-    unmodeled_names = {op.name for op in projection.unmodeled_ops}
-    assert "embed_tokens" in unmodeled_names
+    embed = next(op for op in projection.modeled_ops if op.name == "embed_tokens")
+    assert embed.category == "Embedding"
+    assert embed.flops == 0
+    assert embed.bytes > 0
 
     totals = projection.totals()
     assert totals["total_flops"] > 0

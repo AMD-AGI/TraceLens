@@ -407,6 +407,24 @@ for op in upsample_ops:
 for op in bilinear_upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
 
+# Embedding lookup is a gather: zero FLOPs, bytes for the gathered rows
+# (read and write) plus the index vector. Bag offsets are extra index reads.
+# Backward scatter-adds also re-read the updated row.
+embedding_lookup_ops = {
+    "aten::embedding": perf_model.aten_embedding,
+    "aten::embedding_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_dense_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_forward_only": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_dense_backward": perf_model.aten_embedding_bag_dense_backward,
+    "aten::index_select": perf_model.aten_index_select,
+    "aten::index_select_backward": perf_model.aten_index_select_backward,
+    "aten::gather": perf_model.aten_gather,
+}
+for op_name, op_class in embedding_lookup_ops.items():
+    op_to_perf_model_class_map[op_name] = op_class
+
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.
 # Each matcher is a callable: name -> perf_model_class | None.

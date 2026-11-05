@@ -26,10 +26,12 @@ geometry onto the node's ``details`` attr (``conv_weight=[...]``); the
 input/output shapes alone cannot recover the weight's kernel size or groups.
 A depthwise short conv packed inside a fused attention leaf is the exception:
 its kernel comes from the checkpoint (``sconv_kernel_size`` /
-``conv_kernel_size``) because that leaf has no conv node of its own. Anything
-else (embeddings, a conv with no threaded geometry and no declared short-conv
-kernel) is reported as "unmodeled" rather than silently dropped, so the
-projection's coverage is always visible instead of assumed.
+``conv_kernel_size``) because that leaf has no conv node of its own. An
+embedding lookup is a gather: zero FLOPs, and bytes for the gathered rows,
+their write, and the index vector. Anything else (a conv with no threaded
+geometry and no declared short-conv kernel) is reported as "unmodeled"
+rather than silently dropped, so the projection's coverage is always visible
+instead of assumed.
 
 Convolutional models are handled separately. The graph expands a non-uniform
 stage once (one conv node per stage, plus the stem and each stage's leading
@@ -107,6 +109,7 @@ from TraceLens.PerfModel.perf_model import (
     GEMM,
     SDPA,
     BinaryElementwise,
+    EmbeddingLookup,
     GroupedGemm,
     Normalization,
     Reduce,
@@ -1859,6 +1862,8 @@ def _is_leaf_computation(computation: str) -> bool:
         return True
     if _classify_normalization(computation) is not None:
         return True
+    if _is_embedding_lookup(computation):
+        return True
     return _is_short_conv(computation, "") or bool(
         re.search(r"(?:causal_)?conv(?:transpose)?[123]d", computation, re.I)
     )
@@ -3423,7 +3428,46 @@ def _dispatch_op_cost(
         return _binary_elementwise_cost(input_shapes, output_shape, bpe)
     if label in _UNARY_POINTWISE_COMPUTATIONS:
         return _unary_elementwise_cost(output_shape, bpe)
+    if _is_embedding_lookup(computation):
+        return _embedding_lookup_cost(input_shapes, output_shape, bpe)
     return None
+
+
+def _is_embedding_lookup(computation: str) -> bool:
+    """True for an embedding gather, including the collapsed ``Token Embedding`` tile.
+
+    Also matches the ATen and module labels a graph export uses for the same
+    lookup (``aten::embedding``, ``EmbeddingBag``). ``index_select`` and a
+    general ``gather`` stay unmodeled here: on a graph they are often views
+    or fused, while a trace still costs them through the perf model.
+    """
+    text = computation.lower().replace("_", " ").strip()
+    labels = {"embedding", "tokenembedding", "embeddingbag"}
+    squashed = text.replace(" ", "")
+    if squashed in labels:
+        return True
+    leaf = squashed.split("::")[-1]
+    return leaf in labels
+
+
+def _embedding_lookup_cost(
+    input_shapes: list[tuple[int, ...] | None],
+    output_shape: tuple[int, ...],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """Bytes for the rows the lookup gathers. The lookup itself is not a GEMM."""
+    if not output_shape or bpe is None:
+        return None
+    hidden = output_shape[-1]
+    tokens = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
+    index_bpe = 8
+    for shape in input_shapes:
+        if shape and len(shape) < len(output_shape):
+            tokens = prod(shape)
+            break
+    flops = EmbeddingLookup.flops_func(tokens, hidden)
+    bytes_moved = EmbeddingLookup.bytes_func(tokens, hidden, bpe, index_bpe)
+    return EmbeddingLookup.category, "vector", flops, bytes_moved
 
 
 def _linear_has_bias(details: str) -> bool:
