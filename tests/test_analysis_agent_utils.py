@@ -2921,40 +2921,6 @@ def _valid_compute_findings(rank=1, row=None):
     )
 
 
-_IDLE_ENTRY = {"rank": 1, **SystemFindings.make("High GPU Idle Time", 20.0, 20.0)}
-
-
-def _valid_system_findings():
-    return (
-        "## Recommendations\n\n"
-        "### P1: High GPU Idle Time\n"
-        "**Insight**: idle is high\n"
-        "**Action**: overlap host work\n"
-        "<!-- impact-begin kind=p_item low=null mid=null high=null -->\n"
-        "**Impact**: Not quantifiable from trace data\n"
-        "<!-- impact-end -->\n\n"
-        "## Detailed Analysis\n\n"
-        "<!-- reasoning-candidate tier=system rank=1 -->\n"
-        "#### High GPU Idle Time\n\n"
-        "**Identification:** Idle is 20.0%, above the 15% threshold.\n\n"
-        "**Data:**\n\n"
-        "| Metric | Value |\n|---|---|\n"
-        "| Idle Time | 20.0 ms |\n| Idle % | 20.0% |\n\n"
-        "**Impact estimate:** Impact estimate is not quantifiable from trace data.\n"
-    )
-
-
-def _write_system_findings(tmp_path, content, entries):
-    (tmp_path / "category_data").mkdir()
-    (tmp_path / "category_data" / "cpu_idle_metrics.json").write_text(
-        json.dumps({"system_findings": entries})
-    )
-    (tmp_path / "system_findings").mkdir()
-    fp = tmp_path / "system_findings" / "cpu_idle_findings.md"
-    _write(str(fp), content)
-    return str(fp)
-
-
 @pytest.fixture
 def output_dir_with_manifest(tmp_path):
     out = tmp_path / "analysis_output"
@@ -3107,6 +3073,40 @@ def test_validate_findings_file_p_item_count_mismatch(tmp_path):
     passed, errors = validate_findings_file(str(fp), "compute")
     assert not passed
     assert any("P-item count" in e or "headings but" in e for e in errors)
+
+
+_IDLE_ENTRY = {"rank": 1, **SystemFindings.make("High GPU Idle Time", 20.0, 20.0)}
+
+
+def _valid_system_findings():
+    return (
+        "## Recommendations\n\n"
+        "### P1: High GPU Idle Time\n"
+        "**Insight**: idle is high\n"
+        "**Action**: overlap host work\n"
+        "<!-- impact-begin kind=p_item low=null mid=null high=null -->\n"
+        "**Impact**: Not quantifiable from trace data\n"
+        "<!-- impact-end -->\n\n"
+        "## Detailed Analysis\n\n"
+        "<!-- reasoning-candidate tier=system rank=1 -->\n"
+        "#### High GPU Idle Time\n\n"
+        "**Identification:** Idle is 20.0%, above the 15% threshold.\n\n"
+        "**Data:**\n\n"
+        "| Metric | Value |\n|---|---|\n"
+        "| Idle Time | 20.0 ms |\n| Idle % | 20.0% |\n\n"
+        "**Impact estimate:** Impact estimate is not quantifiable from trace data.\n"
+    )
+
+
+def _write_system_findings(tmp_path, content, entries):
+    (tmp_path / "category_data").mkdir()
+    (tmp_path / "category_data" / "cpu_idle_metrics.json").write_text(
+        json.dumps({"system_findings": entries})
+    )
+    (tmp_path / "system_findings").mkdir()
+    fp = tmp_path / "system_findings" / "cpu_idle_findings.md"
+    _write(str(fp), content)
+    return str(fp)
 
 
 def test_validate_findings_file_system_pass(tmp_path):

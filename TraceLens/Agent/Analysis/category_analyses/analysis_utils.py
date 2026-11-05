@@ -96,6 +96,29 @@ HIGH_CONFIDENCE_OP_KEYS = "high_confidence_op_keys"
 
 NO_VALUE = "—"  # Table cell for a value the perf report does not provide
 
+# System findings: title -> (metric, unit) rows in card order. Key order breaks
+# rank ties.
+_MEMCPY_ROWS = (("Copy Count", "count"), ("Copy Time", "ms"), ("Copy %", "%"))
+SYSTEM_FINDING_ROWS = {
+    "High GPU Idle Time": (("Idle Time", "ms"), ("Idle %", "%")),
+    "Exposed Collective Communication": (
+        ("Exposed Communication Time", "ms"),
+        ("Exposed Communication %", "%"),
+        ("Compute/Comm Overlap %", "%"),
+        ("Total Communication Time", "ms"),
+    ),
+    "D2H Memory Copy Overhead": _MEMCPY_ROWS,
+    "H2D Memory Copy Overhead": _MEMCPY_ROWS,
+    "D2D Memory Copy Overhead": _MEMCPY_ROWS,
+}
+_SYSTEM_METRIC_UNITS = {m: u for rows in SYSTEM_FINDING_ROWS.values() for m, u in rows}
+# unit -> (cast, cell format, cell regex)
+_SYSTEM_UNITS = {
+    "ms": (float, "{} ms", re.compile(r"(\d+(?:\.\d+)?) ms")),
+    "%": (float, "{}%", re.compile(r"(\d+(?:\.\d+)?)%")),
+    "count": (int, "{}", re.compile(r"(\d+)")),
+}
+
 
 def _eff_bucket(pct):
     """Classify roofline efficiency into a coarse band for P-item grouping."""
@@ -1081,32 +1104,10 @@ def node_field(node) -> dict:
 class SystemFindings:
     """Fixed-schema system findings: ``{title, members: [{metric, value, unit}]}``."""
 
-    # title -> (metric, unit) rows in card order. Key order breaks rank ties.
-    _MEMCPY_ROWS = (("Copy Count", "count"), ("Copy Time", "ms"), ("Copy %", "%"))
-    ROWS = {
-        "High GPU Idle Time": (("Idle Time", "ms"), ("Idle %", "%")),
-        "Exposed Collective Communication": (
-            ("Exposed Communication Time", "ms"),
-            ("Exposed Communication %", "%"),
-            ("Compute/Comm Overlap %", "%"),
-            ("Total Communication Time", "ms"),
-        ),
-        "D2H Memory Copy Overhead": _MEMCPY_ROWS,
-        "H2D Memory Copy Overhead": _MEMCPY_ROWS,
-        "D2D Memory Copy Overhead": _MEMCPY_ROWS,
-    }
-    _METRIC_UNITS = {m: u for rows in ROWS.values() for m, u in rows}
-    # unit -> (cast, cell format, cell regex)
-    _UNITS = {
-        "ms": (float, "{} ms", re.compile(r"(\d+(?:\.\d+)?) ms")),
-        "%": (float, "{}%", re.compile(r"(\d+(?:\.\d+)?)%")),
-        "count": (int, "{}", re.compile(r"(\d+)")),
-    }
-
-    @classmethod
-    def make(cls, title: str, *values) -> dict:
+    @staticmethod
+    def make(title: str, *values) -> dict:
         """A finding: ``values`` in the title's row order, cast per unit, None kept."""
-        rows = cls.ROWS[title]
+        rows = SYSTEM_FINDING_ROWS[title]
         if len(values) != len(rows):
             raise ValueError(f"{title!r} takes {len(rows)} values, got {len(values)}")
         return {
@@ -1114,7 +1115,7 @@ class SystemFindings:
             "members": [
                 {
                     "metric": metric,
-                    "value": None if value is None else cls._UNITS[unit][0](value),
+                    "value": None if value is None else _SYSTEM_UNITS[unit][0](value),
                     "unit": unit,
                 }
                 for (metric, unit), value in zip(rows, values)
@@ -1126,12 +1127,12 @@ class SystemFindings:
         """``P<rank>: <title>`` of a ranked finding, the heading text of its card."""
         return f"P{entry['rank']}: {entry['title']}"
 
-    @classmethod
-    def rank(cls, entries: List[dict]) -> List[dict]:
+    @staticmethod
+    def rank(entries: List[dict]) -> List[dict]:
         """Number findings from 1 by descending share, the first ``%`` row of each;
-        ties keep ``ROWS`` order.
+        ties keep ``SYSTEM_FINDING_ROWS`` order.
         """
-        titles = list(cls.ROWS)
+        titles = list(SYSTEM_FINDING_ROWS)
 
         def sort_key(entry):
             share = next(m["value"] for m in entry["members"] if m["unit"] == "%")
@@ -1142,22 +1143,22 @@ class SystemFindings:
             for rank, entry in enumerate(sorted(entries, key=sort_key), start=1)
         ]
 
-    @classmethod
-    def to_cells(cls, row: dict) -> List[str]:
+    @staticmethod
+    def to_cells(row: dict) -> List[str]:
         """``[metric, value cell]`` of a member row; a null value is ``NO_VALUE``."""
         if row["value"] is None:
             return [row["metric"], NO_VALUE]
-        return [row["metric"], cls._UNITS[row["unit"]][1].format(row["value"])]
+        return [row["metric"], _SYSTEM_UNITS[row["unit"]][1].format(row["value"])]
 
-    @classmethod
-    def from_cells(cls, cells: List[str]) -> Optional[dict]:
+    @staticmethod
+    def from_cells(cells: List[str]) -> Optional[dict]:
         """Inverse of ``to_cells``. None when the row is not a contract metric;
         a value cell that does not read back as its metric's unit becomes null.
         """
-        if len(cells) != 2 or cells[0] not in cls._METRIC_UNITS:
+        if len(cells) != 2 or cells[0] not in _SYSTEM_METRIC_UNITS:
             return None
-        metric, unit = cells[0], cls._METRIC_UNITS[cells[0]]
-        cast, _, cell_re = cls._UNITS[unit]
+        metric, unit = cells[0], _SYSTEM_METRIC_UNITS[cells[0]]
+        cast, _, cell_re = _SYSTEM_UNITS[unit]
         match = cell_re.fullmatch(cells[1])
         value = cast(match.group(1)) if match else None
         return {"metric": metric, "value": value, "unit": unit}

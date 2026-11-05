@@ -32,7 +32,6 @@ from analysis_utils import (
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 # Constants
-
 MEMCPY_PCT_THRESHOLD = 5
 MEMCPY_COUNT_THRESHOLD = 10
 EXPOSED_COMM_PCT_THRESHOLD = 5
