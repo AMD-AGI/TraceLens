@@ -7012,3 +7012,14 @@ class TestSyntheticOpPerfModels:
         assert model.bytes() > 0
         assert model.get_maf_type() == "matrix"
         assert model.get_compute_precision() == "fp8"
+
+    def test_propagate_annotation_no_annotations(self):
+        """Early return when trace has no user_annotation events."""
+        from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops
+
+        class FakeTree:
+            events = [{"cat": "cpu_op", "name": "no_annotations_here"}]
+
+        events = [{"name": "op1", "ts": 100, "dur": 10}]
+        _propagate_annotation_to_synthetic_ops(FakeTree(), events)
+        assert "annotation" not in events[0]
