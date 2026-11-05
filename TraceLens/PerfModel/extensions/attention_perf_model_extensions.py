@@ -8,6 +8,8 @@
 Performance models for pseudo-op extensions.
 """
 
+import re
+
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
@@ -1335,6 +1337,15 @@ class paged_mqa_logits_preshuffle_synthetic:
     BPE_W = 4
     BPE_OUT = 4
 
+    _NAME_PARAMS_RE = re.compile(r"NUM_HEADS_(\d+)_HEAD_SIZE_(\d+)")
+
+    @classmethod
+    def _parse_dims_from_name(cls, name):
+        m = cls._NAME_PARAMS_RE.search(name)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        return None, None
+
     def __init__(self, event, arch=None, python_path=None):
         self.event = event
         self.arch = arch
@@ -1348,19 +1359,22 @@ class paged_mqa_logits_preshuffle_synthetic:
             sum_len = stats["c_sqsk"] + stats["g_sqsk"]
             seq_q = stats["c_sq"] + stats["g_sq"]
             kv_touched = stats["c_sk"] + stats["g_sk"]
-            tp = (arch or {}).get("tp_world_size")
-            # All MLA models (DeepSeek-V2/V2.5/V3/V3.1, GLM-5.2/5.3)
-            # use 128 total heads. H_Q = TOTAL_HEADS / TP.
-            if tp is None:
-                return {"_no_perf": True}
-            H_Q = cls.TOTAL_HEADS // tp
+            # Try parsing H and D from the kernel name first (non-paged
+            # variant embeds NUM_HEADS and HEAD_SIZE in the Triton
+            # kernel name). Fall back to TOTAL_HEADS / TP from arch.
+            H_Q, d_h_qk = cls._parse_dims_from_name(event.get("name", ""))
+            if H_Q is None:
+                tp = (arch or {}).get("tp_world_size")
+                if tp is None:
+                    return {"_no_perf": True}
+                H_Q = cls.TOTAL_HEADS // tp
+                d_h_qk = cls.HEAD_DIM
             return {
                 "H_Q": H_Q,
-                "d_h_qk": cls.HEAD_DIM,
+                "d_h_qk": d_h_qk,
                 "sum_len": sum_len,
                 "seq_q": seq_q,
                 "kv_touched": kv_touched,
-                "tp": tp,
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}

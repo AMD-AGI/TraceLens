@@ -67,7 +67,7 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
     (re.compile(r".*allreduce_fusion_kernel_1stage"), "CustomCollective"),
-    (re.compile(r".*paged_mqa_logits"), "InferenceAttention"),
+    (re.compile(r".*(?:paged_)?mqa_logits"), "InferenceAttention"),
 ]
 
 
@@ -478,10 +478,10 @@ def _match_allreduce_fusion_1stage(name):
 register_perf_model_matcher(_match_allreduce_fusion_1stage)
 
 
-def _match_paged_mqa_logits(name):
-    """Resolve gluon/deepgemm paged MQA logits kernels (DSA indexer) when they
-    appear as Synthetic Ops with template/variant suffixes in the name."""
-    if "paged_mqa_logits" in name:
+def _match_mqa_logits(name):
+    """Resolve gluon/deepgemm MQA logits kernels (DSA indexer) when they
+    appear as Synthetic Ops — both paged (preshuffle) and non-paged variants."""
+    if "mqa_logits" in name:
         from TraceLens.PerfModel.extensions import (
             attention_perf_model_extensions as _a,
         )
@@ -490,7 +490,7 @@ def _match_paged_mqa_logits(name):
     return None
 
 
-register_perf_model_matcher(_match_paged_mqa_logits)
+register_perf_model_matcher(_match_mqa_logits)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,
