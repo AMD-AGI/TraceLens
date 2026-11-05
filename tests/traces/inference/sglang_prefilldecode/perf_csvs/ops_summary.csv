@@ -11,7 +11,7 @@ aten::copy_,nn.Module: Qwen3Attention,3389.9130859375,3389.9130859375,72,3.38991
 sglang::store_cache,nn.Module: RadixAttention,1271.2177734375,1271.2177734375,36,1.2712177734375,36,['InferenceAttention'],"['sglang::store_cache', 'nn.Module: RadixAttention_0', 'nn.Module: Qwen3Attention_0', 'nn.Module: Qwen3DecoderLayer_0', 'nn.Module: Qwen3Model_0']",0.25795210642715505,99.85510930370431
 aten::mm,nn.Module: LogitsProcessor,436.3310546875,436.3310546875,1,0.4363310546875,1,['GEMM'],"['aten::mm', 'nn.Module: LogitsProcessor_0']",0.08853912917837009,99.94364843288268
 aten::argmax,nn.Module: Sampler,74.349609375,74.349609375,1,0.074349609375,1,['reduce'],"['aten::argmax', 'nn.Module: Sampler_0']",0.015086823635620236,99.9587352565183
-aten::gather,nn.Module: VocabParallelEmbedding,66.2578125,66.2578125,1,0.0662578125,1,['Embedding'],"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.013444857882543435,99.97218011440084
+aten::gather,nn.Module: VocabParallelEmbedding,66.2578125,66.2578125,1,0.0662578125,1,['DataMovement'],"['aten::gather', 'nn.Module: VocabParallelEmbedding_0', 'nn.Module: Qwen3Model_0']",0.013444857882543435,99.97218011440084
 aten::copy_,NA,33.0419921875,33.0419921875,7,0.0330419921875,7,['elementwise'],['aten::copy_'],0.006704792572453972,99.97888490697329
 aten::copy_,nn.Module: LogitsProcessor,15.5419921875,15.5419921875,2,0.0155419921875,2,['elementwise'],"['aten::copy_', 'nn.Module: LogitsProcessor_0']",0.0031537394352181168,99.98203864640851
 aten::_local_scalar_dense,NA,15.1396484375,15.1396484375,3,0.0151396484375,3,['other'],['aten::_local_scalar_dense'],0.003072096918893274,99.98511074332741
@@ -19,7 +19,7 @@ aten::sub,NA,11.17578125,11.17578125,2,0.01117578125,2,['elementwise'],['aten::s
 aten::max,NA,10.373046875,10.373046875,2,0.010373046875,2,['reduce'],['aten::max'],0.0021048708941807624,99.98948337382554
 aten::cumsum,NA,9.05078125,9.05078125,2,0.00905078125,2,['reduce'],['aten::cumsum'],0.0018365602944141694,99.99131993411994
 hipLaunchKernel,NA,7.009765625,7.009765625,1,0.007009765625,1,['other'],['hipLaunchKernel'],0.0014224028693682464,99.99274233698931
-aten::index,nn.Module: LogitsProcessor,6.087890625,6.087890625,1,0.006087890625,1,['Embedding'],"['aten::index', 'nn.Module: LogitsProcessor_0']",0.0012353384630317146,99.99397767545234
+aten::index,nn.Module: LogitsProcessor,6.087890625,6.087890625,1,0.006087890625,1,['DataMovement'],"['aten::index', 'nn.Module: LogitsProcessor_0']",0.0012353384630317146,99.99397767545234
 sglang_profiler::forward_batch_info_compute_position_triton,NA,5.7275390625,5.7275390625,1,0.0057275390625,1,['other'],['sglang_profiler::forward_batch_info_compute_position_triton'],0.0011622168889446594,99.99513989234129
 aten::sub,nn.Module: LogitsProcessor,5.607421875,5.607421875,1,0.005607421875,1,['elementwise'],"['aten::sub', 'nn.Module: LogitsProcessor_0']",0.0011378430309156409,99.9962777353722
 aten::cumsum,nn.Module: LogitsProcessor,5.4873046875,11.17578125,1,0.0054873046875,1,['reduce'],"['aten::cumsum', 'nn.Module: LogitsProcessor_0']",0.0011134691728866225,99.9973912045451
