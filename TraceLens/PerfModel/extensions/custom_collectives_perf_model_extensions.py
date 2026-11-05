@@ -14,7 +14,6 @@ from TraceLens.PerfModel.utils import (
     cxx_dtype_to_torch,
     dense_counted_tensor,
     name2bpe,
-    torch_dtype_map,
 )
 
 
