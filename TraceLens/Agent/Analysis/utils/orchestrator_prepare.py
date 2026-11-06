@@ -387,6 +387,8 @@ def main():
     print("\n[STEP 5] Loading trace tree...")
 
     merged_tree = None
+    multi_kernel_data = None
+    fusion_candidates = None
     try:
         print(f"  Loading trace: {trace_path}")
         print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
@@ -681,17 +683,10 @@ def main():
     # ============================================================================
     # Multi-Kernel System-Level Category Creation
     # ============================================================================
-    multi_kernel_data_file = f"{output_dir}/category_data/multi_kernel_data.json"
-    has_multi_kernel_events = False
-    if os.path.exists(multi_kernel_data_file):
-        with open(multi_kernel_data_file, "r") as f:
-            mk_data = json.load(f)
-        has_multi_kernel_events = (
-            mk_data.get("memcpy_summary", {}).get("total_count", 0) > 0
-            or mk_data.get("nccl_summary", {}).get("total_count", 0) > 0
-        )
-
-    if has_multi_kernel_events:
+    if multi_kernel_data is not None and (
+        multi_kernel_data["memcpy_summary"]["total_count"] > 0
+        or multi_kernel_data["nccl_summary"]["total_count"] > 0
+    ):
         print("\n  Category: Multi-Kernel Issues (multi_kernel)")
         print("    ℹ️  Multi-kernel data available (memcpy/NCCL events present)")
 
@@ -709,22 +704,18 @@ def main():
     # ============================================================================
     # Kernel Fusion System-Level Category Creation (Experimental)
     # ============================================================================
-    fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
-    if os.path.exists(fusion_candidates_file):
-        with open(fusion_candidates_file, "r") as f:
-            _fc = json.load(f)
-        if _fc:
-            print("\n  Category: Kernel Fusion Opportunities (kernel_fusion)")
-            print(f"    ℹ️  {len(_fc)} fusion candidates available")
-            exported_categories.append(
-                {
-                    "name": "kernel_fusion",
-                    "display_name": "Kernel Fusion Opportunities",
-                    "skill": "kernel-fusion-analyzer",
-                    "tier": "system",
-                    "ops_count": len(_fc),
-                }
-            )
+    if fusion_candidates:
+        print("\n  Category: Kernel Fusion Opportunities (kernel_fusion)")
+        print(f"    ℹ️  {len(fusion_candidates)} fusion candidates available")
+        exported_categories.append(
+            {
+                "name": "kernel_fusion",
+                "display_name": "Kernel Fusion Opportunities",
+                "skill": "kernel-fusion-analyzer",
+                "tier": "system",
+                "ops_count": len(fusion_candidates),
+            }
+        )
 
     # ============================================================================
     # STEP 6.5: Calculate Time Metric Breakdown per Category

@@ -4443,6 +4443,45 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
     ]
 
 
+def test_orchestrator_main_ignores_stale_system_data_on_trace_failure(
+    tmp_path, monkeypatch
+):
+    out = str(tmp_path)
+    _write_minimal_orchestrator_csvs(out, comparative=False)
+    category_data = os.path.join(out, "category_data")
+    os.makedirs(category_data)
+    with open(os.path.join(category_data, "multi_kernel_data.json"), "w") as f:
+        json.dump({"memcpy_summary": {"total_count": 3}, "nccl_summary": {}}, f)
+    with open(os.path.join(category_data, "fusion_candidates.json"), "w") as f:
+        json.dump([{"base_name": "MLP"}], f)
+
+    class _FailingTreePerfAnalyzer:
+        @classmethod
+        def from_file(cls, *args, **kwargs):
+            raise RuntimeError("trace load failed")
+
+    monkeypatch.setattr(op, "TreePerfAnalyzer", _FailingTreePerfAnalyzer)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrator_prepare",
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+        ],
+    )
+    op.main()
+
+    with open(os.path.join(category_data, "category_manifest.json")) as f:
+        names = [c["name"] for c in json.load(f)["categories"]]
+    assert "multi_kernel" not in names
+    assert "kernel_fusion" not in names
+
+
 def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
     out = str(tmp_path)
     _write_minimal_orchestrator_csvs(out)
