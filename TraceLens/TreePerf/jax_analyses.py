@@ -205,10 +205,9 @@ class JaxAnalyses:
 
     @staticmethod
     def summarize_gpu_events(filename, save_preprocessed=False):
-        data = DataLoader.load_data(
-            filename_path=filename, save_preprocessed=save_preprocessed
+        events, _ = DataLoader.load_trace_events(
+            filename, save_preprocessed=save_preprocessed, framework="jax"
         )
-        events = data["traceEvents"]
         my_gpu_event_analyser = JaxGPUEventAnalyser(events)
         return JaxAnalyses.create_gpu_summary(my_gpu_event_analyser)
 
@@ -391,8 +390,7 @@ class JaxAnalyses:
     @staticmethod
     def summarize_gpu_communication_events(profile_filename, xla_filename):
         # summarizes communication events from a single step
-        data = DataLoader.load_data(profile_filename)
-        events = data["traceEvents"]
+        events, _ = DataLoader.load_trace_events(profile_filename, framework="jax")
         my_gpu_event_analyser = JaxGPUEventAnalyser(events)
         comm_xla_events = JaxAnalyses.process_communication_events_from_xla_dump(
             xla_filename
@@ -425,9 +423,9 @@ class JaxAnalyses:
         arch: dict = None,
         enable_origami_gemm: bool = False,
     ):
-        all_profile_events = DataLoader.load_data(filename_path=pb_file_name)[
-            "traceEvents"
-        ]
+        all_profile_events, _ = DataLoader.load_trace_events(
+            pb_file_name, framework="jax"
+        )
         metadata = TraceEventUtils.get_metadata(all_profile_events)
         events = TraceEventUtils.split_events_by_pid_tid(
             TraceEventUtils.non_metadata_events(all_profile_events)

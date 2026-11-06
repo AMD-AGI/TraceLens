@@ -187,7 +187,7 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
-        data = DataLoader.load_data(profile_filepath)
+        #
         # PyTorch Chrome traces carry run metadata as top-level JSON fields.
         # Field presence varies by profiler version, profiler options, and backend, e.g.
         # {
@@ -226,11 +226,12 @@ class TreePerfAnalyzer:
         #   "hip_driver_version": 70253211,  # optional; ROCm traces only
         #   "traceEvents": [...]             # required event payload
         # }
-        # Keep these trace-level fields separate from Chrome "M" metadata events.
-        trace_metadata = {
-            key: value for key, value in data.items() if key != "traceEvents"
-        }
-        data = data["traceEvents"]
+        # load_trace_events separates these from the Chrome "M" metadata events.
+        data, trace_metadata = DataLoader.load_trace_events(
+            profile_filepath,
+            capture_trace_filepath=capture_trace_filepath,
+            framework="jax" if jax else "pytorch",
+        )
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -2995,8 +2996,8 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
         *args,
         **kwargs,
     ) -> "JaxTreePerfAnalyzer":
-        data = DataLoader.load_data(profile_filepath)
-        data_pb = data["traceEvents"]
+        data_pb, _ = DataLoader.load_trace_events(profile_filepath, framework="jax")
+
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         metadata_events, events = TraceEventUtils.split_event_list(data_pb)
         linking_key = "correlation_id"
