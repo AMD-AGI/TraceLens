@@ -19,12 +19,14 @@ import re
 
 import pytest
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    _KERNEL_NAME_TRUNC_LEN,
+)
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 from TraceLens.Agent.Analysis.utils.deterministic_fallback import (
     GRAPH_REPLAY_FRACTION_MAX,
     MAX_PITEM_COUNT,
     MIN_PITEM_PERCENT_E2E,
-    _KERNEL_NAME_TRUNC_LEN,
     _normalize_kernel_name,
     check_graph_replay_coverage,
     main,

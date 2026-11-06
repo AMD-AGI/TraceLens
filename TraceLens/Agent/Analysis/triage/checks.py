@@ -26,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    IDLE_PCT_THRESHOLD,
     focus_job_utilization,
 )
 from TraceLens.util import DataLoader
@@ -113,8 +114,6 @@ _SIGNIFICANT_PCT_MIN = 4
 _RUNTIME_INSTABILITY_CV = 0.25
 # kernel/cpu_op ratio below which a split trace is flagged as missing GPU kernels.
 _SPLIT_LOW_KERNEL_RATIO = 0.1
-# GPU idle percentage above which idle time is flagged.
-_HIGH_IDLE_PCT = 15
 # Minimum cpu_op events carrying input shapes before a capture is deemed OK.
 _MIN_CPU_OP_SHAPES = 10
 # Zero-byte file count above which disk exhaustion is suspected.
@@ -611,9 +610,9 @@ def check_high_idle(run_dir, _stream_file):
             if idle is not None:
                 source = "category_manifest.json gpu_utilization.idle_time_percent"
 
-    if idle is not None and idle > _HIGH_IDLE_PCT:
+    if idle is not None and idle > IDLE_PCT_THRESHOLD:
         return FindingDraft(
-            f"High idle time (> {_HIGH_IDLE_PCT}% GPU idle)",
+            f"High idle time (> {IDLE_PCT_THRESHOLD}% GPU idle)",
             f"GPU idle time is {idle:.1f}% ({source})",
             "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
         )
@@ -986,7 +985,11 @@ def check_subagent_budget(run_dir, _stream_file):
         name = cat.get("name", "")
         if not name:
             continue
-        if name == "cpu_idle" and idle_pct is not None and idle_pct <= _HIGH_IDLE_PCT:
+        if (
+            name == "cpu_idle"
+            and idle_pct is not None
+            and idle_pct <= IDLE_PCT_THRESHOLD
+        ):
             continue
         target_dir = system_dir if cat.get("tier") == "system" else findings_dir
         if not os.path.isfile(os.path.join(target_dir, f"{name}_findings.md")):

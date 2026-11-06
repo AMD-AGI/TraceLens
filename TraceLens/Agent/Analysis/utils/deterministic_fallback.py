@@ -41,8 +41,8 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_HIGH,
     HEURISTIC_FRACTION_LOW,
     HEURISTIC_FRACTION_MID,
-    _KERNEL_NAME_TRUNC_LEN,
     gpu_utilization_from_timeline,
+    truncate_kernel_name,
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     EXEC_TOTAL_COL,
@@ -306,9 +306,7 @@ def _normalize_kernel_name(raw: str) -> str:
     # Display-only shortening for the P-item heading; truncate long device symbols
     # but never demangle (the matched symbol stays raw) and never return empty (an
     # empty heading title fails the downstream heading match and drops the block).
-    s = raw.strip()
-    if len(s) > _KERNEL_NAME_TRUNC_LEN:
-        s = s[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    s = truncate_kernel_name(raw.strip())
     if not s:
         return raw
     return s

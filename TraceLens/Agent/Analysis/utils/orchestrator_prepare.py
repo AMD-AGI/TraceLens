@@ -19,6 +19,7 @@ import traceback
 import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    IDLE_PCT_THRESHOLD,
     PEAK_MEM_BW_KEY,
     gpu_utilization_from_timeline,
     load_perf_rows,
@@ -339,9 +340,9 @@ def main():
     idle_pct = gpu_utilization_metrics["idle_time_percent"]
     print(f"  Idle: {idle_pct:.2f}%")
 
-    if idle_pct > 15:
+    if idle_pct > IDLE_PCT_THRESHOLD:
         print(
-            f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds 15% threshold"
+            f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds {IDLE_PCT_THRESHOLD}% threshold"
         )
     if gpu_utilization_metrics["computation_time_percent"] < MIN_COMPUTE_UTIL_PCT:
         print(
