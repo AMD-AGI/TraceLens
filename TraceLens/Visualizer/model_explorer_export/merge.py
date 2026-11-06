@@ -418,6 +418,15 @@ def _node_attr(node: dict[str, Any], key: str) -> str | None:
     return None
 
 
+def _node_attr_values(node: dict[str, Any], key: str) -> tuple[str, ...]:
+    """All non-empty values for repeatable structured node metadata."""
+    return tuple(
+        str(attr["value"])
+        for attr in node.get("attrs", [])
+        if attr.get("key") == key and attr.get("value")
+    )
+
+
 def _is_generator_source_node(node: dict[str, Any]) -> bool:
     """True for a tensor-*generating* op (``torch.arange``/``torch.zeros``) that
     reads no tensor operand.
@@ -2338,14 +2347,13 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     """A value written into persistent state leaves through a tile of its own.
 
     ``self.overlap_kv[name] = chunk_kv[..., :head_dim].clone()`` publishes into
-    the module's own state: nothing in THIS forward reads it, the NEXT call
-    does. With no consumer the clone reads as a dead node, which is the one
-    thing it is not -- it is the whole point of the statement.
+    the module's own state: the NEXT call reads it. A producer can also feed
+    work in this call, but that does not remove its cross-call boundary.
 
     The graph already says "a value leaves here" with an output tile, so the
     store gets one, named for the state it writes. The reader sees where the
-    value goes instead of a box wired to nothing, and the dead-node check sees
-    a legitimate sink rather than a dropped edge.
+    value goes and the dead-node check sees a legitimate sink rather than a
+    dropped edge.
     """
     consumed = {
         str(edge.get("sourceNodeId"))
@@ -2354,32 +2362,54 @@ def _publish_state_stores_through_output_tiles(nodes: list[dict[str, Any]]) -> N
     }
     additions: list[dict[str, Any]] = []
     for node in nodes:
-        if str(node["id"]) in consumed or _node_attr(node, "synthetic"):
+        if _node_attr(node, "synthetic"):
             continue
-        parts = [
-            part.strip()
-            for part in str(_node_attr(node, "details") or "").split(";")
-            if part.strip()
-        ]
-        stored = next(
-            (
-                part.split(":", 1)[1].strip()
-                for part in parts
-                if part.startswith("stores:")
-            ),
-            None,
-        )
+        stored = _node_attr_values(node, "state_write")
+        if str(node["id"]) in consumed and not stored:
+            continue
         side_effect = next(
             (
                 part.split(":", 1)[1].strip()
-                for part in parts
+                for part in str(_node_attr(node, "details") or "").split(";")
                 if part.startswith("side_effect:")
             ),
             None,
         )
         if stored:
-            sink_id = f"{node['id']}:@state_out:{stored}"
-            sink_label = stored
+            # One producer can publish several independent state values.  Each
+            # gets its own sink so graph consumers retain every identity.
+            for state in stored:
+                sink_id = f"{node['id']}:@state_out:{state}"
+                additions.append(
+                    {
+                        "id": sink_id,
+                        "label": state,
+                        "namespace": node.get("namespace", ""),
+                        "attrs": [
+                            {"key": "synthetic", "value": "@state_out"},
+                            # This is a visual boundary for a write already
+                            # represented on its producer.  Keep its identity
+                            # without making it a second costed write.
+                            {"key": "state_boundary", "value": state},
+                            {
+                                "key": "output_shape",
+                                "value": _node_attr(node, "output_shape") or "",
+                            },
+                            {
+                                "key": "output_dtype",
+                                "value": _node_attr(node, "output_dtype") or "",
+                            },
+                        ],
+                        "incomingEdges": [
+                            {
+                                "sourceNodeId": node["id"],
+                                "sourceNodeOutputId": "0",
+                                "targetNodeInputId": "0",
+                            }
+                        ],
+                    }
+                )
+            continue
         elif side_effect:
             # A discarded call (a shape check, a log) is the consumer of the
             # tensor it was handed. The call itself is not a tensor op, so the
@@ -2447,7 +2477,7 @@ def _drop_undrawn_state_reads(nodes: list[dict[str, Any]]) -> None:
             if str(node["id"]) not in consumed
             and not _node_attr(node, "synthetic")
             and "method_params:" in str(_node_attr(node, "details") or "")
-            and "stores:" not in str(_node_attr(node, "details") or "")
+            and not _node_attr_values(node, "state_write")
             and "side_effect:" not in str(_node_attr(node, "details") or "")
         }
         # A constant tile belongs to the op that reads it; when that op is not
@@ -6544,6 +6574,22 @@ def _resolve_section_tree_for_component(
                     component_label=variant.ffn_label,
                     basic_ops=basic_ops,
                 )
+                # The variant's own class was not parsed into the registry (both
+                # MLP classes live in sibling modules the entry file never
+                # defines). The attribute lookup then returns the component's
+                # own tree — the other class, the one the constructor assigned
+                # last. Leave that unresolved so the caller emits one summary
+                # tile named for the class this layer actually builds. A tree
+                # the label selected, whose class is not the component's, still
+                # stands.
+                if (
+                    resolved is not None
+                    and variant.ffn_class
+                    and variant.ffn_class != component.class_name
+                    and resolved[1].class_name == component.class_name
+                    and (spec.class_registry or {}).get(variant.ffn_class) is None
+                ):
+                    return None
                 if resolved is not None:
                     return resolved
     return _resolve_section_tree(
@@ -6623,6 +6669,30 @@ def _single_op_attrs(node: BlockNode) -> list[dict[str, str]]:
             attrs.append({"key": "raw_op", "value": value.strip()})
             break
     return attrs
+
+
+def _stamp_variant_ffn_identity(
+    summary: dict[str, Any],
+    component: BlockComponent,
+    variant: LayerVariant | None,
+) -> None:
+    """Name a collapsed FFN tile after the class THIS layer builds.
+
+    The decoder component keeps whichever class the constructor assigned last
+    (the MoE arm, for a ``dense if layer_id < threshold else MoE`` block). A
+    variant whose class was never parsed still has to say so, or every layer —
+    including the dense ones — is costed as that last class.
+    """
+    if not _component_uses_variant_ffn_class(component, variant):
+        return
+    class_name = variant.ffn_class if variant is not None else None
+    if not class_name or class_name == component.class_name:
+        return
+    from TraceLens.ModelUtils.ast_analyze import ffn_role_for_class
+
+    _set_node_attr(summary, "class_name", class_name)
+    _set_node_attr(summary, "role", ffn_role_for_class(component.attr_name, class_name))
+    summary["label"] = variant.ffn_label or class_name
 
 
 def _summary_node(
@@ -6734,6 +6804,8 @@ def _append_section(
             previous_exits,
             shape_inferencer,
         )
+        if collapsed_op is None:
+            _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 
@@ -6765,6 +6837,7 @@ def _append_section(
             previous_exits,
             shape_inferencer,
         )
+        _stamp_variant_ffn_identity(summary, component, variant)
         merged_nodes.append(summary)
         return [id_prefix]
 

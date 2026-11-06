@@ -60,8 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Project a kernel-by-kernel roofline for a model checkpoint from its "
             "config and modeling source alone, with no trace or GPU run. Ops are "
             "costed with TraceLens.PerfModel's analytical FLOPs/bytes formulas; "
-            "ops with no direct formula (embeddings, MoE routing, convolutions, "
-            "...) are reported as unmodeled rather than silently dropped."
+            "ops with no direct formula (embeddings, reshapes, a convolution with "
+            "no weight geometry) are reported as unmodeled rather than silently "
+            "dropped."
         ),
     )
     parser.add_argument(
@@ -91,6 +92,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=2048,
         metavar="N",
         help="Sequence length to project at (default: 2048)",
+    )
+    parser.add_argument(
+        "--num-predicted-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Speculative / MTP draft tokens to cost as a secondary stack "
+            "(default: 0, backbone only). Each token is one draft depth from "
+            "the parsed draft class (its own norms, projections, attention, "
+            "and dense or MoE feed-forward), capped at the depth the "
+            "checkpoint declares. With no draft class, the depth is the fixed "
+            "attention-plus-dense template. Leaves the graph already draws "
+            "are not costed again."
+        ),
     )
     parser.add_argument(
         "--dim",
@@ -295,6 +311,7 @@ def run_projection(args):
         seq_len=args.seq_len,
         extra_dims=extra_dims,
         gpu_arch=gpu_arch,
+        num_predicted_tokens=args.num_predicted_tokens,
         checkpoint=checkpoint,
     )
     # Convolutional models: the graph draws one conv per stage (and the stem /

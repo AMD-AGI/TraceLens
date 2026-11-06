@@ -2142,6 +2142,17 @@ def test_merge_section_tree_resolution_variant_fallbacks(
         == trees[2]
     )
 
+    # An unparsed variant class must not inherit the component's own tree.
+    other = _component("experts", "moe", class_name="VariantFFN", label="Experts")
+    variant.ffn_class = "UnparsedDense"
+    variant.ffn_label = "UnparsedDense"
+    assert (
+        merge._resolve_section_tree_for_component(
+            spec, other, variant=variant, basic_ops=basic
+        )
+        is None
+    )
+
 
 def test_merge_resolve_section_tree_disambiguates_and_uses_largest(
     monkeypatch: pytest.MonkeyPatch,

@@ -1252,9 +1252,9 @@ class TestCaptureMergePush95:
         (tmp_path / "ok.json.gz").write_bytes(
             b"\x1f\x8b"
         )  # invalid gzip; load may skip
-        result, batch_sizes = load_capture_folder(str(tmp_path), str(meta))
+        result, batch_sizes, _ = load_capture_folder(str(tmp_path), str(meta))
         assert isinstance(result, dict)
-        assert 32 in batch_sizes or batch_sizes == []
+        assert batch_sizes == {"target": [32]}
 
     def test_find_closest_batch_size(self):
         assert find_closest_batch_size(30, [16, 32, 64]) == 32

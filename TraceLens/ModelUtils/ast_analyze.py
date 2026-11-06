@@ -113,6 +113,14 @@ HEAD_CLASS_RE = re.compile(r"(?:^|_)head$|Head$|LMHead|CausalLMOutput", re.I)
 _MOE_BLOCK_CLASS_RE = re.compile(
     r"(?i)(?:^moe$|sparse_?moe(?:_?block)?$|moe_?block$|experts$)"
 )
+# Speculative-decoding draft blocks. vLLM names the layer
+# ``MultiTokenPredictor``, SGLang names it ``NextN``, and EAGLE keeps "eagle"
+# in the class. Unanchored on purpose: the token sits inside a longer engine
+# class name (``DeepseekV3MultiTokenPredictorLayer``). The enorm/hnorm/eh_proj
+# assignment signature is a separate structural check, not part of this pattern.
+SPECULATIVE_CLASS_RE = re.compile(
+    r"(?i)(?:multi[_ ]?token|mtp|next[_ ]?n|speculative|eagle)"
+)
 
 
 SYNTHETIC_ATTENTION = "@attention"
@@ -1476,6 +1484,104 @@ def _module_dict_registry_class_refs(tree: ast.AST) -> dict[str, list[str]]:
 #: so this module stays free of that import.
 INSTANCE_SUBMODULE_ABSENT = "@absent"
 
+#: Constructor parameter names a per-layer block uses for its own layer index.
+#: The caller supplies the index under ``"layer_idx"``; a block that names the
+#: same argument differently (``layer_id``, ``layer_num``, ...) still needs it
+#: bound so a ``layer_id < config.first_k_dense`` style branch resolves.
+_LAYER_INDEX_PARAM_NAMES = frozenset(
+    {"layer_idx", "layer_id", "layer_index", "layer_num", "layer_no", "idx", "index"}
+)
+
+
+def _augmented_param_values(
+    init: ast.FunctionDef, param_values: dict[str, Any] | None
+) -> dict[str, Any]:
+    """``param_values`` plus the block's own layer-index parameter name and any
+    literal parameter defaults.
+
+    The caller passes the concrete layer index under ``"layer_idx"``; bind it to
+    whatever the block actually calls that argument (``layer_id``, ...), and bind
+    each parameter's literal default (``force_dense_mlp: bool = False``) so a
+    branch over it folds instead of stalling on an unknown name."""
+    params = dict(param_values or {})
+    idx_val = next((params[k] for k in _LAYER_INDEX_PARAM_NAMES if k in params), None)
+    args = getattr(init, "args", None)
+    if args is None:
+        return params
+    positional = list(getattr(args, "args", []) or []) + list(
+        getattr(args, "posonlyargs", []) or []
+    )
+    if idx_val is not None:
+        for arg in positional:
+            if arg.arg not in params and arg.arg in _LAYER_INDEX_PARAM_NAMES:
+                params[arg.arg] = idx_val
+    defaults = list(getattr(args, "defaults", []) or [])
+    if defaults:
+        for arg, default in zip(
+            positional[len(positional) - len(defaults) :], defaults
+        ):
+            if arg.arg not in params and isinstance(default, ast.Constant):
+                params[arg.arg] = default.value
+    for arg, default in zip(
+        getattr(args, "kwonlyargs", []) or [], getattr(args, "kw_defaults", []) or []
+    ):
+        if (
+            default is not None
+            and arg.arg not in params
+            and isinstance(default, ast.Constant)
+        ):
+            params[arg.arg] = default.value
+    return params
+
+
+def _assigned_value_for_attr(
+    body: list[ast.stmt],
+    attr: str,
+    config: dict[str, Any],
+    self_values: dict[str, Any],
+    param_values: dict[str, Any] | None,
+) -> ast.expr | None:
+    """RHS assigned to ``self.<attr>`` in *body*, honoring ``if/else`` whose test
+    resolves (later assignments win, as Python runs them).
+
+    Unlike a flat ``ast.walk`` first-match, this follows only the taken branch of
+    a resolvable ``if``: ``if layer_id < config.dense_mlp_idx: self.mlp = Dense
+    else: self.mlp = MoE`` gives Dense for the early layers and MoE for the rest.
+    Returns ``None`` when no assignment to the attr is found down a resolvable
+    path (the caller then falls back to the structural first-match)."""
+
+    def _targets_self_attr(target: ast.expr) -> bool:
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == attr
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        )
+
+    result: ast.expr | None = None
+    for stmt in body:
+        if isinstance(stmt, ast.Assign):
+            if any(_targets_self_attr(target) for target in stmt.targets):
+                result = stmt.value
+        elif isinstance(stmt, ast.AnnAssign):
+            # ``self.mlp: nn.Module = InklingDenseMLP(...)`` -- an annotated
+            # assignment, as common as a bare one in typed modeling source.
+            if stmt.value is not None and _targets_self_attr(stmt.target):
+                result = stmt.value
+        elif isinstance(stmt, ast.If):
+            taken = _config_value(stmt.test, config, self_values, param_values)
+            if isinstance(taken, bool):
+                branch = _assigned_value_for_attr(
+                    stmt.body if taken else stmt.orelse,
+                    attr,
+                    config,
+                    self_values,
+                    param_values,
+                )
+                if branch is not None:
+                    result = branch
+    return result
+
 
 def instance_submodule_class(
     cls: "ClassStructure",
@@ -1513,25 +1619,29 @@ def instance_submodule_class(
     )
     if init is None:
         return None
-    self_values = _self_config_values(init, config, param_values)
-    assigned = next(
-        (
-            stmt.value
-            for stmt in ast.walk(init)
-            if isinstance(stmt, ast.Assign)
-            for target in stmt.targets
-            if isinstance(target, ast.Attribute)
-            and target.attr == attr
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "self"
-        ),
-        None,
-    )
+    params = _augmented_param_values(init, param_values)
+    self_values = _self_config_values(init, config, params)
+    # Honor if/else whose test resolves (dense-vs-MoE threshold on the layer
+    # index); fall back to the structural first-match for the unconditional and
+    # ternary (IfExp) cases _instance_constructed_class already handles.
+    assigned = _assigned_value_for_attr(init.body, attr, config, self_values, params)
+    if assigned is None:
+        assigned = next(
+            (
+                stmt.value
+                for stmt in ast.walk(init)
+                if isinstance(stmt, ast.Assign)
+                for target in stmt.targets
+                if isinstance(target, ast.Attribute)
+                and target.attr == attr
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ),
+            None,
+        )
     if assigned is None:
         return None
-    return _instance_constructed_class(
-        assigned, cls, attr, config, self_values, param_values
-    )
+    return _instance_constructed_class(assigned, cls, attr, config, self_values, params)
 
 
 def _instance_constructed_class(
@@ -7799,6 +7909,14 @@ class _ForwardOperationExtractor:
         # misses these because there is no local for the sliced value.
         self.return_producer_order: list[str] = []
         self.return_producer_slots: dict[str, str] = {}
+        # Every ``return`` this body actually walks, in source order, as
+        # ``(statement, [(slot label, producer or None), ...])``. A helper that
+        # returns a tuple from more than one arm (``return None, hidden + full``
+        # in one, ``return add_rmsnorm(...)`` — itself a 2-tuple — in the other)
+        # has no single bare-name tuple for the name-based pass to read, so the
+        # arms are merged positionally afterwards. Without that merge the add and
+        # the forwarded call are extracted and then left with no consumer.
+        self.return_arms: list[tuple[ast.Return, list[tuple[str, str | None]]]] = []
         # ``hidden_shape = (a, b, -1, self.head_dim)`` — a local tuple used as a
         # reshape target. Record the literal so ``view(hidden_shape)`` expands to
         # its dims rather than the un-resolvable variable name.
@@ -8430,6 +8548,46 @@ class _ForwardOperationExtractor:
                 return None, []
             return None, [node.attr]
         return None, []
+
+    def _return_arm_slots(self, value: ast.AST) -> list[tuple[str, str | None]]:
+        """One return arm as ``(label, producer)`` per tuple position.
+
+        A bare ``return callee(...)`` whose callee itself returns a tuple
+        forwards that tuple: every position is produced by this one call, so a
+        caller unpacking ``normed, hidden = helper(...)`` docks both slots
+        instead of the call (and the value it computed) reading as unconsumed.
+        An element with no name of its own (``None``, or ``hidden + full``)
+        still occupies its position, under a synthetic ``out{i}`` label, so the
+        ordinals stay aligned with the caller's unpack.
+        """
+        forwarded = self._forwarded_tuple_slots(value)
+        if forwarded is not None:
+            return forwarded
+        elements = value.elts if isinstance(value, ast.Tuple) else [value]
+        slots: list[tuple[str, str | None]] = []
+        for index, element in enumerate(elements):
+            producer, _ = self.expression(element)
+            label = self._return_element_label(element) or f"_slot{index}"
+            slots.append((label, producer))
+        return slots
+
+    def _forwarded_tuple_slots(
+        self, value: ast.AST
+    ) -> list[tuple[str, str | None]] | None:
+        """``return callee(...)`` expanded to *callee*'s own tuple return, or
+        ``None`` when *value* is not such a forward."""
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+            return None
+        callee = self.module_functions.get(value.func.id)
+        if callee is None:
+            return None
+        names = _static_tuple_return_names(callee, self.module_functions)
+        if len(names) < 2:
+            return None
+        producer, _ = self.expression(value)
+        if not producer:
+            return None
+        return [(name, producer) for name in names]
 
     def _return_element_label(self, node: ast.AST) -> str | None:
         """Base name of a return element, seeing through a trailing subscript
@@ -10417,8 +10575,10 @@ class _ForwardOperationExtractor:
         return names
 
     @staticmethod
-    def _stored_self_attr(stmt: ast.Assign | ast.AnnAssign) -> str | None:
-        """The ``self.<attr>`` a statement STORES into, through any subscript.
+    def _stored_self_attrs(
+        stmt: ast.Assign | ast.AnnAssign | ast.AugAssign,
+    ) -> tuple[str, ...]:
+        """Every persistent ``self`` destination a statement writes.
 
         ``self.overlap_kv[name] = chunk_kv[...].clone()`` publishes a value into
         persistent state. Nothing in THIS forward reads it -- the next call
@@ -10427,6 +10587,7 @@ class _ForwardOperationExtractor:
         of its own.
         """
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        stored: list[str] = []
         for target in targets:
             node = target
             while isinstance(node, ast.Subscript):
@@ -10436,25 +10597,34 @@ class _ForwardOperationExtractor:
                 and isinstance(node.value, ast.Name)
                 and node.value.id == "self"
             ):
-                return node.attr
-        return None
+                # Preserve nested and keyed destinations so separate cache
+                # entries do not collapse into one state identity.
+                stored.append(ast.unparse(target).removeprefix("self."))
+        return tuple(dict.fromkeys(stored))
 
     def _record_state_store(
-        self, stmt: ast.Assign | ast.AnnAssign, producer: str | None
+        self, stmt: ast.Assign | ast.AnnAssign | ast.AugAssign, producer: str | None
     ) -> None:
         """Mark the op behind a store to persistent state with what it writes."""
         if producer is None:
             return
-        attr = self._stored_self_attr(stmt)
-        if attr is None:
+        attrs = self._stored_self_attrs(stmt)
+        if not attrs:
             return
         for index, operation in enumerate(self.operations):
             if operation.attr_name != producer:
                 continue
-            if any(str(d).startswith("stores:") for d in operation.details):
-                return
+            existing = {
+                str(detail).split(":", 1)[1].strip()
+                for detail in operation.details
+                if str(detail).startswith("stores:")
+            }
             self.operations[index] = dataclasses.replace(
-                operation, details=(*operation.details, f"stores: {attr}")
+                operation,
+                details=(
+                    *operation.details,
+                    *(f"stores: {attr}" for attr in attrs if attr not in existing),
+                ),
             )
             return
 
@@ -11409,6 +11579,7 @@ class _ForwardOperationExtractor:
                     )
                     if isinstance(stmt.target, ast.Name):
                         self.var_producer[stmt.target.id] = producer
+                    self._record_state_store(stmt, producer)
                 continue
             if isinstance(stmt, ast.Expr):
                 value = stmt.value
@@ -11477,15 +11648,19 @@ class _ForwardOperationExtractor:
                         self.var_producer[owner.id] = producer
                 continue
             if isinstance(stmt, ast.Return) and stmt.value is not None:
-                elements = (
-                    stmt.value.elts
-                    if isinstance(stmt.value, ast.Tuple)
-                    else [stmt.value]
-                )
-                for element in elements:
-                    producer, _ = self.expression(element)
-                    label = self._return_element_label(element)
-                    if label and producer and label not in self.return_producer_slots:
+                slots = self._return_arm_slots(stmt.value)
+                self.return_arms.append((stmt, slots))
+                # A synthetic ``_slotN`` only holds a tuple position for the
+                # positional merge. Recording it here would append a second
+                # output next to a return the name-based pass already named
+                # (a ``ModelOutput(...)`` call is one value, not a tuple slot).
+                for label, producer in slots:
+                    if (
+                        label
+                        and producer
+                        and not label.startswith("_slot")
+                        and label not in self.return_producer_slots
+                    ):
                         self.return_producer_slots[label] = producer
                         self.return_producer_order.append(label)
                 continue
@@ -12144,6 +12319,127 @@ def _return_value_names(value: ast.AST) -> list[str]:
                 names.append(keyword.value.id)
         return names
     return []
+
+
+def _static_tuple_return_names(
+    func: ast.FunctionDef,
+    module_functions: dict[str, ast.FunctionDef],
+    seen: set[str] | None = None,
+) -> list[str]:
+    """Positional names of *func*'s tuple return, or ``[]`` when it returns one value.
+
+    The last ``return`` in source order wins, and ``return other(...)`` forwards
+    *other*'s tuple when that function is in *module_functions*. A tuple element
+    that is not a bare name keeps its position as ``out{i}`` so a caller unpack
+    still lines up (``return None, hidden + full`` is two positions, not one).
+    """
+    seen = set(seen or ())
+    if func.name in seen:
+        return []
+    seen.add(func.name)
+    found: list[str] = []
+
+    def _walk(body: list[ast.stmt]) -> None:
+        nonlocal found
+        for stmt in body:
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                found = _tuple_names_of(stmt.value, module_functions, seen)
+            elif isinstance(stmt, ast.If):
+                _walk(stmt.body)
+                _walk(stmt.orelse)
+            elif isinstance(stmt, (ast.For, ast.While, ast.With)):
+                _walk(list(stmt.body))
+
+    _walk(list(func.body))
+    return found
+
+
+def _tuple_names_of(
+    value: ast.AST,
+    module_functions: dict[str, ast.FunctionDef],
+    seen: set[str],
+) -> list[str]:
+    if isinstance(value, ast.Tuple) and len(value.elts) >= 2:
+        names: list[str] = []
+        for index, element in enumerate(value.elts):
+            if isinstance(element, ast.Name):
+                names.append(element.id)
+            else:
+                names.append(f"_slot{index}")
+        return names
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        callee = module_functions.get(value.func.id)
+        if callee is not None:
+            return _static_tuple_return_names(callee, module_functions, seen)
+    return []
+
+
+def _publish_branched_tuple_return(
+    extractor: "_ForwardOperationExtractor",
+    return_slots: dict[str, str],
+    return_order: list[str],
+    primary_return_slot: str | None,
+) -> tuple[dict[str, str], list[str], str | None]:
+    """Publish a multi-value return the name-based pass could not.
+
+    One arm (``return y, res``) is already named and left alone. A helper whose
+    arms disagree — one ``return None, hidden + full``, the other
+    ``return add_rmsnorm(...)`` which itself returns ``(y, res)`` — otherwise
+    publishes no aligned tuple, and both the add and the forwarded call are
+    dead nodes inside the helper. Slots merge by position: one producer is used
+    as-is, two become a branch merge so each arm stays consumed.
+    """
+    arms = extractor.return_arms
+    if not arms:
+        return return_slots, return_order, primary_return_slot
+    width = max(len(slots) for _stmt, slots in arms)
+    if width < 2:
+        return return_slots, return_order, primary_return_slot
+    if len(arms) == 1:
+        labels = [label for label, _producer in arms[0][1]]
+        if labels == return_order and all(
+            producer is None or return_slots.get(label) == producer
+            for label, producer in arms[0][1]
+        ):
+            return return_slots, return_order, primary_return_slot
+    labels = [f"_slot{index}" for index in range(width)]
+    for _stmt, slots in arms:
+        if len(slots) == width and any(
+            not label.startswith("_slot") for label, _producer in slots
+        ):
+            labels = [label for label, _producer in slots]
+            break
+    merged: list[str | None] = []
+    anchor = arms[-1][0]
+    for index in range(width):
+        producers: list[str] = []
+        for _stmt, slots in arms:
+            if index >= len(slots):
+                continue
+            producer = slots[index][1]
+            if producer and producer not in producers:
+                producers.append(producer)
+        if not producers:
+            merged.append(None)
+        elif len(producers) == 1:
+            merged.append(producers[0])
+        else:
+            acc = producers[0]
+            for other in producers[1:]:
+                acc = extractor._emit_branch_select(
+                    anchor, acc, other, "return", variable=labels[index]
+                )
+            merged.append(acc)
+    new_slots = {
+        labels[index]: producer for index, producer in enumerate(merged) if producer
+    }
+    new_primary = primary_return_slot if primary_return_slot in new_slots else None
+    if new_primary is None:
+        for label in reversed(labels):
+            if label in new_slots:
+                new_primary = label
+                break
+    return new_slots, list(labels), new_primary
 
 
 def _extract_forward_return_metadata(
@@ -12839,6 +13135,9 @@ def _forward_operations_from_forward(
                 primary_return_slot = submodule_call_slot
     if primary_return_slot is None and return_order:
         primary_return_slot = return_order[-1]
+    return_slots, return_order, primary_return_slot = _publish_branched_tuple_return(
+        extractor, return_slots, return_order, primary_return_slot
+    )
     extractor._drop_unconsumed_merges(set(return_slots.values()))
     _release_extent_only_params(extractor.operations)
     return ForwardAnalysis(
@@ -17336,6 +17635,35 @@ def build_stack_components(
                     role="norm",
                     forward_order=order.get(attr),
                     details=stack_model.init_details.get(attr, []),
+                )
+            )
+
+    # A speculative draft (MTP / NextN / EAGLE) hangs off the model, outside the
+    # decoder ModuleList. Leaving it off the tail dropped it from the graph, so
+    # the roofline could only invent that stack.
+    seen_drafts: set[tuple[str, str]] = set()
+    for owner in (stack_model, causal_lm):
+        if owner is None:
+            continue
+        order = {attr: idx for idx, attr in enumerate(owner.forward_calls)}
+        for attr, class_name in owner.init_assignments.items():
+            if class_name in _SKIP_INIT_CLASS_NAMES:
+                continue
+            if (attr, class_name) in seen_drafts:
+                continue
+            if not (
+                SPECULATIVE_CLASS_RE.search(class_name)
+                or SPECULATIVE_CLASS_RE.search(attr)
+            ):
+                continue
+            seen_drafts.add((attr, class_name))
+            tail.append(
+                _stack_component(
+                    attr_name=attr,
+                    class_name=class_name,
+                    role="other",
+                    forward_order=order.get(attr),
+                    details=owner.init_details.get(attr, []),
                 )
             )
 
