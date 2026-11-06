@@ -24,7 +24,7 @@ import ast
 import re
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, fields, replace
 from math import prod
 
@@ -32,6 +32,7 @@ import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     NO_VALUE,
+    NOT_FOUND,
     PERF_ARG_COLS,
     PERF_THREAD_COLS,
     TARGET_HIGH,
@@ -84,6 +85,8 @@ MAX_FUSION_KERNEL_COUNT = 15
 MAX_GAP = 1
 
 NN_MODULE_PREFIX = "nn.Module: "
+# Trailing instance index of a module name, as in ``layers_3``.
+MODULE_INDEX_SUFFIX = re.compile(r"_(\d+)$")
 # Case-A gates (comparative mode): trace 1 has more kernels than trace 2, by at
 # most CASE_A_MAX_DELTA, and has at most CASE_A_MAX_N1 kernels in all.
 CASE_A_MAX_DELTA = 15
@@ -98,10 +101,15 @@ SKIP_CATEGORIES = frozenset(
 )
 # Confidence, bound and fusion-type labels used at more than one site.
 CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
 BOUND_COMPUTE = "compute"
 BOUND_MEMORY = "memory"
 FUSION_TYPE_MATRIX = "matrix_compute"
 FUSION_TYPE_MEMORY = "memory_bound"
+
+# Perf-summary column holding an op's total data movement.
+DATA_MOVED_COL = "Data Moved (MB)"
 
 # Memory/compute pipeline overlap fraction (0 = no overlap, 1 = perfect overlap).
 OVERLAP_EFFICIENCY = 0.85
@@ -369,7 +377,7 @@ class FusionLabeler:
         # Also true when every kernel is matrix: nothing is left to fuse.
         if any(matrix) and all(
             kc.covers and NORM_ONLY_COVERS.issuperset(kc.covers)
-            for kc, is_matrix in zip(classes, matrix)
+            for kc, is_matrix in zip(classes, matrix, strict=True)
             if not is_matrix
         ):
             return None
@@ -381,9 +389,9 @@ class FusionLabeler:
         else:
             kind = ELEMENTWISE_CHAIN
         if any(kc.type == UNKNOWN for kc in classes):
-            confidence = "low"
+            confidence = CONFIDENCE_LOW
         elif kind == GEMM_EPILOGUE:
-            confidence = "medium"
+            confidence = CONFIDENCE_MEDIUM
         else:
             confidence = CONFIDENCE_HIGH
         return Label(kind, confidence, span)
@@ -527,8 +535,9 @@ class FusionCandidateBuilder:
         )
         return candidates
 
-    def _module_groups(self) -> list[_Group]:
-        groups: dict = {}
+    def _module_events(self) -> Iterator[tuple]:
+        """(event, name, base name, GPU UIDs) of each container event that lists two or
+        more GPU events."""
         for ev in self.tree.events:
             if self.categorizer(ev) in SKIP_CATEGORIES:
                 continue
@@ -537,8 +546,12 @@ class FusionCandidateBuilder:
                 continue
             name = ev.get("name", "")
             base = self._strip_module_index(name)
-            if not base:
-                continue
+            if base:
+                yield ev, name, base, gpu_uids
+
+    def _module_groups(self) -> list[_Group]:
+        groups: dict = {}
+        for ev, name, base, gpu_uids in self._module_events():
             launches = [x for uid in gpu_uids if (x := self._launch(uid))]
             if base in groups:
                 groups[base].instances.append(launches)
@@ -610,7 +623,7 @@ class FusionCandidateBuilder:
             labels = [self._label(i) for i in instances]
             instances = [
                 inst[lab.span[0] : lab.span[1]]
-                for inst, lab in zip(instances, labels)
+                for inst, lab in zip(instances, labels, strict=True)
                 if lab is not None and lab.span is not None
             ]
         kernels = tuple(self._with_data_moved(k) for k in instances[0])
@@ -672,19 +685,9 @@ class FusionCandidateBuilder:
             return []
 
         groups: dict = {}
-        for ev in self.tree.events:
-            if self.categorizer(ev) in SKIP_CATEGORIES:
-                continue
-            gpu_uids = list(dict.fromkeys(ev.get("gpu_events", [])))
-            if len(gpu_uids) < 2:
-                continue
-            name = ev.get("name", "")
-            base = self._strip_module_index(name)
-            if not base:
-                continue
-
+        for ev, name, base, gpu_uids in self._module_events():
             t1, lca_ids = [], set()
-            for uid in gpu_uids:
+            for uid in dict.fromkeys(gpu_uids):
                 if uid in uid_to_t1:
                     record, lca_id = uid_to_t1[uid]
                     op = self.resolver.fields(uid)
@@ -809,7 +812,7 @@ class FusionCandidateBuilder:
 
     @staticmethod
     def _strip_module_index(name: str) -> str:
-        return re.sub(r"_(\d+)$", "", name.removeprefix(NN_MODULE_PREFIX))
+        return MODULE_INDEX_SUFFIX.sub("", name.removeprefix(NN_MODULE_PREFIX))
 
     def _parent_chain(self, ev) -> list:
         """Walk ancestors and return a list of cleaned parent names (outermost last)."""
@@ -875,7 +878,7 @@ class FusionCandidateBuilder:
     @classmethod
     def _row_data_in_out(cls, row):
         """(data_in_mb, data_out_mb) of a perf-summary row."""
-        dm = perf_float(row, "Data Moved (MB)")
+        dm = perf_float(row, DATA_MOVED_COL)
         pp = row.get("perf_params", "")
         return cls._compute_data_in_out(
             row.get("op category", ""), "" if pd.isna(pp) else pp, dm
@@ -1019,6 +1022,24 @@ class FusionPricer:
             keys += [k for k in est.op_keys if replaces or tuple(k) not in matrix_keys]
         return keys
 
+    def _impact_band(
+        self, gap: float, time_ms: float
+    ) -> tuple[float, float, float] | None:
+        """Impact scores (low, mid, high) of recovering ``gap`` of ``time_ms``, or None
+        when the high case is under the savings or impact floor.
+
+        Multiplies as ``ratio * gap * time_ms`` so the scores stay bit-identical.
+        """
+        if gap * time_ms < MIN_SAVINGS_MS:
+            return None
+        low, mid, high = (
+            target / TARGET_HIGH * gap * time_ms / self.baseline_ms * 100
+            for target in (TARGET_LOW, TARGET_MID, TARGET_HIGH)
+        )
+        if high < MIN_IMPACT_SCORE:
+            return None
+        return low, mid, high
+
     def price_comparative(self, c: FusionCandidate) -> FusionEstimate | None:
         """Impact of a comparative candidate: the measured GPU time gap between trace
         1 and trace 2 kernels. None if the candidate should be skipped."""
@@ -1026,20 +1047,11 @@ class FusionPricer:
         if gap_us <= 0:
             return None
 
-        savings_high = gap_us / 1000
-        if savings_high < MIN_SAVINGS_MS:
+        band = self._impact_band(gap_us / 1000, 1.0)
+        if band is None:
             return None
-
-        savings_low = (TARGET_LOW / TARGET_HIGH) * savings_high
-        savings_mid = (TARGET_MID / TARGET_HIGH) * savings_high
+        impact_score_low, impact_score_mid, impact_score_high = band
         time_ms = c.total_kernel_time_us_trace1 / 1000
-
-        impact_score_high = savings_high / self.baseline_ms * 100
-        impact_score_low = savings_low / self.baseline_ms * 100
-        impact_score_mid = savings_mid / self.baseline_ms * 100
-
-        if impact_score_high < MIN_IMPACT_SCORE:
-            return None
 
         has_matrix_ops = any(self.forms.is_matrix(k.type) for k in c.kernels_trace1)
         return FusionEstimate(
@@ -1082,14 +1094,14 @@ class FusionPricer:
         )
         # A kernel without an op UID is its own op.
         by_op = defaultdict(list)
-        for i, (k, is_matrix) in enumerate(zip(c.kernels, matrix)):
+        for i, (k, is_matrix) in enumerate(zip(c.kernels, matrix, strict=True)):
             by_op[i if k.op_uid is None else ("op", k.op_uid)].append((k, is_matrix))
         enriched = []
         for launches in by_op.values():
             # Every kernel of an op carries the op's whole data in/out.
             k = launches[0][0]
             perf = self.perf_rows.get(tuple(k.perf_key)) if k.perf_key else None
-            dm = perf_float(perf, "Data Moved (MB)")
+            dm = perf_float(perf, DATA_MOVED_COL)
             gflops = perf_float(perf, "GFLOPS")
             peak = (
                 resolve_peak_maf(perf, self.peak_maf_tflops, None) if gflops else None
@@ -1158,22 +1170,11 @@ class FusionPricer:
                 else BOUND_MEMORY
             )
 
-        gap_high = total_savings_us / current_per_instance_us
-        gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
-        gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
-
         time_ms = c.total_kernel_time_us / 1000
-        savings_high_ms = gap_high * time_ms
-
-        if savings_high_ms < MIN_SAVINGS_MS:
+        band = self._impact_band(total_savings_us / current_per_instance_us, time_ms)
+        if band is None:
             return None
-
-        impact_score_high = gap_high * time_ms / self.baseline_ms * 100
-        impact_score_low = gap_low * time_ms / self.baseline_ms * 100
-        impact_score_mid = gap_mid * time_ms / self.baseline_ms * 100
-
-        if impact_score_high < MIN_IMPACT_SCORE:
-            return None
+        impact_score_low, impact_score_mid, impact_score_high = band
 
         warning = None
         if unmodeled_count > 0:
@@ -1312,7 +1313,7 @@ class FusionPricer:
                     "operation": operation,
                     "args": (key and format_args(dims, dtypes)) or NO_VALUE,
                     "kernel_path": (
-                        entry_point if isinstance(entry_point, str) else "Not found"
+                        entry_point if isinstance(entry_point, str) else NOT_FOUND
                     ),
                     "kernel_name": format_kernel_names(g["kernel_names"])[1],
                     "time_ms": f"{time_ms:.3f}",

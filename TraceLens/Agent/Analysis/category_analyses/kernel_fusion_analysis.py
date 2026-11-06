@@ -17,12 +17,10 @@ import json
 import os
 import sys
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_ANALYSIS_DIR = os.path.dirname(_THIS_DIR)
-sys.path.insert(0, _THIS_DIR)
+_ANALYSIS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ANALYSIS_DIR)
 
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HIGH_CONFIDENCE_OP_KEYS,
     PEAK_MEM_BW_KEY,
     focus_job_utilization,
@@ -169,7 +167,7 @@ def main():
     metrics[HIGH_CONFIDENCE_OP_KEYS] = high_confidence_op_keys
 
     output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
-    print(f"Kernel fusion analysis complete:")
+    print("Kernel fusion analysis complete:")
     print(f"  Candidates: {len(candidates)}")
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total impact_score (mid): {total_impact_score:.2f}")
