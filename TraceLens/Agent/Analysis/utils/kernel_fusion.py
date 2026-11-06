@@ -1022,18 +1022,13 @@ class FusionPricer:
             keys += [k for k in est.op_keys if replaces or tuple(k) not in matrix_keys]
         return keys
 
-    def _impact_band(
-        self, gap: float, time_ms: float
-    ) -> tuple[float, float, float] | None:
-        """Impact scores (low, mid, high) of recovering ``gap`` of ``time_ms``, or None
-        when the high case is under the savings or impact floor.
-
-        Multiplies as ``ratio * gap * time_ms`` so the scores stay bit-identical.
-        """
-        if gap * time_ms < MIN_SAVINGS_MS:
+    def _impact_band(self, savings_ms: float) -> tuple[float, float, float] | None:
+        """Impact scores (low, mid, high) of saving ``savings_ms`` at the high target,
+        or None when it is under the savings or impact floor."""
+        if savings_ms < MIN_SAVINGS_MS:
             return None
         low, mid, high = (
-            target / TARGET_HIGH * gap * time_ms / self.baseline_ms * 100
+            target / TARGET_HIGH * savings_ms / self.baseline_ms * 100
             for target in (TARGET_LOW, TARGET_MID, TARGET_HIGH)
         )
         if high < MIN_IMPACT_SCORE:
@@ -1047,7 +1042,7 @@ class FusionPricer:
         if gap_us <= 0:
             return None
 
-        band = self._impact_band(gap_us / 1000, 1.0)
+        band = self._impact_band(gap_us / 1000)
         if band is None:
             return None
         impact_score_low, impact_score_mid, impact_score_high = band
@@ -1171,7 +1166,7 @@ class FusionPricer:
             )
 
         time_ms = c.total_kernel_time_us / 1000
-        band = self._impact_band(total_savings_us / current_per_instance_us, time_ms)
+        band = self._impact_band(total_savings_us / current_per_instance_us * time_ms)
         if band is None:
             return None
         impact_score_low, impact_score_mid, impact_score_high = band
