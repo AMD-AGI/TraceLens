@@ -543,6 +543,28 @@ class TestTreePerfAnalyzer:
         df = analyzer.get_df_kernels(launcher_detail=True, cpu_op_detail=True)
         assert len(df) == 1
 
+    def test_arch_compute_units_come_from_the_trace(self):
+        devices = [{"name": "AMD Instinct MI355X", "numSms": 256}] * 2
+        tree = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": devices},
+        )
+        supplied = {"name": "MI355X", "num_cus": 304}
+        analyzer = TreePerfAnalyzer(tree, rebuild_tree=False, arch=supplied)
+        assert analyzer.arch["num_cus"] == 256
+        assert supplied["num_cus"] == 304
+
+        mixed = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": [{"numSms": 256}, {"numSms": 104}]},
+        )
+        kept = TreePerfAnalyzer(
+            mixed, rebuild_tree=False, arch={"name": "MI355X", "num_cus": 80}
+        )
+        assert kept.arch["num_cus"] == 80
+
     def test_get_df_gpu_timeline_detect_recompute(self):
         events = [
             _make_gpu_event(1, 0, 100, "kernel"),
