@@ -88,7 +88,7 @@ _CALL_CHAIN_SKIP = frozenset(
     }
 )
 
-_KERNEL_NAME_TRUNC_LEN = 75
+KERNEL_NAME_TRUNC_LEN = 75
 # What ast.literal_eval raises on malformed or hostile input.
 LITERAL_EVAL_ERRORS = (
     ValueError,
@@ -575,9 +575,9 @@ def _extract_call_chain(call_stack_full: str) -> list[str]:
 
 
 def truncate_kernel_name(name: str) -> str:
-    """Clip ``name`` to ``_KERNEL_NAME_TRUNC_LEN`` chars, marking the cut with ``...``."""
-    if len(name) > _KERNEL_NAME_TRUNC_LEN:
-        return name[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    """Clip ``name`` to ``KERNEL_NAME_TRUNC_LEN`` chars, marking the cut with ``...``."""
+    if len(name) > KERNEL_NAME_TRUNC_LEN:
+        return name[:KERNEL_NAME_TRUNC_LEN] + "..."
     return name
 
 
@@ -586,7 +586,7 @@ def format_kernel_names(kernels: list[str]) -> tuple:
 
     Returns ``(full, trunc)``: a lone kernel is its bare name; several are
     ``Kernel 1: ...<br>Kernel 2: ...``. ``trunc`` clips each individual name to
-    ``_KERNEL_NAME_TRUNC_LEN`` chars.
+    ``KERNEL_NAME_TRUNC_LEN`` chars.
     """
     if len(kernels) == 1:
         return kernels[0], truncate_kernel_name(kernels[0])
@@ -598,7 +598,7 @@ def format_kernel_names(kernels: list[str]) -> tuple:
     return full, trunc
 
 
-def _kernel_name_list(call_stack_full: str) -> list[str]:
+def kernel_name_list(call_stack_full: str) -> list[str]:
     """Extract GPU kernel name(s) from call_stack_full.
 
     Single kernel (flat list): last element is the kernel.
@@ -622,9 +622,9 @@ def _extract_kernel_names(call_stack_full: str) -> tuple:
     """Render the kernel name(s) of call_stack_full for a table cell.
 
     Returns ``(kernel_name, kernel_name_trunc)`` where the truncated form
-    clips each individual kernel name to ``_KERNEL_NAME_TRUNC_LEN`` chars.
+    clips each individual kernel name to ``KERNEL_NAME_TRUNC_LEN`` chars.
     """
-    kernels = _kernel_name_list(call_stack_full)
+    kernels = kernel_name_list(call_stack_full)
     return format_kernel_names(kernels) if kernels else ("", "")
 
 
@@ -1043,7 +1043,7 @@ def build_category_findings(
     return findings
 
 
-def _arg_pairs(input_dims_str, input_type_str) -> list:
+def arg_pairs(input_dims_str, input_type_str) -> list:
     """``("(d1,d2,...)", dtype)`` per input from Input Dims + Input type strings.
 
     Drops empty/Scalar placeholder slots, normalizes dtypes via torch_dtype_map
@@ -1084,7 +1084,7 @@ def format_args(input_dims_str, input_type_str) -> str | None:
     return (
         "<br>".join(
             f"{shape} {kind}".rstrip()
-            for shape, kind in _arg_pairs(input_dims_str, input_type_str)
+            for shape, kind in arg_pairs(input_dims_str, input_type_str)
         )
         or None
     )

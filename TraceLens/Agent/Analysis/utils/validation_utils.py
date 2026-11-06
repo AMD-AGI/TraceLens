@@ -32,7 +32,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import SystemFind
 from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionEstimate
 from TraceLens.Agent.Analysis.utils.report_utils import (
     load_manifest,
-    _scan_findings_dir,
+    scan_findings_dir,
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
@@ -408,7 +408,7 @@ def _load_compute_data_metrics(metrics_path):
     return args, paths, kernel_names
 
 
-def _iter_candidate_blocks(content, tier):
+def iter_candidate_blocks(content, tier):
     """Yield (start, end, rank) for each candidate block of ``tier``: the line-index
     range and the integer rank."""
     lines = content.splitlines()
@@ -427,7 +427,7 @@ def _split_row(line):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
-def _find_data_table(lines, start, end):
+def find_data_table(lines, start, end):
     """Locate the first markdown table after **Data:** in lines[start:end].
 
     Returns (header_line_1based, header_cols, row_iter) or None. row_iter
@@ -485,8 +485,8 @@ def _validate_compute_data_tables(
     )
     lines = content.splitlines()
     errors = []
-    for start, end, _ in _iter_candidate_blocks(content, TIER_COMPUTE):
-        table = _find_data_table(lines, start, end)
+    for start, end, _ in iter_candidate_blocks(content, TIER_COMPUTE):
+        table = find_data_table(lines, start, end)
         if table is None:
             errors.append(
                 f"compute-tier reasoning-candidate block at line {start + 1}: "
@@ -553,8 +553,8 @@ def _validate_fusion_data_tables(
     lines = content.splitlines()
     required_cols = standalone_cols
     errors = []
-    for start, end, _ in _iter_candidate_blocks(content, TIER_FUSION):
-        table = _find_data_table(lines, start, end)
+    for start, end, _ in iter_candidate_blocks(content, TIER_FUSION):
+        table = find_data_table(lines, start, end)
         if table is None:
             errors.append(
                 f"fusion-tier reasoning-candidate block at line {start + 1}: "
@@ -578,7 +578,7 @@ def _system_block_errors(content, entries):
     the entry's verbatim.
     """
     lines = content.splitlines()
-    blocks = list(_iter_candidate_blocks(content, TIER_SYSTEM))
+    blocks = list(iter_candidate_blocks(content, TIER_SYSTEM))
     expected_ranks = [e["rank"] for e in entries]
     errors = []
     if [rank for _, _, rank in blocks] != expected_ranks:
@@ -597,7 +597,7 @@ def _system_block_errors(content, entries):
             errors.append(
                 f"system P{rank} block heading is {title!r}, expected {entry['title']!r}"
             )
-        table = _find_data_table(lines, start, end)
+        table = find_data_table(lines, start, end)
         if table is None:
             errors.append(f"system P{rank} block has no **Data:** table")
             continue
@@ -681,13 +681,13 @@ def _check_coverage(output_dir, manifest):
     categories = manifest.get("categories", [])
     messages = []
 
-    found_system = set(_scan_findings_dir(output_dir, "system_findings").keys())
+    found_system = set(scan_findings_dir(output_dir, "system_findings").keys())
     expected_system = {c["name"] for c in categories if c.get("tier") == "system"}
     missing_system = expected_system - found_system
     if missing_system:
         messages.append(f"Missing system findings: {', '.join(missing_system)}")
 
-    found_compute = set(_scan_findings_dir(output_dir, "category_findings").keys())
+    found_compute = set(scan_findings_dir(output_dir, "category_findings").keys())
     expected_compute = {
         c["name"] for c in categories if c.get("tier") == "compute_kernel"
     }
@@ -1030,7 +1030,7 @@ def _validate_report_priority_consistency(content, output_dir):
             f"priority_data.json has {len(findings)} findings"
         )
 
-    p_markers = [attrs for _, attrs in _marker_attrs(section, "p_item")]
+    p_markers = [attrs for _, attrs in marker_attrs(section, "p_item")]
 
     for idx, attrs in enumerate(p_markers):
         if idx >= len(findings):
@@ -1076,9 +1076,9 @@ def _validate_report_priority_consistency(content, output_dir):
     lines = content.splitlines()
     node_checks = [
         (f"detail_estimate of P{rank}", attrs, findings[rank - 1].get(NODE_COL))
-        for start, end, rank in _iter_candidate_blocks(content, TIER_COMPUTE)
+        for start, end, rank in iter_candidate_blocks(content, TIER_COMPUTE)
         if rank <= len(findings)
-        for _, attrs in _marker_attrs("\n".join(lines[start:end]), "detail_estimate")
+        for _, attrs in marker_attrs("\n".join(lines[start:end]), "detail_estimate")
     ]
     focus_job = _load_manifest_if_present(output_dir).get("focus_job")
     for label, header in (
@@ -1088,7 +1088,7 @@ def _validate_report_priority_consistency(content, output_dir):
         node_checks.extend(
             (f"{label} P-item marker #{i + 1}", attrs, focus_job)
             for i, (_, attrs) in enumerate(
-                _marker_attrs(_report_section(content, header) or "", "p_item")
+                marker_attrs(_report_section(content, header) or "", "p_item")
             )
         )
     for label, attrs, expected in node_checks:
@@ -1193,8 +1193,8 @@ def _validate_report_reasoning_candidates(content):
     errors.extend(
         f"R5: compute P{rank} at line {start + 1} has no **Data:** table; paste it "
         f"verbatim from its category findings"
-        for start, end, rank in _iter_candidate_blocks(content, TIER_COMPUTE)
-        if _find_data_table(lines, start, end) is None
+        for start, end, rank in iter_candidate_blocks(content, TIER_COMPUTE)
+        if find_data_table(lines, start, end) is None
     )
     return errors
 
@@ -1356,8 +1356,8 @@ class MarkerValidator:
         """
         lines = text.splitlines()
         errors = []
-        for start, end, _ in _iter_candidate_blocks(text, TIER_COMPUTE):
-            table = _find_data_table(lines, start, end)
+        for start, end, _ in iter_candidate_blocks(text, TIER_COMPUTE):
+            table = find_data_table(lines, start, end)
             if table is None:
                 continue
             n_rows = sum(1 for _ in table[2])
@@ -1462,7 +1462,7 @@ class MarkerValidator:
 # ===========================================================================
 
 
-def _marker_attrs(text, kind):
+def marker_attrs(text, kind):
     """Yield (match, attrs) for each ``kind`` impact marker in ``text``."""
     for m in MarkerValidator.BEGIN_RE.finditer(text):
         attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))

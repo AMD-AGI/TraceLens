@@ -48,8 +48,8 @@ from TraceLens.Agent.Analysis.post_processing.analysis_json import (
     _strip_trailing_comment,
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
-    _find_data_table,
-    _iter_candidate_blocks,
+    find_data_table,
+    iter_candidate_blocks,
 )
 
 # Constants
@@ -537,8 +537,8 @@ def _reparse_rows(md_text):
     """Independently pull (operation, kernel_names, time_ms, pct_e2e) per row."""
     lines = md_text.splitlines()
     rows = []
-    for start, end, _ in _iter_candidate_blocks(md_text, "compute"):
-        table = _find_data_table(lines, start, end)
+    for start, end, _ in iter_candidate_blocks(md_text, "compute"):
+        table = find_data_table(lines, start, end)
         if table is None:
             continue
         _, header, row_iter = table

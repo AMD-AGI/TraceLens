@@ -462,7 +462,7 @@ class OpResolver:
         return {"op_uid": op.get("UID", uid), "perf_key": self.perf_key(op)}
 
 
-def _efficiency_parts(eff: dict) -> tuple:
+def efficiency_parts(eff: dict) -> tuple:
     """(pct, peak, unit, bound) of a ``calculate_efficiency`` result.
 
     ``bound`` reads ``compute-bound`` / ``memory-bound``; pct, peak and unit are
@@ -1270,7 +1270,7 @@ class FusionPricer:
 
     def _efficiency_cells(self, eff: dict) -> tuple:
         """(Efficiency, Bound) table cells from a ``calculate_efficiency`` result."""
-        pct, peak, unit, bound = _efficiency_parts(eff)
+        pct, peak, unit, bound = efficiency_parts(eff)
         bound_cell = bound or NO_VALUE
         if pct is None:
             return NO_VALUE, bound_cell

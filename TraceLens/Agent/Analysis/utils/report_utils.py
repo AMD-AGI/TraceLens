@@ -136,7 +136,7 @@ def load_manifest_categories(output_dir):
     return result
 
 
-def _scan_findings_dir(output_dir: str, subdir: str) -> dict:
+def scan_findings_dir(output_dir: str, subdir: str) -> dict:
     """Read all *_findings.md files from a subdirectory.
 
     Returns ``{category_name: file_content}`` for every findings file found.
@@ -177,10 +177,10 @@ def load_findings(output_dir):
         top_ops: list of top operations from the manifest
     """
     system_findings, failed_system = _split_failed(
-        _scan_findings_dir(output_dir, "system_findings")
+        scan_findings_dir(output_dir, "system_findings")
     )
     compute_findings, failed_compute = _split_failed(
-        _scan_findings_dir(output_dir, "category_findings")
+        scan_findings_dir(output_dir, "category_findings")
     )
 
     try:

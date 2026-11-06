@@ -16,11 +16,6 @@
 
 import json, os, shutil, subprocess, sys, pandas as pd, pytest, yaml
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, ANALYSIS_DIR)
-sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     SystemFindings,
     _eff_bucket,
@@ -61,7 +56,6 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _check_priority_consistency,
     _check_time_sanity,
     _extract_detailed_analysis_subsection,
-    _iter_candidate_blocks,
     _load_valid_args,
     _metrics_json_for_findings,
     _scan_args_cells,
@@ -72,6 +66,7 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _validate_report_comparison_scope_diffs,
     _validate_report_priority_consistency,
     _validate_report_reasoning_candidates,
+    iter_candidate_blocks,
     validate_findings_file,
     validate_report,
     validate_subagent_outputs,
@@ -111,6 +106,8 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
 )
 
 # Constants
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 _FUSION_ROW = (
     "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
     "50.00% of 5.3 TB/s | memory-bound |"
@@ -1979,7 +1976,7 @@ def test_validate_exec_summary_nodes(block, expected):
     assert all(any(frag in e for e in errors) for frag in expected)
 
 
-# ----- _validate_fusion_data_tables / _iter_candidate_blocks -----
+# ----- _validate_fusion_data_tables / iter_candidate_blocks -----
 
 
 def _fusion_block(header=_STANDALONE_HEADER, tier="fusion"):
@@ -2001,9 +1998,9 @@ def test_fusion_data_tables_canonical_header():
 
 def test_iter_candidate_blocks_filters_by_tier():
     content = _fusion_block() + _fusion_block(tier="compute")
-    assert [rank for _, _, rank in _iter_candidate_blocks(content, "fusion")] == [1]
-    assert len(list(_iter_candidate_blocks(content, "compute"))) == 1
-    assert list(_iter_candidate_blocks(content, "system")) == []
+    assert [rank for _, _, rank in iter_candidate_blocks(content, "fusion")] == [1]
+    assert len(list(iter_candidate_blocks(content, "compute"))) == 1
+    assert list(iter_candidate_blocks(content, "system")) == []
 
 
 # ----- FusionCandidateBuilder: pure helpers -----

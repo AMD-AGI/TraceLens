@@ -23,8 +23,8 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
     NO_VALUE,
     SystemFindings,
-    _arg_pairs,
-    _kernel_name_list,
+    arg_pairs,
+    kernel_name_list,
     node_field,
 )
 from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
@@ -33,7 +33,7 @@ from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
     TaskMember,
 )
 from TraceLens.Agent.Analysis.utils.config_utils import SCOPE_STANDALONE
-from TraceLens.Agent.Analysis.utils.kernel_fusion import _efficiency_parts
+from TraceLens.Agent.Analysis.utils.kernel_fusion import efficiency_parts
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     EXEC_TOTAL_COL,
     PCT_OF_NODE_COL,
@@ -42,9 +42,9 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     TIER_SYSTEM,
     MarkerValidator,
     PRIORITY_PREFIX_RE,
-    _find_data_table,
-    _iter_candidate_blocks,
-    _marker_attrs,
+    find_data_table,
+    iter_candidate_blocks,
+    marker_attrs,
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
@@ -190,15 +190,15 @@ def system_tasks(findings: list) -> list[SystemTask]:
 def _op_finding(op: dict) -> dict:
     """One op-metrics row as a single-member finding for ``TaskGrouper``."""
     eff = op["efficiency"]
-    pct, peak, unit, bound = _efficiency_parts(eff)
-    args = _arg_pairs(op.get("Input Dims"), op.get("Input type"))
+    pct, peak, unit, bound = efficiency_parts(eff)
+    args = arg_pairs(op.get("Input Dims"), op.get("Input type"))
     member = {
         "operation_cell": op["name"],
         "kernel_launcher_path": op["launcher_path"],
         "library": op["library"],
         "category": None,
         "analysis_md_rank": None,
-        "kernel_name": _kernel_name_list(op.get("call_stack_full")),
+        "kernel_name": kernel_name_list(op.get("call_stack_full")),
         "args_shapes": [shape for shape, _ in args] or None,
         "args_datatypes": [kind or None for _, kind in args] or None,
         "time_ms": op["time_ms"],
@@ -350,7 +350,7 @@ class AnalysisMdParser:
         attrs_by_rank = self._card_attrs(tier)
         return [
             self._parse_finding(start, end, rank, tier, attrs_by_rank)
-            for start, end, rank in _iter_candidate_blocks(self.text, tier)
+            for start, end, rank in iter_candidate_blocks(self.text, tier)
         ]
 
     def appendix(self) -> "dict | None":
@@ -428,7 +428,7 @@ class AnalysisMdParser:
 
     def _parse_system_members(self, start: int, end: int) -> list:
         """Parse the block's **Data:** table into system rows, dropping non-contract rows."""
-        table = _find_data_table(self.lines, start, end)
+        table = find_data_table(self.lines, start, end)
         if table is None:
             return []
         rows = (SystemFindings.from_cells(cells) for _, cells in table[2])
@@ -436,7 +436,7 @@ class AnalysisMdParser:
 
     def _parse_data_table(self, start: int, end: int) -> list:
         """Parse the block's **Data:** table into per-row member dicts."""
-        table = _find_data_table(self.lines, start, end)
+        table = find_data_table(self.lines, start, end)
         if table is None:
             return []
         _, header_cols, row_iter = table
@@ -493,7 +493,7 @@ class AnalysisMdParser:
         """
         anchor_re = re.compile(rf"#detailed-analysis-{tier}-[pP](\d+)")
         mapping: dict = {}
-        for m, attrs in _marker_attrs(self.text, "p_item"):
+        for m, attrs in marker_attrs(self.text, "p_item"):
             end = MarkerValidator.END_RE.search(self.text, m.end())
             if not end:
                 continue
@@ -531,7 +531,7 @@ class AnalysisMdParser:
         Fallback reports carry no card anchors, so the node rides on the p_item
         marker inside the reasoning-candidate block instead.
         """
-        for _, attrs in _marker_attrs(block, "p_item"):
+        for _, attrs in marker_attrs(block, "p_item"):
             return attrs.get(NODE_COL)
         return None
 
@@ -596,7 +596,7 @@ class AnalysisMdParser:
     def _marker_blocks(self, kind: str):
         """Yield (attrs, text) between each ``impact-begin kind=<kind>`` and its end."""
         text = self.text
-        for m, attrs in _marker_attrs(text, kind):
+        for m, attrs in marker_attrs(text, kind):
             end = MarkerValidator.END_RE.search(text, m.end())
             yield attrs, text[m.end() : end.start()] if end else text[m.end() :]
 
