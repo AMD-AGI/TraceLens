@@ -16,11 +16,6 @@
 
 import json, os, shutil, subprocess, sys, pandas as pd, pytest, yaml
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, ANALYSIS_DIR)
-sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     SystemFindings,
     _eff_bucket,
@@ -61,7 +56,6 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _check_priority_consistency,
     _check_time_sanity,
     _extract_detailed_analysis_subsection,
-    _iter_candidate_blocks,
     _load_valid_args,
     _metrics_json_for_findings,
     _scan_args_cells,
@@ -72,6 +66,7 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _validate_report_comparison_scope_diffs,
     _validate_report_priority_consistency,
     _validate_report_reasoning_candidates,
+    iter_candidate_blocks,
     validate_findings_file,
     validate_report,
     validate_subagent_outputs,
@@ -111,6 +106,8 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
 )
 
 # Constants
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 _FUSION_ROW = (
     "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
     "50.00% of 5.3 TB/s | memory-bound |"
@@ -210,7 +207,7 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 150.0,
                 "impact_score_low": 127.0,
                 "impact_score_high": 173.0,
-                "operation_count": 2,
+                "member_count": 2,
             },
         ],
     }
@@ -239,7 +236,7 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 80.0,
                 "impact_score_low": 68.0,
                 "impact_score_high": 92.0,
-                "operation_count": 1,
+                "member_count": 1,
             },
         ],
     }
@@ -1191,7 +1188,7 @@ def _valid_category_findings(rank=1):
 def test_check_findings_file_valid_category(tmp_path):
     p = tmp_path / "gemm_findings.md"
     _write(str(p), _valid_category_findings())
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert errors == []
 
 
@@ -1204,7 +1201,7 @@ def test_check_findings_file_missing_p_item(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert any("missing required kind=p_item" in e for e in errors)
 
 
@@ -1216,9 +1213,7 @@ def test_check_findings_file_skip_p_item_required(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(
-        str(p), "category_findings", skip_p_item_required=True
-    )
+    errors = MarkerValidator.check_findings_file(str(p), skip_p_item_required=True)
     assert errors == []
 
 
@@ -1232,7 +1227,7 @@ def test_check_findings_file_detail_estimate_missing(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert any("missing" in e and "detail_estimate" in e for e in errors)
 
 
@@ -1981,7 +1976,7 @@ def test_validate_exec_summary_nodes(block, expected):
     assert all(any(frag in e for e in errors) for frag in expected)
 
 
-# ----- _validate_fusion_data_tables / _iter_candidate_blocks -----
+# ----- _validate_fusion_data_tables / iter_candidate_blocks -----
 
 
 def _fusion_block(header=_STANDALONE_HEADER, tier="fusion"):
@@ -2003,9 +1998,9 @@ def test_fusion_data_tables_canonical_header():
 
 def test_iter_candidate_blocks_filters_by_tier():
     content = _fusion_block() + _fusion_block(tier="compute")
-    assert [rank for _, _, rank in _iter_candidate_blocks(content, "fusion")] == [1]
-    assert len(list(_iter_candidate_blocks(content, "compute"))) == 1
-    assert list(_iter_candidate_blocks(content, "system")) == []
+    assert [rank for _, _, rank in iter_candidate_blocks(content, "fusion")] == [1]
+    assert len(list(iter_candidate_blocks(content, "compute"))) == 1
+    assert list(iter_candidate_blocks(content, "system")) == []
 
 
 # ----- FusionCandidateBuilder: pure helpers -----
@@ -3598,7 +3593,7 @@ def test_extract_detailed_analysis_subsection():
 def test_marker_validator_system_findings_requires_p_item(tmp_path):
     fp = tmp_path / "cpu_idle_findings.md"
     _write(str(fp), "## Recommendations\n\n## Detailed Analysis\n")
-    errors = MarkerValidator.check_findings_file(str(fp), "system_findings")
+    errors = MarkerValidator.check_findings_file(str(fp))
     assert any("missing required kind=p_item" in e for e in errors)
 
 
@@ -3610,7 +3605,7 @@ def test_marker_validator_p_item_heading_mismatch(tmp_path):
     )
     fp = tmp_path / "gemm_findings.md"
     _write(str(fp), text)
-    errors = MarkerValidator.check_findings_file(str(fp), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(fp))
     assert any("headings but" in e for e in errors)
 
 
@@ -4441,6 +4436,45 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
     assert [(c["base_name"], c["fusion_kind"]) for c in candidates] == [
         ("MLP", "gemm_epilogue")
     ]
+
+
+def test_orchestrator_main_ignores_stale_system_data_on_trace_failure(
+    tmp_path, monkeypatch
+):
+    out = str(tmp_path)
+    _write_minimal_orchestrator_csvs(out, comparative=False)
+    category_data = os.path.join(out, "category_data")
+    os.makedirs(category_data)
+    with open(os.path.join(category_data, "multi_kernel_data.json"), "w") as f:
+        json.dump({"memcpy_summary": {"total_count": 3}, "nccl_summary": {}}, f)
+    with open(os.path.join(category_data, "fusion_candidates.json"), "w") as f:
+        json.dump([{"base_name": "MLP"}], f)
+
+    class _FailingTreePerfAnalyzer:
+        @classmethod
+        def from_file(cls, *args, **kwargs):
+            raise RuntimeError("trace load failed")
+
+    monkeypatch.setattr(op, "TreePerfAnalyzer", _FailingTreePerfAnalyzer)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrator_prepare",
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+        ],
+    )
+    op.main()
+
+    with open(os.path.join(category_data, "category_manifest.json")) as f:
+        names = [c["name"] for c in json.load(f)["categories"]]
+    assert "multi_kernel" not in names
+    assert "kernel_fusion" not in names
 
 
 def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):

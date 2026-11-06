@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 ---
 name: cpu-idle-analyzer
-description: Report high GPU idle time with actionable recommendations. Invoked when idle_time_percent exceeds 15%.
+description: Report high GPU idle time with actionable recommendations. Use when the orchestrator flags high GPU idle time.
 model: claude-opus-4-7-high
 ---
 

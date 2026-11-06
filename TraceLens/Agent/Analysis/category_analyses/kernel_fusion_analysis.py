@@ -17,12 +17,7 @@ import json
 import os
 import sys
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_ANALYSIS_DIR = os.path.dirname(_THIS_DIR)
-sys.path.insert(0, _THIS_DIR)
-sys.path.insert(0, _ANALYSIS_DIR)
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HIGH_CONFIDENCE_OP_KEYS,
     PEAK_MEM_BW_KEY,
     focus_job_utilization,
@@ -31,15 +26,15 @@ from analysis_utils import (
     perf_report_csv_dir,
     write_metrics_json,
 )
-from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
-from utils.classify_kernels import TAXONOMY
-from utils.kernel_fusion import (
+from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
+from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     CONFIDENCE_HIGH,
     OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionForms,
     FusionPricer,
 )
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 
 def load_fusion_data(output_dir: str):
@@ -169,7 +164,7 @@ def main():
     metrics[HIGH_CONFIDENCE_OP_KEYS] = high_confidence_op_keys
 
     output_path = write_metrics_json(metrics, args.output_dir, "kernel_fusion")
-    print(f"Kernel fusion analysis complete:")
+    print("Kernel fusion analysis complete:")
     print(f"  Candidates: {len(candidates)}")
     print(f"  With estimates: {len(impact_estimates)}")
     print(f"  Total impact_score (mid): {total_impact_score:.2f}")

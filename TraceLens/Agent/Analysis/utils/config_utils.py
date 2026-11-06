@@ -30,8 +30,8 @@ import argparse
 import copy
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -72,11 +72,11 @@ _PATH_KEYS = ("trace_path", "capture_folder")
 @dataclass(frozen=True)
 class AnalysisConfig:
     run_config: dict  # completed, wrapper schema, written to cache/run_config.yaml
-    changes: List[Tuple[str, str]]  # (verb, text); verb is added/set/renamed/removed
-    variables: Dict[str, str]  # the orchestrator's variables
+    changes: list[tuple[str, str]]  # (verb, text); verb is added/set/renamed/removed
+    variables: dict[str, str]  # the orchestrator's variables
 
 
-def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
+def check_config(config: dict, scope: str | None = None) -> AnalysisConfig:
     """Run the three phases on ``config``. Raises ``ConfigError``.
 
     ``config`` is not modified. ``scope`` is derived when the shape makes it
@@ -154,9 +154,7 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
                 )
             job["name"] = name
         if scope == SCOPE_COMPARATIVE:
-            target = {
-                key: jobs[1][key] for key in _PATH_KEYS if jobs[1].get(key) is not None
-            }
+            target = _compare_target(jobs[1])
             compare = jobs[0].get("compare_to")
             if compare is None:
                 changes.append(("added", f"jobs[0].compare_to: {json.dumps(target)}"))
@@ -206,7 +204,9 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
 
     focus = plans[0]
     variables = {
-        "comparison_scope": "comparative" if scope in _PAIR_SCOPES else "standalone",
+        "comparison_scope": (
+            SCOPE_COMPARATIVE if scope in _PAIR_SCOPES else SCOPE_STANDALONE
+        ),
         "trace_path": focus.trace_path,
         "platform": focus.platform,
         "output_dir": os.path.dirname(focus.output_xlsx_path),
@@ -224,7 +224,7 @@ def check_config(config: dict, scope: Optional[str] = None) -> AnalysisConfig:
     return AnalysisConfig(completed, changes, variables)
 
 
-def add_diff_stats(config: dict, path: str) -> Tuple[dict, Tuple[str, str]]:
+def add_diff_stats(config: dict, path: str) -> tuple[dict, tuple[str, str]]:
     """Return ``config`` with job 1 reading ``path`` as its diff stats, and the
     change. An existing diff stats path on job 1 is replaced. Raises
     ``ConfigError`` unless ``config`` is semantic-shaped, ``path`` is absolute
@@ -316,7 +316,11 @@ def main(argv=None) -> None:
         print(text if verb is None else f"{verb:<8}{text}")
 
 
-def _shape_errors(scope: str, config: dict) -> List[str]:
+def _compare_target(job: dict) -> dict:
+    return {key: job[key] for key in _PATH_KEYS if job.get(key) is not None}
+
+
+def _shape_errors(scope: str, config: dict) -> list[str]:
     errors = []
     jobs = config["jobs"]
     analysis_mode = config.get("analysis_mode")
@@ -352,9 +356,7 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
         if len(jobs) != count:
             return [f"{scope} takes exactly {count} jobs, got {len(jobs)}."]
         checked = [(1, jobs[1])]
-        target = {
-            key: jobs[1][key] for key in _PATH_KEYS if jobs[1].get(key) is not None
-        }
+        target = _compare_target(jobs[1])
         name2 = jobs[1].get("name", "trace2")
         if jobs[0].get("compare_to") not in (None, target, name2):
             errors.append(
@@ -369,7 +371,7 @@ def _shape_errors(scope: str, config: dict) -> List[str]:
     ]
 
 
-def _assign_pairs(pairs: Iterable[str], reserved: Tuple[str, ...] = ()) -> dict:
+def _assign_pairs(pairs: Iterable[str], reserved: tuple[str, ...] = ()) -> dict:
     target = {}
     for pair in pairs:
         key, separator, value = pair.partition("=")

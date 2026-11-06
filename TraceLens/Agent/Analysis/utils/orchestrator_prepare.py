@@ -19,6 +19,7 @@ import traceback
 import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    IDLE_PCT_THRESHOLD,
     PEAK_MEM_BW_KEY,
     gpu_utilization_from_timeline,
     load_perf_rows,
@@ -43,6 +44,23 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 )
 from TraceLens.TreePerf import TreePerfAnalyzer
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+
+KERNEL_TIME_US_COL = "Kernel Time (µs)_sum"
+DIRECT_KERNEL_TIME_MS_COL = "total_direct_kernel_time_ms"
+MIN_COMPUTE_UTIL_PCT = 85
+# A category op is a sync bottleneck when CPU duration exceeds SYNC_DURATION_RATIO
+# times its kernel time. The category is flagged when the summed sync time exceeds
+# SYNC_TIME_FRACTION of its GPU kernel time and SYNC_TIME_MIN_MS.
+SYNC_DURATION_RATIO = 5
+SYNC_TIME_FRACTION = 0.1
+SYNC_TIME_MIN_MS = 1
+# Lowercase event-name markers per memcpy direction, matched in this order.
+MEMCPY_DIRECTIONS = (
+    ("D2H", ("dtoh", "device -> host", "devicetohost")),
+    ("H2D", ("htod", "host -> device", "hosttodevice")),
+    ("D2D", ("dtod", "device -> device", "devicetodevice")),
+)
+MEMCPY_OTHER = "other"
 
 CATEGORY_SKILL_MAP = {
     "gemm": "gemm-analyzer",
@@ -90,6 +108,27 @@ def _normalize_category(row):
     return category_name, category
 
 
+def _add_enhanced_category(df: pd.DataFrame) -> None:
+    df["enhanced_category"], df["display_name"] = zip(
+        *df.apply(_normalize_category, axis=1), strict=True
+    )
+
+
+def _time_col(df: pd.DataFrame) -> str | None:
+    for col in (KERNEL_TIME_US_COL, DIRECT_KERNEL_TIME_MS_COL):
+        if col in df.columns:
+            return col
+    return None
+
+
+def _category_summary_csv_records(csv_dir: str) -> list:
+    return json.loads(
+        pd.read_csv(os.path.join(csv_dir, "ops_summary_by_category.csv")).to_json(
+            orient="records"
+        )
+    )
+
+
 def ops_summary_by_enhanced_category(csv_dir: str) -> list:
     """Roll a perf report's unified_perf_summary.csv up by enhanced category.
 
@@ -99,29 +138,15 @@ def ops_summary_by_enhanced_category(csv_dir: str) -> list:
     """
     unified_path = os.path.join(csv_dir, "unified_perf_summary.csv")
     if not os.path.isfile(unified_path):
-        return json.loads(
-            pd.read_csv(os.path.join(csv_dir, "ops_summary_by_category.csv")).to_json(
-                orient="records"
-            )
-        )
+        return _category_summary_csv_records(csv_dir)
 
     df = pd.read_csv(unified_path)
-    df["enhanced_category"], df["display_name"] = zip(
-        *df.apply(_normalize_category, axis=1)
-    )
+    _add_enhanced_category(df)
 
-    if "Kernel Time (µs)_sum" in df.columns:
-        time_col = "Kernel Time (µs)_sum"
-        time_scale = 1 / 1000  # µs → ms
-    elif "total_direct_kernel_time_ms" in df.columns:
-        time_col = "total_direct_kernel_time_ms"
-        time_scale = 1.0
-    else:
-        return json.loads(
-            pd.read_csv(os.path.join(csv_dir, "ops_summary_by_category.csv")).to_json(
-                orient="records"
-            )
-        )
+    time_col = _time_col(df)
+    if time_col is None:
+        return _category_summary_csv_records(csv_dir)
+    time_scale = 1 / 1000 if time_col == KERNEL_TIME_US_COL else 1.0  # µs → ms
 
     count_col = (
         "operation_count" if "operation_count" in df.columns else "enhanced_category"
@@ -134,14 +159,12 @@ def ops_summary_by_enhanced_category(csv_dir: str) -> list:
         )
         .reset_index()
     )
-    grouped["total_direct_kernel_time_ms"] *= time_scale
-    total_time = grouped["total_direct_kernel_time_ms"].sum()
+    grouped[DIRECT_KERNEL_TIME_MS_COL] *= time_scale
+    total_time = grouped[DIRECT_KERNEL_TIME_MS_COL].sum()
     grouped["Percentage (%)"] = (
-        (grouped["total_direct_kernel_time_ms"] / total_time * 100)
-        if total_time > 0
-        else 0
+        (grouped[DIRECT_KERNEL_TIME_MS_COL] / total_time * 100) if total_time > 0 else 0
     )
-    grouped = grouped.sort_values("total_direct_kernel_time_ms", ascending=False)
+    grouped = grouped.sort_values(DIRECT_KERNEL_TIME_MS_COL, ascending=False)
     grouped["Cumulative Percentage (%)"] = grouped["Percentage (%)"].cumsum()
     grouped = grouped.rename(columns={"enhanced_category": "op category"})
 
@@ -149,11 +172,11 @@ def ops_summary_by_enhanced_category(csv_dir: str) -> list:
 
 
 def _kernel_time_ms(df: pd.DataFrame) -> float:
-    if "Kernel Time (µs)_sum" in df.columns:
-        return df["Kernel Time (µs)_sum"].sum() / 1000
-    if "total_direct_kernel_time_ms" in df.columns:
-        return df["total_direct_kernel_time_ms"].sum()
-    return 0
+    time_col = _time_col(df)
+    if time_col is None:
+        return 0
+    total = df[time_col].sum()
+    return total / 1000 if time_col == KERNEL_TIME_US_COL else total
 
 
 def perf_report_metadata(csv_dir: str, platform: str) -> dict:
@@ -307,7 +330,7 @@ def main():
             trace2_csv_dir
         )
 
-    print(f"\nGPU Utilization Metrics:")
+    print("\nGPU Utilization Metrics:")
     print(f"  Total Time: {gpu_utilization_metrics['total_time_ms']:.2f} ms")
     print(f"  Computation: {gpu_utilization_metrics['computation_time_percent']:.2f}%")
     print(
@@ -317,12 +340,14 @@ def main():
     idle_pct = gpu_utilization_metrics["idle_time_percent"]
     print(f"  Idle: {idle_pct:.2f}%")
 
-    if idle_pct > 15:
+    if idle_pct > IDLE_PCT_THRESHOLD:
         print(
-            f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds 15% threshold"
+            f"  [DIAG:trace_quality:HIGH_IDLE] GPU idle time {idle_pct:.1f}% exceeds {IDLE_PCT_THRESHOLD}% threshold"
         )
-    if gpu_utilization_metrics["computation_time_percent"] < 85:
-        print(f"  [DIAG:trace_quality:HIGH_IDLE] Compute utilization < 85%")
+    if gpu_utilization_metrics["computation_time_percent"] < MIN_COMPUTE_UTIL_PCT:
+        print(
+            f"  [DIAG:trace_quality:HIGH_IDLE] Compute utilization < {MIN_COMPUTE_UTIL_PCT}%"
+        )
 
     # ============================================================================
     # STEP 4: Identify Top Operations
@@ -332,26 +357,26 @@ def main():
     ops_summary = pd.read_csv(os.path.join(trace1_csv_dir, "ops_summary.csv"))
 
     # Sort by total_direct_kernel_time_ms if available, else by time column
-    if "total_direct_kernel_time_ms" in ops_summary.columns:
+    if DIRECT_KERNEL_TIME_MS_COL in ops_summary.columns:
         ops_summary_sorted = ops_summary.sort_values(
-            "total_direct_kernel_time_ms", ascending=False
+            DIRECT_KERNEL_TIME_MS_COL, ascending=False
         )
-        time_col = "total_direct_kernel_time_ms"
-    elif "Kernel Time (µs)_sum" in ops_summary.columns:
+        time_col = DIRECT_KERNEL_TIME_MS_COL
+    elif KERNEL_TIME_US_COL in ops_summary.columns:
         ops_summary_sorted = ops_summary.sort_values(
-            "Kernel Time (µs)_sum", ascending=False
+            KERNEL_TIME_US_COL, ascending=False
         )
-        time_col = "Kernel Time (µs)_sum"
+        time_col = KERNEL_TIME_US_COL
     else:
-        print(f"  ⚠️  Could not determine time column")
+        print("  ⚠️  Could not determine time column")
         print(f"  Available columns: {ops_summary.columns.tolist()}")
         ops_summary_sorted = ops_summary
         time_col = None
 
-    print(f"\nTop 10 Operations by GPU Time:")
+    print("\nTop 10 Operations by GPU Time:")
     print("=" * 80)
     if time_col:
-        for idx, row in ops_summary_sorted.head(10).iterrows():
+        for _, row in ops_summary_sorted.head(10).iterrows():
             op_name = row.get("name", "Unknown")
             time_val = row[time_col]
             category = row.get("op category", "N/A")
@@ -363,6 +388,8 @@ def main():
     print("\n[STEP 5] Loading trace tree...")
 
     merged_tree = None
+    multi_kernel_data = None
+    fusion_candidates = None
     try:
         print(f"  Loading trace: {trace_path}")
         print(f"  Pseudo ops: {'enabled' if enable_pseudo_ops else 'disabled'}")
@@ -392,7 +419,7 @@ def main():
                 enable_pseudo_ops=enable_pseudo_ops,
             )
         tree = analyzer.tree
-        print(f"  ✓ Trace loaded successfully")
+        print("  ✓ Trace loaded successfully")
         print(f"  ✓ Tree has {len(tree.events)} events")
 
         # ====================================================================
@@ -408,23 +435,19 @@ def main():
             mk_memcpy_events = event_lists[GPUEventAnalyser.memcpy_key]
 
             # Sub-classify memcpy by direction (not provided by GPUEventAnalyser)
-            memcpy_by_direction = {"D2H": [], "H2D": [], "D2D": [], "other": []}
+            memcpy_by_direction = {d: [] for d, _ in MEMCPY_DIRECTIONS}
+            memcpy_by_direction[MEMCPY_OTHER] = []
             for event in mk_memcpy_events:
                 name = event.get("name", "").lower()
-                if "dtoh" in name or "device -> host" in name or "devicetohost" in name:
-                    memcpy_by_direction["D2H"].append(event)
-                elif (
-                    "htod" in name or "host -> device" in name or "hosttodevice" in name
-                ):
-                    memcpy_by_direction["H2D"].append(event)
-                elif (
-                    "dtod" in name
-                    or "device -> device" in name
-                    or "devicetodevice" in name
-                ):
-                    memcpy_by_direction["D2D"].append(event)
-                else:
-                    memcpy_by_direction["other"].append(event)
+                direction = next(
+                    (
+                        d
+                        for d, markers in MEMCPY_DIRECTIONS
+                        if any(m in name for m in markers)
+                    ),
+                    MEMCPY_OTHER,
+                )
+                memcpy_by_direction[direction].append(event)
 
             # Build memcpy summary
             memcpy_summary = {
@@ -519,23 +542,18 @@ def main():
                         ),
                     }
                 except Exception as e:
+                    # Overlap metrics are optional.
                     print(f"    ⚠️  Could not compute overlap metrics: {e}")
                     overlap_analysis = {"error": str(e)}
 
-            # Write multi_kernel_data.json (raw statistics only -- pattern
-            # detection and recommendations are handled by multi_kernel_analysis.py
-            # and the multi-kernel-analyzer sub-agent respectively)
+            # Raw statistics only -- pattern detection and recommendations are
+            # handled by multi_kernel_analysis.py and the multi-kernel-analyzer
+            # sub-agent respectively
             multi_kernel_data = {
                 "memcpy_summary": memcpy_summary,
                 "nccl_summary": nccl_summary,
                 "overlap_analysis": overlap_analysis,
             }
-
-            multi_kernel_data_file = (
-                f"{output_dir}/category_data/multi_kernel_data.json"
-            )
-            with open(multi_kernel_data_file, "w") as f:
-                json.dump(multi_kernel_data, f, indent=2)
 
             print(
                 f"  ✓ Multi-kernel data: {len(mk_memcpy_events)} memcpy events, {len(mk_comm_events)} NCCL events"
@@ -544,7 +562,7 @@ def main():
         except Exception as e:
             print(f"  ⚠️  Error during multi-kernel data pre-computation: {e}")
             traceback.print_exc()
-            # Write empty data so downstream scripts don't fail
+            # Empty data, written below, so downstream scripts do not fail
             multi_kernel_data = {
                 "memcpy_summary": {
                     "total_count": 0,
@@ -555,11 +573,10 @@ def main():
                 "overlap_analysis": {},
                 "error": str(e),
             }
-            multi_kernel_data_file = (
-                f"{output_dir}/category_data/multi_kernel_data.json"
-            )
-            with open(multi_kernel_data_file, "w") as f:
-                json.dump(multi_kernel_data, f, indent=2)
+
+        multi_kernel_data_file = f"{output_dir}/category_data/multi_kernel_data.json"
+        with open(multi_kernel_data_file, "w") as f:
+            json.dump(multi_kernel_data, f, indent=2)
 
         # ====================================================================
         # STEP 5b: Extract Kernel Fusion Candidates (Experimental)
@@ -606,6 +623,7 @@ def main():
         )
 
     except Exception as e:
+        # Report the failure and let Step 6 export whatever was built.
         print(
             f"  [DIAG:pipeline:STEP3_6_FAIL] Error loading trace tree or extracting multi-kernel/fusion data: {e}"
         )
@@ -619,9 +637,7 @@ def main():
     unified_df = pd.read_csv(os.path.join(trace1_csv_dir, "unified_perf_summary.csv"))
 
     # Apply enhanced categorization
-    unified_df["enhanced_category"], unified_df["display_name"] = zip(
-        *unified_df.apply(_normalize_category, axis=1)
-    )
+    _add_enhanced_category(unified_df)
 
     categories = unified_df["enhanced_category"].unique()
     exported_categories = []
@@ -631,10 +647,6 @@ def main():
         display_name = category_df.iloc[0]["display_name"]
 
         print(f"\n  Category: {display_name} ({category_name})")
-
-        if len(category_df) == 0:
-            print(f"    No operations - skipping")
-            continue
 
         # Export filtered CSV
         csv_file = f"{output_dir}/category_data/{category_name}_ops.csv"
@@ -654,7 +666,7 @@ def main():
     # ============================================================================
     # CPU/Idle Category Creation (always created)
     # ============================================================================
-    print(f"\n  Category: CPU/Idle Analysis (cpu_idle)")
+    print("\n  Category: CPU/Idle Analysis (cpu_idle)")
     print(f"    Idle time: {system_utilization['idle_time_percent']:.1f}%")
 
     exported_categories.insert(
@@ -672,19 +684,12 @@ def main():
     # ============================================================================
     # Multi-Kernel System-Level Category Creation
     # ============================================================================
-    multi_kernel_data_file = f"{output_dir}/category_data/multi_kernel_data.json"
-    has_multi_kernel_events = False
-    if os.path.exists(multi_kernel_data_file):
-        with open(multi_kernel_data_file, "r") as f:
-            mk_data = json.load(f)
-        has_multi_kernel_events = (
-            mk_data.get("memcpy_summary", {}).get("total_count", 0) > 0
-            or mk_data.get("nccl_summary", {}).get("total_count", 0) > 0
-        )
-
-    if has_multi_kernel_events:
-        print(f"\n  Category: Multi-Kernel Issues (multi_kernel)")
-        print(f"    ℹ️  Multi-kernel data available (memcpy/NCCL events present)")
+    if multi_kernel_data is not None and (
+        multi_kernel_data["memcpy_summary"]["total_count"] > 0
+        or multi_kernel_data["nccl_summary"]["total_count"] > 0
+    ):
+        print("\n  Category: Multi-Kernel Issues (multi_kernel)")
+        print("    ℹ️  Multi-kernel data available (memcpy/NCCL events present)")
 
         # Add to categories list (system tier)
         exported_categories.append(
@@ -700,22 +705,18 @@ def main():
     # ============================================================================
     # Kernel Fusion System-Level Category Creation (Experimental)
     # ============================================================================
-    fusion_candidates_file = f"{output_dir}/category_data/fusion_candidates.json"
-    if os.path.exists(fusion_candidates_file):
-        with open(fusion_candidates_file, "r") as f:
-            _fc = json.load(f)
-        if _fc:
-            print(f"\n  Category: Kernel Fusion Opportunities (kernel_fusion)")
-            print(f"    ℹ️  {len(_fc)} fusion candidates available")
-            exported_categories.append(
-                {
-                    "name": "kernel_fusion",
-                    "display_name": "Kernel Fusion Opportunities",
-                    "skill": "kernel-fusion-analyzer",
-                    "tier": "system",
-                    "ops_count": len(_fc),
-                }
-            )
+    if fusion_candidates:
+        print("\n  Category: Kernel Fusion Opportunities (kernel_fusion)")
+        print(f"    ℹ️  {len(fusion_candidates)} fusion candidates available")
+        exported_categories.append(
+            {
+                "name": "kernel_fusion",
+                "display_name": "Kernel Fusion Opportunities",
+                "skill": "kernel-fusion-analyzer",
+                "tier": "system",
+                "ops_count": len(fusion_candidates),
+            }
+        )
 
     # ============================================================================
     # STEP 6.5: Calculate Time Metric Breakdown per Category
@@ -746,15 +747,14 @@ def main():
             cpu_duration_ms = gpu_kernel_time_ms  # Fallback to kernel time
 
         # Calculate sync time (ops where CPU duration >> GPU kernel time)
-        # Sync bottleneck = CPU duration - GPU kernel time when ratio > 5x
         sync_time_ms = 0
         sync_ops_count = 0
 
         for _, row in category_df.iterrows():
-            if "Kernel Time (µs)_sum" in row and "total_duration_us" in row:
-                kernel_us = row.get("Kernel Time (µs)_sum", 0) or 0
+            if KERNEL_TIME_US_COL in row and "total_duration_us" in row:
+                kernel_us = row.get(KERNEL_TIME_US_COL, 0) or 0
                 duration_us = row.get("total_duration_us", 0) or 0
-                if kernel_us > 0 and duration_us > kernel_us * 5:
+                if kernel_us > 0 and duration_us > kernel_us * SYNC_DURATION_RATIO:
                     sync_time_ms += (duration_us - kernel_us) / 1000
                     sync_ops_count += 1
 
@@ -773,7 +773,10 @@ def main():
             }
 
         # Flag sync bottleneck if significant
-        if sync_time_ms > 0.1 * gpu_kernel_time_ms and sync_time_ms > 1:
+        if (
+            sync_time_ms > SYNC_TIME_FRACTION * gpu_kernel_time_ms
+            and sync_time_ms > SYNC_TIME_MIN_MS
+        ):
             cat_info["has_sync_bottleneck"] = True
             print(
                 f"    ⚠️  {category_name}: Sync bottleneck detected ({sync_time_ms:.2f}ms sync time)"
@@ -781,7 +784,7 @@ def main():
         else:
             cat_info["has_sync_bottleneck"] = False
 
-    print(f"  ✓ Time metrics calculated for all categories")
+    print("  ✓ Time metrics calculated for all categories")
 
     # Save category manifest
     manifest = {
@@ -820,7 +823,7 @@ def main():
         json.dump(model_info, f, indent=2)
 
     print(f"\n{'='*80}")
-    print(f"✓ Orchestrator Preparation Complete (Steps 3-6)")
+    print("✓ Orchestrator Preparation Complete (Steps 3-6)")
     print(f"✓ Exported {len(exported_categories)} categories")
     print(f"✓ Manifest saved: {manifest_file}")
     print(f"{'='*80}")

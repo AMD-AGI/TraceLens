@@ -41,8 +41,8 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_HIGH,
     HEURISTIC_FRACTION_LOW,
     HEURISTIC_FRACTION_MID,
-    _KERNEL_NAME_TRUNC_LEN,
     gpu_utilization_from_timeline,
+    truncate_kernel_name,
 )
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     EXEC_TOTAL_COL,
@@ -50,8 +50,8 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
-# Real traces have CSV cells far larger than csv's 131072-char default, which
-# would crash the trace-quality gate; lift the limit to the platform maximum.
+# Lift csv's 131072-char cell cap at import: the trace-quality gate and
+# Hyperloom's csv readers (via the utils import chain) both hit larger cells.
 csv.field_size_limit(sys.maxsize)
 
 # Constants
@@ -96,7 +96,7 @@ _TABLE_DIVIDER = "|" + "---|" * 10
 # percent column; {drop_note} is the conditional drop-count sentence (empty when
 # nothing was dropped).
 _DEGRADED_BANNER = """> **⚠ Degraded (deterministic fallback) report.** This trace was
-> graph-under-recorded (graph-replay fraction {pct};
+> graph-under-recorded (graph-replay fraction {pct} > {max_pct});
 > per-op decomposition failed, so the agentic analysis path did not execute.
 > Only **kernel name, time, and {pct_label}** are recoverable from a graph-collapsed
 > trace. Shapes, launcher path, quant operands, category, and efficiency are
@@ -187,8 +187,8 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
             f"(or beyond top-{MAX_PITEM_COUNT})."
         )
     banner = _DEGRADED_BANNER.format(
-        pct=f"{graph_replay_fraction:.0%}",
-        max_pct=f"{GRAPH_REPLAY_FRACTION_MAX:.0%}",
+        pct=f"{graph_replay_fraction:.1%}",
+        max_pct=f"{GRAPH_REPLAY_FRACTION_MAX:.1%}",
         pct_label=percent_label,
         drop_note=drop_note,
     )
@@ -299,19 +299,14 @@ def _is_plumbing_wrapper(prefix: str) -> bool:
 
 
 def _strip_synthetic_suffix(name: str) -> str:
-    suffix = " (Synthetic Op)"
-    if name.endswith(suffix):
-        name = name[: -len(suffix)]
-    return name.strip()
+    return name.removesuffix(" (Synthetic Op)").strip()
 
 
 def _normalize_kernel_name(raw: str) -> str:
     # Display-only shortening for the P-item heading; truncate long device symbols
     # but never demangle (the matched symbol stays raw) and never return empty (an
     # empty heading title fails the downstream heading match and drops the block).
-    s = raw.strip()
-    if len(s) > _KERNEL_NAME_TRUNC_LEN:
-        s = s[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    s = truncate_kernel_name(raw.strip())
     if not s:
         return raw
     return s

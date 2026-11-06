@@ -20,10 +20,6 @@ Covers every module under category_analyses/ plus the shared kernel classifier:
 
 import json, os, sys, pandas as pd, pytest
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
@@ -278,6 +274,12 @@ def _name_key(name):
         (
             "triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_0",
             "RMSNorm (fused triton)",
+            "Normalization",
+            ("add", "norm"),
+        ),
+        (
+            "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt_0",
+            "RMSNorm (fused triton residual)",
             "Normalization",
             ("add", "norm"),
         ),
@@ -1147,9 +1149,10 @@ def test_parse_kernel_breakdown_fwd_kernel_type():
 
 
 def test_parse_kernel_breakdown_strips_np_float64():
-    kd = "[{'name': 'k', 'mean_duration_us': np.float64(12.5)}]"
+    kd = "[{'name': 'kernel_a(anonymous namespace)', 'mean_duration_us': np.float64(12.5)}]"
     r = parse_kernel_breakdown(kd)
     assert r["total_kernel_time_us"] == 12.5
+    assert r["kernels"][0]["name"] == "kernel_a(anonymous namespace)"
 
 
 def test_parse_kernel_breakdown_empty():

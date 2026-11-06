@@ -14,36 +14,34 @@ Supports both Flash Attention and Paged Attention (vLLM) analysis.
 import argparse
 import ast
 import logging
-import os
 import re
-import sys
 
 import pandas as pd
 
-logger = logging.getLogger(__name__)
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    LITERAL_EVAL_ERRORS,
     get_peak_specs,
     run_category_analysis,
 )
 
-# ---------------------------------------------------------------------------
-# SDPA-specific detectors (moved from analysis_utils)
-# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+# Constants
+_FLASH_MARKERS = ("flash", "fmha")
+_PAGED_OP_MARKERS = ("unified_attention", "paged_attention", "vllm")
+# Share of context tokens above (below) which a workload is prefill (decode) heavy.
+_PREFILL_RATIO = 0.8
+_DECODE_RATIO = 0.2
 
 
 def detect_flash_attention(op_name: str) -> bool:
     """Check if SDPA operation uses Flash Attention."""
-    flash_markers = ["flash", "fmha", "flash_attention", "flashattn"]
-    return any(marker in op_name.lower() for marker in flash_markers)
+    return any(marker in op_name.lower() for marker in _FLASH_MARKERS)
 
 
 def detect_paged_attention(op_name: str, kernel_details: str = None) -> bool:
     """Check if SDPA operation uses Paged Attention (vLLM style)."""
-    paged_markers = ["unified_attention", "paged_attention", "vllm"]
-    if any(marker in op_name.lower() for marker in paged_markers):
+    if any(marker in op_name.lower() for marker in _PAGED_OP_MARKERS):
         return True
 
     if kernel_details:
@@ -71,7 +69,7 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
 
     try:
         kernel_str = str(kernel_details_str)
-        kernel_str = kernel_str.replace("np.float64(", "").replace(")", "")
+        kernel_str = kernel_str.replace("np.float64(", "")
 
         kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
         matches = re.findall(kernel_pattern, kernel_str, re.DOTALL)
@@ -83,14 +81,15 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
             mean_us_float = float(mean_us)
             total_time += mean_us_float
 
+            name_lower = name.lower()
             kernel_type = "other"
-            if "reshape_and_cache" in name.lower():
+            if "reshape_and_cache" in name_lower:
                 kernel_type = "reshape_cache"
                 result["has_reshape_cache"] = True
-            elif "paged_attention" in name.lower():
+            elif "paged_attention" in name_lower:
                 kernel_type = "paged_attention"
                 result["has_paged_attention"] = True
-            elif "_fwd_kernel" in name.lower() or "fwd_kernel" in name.lower():
+            elif "fwd_kernel" in name_lower:
                 kernel_type = "fwd_kernel"
                 result["has_fwd_kernel"] = True
 
@@ -105,10 +104,19 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
         result["kernels"] = kernels
         result["total_kernel_time_us"] = round(total_time, 2)
 
-    except Exception:
+    except ValueError:
         logger.debug("Failed to parse kernel breakdown", exc_info=True)
 
     return result
+
+
+def _workload_type(ctx_ratio: float) -> str:
+    """Classify a workload as prefill heavy, decode heavy or mixed."""
+    if ctx_ratio > _PREFILL_RATIO:
+        return "prefill_heavy"
+    if ctx_ratio < _DECODE_RATIO:
+        return "decode_heavy"
+    return "mixed"
 
 
 def parse_perf_params(perf_params_str: str) -> dict:
@@ -156,13 +164,7 @@ def parse_perf_params(perf_params_str: str) -> dict:
         if total_tokens > 0:
             ctx_ratio = ctx_tokens / total_tokens
             result["ctx_ratio"] = round(ctx_ratio, 3)
-
-            if ctx_ratio > 0.8:
-                result["workload_type"] = "prefill_heavy"
-            elif ctx_ratio < 0.2:
-                result["workload_type"] = "decode_heavy"
-            else:
-                result["workload_type"] = "mixed"
+            result["workload_type"] = _workload_type(ctx_ratio)
 
         if result["h_q"] and result["h_kv"]:
             if result["h_kv"] < result["h_q"]:
@@ -173,7 +175,7 @@ def parse_perf_params(perf_params_str: str) -> dict:
             else:
                 result["attention_pattern"] = "unknown"
 
-    except Exception:
+    except (*LITERAL_EVAL_ERRORS, AttributeError):
         logger.debug("Failed to parse perf params", exc_info=True)
 
     return result
@@ -181,15 +183,8 @@ def parse_perf_params(perf_params_str: str) -> dict:
 
 def classify_sdpa_operation(op_name: str, row) -> dict:
     """Classify SDPA operation type with paged attention detection."""
-    has_perf_model = (
-        row.get("has_perf_model", False) if "has_perf_model" in row.index else False
-    )
-
-    kernel_details = (
-        row.get("kernel_details_summary", "")
-        if "kernel_details_summary" in row.index
-        else ""
-    )
+    has_perf_model = row.get("has_perf_model", False)
+    kernel_details = row.get("kernel_details_summary", "")
 
     is_flash = detect_flash_attention(op_name)
     is_paged = detect_paged_attention(op_name, kernel_details)
@@ -205,7 +200,7 @@ def classify_sdpa_operation(op_name: str, row) -> dict:
     if is_paged and kernel_details:
         kernel_breakdown = parse_kernel_breakdown(kernel_details)
 
-    perf_params_str = row.get("perf_params", "") if "perf_params" in row.index else ""
+    perf_params_str = row.get("perf_params", "")
     workload_profile = None
     if perf_params_str:
         workload_profile = parse_perf_params(perf_params_str)
@@ -259,11 +254,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
 
     for _, row in ops_df.iterrows():
         op_name = str(row.get("name", ""))
-        kernel_details = (
-            row.get("kernel_details_summary", "")
-            if "kernel_details_summary" in row.index
-            else ""
-        )
+        kernel_details = row.get("kernel_details_summary", "")
 
         if detect_flash_attention(op_name):
             flash_attention_count += 1
@@ -282,9 +273,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
                     elif k["kernel_type"] == "paged_attention":
                         total_paged_attention_percent += k.get("percent", 0)
 
-        perf_params_str = (
-            row.get("perf_params", "") if "perf_params" in row.index else ""
-        )
+        perf_params_str = row.get("perf_params", "")
         if perf_params_str:
             profile = parse_perf_params(perf_params_str)
             total_ctx_tokens += profile.get("sum_ctx_tokens") or 0
@@ -295,8 +284,8 @@ def extract_category_specific(ops_df, metadata) -> dict:
         has_perf_model_count = int(ops_df["has_perf_model"].sum())
 
     result = {
-        "flash_attention_count": int(flash_attention_count),
-        "paged_attention_count": int(paged_attention_count),
+        "flash_attention_count": flash_attention_count,
+        "paged_attention_count": paged_attention_count,
         "has_perf_model_count": has_perf_model_count,
         "flash_attention_detected": flash_attention_count > 0,
         "paged_attention_detected": paged_attention_count > 0,
@@ -319,18 +308,12 @@ def extract_category_specific(ops_df, metadata) -> dict:
     total_tokens = total_ctx_tokens + total_gen_tokens
     if total_tokens > 0:
         ctx_ratio = total_ctx_tokens / total_tokens
-        if ctx_ratio > 0.8:
-            profile_type = "prefill_heavy"
-        elif ctx_ratio < 0.2:
-            profile_type = "decode_heavy"
-        else:
-            profile_type = "mixed"
 
         result["workload_profile"] = {
             "total_ctx_tokens": total_ctx_tokens,
             "total_gen_tokens": total_gen_tokens,
             "ctx_ratio": round(ctx_ratio, 3),
-            "profile_type": profile_type,
+            "profile_type": _workload_type(ctx_ratio),
         }
 
     return result
