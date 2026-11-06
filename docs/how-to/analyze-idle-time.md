@@ -10,34 +10,27 @@ See LICENSE for license information.
 :keywords: TraceLens, GPU idle time, idle gaps, launch latency, synchronization, CPU overhead, PyTorch profiler, Perfetto, ROCm, AMD Instinct
 ```
 
-TraceLens explains every gap between consecutive GPU events (kernels, memory
-copies, and memsets) instead of reporting GPU idle time as a single number. This
-topic shows how to run the analysis and then walks through a diagnosis: from how
-much time is idle, to what kind of problem it is, to the line of code that causes
-it. The steps work the same whether you read the sheets yourself or hand them to
-an AI agent.
+TraceLens classifies every gap between consecutive GPU operations (kernels,
+memory copies, and memsets) in a PyTorch profiler trace. For each gap, it records
+what the CPU thread that launched the next operation was doing, whether a
+synchronization call emptied the GPU queue, and the code involved. This topic
+shows how to run the analysis and how to use its three sheets to find the code
+that causes idle time.
 
 ## Before you begin
 
-Before running the analysis, confirm you have the following:
-
 - [TraceLens installed](../install/install.md).
-- A `torch.profiler` Chrome trace (`.json` or `.json.gz`) with CPU and GPU
-  activity. See
-  [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
-  for capture settings. Capture with `with_stack=True` so the analysis can name
-  the Python code behind each gap.
+- A `torch.profiler` Chrome trace (`.json` or `.json.gz`) that includes CPU and
+  GPU activity. Capture it with `with_stack=True`. Without Python frames, the
+  analysis can name the op behind a gap but not the line of code. See
+  [Generate a PyTorch performance report](./generate-perf-report-pytorch.md) for
+  capture settings.
 - For multi-GPU runs, one trace per rank. Analyze each rank's trace separately,
   not a file that merges several ranks.
 
 ## Run the analysis
 
-Add `--enable_idle_analysis` to the PyTorch report to append the
-`idle_overview`, `idle_groups`, and `idle_intervals` sheets. For a diagnosis, also
-add `--include_call_stack`: it names the line of code behind each sync, and
-splits the sync rows of the overview by that line. Add `--enable_augmented_trace`
-to write `<trace>_idle_augmented.json.gz` next to the input trace, the original
-trace plus idle annotation tracks for [Perfetto](https://ui.perfetto.dev):
+Add `--enable_idle_analysis` to the PyTorch performance report command:
 
 ```bash
 TraceLens_generate_perf_report_pytorch \
@@ -47,22 +40,33 @@ TraceLens_generate_perf_report_pytorch \
     --enable_augmented_trace
 ```
 
-Gaps shorter than `--micro_idle_thresh_us` (default `5` µs for idle analysis)
-count as noise: they're included in the idle total but not classified. Use
-`--idle_launch_latency_us` to change the launch latency threshold (default 15 µs).
+`--enable_idle_analysis` adds three sheets to the report workbook:
+`idle_overview`, `idle_groups`, and `idle_intervals`. The other options are:
 
-To analyze idle time without generating the full report, run the standalone
-module. It prints the overview, writes an Excel workbook with the three idle
-sheets, and writes an augmented trace (`<trace>_idle_classified.json.gz` by
-default; override with `-o`):
+- `--include_call_stack`: records the call stack of each sync call and covering
+  op, and splits the sync rows of `idle_overview` by the line of code that issued
+  the sync. Use it when you diagnose idle time.
+- `--enable_augmented_trace`: writes `<trace>_idle_augmented.json.gz` next to the
+  input trace. It's the original trace plus annotation tracks that label each
+  gap, for viewing in [Perfetto](https://ui.perfetto.dev).
+- `--micro_idle_thresh_us` (default `5`): gaps shorter than this are counted in
+  the idle total but not classified.
+- `--idle_launch_latency_us` (default `15`): the normal time from a launch call's
+  return to the start of the GPU op.
+
+To run only the idle analysis, use the standalone module:
 
 ```bash
 python -m TraceLens.Reporting.classify_idle_time trace.json --include-call-stack
 ```
 
-Or use the Python API, which returns the same sheets as pandas `DataFrame`
-objects. All thresholds are fields of `IdleThresholds`. Call stacks need the
-tree built with Python functions:
+It prints `idle_overview`, writes an Excel workbook with the three idle sheets,
+and writes an augmented trace to `<trace>_idle_classified.json.gz` (change the
+path with `-o`).
+
+The Python API returns the sheets as pandas `DataFrame` objects. Build the tree
+with `add_python_func=True` to get call stacks. Thresholds are fields of
+`IdleThresholds`.
 
 ```python
 from TraceLens import TreePerfAnalyzer
@@ -74,197 +78,208 @@ dfs = analyser.get_dataframes()   # {"idle_overview": ..., "idle_groups": ..., "
 gaps = analyser.classify()        # list of per-gap dicts
 ```
 
-## How a gap is described
+## How a gap is classified
 
-The CPU submits work to the GPU by enqueueing launches into GPU queues, and the
-GPU runs them independently. The GPU goes idle when its queue is empty, or when
-it doesn't start work that's already queued. For each gap, the analysis looks at
-the GPU op that ends the gap and at the thread that launched it, and records
-three things.
+A gap ends when the GPU starts its next operation. The analysis finds the
+runtime call that launched that operation and the thread it ran on, then
+describes the gap with three fields: the case and its parts, `drain_type`, and
+`stream_switch`.
 
-**Case and parts: what the launching thread was doing.** The gap is split into
-parts that add up to its duration:
+### Case and parts
 
-- *Unqueued:* the next op was launched during the gap (or less than
-  `launch_latency_us` before it), so the GPU was waiting for the CPU. The time
-  before the launch call is split into `cpu_op_us` (CPU ops and Python
-  functions), `cpu_runtime_us` (runtime calls such as `hipMalloc` or a blocking
-  copy), and `cpu_untraced_us` (nothing traced). Then come the launch call
-  itself (`launch_call_us`) and launch return to op start (`submit_latency_us`).
-- *Queued:* the next op was launched before the gap, so the CPU wasn't the
+The case says whether the next op had been launched when the gap started:
+
+- `unqueued`: the next op was launched during the gap, or less than
+  `launch_latency_us` before it. The GPU was waiting for the CPU. The gap is split
+  into parts by what the launching thread did:
+  - `cpu_op_us`: CPU ops and Python functions.
+  - `cpu_runtime_us`: runtime calls other than the launch, such as `hipMalloc` or
+    a blocking copy.
+  - `cpu_untraced_us`: nothing traced.
+  - `launch_call_us`: the launch call itself.
+  - `submit_latency_us`: from the launch call's return to the start of the op.
+- `queued`: the next op was launched before the gap, so the CPU wasn't the
   bottleneck. The whole gap is `gpu_wait_us`.
-- *No launch:* the trace has no launch for the next op. The whole gap is
+- `no_launch`: the trace has no launch call for the next op. The whole gap is
   `unattributed_us`.
 
-The **label** names the largest part: `CPU_OP_DOMINATED`, `RUNTIME_DOMINATED`,
-`UNTRACED_DOMINATED`, `LAUNCH_DOMINATED` (launch call plus normal launch
-latency), `UNEXPLAINED_GPU_WAIT` (queued, or launched but late to start), or
-`UNATTRIBUTED`.
+The parts add up to the gap's duration. The gap's label names its largest part:
 
-**`drain_type`: why the queue was empty.** `sync_drain` means a sync call on the
-launching thread was blocking the CPU when the GPU finished its queue, for example
-`hipStreamSynchronize`, `.item()` (a blocking copy), or `hipFree`. The gap also
-includes whatever the CPU did after the sync returned, so the sync itself may be
-a small part of it (see Step 2). `starved`
-means the CPU just didn't submit work in time. The two need different fixes:
-removing or moving a sync lets the CPU work after it start earlier and overlap
-with GPU work, even if that work stays as slow. A starved gap only shrinks if the
-CPU does less work per GPU op.
+| Label | Largest part |
+|-------|--------------|
+| `CPU_OP_DOMINATED` | `cpu_op_us` |
+| `RUNTIME_DOMINATED` | `cpu_runtime_us` |
+| `UNTRACED_DOMINATED` | `cpu_untraced_us` |
+| `LAUNCH_DOMINATED` | `launch_call_us` plus `submit_latency_us` |
+| `UNEXPLAINED_GPU_WAIT` | `gpu_wait_us`, or a launch during the gap after which the op took longer than `launch_latency_us` to start |
+| `UNATTRIBUTED` | `unattributed_us` |
 
-**`stream_switch`: whether the ops on either side of the gap ran on different
-streams.** A switch can mean the next op waited on another stream.
+### drain_type
 
-The [idle time sheet reference](../reference/idle-time-columns.md) defines every
-column and rule.
+`drain_type` says why the GPU queue was empty:
+
+- `sync_drain`: the launching thread was blocked in a sync call while the GPU
+  finished its queued work. Examples are `hipStreamSynchronize`, `hipFree`, and
+  the blocking copy behind `.item()` or `.cpu()`. The gap also includes the CPU
+  work after the sync returned, up to the next launch.
+- `starved`: the GPU finished its work before the CPU launched the next op, and
+  no sync call was waiting on that work.
+
+The two need different fixes. For a `sync_drain` gap, removing or deferring the
+sync lets the CPU work after it run while the GPU is still busy, so the gap
+shrinks even if that work stays as slow. A `starved` gap only shrinks if the CPU
+does less work between GPU ops.
+
+### stream_switch
+
+`stream_switch` is true when the GPU ops before and after the gap ran on
+different streams. The next op might have waited on work in another stream.
+
+The [idle time sheet reference](../reference/idle-time-columns.md) gives the
+exact rules and every column.
 
 ## Diagnose idle time
 
-The three sheets go from coarse to fine: `idle_overview` says how much time is
-idle and why, `idle_groups` says where in the code, and `idle_intervals` lists
-each gap. Work through the following steps in order. Each one narrows the
-question for the next.
+`idle_overview` gives idle time totals by cause, `idle_groups` groups gaps by
+code location, and `idle_intervals` lists each gap. The following steps use them
+in that order.
 
-### Step 1: Is idle time the problem?
+### Step 1: Check GPU utilization
 
-In `idle_overview`, read the `gpu_utilization_pct` row. It's GPU busy time as a
-share of busy time plus all idle time, and it matches the `gpu_timeline` sheet.
-Above about 95%, idle time is unlikely to be the main bottleneck; look at kernel
-performance instead.
+In `idle_overview`, `gpu_utilization_pct` is GPU busy time divided by busy time
+plus idle time. It matches the `gpu_timeline` sheet. Above about 95%, idle time
+is unlikely to be the main bottleneck; look at kernel performance instead.
 
-Then compare the `noise` and `macro` rows. Macro gaps (5 µs or longer) are what
-the rest of the analysis explains. If noise holds a large share of idle time, the
-GPU runs many short kernels back to back and is limited by launch rate; fusion and
-graph capture (CUDA or HIP graphs) help more than any single fix.
+Next, compare the `noise` and `macro` rows. Macro gaps are the gaps of 5 µs or
+longer, which the analysis classifies. If `noise` holds a large share of idle
+time, the GPU is running many short kernels back to back and is limited by the
+launch rate. Kernel fusion and graph capture (CUDA or HIP graphs) reduce this
+kind of idle time.
 
-### Step 2: Sync or starvation?
+### Step 2: Separate sync drains from starvation
 
-On the `macro` row, compare `sync_drain_ms` with `starved_ms`. Then read the
-`drain` rows: `starved`, and one row per sync call that drained the queue. With
-`--include_call_stack`, each sync row is one line of code,
-`sync_drain: <call> @ <file>(<line>): <function>`. If a sync row has no `@`, the
-sync was issued with no Python frame in its call stack, for example from the
-autograd thread in the backward pass (`sync_entry_point` is then `Not found`),
-and the row can mix several call paths. Group `sync_call_stack_full` in
-`idle_intervals` to split it (a row with `@` can also mix paths that share the
-same innermost user frame); an op-only stack such as `aten::item` →
-`aten::_local_scalar_dense` → `hipMemcpyWithStream` is enough to recognize the
-call.
+On the `macro` row, `sync_drain_ms` and `starved_ms` add up to `total_ms`. The
+`drain` rows break this down into `starved` and one row per sync call. With
+`--include_call_stack`, each sync row is one line of code:
 
-A sync row names where the queue drained, not how much removing the sync would
-save. Removing a sync lets the CPU start the work after it earlier, by as long
-as the sync blocked, so on each gap the most it can save is
-`min(sync_event_dur, duration_us)` (both in µs). `sync_event_dur` is often much
-longer than the gap, because the call started while the GPU was still busy;
-only the gap is idle time, hence the cap. The bound is the `sync_gain_us` column
-of `idle_intervals`, summed per row in `sync_gain_ms` on the drain rows. Compare
-it with the row's `total_ms`:
+```text
+sync_drain: hipMemcpyWithStream @ vllm/v1/attention/backends/rocm_aiter_fa.py(459): build
+```
 
-- *The bound is the gain from removing or deferring the sync,* whatever the
-  gap's parts are: the blocking call itself, CPU ops, or untraced time that
-  waited behind it (as in the vLLM example below). It counts only the sync at
-  the gap start. If `cpu_runtime_ms` is most of the row and `top_runtime` is the
-  same call, more calls of it follow in the gap (for example one `hipFree` after
-  another), and removing them all removes the gap.
-- *The rest of the row's time is CPU work that runs after the sync anyway.* If
-  that's most of the row, for example preprocessing the next input after copying
-  the results out, find that work in `idle_groups` (`covering_op` of the
-  `sync_drain` groups) and make it faster or run it ahead of the GPU (pipelining,
-  data loader workers). Moving the sync doesn't help. For a small row, that work
-  may be folded into an `other` group; filter `idle_intervals` by
-  `sync_event_name` and `sync_entry_point` instead.
+A sync row without `@` means the sync's call stack has no Python frame, for
+example a sync issued from the autograd thread during the backward pass. Its
+`sync_entry_point` is `Not found`, and the row can combine several call paths. To
+split it, group `idle_intervals` by `sync_call_stack_full`. A stack of op names
+still identifies the call: `aten::item` → `aten::_local_scalar_dense` →
+`hipMemcpyWithStream` is an `.item()`.
 
-The bound assumes the work after the sync doesn't need its result; for example,
-code that branches on an `.item()` value has to move the branch too.
+A sync row's `total_ms` isn't what removing the sync saves. Each gap holds the
+time the sync blocked plus the CPU work after it. Removing the sync lets that
+work start earlier by the time the sync blocked during the gap, so the most it
+saves per gap is `sync_gain_us = min(sync_event_dur, duration_us)`.
+`sync_event_dur` is often longer than the gap, because the call started while the
+GPU was still busy. The `sync_gain_ms` column of each drain row sums
+`sync_gain_us` over the row's gaps. Compare it with the row's `total_ms`:
 
-### Step 3: What was the CPU doing?
+- If `sync_gain_ms` is close to `total_ms`, removing or deferring the sync
+  removes most of the row's idle time.
+- If `sync_gain_ms` is a small part of `total_ms`, most of the time is CPU work
+  that runs after the sync anyway, for example preprocessing the next input after
+  copying results out. Moving the sync doesn't help. Find that work in
+  `idle_groups` (the `covering_op` of the `sync_drain` groups) and make it faster,
+  or run it ahead of the GPU with pipelining or data loader workers. If the work
+  is folded into an `other` group, filter `idle_intervals` by `sync_event_name`
+  and `sync_entry_point` instead.
 
-The `label` rows show how much macro idle each label holds, split into
-`sync_drain_ms`, `starved_ms`, and `stream_switch_ms`. The `*_ms` part columns
-show what the gaps were made of. A label names only each gap's largest part, so
-read the part columns too. For example, a large `launch_call_ms` on the
-`CPU_OP_DOMINATED` row means launch cost hides inside gaps where CPU ops took the
-largest share. The `sub_label` rows split `RUNTIME_DOMINATED` (`other_thread`)
-and `UNEXPLAINED_GPU_WAIT` (`queued`, `unqueued`).
+`sync_gain_us` counts only the sync at the start of the gap. If `cpu_runtime_ms`
+is most of the row and `top_runtime` is the same call, more calls of it follow in
+the gap, for example one `hipFree` after another. Removing all of them removes
+the gap.
 
-`RUNTIME_DOMINATED/other_thread` is the exception to reading the part columns:
-the parts describe the launching thread, which may show mostly `cpu_op_ms` (for
-example, waiting inside `run_backward`). The blocking call is on another thread;
-it's in `other_thread_top_runtime` and `other_thread_runtime_us` in
-`idle_intervals`.
+The estimate assumes the work after the sync doesn't use the sync's result. Code
+that branches on an `.item()` value has to move the branch as well.
 
-### Step 4: Where in the code?
+### Step 3: See what the CPU was doing
 
-Each `idle_groups` row is one label, sub-label, `drain_type`, and `covering_op`,
-sorted by total time; `cumulative_pct` shows how few groups cover most of the
-idle time. Columns to read for each large group:
+The `label` rows give macro idle time per label, split into `sync_drain_ms`,
+`starved_ms`, and `stream_switch_ms`. The part columns, `cpu_op_ms` through
+`unattributed_ms`, show what the gaps contained. A label names only each gap's
+largest part, so read the part columns too. For example, a large `launch_call_ms`
+on the `CPU_OP_DOMINATED` row means launch cost is also significant in gaps where
+CPU ops took the largest share.
 
-- `covering_op`: the CPU op running on the launching thread during the gap, for
-  example `aten::addmm`, a Python frame such as `model.py(42): forward`, or a C
-  function called from Python such as `<built-in function zoom_shift>` (often a
-  library outside PyTorch; find its caller in Perfetto or the tree). It's
-  the deepest op spanning at least half the gap, or the op with the most time in
-  the gap if none does. `(no CPU op)` means the thread ran nothing traced;
-  `(no launch)` is for `UNATTRIBUTED`. If it's a generic op such as
-  `aten::copy_`, `covering_call_stack_full` in `idle_intervals` (with
-  `--include_call_stack`) shows the code that called it.
+The `sub_label` rows split `RUNTIME_DOMINATED` into `other_thread`, and
+`UNEXPLAINED_GPU_WAIT` into `queued` and `unqueued`.
+
+For `RUNTIME_DOMINATED/other_thread`, the part columns describe the launching
+thread, which can show mostly `cpu_op_ms`, for example while it waits inside
+`run_backward`. The blocking call is on another thread. In `idle_intervals`,
+`other_thread_top_runtime` names it and `other_thread_runtime_us` gives its time.
+
+### Step 4: Find the code location
+
+Each `idle_groups` row holds the gaps that share a label, sub-label,
+`drain_type`, and `covering_op`, sorted by total time. `cumulative_pct` shows how
+many groups cover most of the idle time. For each large group, read:
+
+- `covering_op`: the CPU op on the launching thread during the gap, for example
+  `aten::addmm`, a Python frame such as `model.py(42): forward`, or a C function
+  called from Python such as `<built-in function zoom_shift>`. It's the deepest op
+  that spans at least half the gap, or otherwise the op with the most time in the
+  gap. `(no CPU op)` means the thread ran nothing traced, and `(no launch)` marks
+  `UNATTRIBUTED` gaps. For a generic op such as `aten::copy_`, the
+  `covering_call_stack_full` column of `idle_intervals` shows the calling code.
 - `top_runtime`: the runtime call with the most time in the group's gaps. It's
-  blank when that call holds under 10% of the group's time, because it's then
-  incidental.
-- `top_launch`: the launch call for the next op with the most idle time before
-  it. `hipGraphLaunch` or `cudaGraphLaunch` here means the group's gaps end in
-  graph launches.
-- `top_next_gpu_op`: the single GPU op with the most idle time before it. For
-  `UNEXPLAINED_GPU_WAIT`, it's the main clue, but a group can mix several next
-  ops; sum `following_gpu_event` in `idle_intervals` to see the mix. For gaps the
-  CPU caused, it's only the op that ran after the gap.
-- `gaps`, `mean_us`, `median_us`: many short gaps point at per-op overhead; a few
-  long ones point at a specific event.
+  blank when that call holds less than 10% of the group's time.
+- `top_launch`: the launch call with the most idle time before it.
+  `hipGraphLaunch` or `cudaGraphLaunch` means the gaps end in graph launches.
+- `top_next_gpu_op`: the GPU op with the most idle time before it. It's most
+  useful for `UNEXPLAINED_GPU_WAIT`. A group can contain several next ops; to see
+  them, sum `duration_us` by `following_gpu_event` in `idle_intervals`.
+- `gaps`, `mean_us`, and `median_us`: many short gaps indicate per-op overhead,
+  and a few long gaps indicate a specific event.
 
-`covering_op` is the op running *during* the gap, not necessarily the op that
-caused it:
+`covering_op` is the op that ran during the gap, which isn't always the cause:
 
-- After a sync, the CPU work that follows is spread over whichever ops run next,
-  so one sync line can appear as several `sync_drain` groups with the same
-  `top_runtime`. For syncs, the Step 2 drain rows are the code location; use the
-  groups to see what the CPU did afterward. Whether those groups are one cause
-  depends on the Step 2 bound: if it covers the row, removing the sync fixes all
-  of them; if it's small, each large group is CPU work to fix on its own.
-- For queued gaps (`UNEXPLAINED_GPU_WAIT/queued`), the CPU had already launched
-  the next op, so `covering_op` is only whatever long-running op overlapped the
-  gap, for example an `.item()` waiting for the GPU. All part columns except
-  `gpu_wait_ms` are zero; read `top_next_gpu_op` and the streams instead. The
-  same `.item()` can still be a real `sync_drain` on the gap where it returns.
+- For `sync_drain` gaps, the cause is the sync, and the Step 2 drain rows give its
+  line of code. The CPU work after a sync spreads over whichever ops run next, so
+  one sync can appear as several `sync_drain` groups with the same `top_runtime`.
+  If `sync_gain_ms` covers most of the drain row, removing the sync fixes all of
+  those groups. If it doesn't, treat each large group as separate CPU work.
+- For `UNEXPLAINED_GPU_WAIT/queued` gaps, the next op was already launched, so
+  `covering_op` is only an op that overlapped the gap, for example an `.item()`
+  waiting for the GPU. All parts except `gpu_wait_ms` are zero. Read
+  `top_next_gpu_op` and the streams instead.
+- For `starved` gaps, `launch_parent_op` in `idle_intervals`, the op that launched
+  the next GPU op, is a second code location.
 
-For starved gaps, `launch_parent_op` in `idle_intervals` (the op that launched the
-next GPU op) is a second code location next to `covering_op`.
+Groups under 1% of idle time are folded into one `other (N groups)` row per
+label, sub-label, and `drain_type`. The three largest groups of each label and
+sub-label are never folded. `folded_top_ops` names the `covering_op` of the
+largest folded groups. A large `other` row means the idle time is spread over
+many ops, which points to per-op overhead rather than one hotspot.
 
-Groups under 1% of idle time are folded into one `other (N groups)` row per label,
-sub-label, and `drain_type`, except the three largest groups of each label and
-sub-label, which always stay. `folded_top_ops` names the `covering_op` of the
-largest folded groups. If an `other` row is among the largest groups, the idle
-time is spread over many ops: per-op overhead, not one hotspot.
-
-### Step 5: Drill down to individual gaps
+### Step 5: Inspect individual gaps
 
 In `idle_intervals`, filter by `group_id`, or look up a group's `worst_idle_id`.
-Useful columns per gap:
+The most useful columns are:
 
-- `detail`: the non-zero parts, largest first; for queued and no-launch gaps, a
+- `detail`: the nonzero parts, largest first. For queued and no-launch gaps, a
   short explanation instead.
-- `sync_event_name`, `sync_event_dur`, `sync_entry_point`, `sync_call_stack_full`:
-  the sync, how long it blocked, and the stack that issued it. The stack is a list
-  from the root to the sync call; frames are Python functions (`file(line):
-  function`) when the trace has them, otherwise op names only.
-- `launch_parent_op`, `following_launch_name`, `launch_to_start_us`: how the next
-  op was launched. `launch_tid` tells threads apart, for example the main thread
-  from the autograd thread. `launch_call_x_ref` is the launch call's CPU time
-  over 50 µs; above 1, the launch itself was slow.
+- `sync_event_name`, `sync_event_dur`, `sync_entry_point`, and
+  `sync_call_stack_full`: the sync call, how long it blocked in µs, the user frame
+  that issued it, and its call stack from the root. Stack frames are Python
+  functions (`file(line): function`) when the trace has them, otherwise op names.
+- `launch_parent_op`, `following_launch_name`, and `launch_to_start_us`: how the
+  next op was launched. `launch_tid` tells threads apart, for example the main
+  thread and the autograd thread. `launch_call_x_ref` is the launch call's CPU
+  time divided by 50 µs; above 1, the launch call was slow.
 - `preceding_gpu_event`, `following_gpu_event`, and their streams.
-- `start_us`: sort a group's gaps by it. Gaps at a regular spacing are once per
-  step (or per layer), which tells you how much each step loses.
+- `start_us`: sort a group's gaps by it. Gaps at a regular spacing happen once per
+  step or once per layer.
 
-To see the gap in context, open the augmented trace in Perfetto and search for
-`idle#<idle_id>`. To get the code that launched the next op, follow the UID
+To see a gap in context, open the augmented trace in Perfetto and search for
+`idle#<idle_id>`. To find the code that launched the next op, follow the UID
 columns into the [Trace2Tree](../conceptual/trace2tree.md) model:
 
 ```python
@@ -276,112 +291,96 @@ while evt is not None:                       # launch call -> ops -> Python fram
     evt = tree.events_by_uid.get(evt.get("parent"))
 ```
 
-With a file and line from `sync_entry_point` or the launch stack, read the source
-around that line to see why it syncs or why it's slow.
+Then read the source at the file and line from `sync_entry_point` or the launch
+stack.
 
 ## Common patterns
 
-The following table maps what you see in the sheets to the likely cause and what
-to try. Check the pattern against the part columns and a few gaps before acting
-on it.
+The following table lists common patterns, their usual cause, and what to try.
+Confirm a pattern against the part columns and a few individual gaps before you
+act on it.
 
-| Pattern | Likely cause | What to try |
-|---------|--------------|-------------|
-| Large `sync_drain: hipMemcpyWithStream` or `cudaMemcpyAsync` row (at a line of user code, or with `aten::item` or `aten::_local_scalar_dense` in the stack), with a large Step 2 bound | `.item()`, `.cpu()`, `.tolist()`, `print` of a tensor, or a host-side condition on a GPU value | Remove it, defer it to the end of the step, or copy to pinned memory with `non_blocking=True` and sync later. |
-| Large sync row with a Step 2 bound that's a small share of its time | CPU work that follows the sync anyway, for example preprocessing the next input | Find that work in `idle_groups` (`covering_op` of the `sync_drain` groups); make it faster or run it ahead. Moving the sync doesn't help. |
-| Large `sync_drain: hipFree` or `cudaFree` row, often with no `@` site | Frees that synchronize the device: either the caching allocator is disabled (`PYTORCH_NO_CUDA_MEMORY_CACHING=1`), so every free is a `hipFree`, or the caching allocator freed cached blocks to retry a failed allocation (memory pressure). Either way the op that freed isn't the cause | If the frees repeat once per op every step, check the allocator is enabled first. Otherwise check `num_alloc_retries` in `torch.cuda.memory_stats()`; reduce peak memory (smaller batch, activation checkpointing), or try `expandable_segments:True` in `PYTORCH_CUDA_ALLOC_CONF` where your PyTorch build supports it. |
-| Large `sync_drain` row for `hipDeviceSynchronize`, `hipStreamSynchronize`, or an event sync | Explicit sync, often timing, logging, or a `torch.cuda.synchronize()` | Remove it or move it out of the step. |
-| `starved`, `CPU_OP_DOMINATED`, many short gaps under one `covering_op` | Host overhead per op (dispatch, Python, small kernels) | Fuse ops, use `torch.compile`, capture a graph, or give each op more work (larger batch). |
-| `starved`, `LAUNCH_DOMINATED`, many gaps near 10 µs | Launch rate: the GPU finishes each small kernel before the next one arrives | Graph capture or kernel fusion. |
-| `LAUNCH_DOMINATED` with `top_launch` or `following_launch_name` `cudaGraphLaunch` or `hipGraphLaunch` and `launch_call_us` in the hundreds of µs or more | The CPU cost of launching a large graph | Capture fewer, larger graphs per step only if the launches are back to back; otherwise overlap the graph launch with GPU work (launch the next graph before syncing on the previous one). |
-| `launch_call_x_ref` above 1 on ordinary kernel launches (`hipLaunchKernel`, `cudaLaunchKernel`), up to the ms range | The launching thread was descheduled or contended (too few CPU cores per process, CPU oversubscription). For graph launches, see the previous row | Check CPU affinity and the number of threads per process. |
-| `RUNTIME_DOMINATED` with `top_runtime` `hipMalloc` or `hipFree`, `starved` | Allocation on the critical path, for example with the caching allocator disabled | Keep the caching allocator enabled; preallocate buffers. |
-| `RUNTIME_DOMINATED/other_thread` | Another thread (data loader, communication, allocator) was in a long runtime call and blocked the launching thread | Find that thread in Perfetto; move the work off the critical path. |
-| `UNTRACED_DOMINATED` | CPU work that the profiler didn't record: Python without `with_stack`, data loading, waiting for the GIL | Re-profile with `with_stack=True` or `record_function` ranges, or use a Python profiler. |
-| `UNEXPLAINED_GPU_WAIT/queued` with high `stream_switch_ms` | The next op waited on work in another stream, for example an event wait or a collective | Check the other stream in Perfetto; for collectives, compare ranks for a straggler. |
-| `UNEXPLAINED_GPU_WAIT` on the same stream | Runtime, driver, or hardware behavior, or profiler overhead | Not fixable from Python. Compare with profiling off; report it if it's large. |
-| `UNATTRIBUTED` | The trace has no CPU activity for the next op | Check the profiler settings and whether another process launched the op. |
+| Pattern | Usual cause | What to try |
+|---------|-------------|-------------|
+| Large `sync_drain` row for `hipMemcpyWithStream` or `cudaMemcpyAsync` at a line of user code, with `sync_gain_ms` close to `total_ms` | `.item()`, `.cpu()`, `.tolist()`, printing a tensor, or a Python condition on a GPU value | Remove it, defer it to the end of the step, or copy to pinned memory with `non_blocking=True` and sync later. |
+| Large `sync_drain` row with `sync_gain_ms` much smaller than `total_ms` | CPU work that runs after the sync anyway, for example preprocessing the next input | Make that work faster or run it ahead of the GPU (see Step 2). |
+| Large `sync_drain: hipFree` or `cudaFree` row, often without `@` | The caching allocator is disabled (`PYTORCH_NO_CUDA_MEMORY_CACHING=1`), or it frees cached blocks to retry a failed allocation | If every op frees memory, check that the caching allocator is enabled. Otherwise check `num_alloc_retries` in `torch.cuda.memory_stats()`, then reduce peak memory or set `expandable_segments:True` in `PYTORCH_CUDA_ALLOC_CONF` if your PyTorch build supports it. |
+| Large `sync_drain` row for `hipDeviceSynchronize`, `hipStreamSynchronize`, or an event sync | An explicit sync, often `torch.cuda.synchronize()` for timing or logging | Remove it or move it out of the step. |
+| `starved` and `CPU_OP_DOMINATED`, many short gaps under one `covering_op` | Host overhead per op: dispatch, Python, small kernels | Fuse ops, use `torch.compile`, capture a graph, or give each op more work with a larger batch. |
+| `starved` and `LAUNCH_DOMINATED`, many gaps of about 10 µs | Launch rate: each small kernel finishes before the next one arrives | Capture a graph or fuse kernels. |
+| `LAUNCH_DOMINATED` with `top_launch` `hipGraphLaunch` or `cudaGraphLaunch` and `launch_call_us` of hundreds of µs or more | CPU cost of launching a large graph | Launch the next graph before you sync on the previous one, so the launch overlaps GPU work. If graph launches run back to back, capture fewer, larger graphs. |
+| `launch_call_x_ref` above 1 on `hipLaunchKernel` or `cudaLaunchKernel` | The launching thread was descheduled or contended, for example too few CPU cores per process | Check CPU affinity and the number of threads per process. |
+| `RUNTIME_DOMINATED` and `starved`, with `top_runtime` `hipMalloc` or `hipFree` | Memory allocation on the critical path, for example with the caching allocator disabled | Keep the caching allocator enabled and preallocate buffers. |
+| `RUNTIME_DOMINATED/other_thread` | A long runtime call on another thread (data loader, communication, allocator) blocked the launching thread | Find that thread in Perfetto and move its work off the critical path. |
+| `UNTRACED_DOMINATED` | CPU work the profiler didn't record: Python without `with_stack`, data loading, waiting for the GIL | Profile again with `with_stack=True` or `record_function` ranges, or use a Python profiler. |
+| `UNEXPLAINED_GPU_WAIT/queued` with a large `stream_switch_ms` | The next op waited on another stream, for example on an event or a collective | Check the other stream in Perfetto. For collectives, compare ranks to find a straggler. |
+| `UNEXPLAINED_GPU_WAIT` on the same stream | Runtime, driver, or hardware behavior, or profiler overhead | Compare with profiling off. Report it if it's large. |
+| `UNATTRIBUTED` | The trace has no CPU activity for the next op | Check the profiler settings, and whether another process launched the op. |
 
 ## Pitfalls
 
-- *A label names only the largest part.* Read the part columns before deciding a
-  gap is "CPU" or "launch".
-- *`covering_op` isn't the cause of a sync.* For `sync_drain` gaps, the drain rows
-  and `sync_entry_point` point at the sync; `covering_op` shows the work after it.
-- *A sync row's time isn't the gain from removing it.* Check the Step 2 bound.
-- *A sync can hide.* A sync on another thread, or one inside a library call that
-  isn't a known sync call, shows as `starved`.
-- *Profiler overhead inflates CPU time.* Short gaps between small ops are partly
-  profiler cost. Confirm the gain with the profiler off.
-- *Idle time is the upper bound of the gain.* Removing a gap only shortens the
-  step if the work after it was on the critical path.
+- A label names only the largest part of a gap. Read the part columns before you
+  decide that a gap is CPU-bound or launch-bound.
+- For `sync_drain` gaps, `covering_op` is the work after the sync, not the sync.
+  The drain rows and `sync_entry_point` point at the sync.
+- A sync row's `total_ms` isn't the gain from removing the sync. Use
+  `sync_gain_ms`.
+- Some syncs show as `starved`: a sync on another thread, a sync inside a library
+  call that isn't a known sync call, and a copy issued after the GPU was already
+  idle.
+- Profiler overhead adds CPU time, especially between small ops. Confirm a gain
+  with profiling off.
+- Removing a gap shortens the step only if the work after it is on the critical
+  path, so idle time is an upper bound on the gain.
 
-## Report the findings
+## Examples
 
-Whether you or an agent write it up, a short report with the following structure
-is easy to act on:
+### Diffusion model inference limited by the CPU
 
-1. GPU utilization, macro idle time, and its split into `sync_drain` and
-   `starved`.
-2. The top three to five causes, each with its share of idle time, label and
-   `drain_type`, code location (`sync_entry_point`, `covering_op`,
-   `launch_parent_op`, or the launch stack), gap count and typical length, and the
-   evidence from the part columns. For a sync, include the Step 2 bound
-   (`sync_gain_ms`).
-3. For each cause, what to try first and how confident you are.
-4. What's left unexplained (`UNEXPLAINED_GPU_WAIT`, `UNATTRIBUTED`, untraced
-   time) and what would explain it.
+A diffusion model inference trace has 62% GPU utilization:
 
-## Example workflows
-
-### CPU-bound inference: make the CPU faster
-
-The following example is a diffusion model inference trace with 62% GPU
-utilization:
-
-1. Utilization is 62%, so idle time matters. Macro idle is 35% of the trace.
-2. The `drain` rows show almost all idle time is `starved`; the few sync rows add
-   up to about 0.1%. Synchronization isn't the issue.
-3. `CPU_OP_DOMINATED` holds 65% of idle time and `LAUNCH_DOMINATED` 27%. The part
-   columns show 53 ms of launch time inside the `CPU_OP_DOMINATED` gaps, so launch
-   cost is larger than the `LAUNCH_DOMINATED` row alone suggests.
-4. In `idle_groups`, the largest group is `CPU_OP_DOMINATED` under `aten::addmm`
-   (24% of idle), followed by an attention processor's `__call__` and
+1. Macro idle time is 35% of the trace, so idle time matters.
+2. Nearly all idle time is `starved`. The sync rows add up to about 0.1% of idle
+   time, so syncs aren't the problem.
+3. `CPU_OP_DOMINATED` holds 65% of idle time and `LAUNCH_DOMINATED` holds 27%. The
+   part columns of the `CPU_OP_DOMINATED` row hold another 53 ms of launch time,
+   so launch cost is larger than the `LAUNCH_DOMINATED` row shows.
+4. The largest `idle_groups` row is `CPU_OP_DOMINATED` under `aten::addmm`, with
+   24% of idle time. The next are an attention processor's `__call__` and
    `aten::mm`. The `LAUNCH_DOMINATED` time is spread over many small groups of
    short gaps.
-5. Filter `idle_intervals` by the `aten::addmm` group and open its worst gaps in
-   the augmented trace: the GPU finishes the previous kernels while the CPU is
-   still inside `aten::addmm`, before it launches the GEMM.
-6. Conclusion: the host can't keep up with many short kernels. Reducing CPU
-   overhead around the linear layers, fusing, or capturing the model in a graph is
-   likely to reduce idle time.
+5. In the augmented trace, the worst `aten::addmm` gaps show the GPU finishing its
+   kernels while the CPU is still inside `aten::addmm`, before it launches the
+   GEMM.
+6. The CPU can't keep up with many short kernels. Reducing CPU overhead around
+   the linear layers, fusing ops, or capturing the model in a graph should reduce
+   idle time.
 
-### LLM serving: remove the sync
+### LLM serving with a blocking copy
 
-The following example is a vLLM serving trace with 89% GPU utilization:
+A vLLM serving trace has 89% GPU utilization and 31 ms of macro idle time:
 
-1. Utilization is 89%; macro idle is 31 ms.
-2. One drain row holds 68% of idle time: `sync_drain: hipMemcpyWithStream @
-   vllm/v1/attention/backends/rocm_aiter_fa.py(459): build`, 22 ms over 128 gaps.
-   Its `cpu_op_ms` is 20 ms: after each copy drains the queue, the CPU runs ops
-   for a while before the next launch, and the GPU waits. The Step 2 bound
-   (`sync_gain_ms`) is 22.0 ms: each copy blocked for longer than its gap, so removing the wait
-   would let that CPU work run while the GPU is still busy.
-3. The label is `CPU_OP_DOMINATED`, which agrees: the gaps are CPU work after the
-   sync.
-4. In `idle_groups`, the same `top_runtime` (`hipMemcpyWithStream`) appears on
-   several `sync_drain` groups with different `covering_op` values
-   (`execute_model`, `build`, `_build_attn_group_metadata`): that's the CPU work
-   that follows the one sync, not separate causes.
-5. `sync_call_stack_full` in `idle_intervals` shows the copy is a `.cpu()` call in
-   the attention backend's metadata `build`.
-6. Conclusion: making the copy asynchronous (pinned memory and a later sync), or
-   moving it after the next launches, lets the metadata build overlap with GPU
-   work, without making the build itself faster.
+1. One drain row, `sync_drain: hipMemcpyWithStream @
+   vllm/v1/attention/backends/rocm_aiter_fa.py(459): build`, holds 22 ms over 126
+   gaps, or 67.5% of idle time.
+2. The row's `sync_gain_ms` is also 22 ms: each copy blocked for longer than its
+   gap. Removing the wait would remove nearly all of the row's idle time.
+3. The row's `cpu_op_ms` is 20 ms, and its label is `CPU_OP_DOMINATED`. After each
+   copy returns, the CPU runs ops for about 160 µs before it launches the next GPU
+   op. Without the blocking copy, that work would overlap GPU work.
+4. In `idle_groups`, `hipMemcpyWithStream` is the `top_runtime` of several
+   `sync_drain` groups with different `covering_op` values (`execute_model`,
+   `build`, and `_build_attn_group_metadata`). These groups are the CPU work after
+   the same copy, not separate causes.
+5. `sync_call_stack_full` shows that the copy is a `.cpu()` call in the attention
+   backend's metadata `build`.
+6. Make the copy asynchronous with pinned memory and a later sync, or move it
+   after the next launches. The metadata build then overlaps GPU work without
+   being made faster.
 
 ## Performance overhead
 
-Idle time analysis adds classification and DataFrame construction on top of the
+Idle time analysis adds classification and `DataFrame` construction to the
 normal trace load. The following table shows measurements on representative
 PyTorch traces.
 
@@ -392,9 +391,8 @@ PyTorch traces.
 | LLM serving (vLLM) | 5.5 MB | 501 | 5.8 s | 3.4 s |
 | Diffusion model inference | 21 MB | 14,882 | 23.7 s | 15.7 s |
 
-To reduce the cost on very large traces, raise the noise threshold
-(`--micro_idle_thresh_us`, or `noise_us` in `IdleThresholds`) so fewer short gaps
-are classified.
+On very large traces, raise the noise threshold (`--micro_idle_thresh_us`, or
+`noise_us` in `IdleThresholds`) to classify fewer short gaps.
 
 ## Related topics
 
