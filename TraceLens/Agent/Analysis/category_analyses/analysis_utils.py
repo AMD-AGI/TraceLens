@@ -873,7 +873,7 @@ def compute_impact_estimates(
     if not baseline_ok:
         print(
             f"[analysis_utils.compute_impact_estimates] baseline_ms="
-            f"{baseline_ms!r} is invalid; skipping impact_score computation"
+            f"{baseline_ms!r} is invalid; skipping impact_score computation "
             f"for category={category!r}",
             file=sys.stderr,
         )
