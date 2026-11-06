@@ -96,7 +96,7 @@ _TABLE_DIVIDER = "|" + "---|" * 10
 # percent column; {drop_note} is the conditional drop-count sentence (empty when
 # nothing was dropped).
 _DEGRADED_BANNER = """> **⚠ Degraded (deterministic fallback) report.** This trace was
-> graph-under-recorded (graph-replay fraction {pct};
+> graph-under-recorded (graph-replay fraction {pct} > {max_pct});
 > per-op decomposition failed, so the agentic analysis path did not execute.
 > Only **kernel name, time, and {pct_label}** are recoverable from a graph-collapsed
 > trace. Shapes, launcher path, quant operands, category, and efficiency are
@@ -187,8 +187,8 @@ def render_fallback_report(unified_perf_csv: Path, graph_replay_fraction: float)
             f"(or beyond top-{MAX_PITEM_COUNT})."
         )
     banner = _DEGRADED_BANNER.format(
-        pct=f"{graph_replay_fraction:.0%}",
-        max_pct=f"{GRAPH_REPLAY_FRACTION_MAX:.0%}",
+        pct=f"{graph_replay_fraction:.1%}",
+        max_pct=f"{GRAPH_REPLAY_FRACTION_MAX:.1%}",
         pct_label=percent_label,
         drop_note=drop_note,
     )

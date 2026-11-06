@@ -607,7 +607,7 @@ def test_writer_degraded_banner(tmp_path):
 
     # Visible call-out with the fraction rendered as a percent.
     assert "> **⚠ Degraded (deterministic fallback) report.**" in md
-    assert "graph-replay fraction 95%" in md
+    assert "graph-replay fraction 95.0% > 10.0%)" in md
 
     # The banner is INERT: stripping it must not change any parsed candidate count.
     stripped = _strip_banner(md)
@@ -896,5 +896,5 @@ def test_main_derives_fraction_when_omitted(tmp_path, monkeypatch):
 
     # 90% graph-replay fraction is recovered from the gate and rendered in the banner.
     md = (out_dir / "analysis.md").read_text(encoding="utf-8")
-    assert "90%" in md
+    assert "90.0%" in md
     assert "#### P1:" in md
