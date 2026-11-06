@@ -11,15 +11,14 @@ Computes metrics for elementwise operations and outputs JSON for subagent proces
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    PEAK_MEM_BW_KEY,
+    run_category_analysis,
+)
 
-from analysis_utils import PEAK_MEM_BW_KEY, run_category_analysis
 
-
-def extract_category_specific(ops_df, metadata) -> dict:
+def extract_category_specific(_ops_df, metadata) -> dict:
     """Extract elementwise-specific aggregate metrics."""
     return {PEAK_MEM_BW_KEY: metadata[PEAK_MEM_BW_KEY]}
 

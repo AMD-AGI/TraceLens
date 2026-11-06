@@ -12,39 +12,39 @@ This script handles Communication, Graph, and miscellaneous operations.
 """
 
 import argparse
-import sys
-import os
 from collections import Counter
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    get_peak_specs,
+    run_category_analysis,
+)
 
-from analysis_utils import get_peak_specs, run_category_analysis
+# Constants
+COMMUNICATION_KEYWORDS = (
+    "all_reduce",
+    "collective",
+    "ncclkernel",
+    "rccl",
+    "broadcast",
+    "allgather",
+)
+GRAPH_KEYWORDS = ("graph", "hipgraph", "cudagraph")
 
 
 def classify_other_operation(op_name: str) -> str:
     """Classify 'other' category operations."""
     op_lower = op_name.lower()
 
-    if any(
-        x in op_lower
-        for x in [
-            "all_reduce",
-            "collective",
-            "ncclkernel",
-            "rccl",
-            "broadcast",
-            "allgather",
-        ]
-    ):
+    if any(x in op_lower for x in COMMUNICATION_KEYWORDS):
         return "communication"
 
-    if any(x in op_lower for x in ["graph", "hipgraph", "cudagraph"]):
+    if any(x in op_lower for x in GRAPH_KEYWORDS):
         return "graph"
 
     return "miscellaneous"
 
 
-def _classify_other_op(op_name: str, row) -> dict:
+def _classify_other_op(op_name: str, _row) -> dict:
     """Operation classifier callback for build_operation_metrics."""
     return {"sub_category": classify_other_operation(op_name)}
 
@@ -110,7 +110,7 @@ def main():
 
     skipped_comm_ops = None
 
-    def strip_communication_ops(ops_df, metadata):
+    def strip_communication_ops(ops_df, _metadata):
         nonlocal skipped_comm_ops
         ops_df, skipped_comm_ops = _split_communication_ops(ops_df)
         return ops_df, {}

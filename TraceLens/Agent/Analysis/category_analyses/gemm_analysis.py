@@ -11,12 +11,8 @@ Computes metrics for GEMM operations and outputs JSON for subagent processing.
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     get_peak_specs,
     run_category_analysis,
 )
@@ -30,7 +26,7 @@ def detect_quantized_gemm(compute_spec: str) -> bool:
     return compute_spec in QUANTIZED_COMPUTE_SPECS
 
 
-def classify_gemm_operation(op_name: str, row) -> dict:
+def classify_gemm_operation(_op_name: str, row) -> dict:
     """Classify GEMM operation type."""
     is_quantized = detect_quantized_gemm(row["Compute Spec"])
     return {
@@ -45,7 +41,6 @@ def extract_category_specific(ops_df, metadata) -> dict:
 
     missing_perf_model = 0
     if "TFLOPS/s_mean" in ops_df.columns:
-
         missing_perf_model = ops_df["TFLOPS/s_mean"].isna().sum()
 
     return {

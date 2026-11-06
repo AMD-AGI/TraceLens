@@ -11,12 +11,11 @@ Computes metrics for reduce operations and outputs JSON for subagent processing.
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import PEAK_MEM_BW_KEY, run_category_analysis
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    PEAK_MEM_BW_KEY,
+    run_category_analysis,
+)
 
 
 def detect_softmax(op_name: str) -> bool:
@@ -29,7 +28,7 @@ def extract_category_specific(ops_df, metadata) -> dict:
     softmax_count = sum(1 for name in ops_df["name"] if detect_softmax(str(name)))
 
     return {
-        "softmax_count": int(softmax_count),
+        "softmax_count": softmax_count,
         PEAK_MEM_BW_KEY: metadata[PEAK_MEM_BW_KEY],
     }
 

@@ -12,11 +12,8 @@ Computes metrics for MoE fused operations and outputs JSON for subagent processi
 
 import argparse
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     get_peak_specs,
     run_category_analysis,
 )
@@ -24,7 +21,7 @@ from analysis_utils import (
 
 def _check_moe_data(output_dir, category, comparison_scope):
     """Return NO_DATA metrics if MoE CSV is absent (expected for non-MoE traces)."""
-    moe_csv = f"{output_dir}/category_data/{category}_ops.csv"
+    moe_csv = os.path.join(output_dir, "category_data", f"{category}_ops.csv")
     if not os.path.exists(moe_csv):
         return {
             "category": category,
@@ -40,7 +37,7 @@ def _check_moe_data(output_dir, category, comparison_scope):
     return None
 
 
-def extract_category_specific(ops_df, metadata) -> dict:
+def extract_category_specific(_ops_df, metadata) -> dict:
     """Extract MoE-specific aggregate metrics."""
     return get_peak_specs(metadata)
 

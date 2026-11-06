@@ -11,15 +11,14 @@ Computes metrics for Convolution operations and outputs JSON for subagent proces
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     get_peak_specs,
     run_category_analysis,
 )
+
+# Constants
+KERNEL_TIME_SUM_COL = "Kernel Time (µs)_sum"
 
 
 def extract_category_specific(ops_df, metadata) -> dict:
@@ -28,14 +27,12 @@ def extract_category_specific(ops_df, metadata) -> dict:
         ops_df["name"].str.contains("transpose", case=False, na=False)
     ]
     transpose_time_ms = (
-        transpose_ops["Kernel Time (µs)_sum"].sum() / 1000
-        if len(transpose_ops) > 0
-        else 0
+        transpose_ops[KERNEL_TIME_SUM_COL].sum() / 1000 if len(transpose_ops) > 0 else 0
     )
 
     total_time_ms = 0
-    if "Kernel Time (µs)_sum" in ops_df.columns:
-        total_time_ms = ops_df["Kernel Time (µs)_sum"].sum() / 1000
+    if KERNEL_TIME_SUM_COL in ops_df.columns:
+        total_time_ms = ops_df[KERNEL_TIME_SUM_COL].sum() / 1000
 
     transpose_overhead_pct = (
         (transpose_time_ms / total_time_ms * 100) if total_time_ms > 0 else 0
