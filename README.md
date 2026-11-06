@@ -19,7 +19,7 @@ TraceLens is a Python library for **automated performance analysis of training a
 
 **Hierarchical Performance Breakdowns**: Pinpoint bottlenecks with a top-down view, moving from the overall GPU timeline (idle/busy) to operator categories, individual operators, and right down to unique argument shapes.
 
-**Compute & Roofline Modeling**: Automatically translate raw timings into efficiency metrics like TFLOP/s and TB/s for popular operations. Determine if an op is compute or memory bound and see how effectively your workload utilizes the hardware.
+**Compute & Roofline Modeling**: Automatically translate raw timings into efficiency metrics like TFLOP/s and TB/s for popular operations. Determine if an op is compute or memory bound and see how effectively your workload utilizes the hardware. Compare each op with predicted times from Origami or your own model; see [Add an op projection](docs/how-to/generate-perf-report-pytorch.md#add-an-op-projection).
 
 **Multi-GPU Communication Analysis**: Accurately diagnose scaling issues by dissecting collective operations. TraceLens separates pure communication time from synchronization skew and calculates effective bandwidth on your workload.
 
@@ -69,6 +69,7 @@ pip install 'TraceLens[all] @ git+https://github.com/AMD-AGI/TraceLens.git'
 | `kernel_source` | [Kernel source mapping](docs/how-to/map-kernel-source.md) (`itanium-demangler`) |
 | `comparative` | LLM clients for comparative analysis (`slodels` with OpenAI, Anthropic, and Google) |
 | `dev` | Test and format tools (`pytest`, `setuptools`, `black`) |
+| `Visualizer` | [Model architecture visualizer](docs/install/install.md#optional-visualizer-model-explorer-export) (CPU PyTorch wheel, `transformers`, `huggingface_hub`, `visualize_model_in_explorer`, `TraceLens_model_roofline_projection`) |
 | `all` | Every extra in this table |
 
 ### 2. Collect Traces
@@ -168,7 +169,7 @@ TraceLens/
 │   ├── EventReplay/      # Extracts meta data and replays almost arbitrary operations
 │   ├── TraceIndex/       # Build a searchable SQLite catalog of TraceLens reports
 │   ├── TraceUtils/       # Shared trace loaders and annotation helpers
-│   └── Agent/            # Agentic optimization report (Analysis) and trace collection (Profiling)
+│   └── Agent/            # Agentic analysis, profiling, and model visualization
 ├── docs/               # tool-specific guides
 ├── examples/           # example traces, notebooks, scripts, custom-workflows
 ├── notebooks/          # end-to-end profiling and analysis walkthroughs
@@ -196,7 +197,9 @@ TraceLens/
 | Multi-Rank Collective Report | [docs/how-to/collective-report.md](docs/how-to/collective-report.md)                                                             |
 | Performance Report Columns   | [docs/reference/perf-report-columns.md](docs/reference/perf-report-columns.md)                                                   |
 | TraceLens Agent              | [docs/how-to/agent.md](docs/how-to/agent.md)                                                                                     |
+| Model visualizer agent       | [docs/how-to/visualize-model.md](docs/how-to/visualize-model.md)                                                                 |
 | TraceIndex                   | [docs/how-to/trace-index.md](docs/how-to/trace-index.md)                                                                         |
+| Model Roofline Projection    | [docs/how-to/generate-model-roofline-projection.md](docs/how-to/generate-model-roofline-projection.md)                           |
 
 ---
 

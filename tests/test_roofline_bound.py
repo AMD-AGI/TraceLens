@@ -61,7 +61,7 @@ def perf_report(tmp_path_factory):
         output_xlsx_path=None,
         output_csvs_dir=csv_dir,
         gpu_arch_json_path=arch_path,
-        enable_origami=True,
+        enable_origami_gemm=True,
     )
 
     return csv_dir
@@ -85,6 +85,18 @@ def test_roofline_bound_in_unified_perf_summary(perf_report):
     )
     bound_vals = set(df[bound_col].dropna().unique())
     assert bound_vals <= VALID_BOUND_VALUES, f"Unexpected values: {bound_vals}"
+    tflops_col = _find_col(df, "Roofline TFLOPS/s")
+    tb_col = _find_col(df, "Roofline TB/s")
+    assert tflops_col is not None, (
+        f"'Roofline TFLOPS/s' missing from unified_perf_summary. "
+        f"Columns: {list(df.columns)}"
+    )
+    assert tb_col is not None, (
+        f"'Roofline TB/s' missing from unified_perf_summary. "
+        f"Columns: {list(df.columns)}"
+    )
+    assert df[tflops_col].dropna().gt(0).any()
+    assert df[tb_col].dropna().gt(0).any()
 
 
 @pytest.mark.skipif(not _ORIGAMI_AVAILABLE, reason="requires origami (rocm-origami)")
@@ -117,6 +129,12 @@ def test_roofline_bound_in_category_sheets(perf_report):
             assert (
                 bound_vals <= VALID_BOUND_VALUES
             ), f"Sheet '{sheet}': unexpected Roofline Bound values: {bound_vals}"
+            assert (
+                _find_col(df, "Roofline TFLOPS/s") is not None
+            ), f"Sheet '{sheet}' has roofline time but missing 'Roofline TFLOPS/s'"
+            assert (
+                _find_col(df, "Roofline TB/s") is not None
+            ), f"Sheet '{sheet}' has roofline time but missing 'Roofline TB/s'"
 
     assert (
         sheets_with_roofline

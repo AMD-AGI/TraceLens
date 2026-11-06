@@ -120,7 +120,7 @@ Not all GPU activity is compute. Profiling traces also show memory transfers:
 
 - **H2D (host to device)**: Copies data from CPU to GPU, usually synchronous and PCIe bandwidth-limited.
 - **D2H (device to host)**: Copies results back to CPU, also synchronous and PCIe bandwidth-limited.
-- **D2D (device to device)**: Moves data between GPU buffers, asynchronous and limited by HBM bandwidth.
+- **D2D (device to device)**: Moves data between GPU buffers, asynchronous and limited by memory bandwidth.
 
 Recent versions even record measured bandwidth for these events in the trace arguments. Importantly, memory copy events use the GPU's DMA engines, not compute cores, so they don't directly compete with kernel execution.
 

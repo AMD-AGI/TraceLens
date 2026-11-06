@@ -65,10 +65,10 @@ The orchestrator runs against a PyTorch profiler trace. Collection is workload-s
 ### Establish a hardware baseline
 
 Roofline analysis compares each measured kernel against your GPU's max-achievable
-TFLOPS and HBM bandwidth, so it needs a `<platform>.json` arch file for your
+TFLOPS and memory bandwidth, so it needs a `<platform>.json` arch file for your
 hardware. Bundled arch files ship with the package. If your platform isn't
 included, or you want stack-specific measured values instead of published specs,
-generate benchmark-derived peak TFLOPS and HBM bandwidth with the GPU
+generate benchmark-derived peak TFLOPS and memory bandwidth with the GPU
 microbenchmarking suite. It writes the arch JSON in the shape the roofline
 expects.
 
@@ -101,6 +101,50 @@ analysis mode (`default` for training and eager inference outside vLLM, SGLang, 
 or `inference` for vLLM, SGLang, or ATOM), the execution mode and capture-folder path for
 inference, environment details (node, container, or virtual environment), and an
 optional output directory.
+
+### Run the agent from a YAML config
+
+If you already have a run config, point the agent at it instead of answering the
+prompts:
+
+```text
+Follow the analysis orchestrator installed with TraceLens and run the full
+agentic analysis workflow from config <run.yaml>, <scope>
+```
+
+Replace `<scope>` with `standalone`, `comparative`, `semantic`, or `multi_trace`. You can
+leave the scope out when the config already implies it: a single job runs as `standalone`,
+two jobs with `compare_to` on the first job run as `comparative`, and a config with an
+`aggregation` block runs as `multi_trace`.
+
+| Scope | Config shape |
+|---|---|
+| `standalone` | One job. |
+| `comparative` | Two jobs, each with an optional `capture_folder`. `compare_to` on the first job can name the second job instead of repeating its paths. |
+| `semantic` | Two graph-replay-only jobs with `analysis_mode: inference` and no `capture_folder`. |
+| `multi_trace` | Two or more jobs on the same platform, each with a `phase` and a `node` (its index within the phase), and an `aggregation` block with policy `combine_by_node`. Each job is one node, `<phase>_<index>`, and the first job is the one that kernel fusion and system analysis focus on. |
+
+For example, a `multi_trace` config for a prefill trace and a decode trace:
+
+```yaml
+analysis_mode: inference
+output_dir: /abs/path/analysis_output
+aggregation:
+  policy: combine_by_node
+jobs:
+  - phase: prefill
+    node: 0
+    trace_path: /abs/path/prefill_0.json.gz
+    platform: MI300X
+  - phase: decode
+    node: 0
+    trace_path: /abs/path/decode.json.gz
+    platform: MI300X
+```
+
+Every job needs a `platform`, and all trace, capture folder, and output paths must be
+absolute. For the full schema and more examples, see
+[Generate performance reports from a YAML config](./generate-perf-report-from-config.md).
 
 ## Read the results
 
@@ -158,19 +202,19 @@ matter.
 
 The high-level steps are:
 
-1. Query user inputs (comparison scope, trace paths, platforms, analysis mode,
-   environment setup).
-2. Generate the performance report (branching on analysis mode and comparison
-   scope).
-3. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
+1. Query user inputs, or read a run YAML (environment setup is always asked).
+2. Generate the performance reports with one call on the completed run config.
+3. Check trace quality, with a fallback for graph-under-recorded traces.
+4. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
    data, category filtering) and extract fusion candidates.
-4. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
+5. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
    parallel.
-5. Run the compute-kernel sub-agents in parallel.
-6. Aggregate the per-category findings into a globally ranked list.
-7. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
-8. Prepare report data and identify the model.
-9. Generate the final `analysis.md` report.
+6. Run the compute-kernel sub-agents in parallel.
+7. Aggregate the per-category findings into a globally ranked list.
+8. Validate sub-agent outputs for time sanity, efficiency anomalies, and coverage.
+9. Prepare report data and identify the model.
+10. Render the performance plot when no `agent_extension.py` is present.
+11. Generate the final `analysis.md` report.
 
 ### Sub-agents
 

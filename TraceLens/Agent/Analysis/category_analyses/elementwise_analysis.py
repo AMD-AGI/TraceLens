@@ -16,12 +16,12 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from analysis_utils import run_category_analysis
+from analysis_utils import get_peak_mem_bw_tbs, run_category_analysis
 
 
 def extract_category_specific(ops_df, metadata) -> dict:
     """Extract elementwise-specific aggregate metrics."""
-    return {"peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs")}
+    return {"peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata)}
 
 
 def main():

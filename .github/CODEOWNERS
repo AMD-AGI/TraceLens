@@ -14,6 +14,8 @@
 # Agent code and evals require area owner review
 /TraceLens/Agent/             @tsrikris
 /TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/ @Ahmedhasssan-aig @tsrikris
+/TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/partial_tests/ @amoskvic @tsrikris
+/TraceLens/Agent/Analysis/semantic_analyses/ @amoskvic @tsrikris
 
 # TraceDiff module and docs require Spandan review
 /TraceLens/TraceDiff/         @spandoesai
@@ -26,7 +28,6 @@
 
 # Inference reporting, docs, tests, and workflows require Deval review
 /TraceLens/Reporting/generate_perf_report_pytorch_inference.py @devalshahamd
-/TraceLens/TraceUtils/split_inference_trace_annotation.py      @devalshahamd
 /examples/custom_workflows/inference_analysis/               @devalshahamd
 /docs/how-to/generate-perf-report-pytorch-inference.md      @devalshahamd
 /docs/conceptual/inference-analysis.md                      @devalshahamd

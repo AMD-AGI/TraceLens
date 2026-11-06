@@ -95,6 +95,7 @@ def _cleanup_report_cache():
     yield
     for entry in _report_cache.values():
         shutil.rmtree(entry["tmpdir"], ignore_errors=True)
+    _report_cache.clear()
 
 
 @pytest.fixture()

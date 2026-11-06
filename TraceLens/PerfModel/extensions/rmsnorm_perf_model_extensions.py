@@ -38,9 +38,9 @@ class aiter_rms_norm(RMSNorm):
     flops/bytes are inherited from RMSNorm (affine=True, training=False).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         # Normalization.__init__ calls self.get_param_details and sets all attrs
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch)
 
     @staticmethod
     def get_param_details(event):
@@ -103,6 +103,73 @@ class aiter_rmsnorm(RMSNorm):
             "is_affine": True,
             "is_training": False,
         }
+
+
+class aiter_fused_qk_rmsnorm(RMSNorm):
+    """
+    Performance model for aiter::_fused_qk_rmsnorm_kernel.
+
+    Fused Q+K affine RMSNorm (aiter / sglang). flops/bytes = RMSNorm(Q) + RMSNorm(K).
+
+    Signature: _fused_qk_rmsnorm_kernel(q, q_w, q_eps, k, k_w, k_eps, q_out, k_out)
+        q / q_out     — shape [M, N_q], dtype BFloat16
+        q_w           — shape [N_q],    dtype BFloat16 (affine scale)
+        q_eps         — float scalar
+        k / k_out     — shape [M, N_k], dtype BFloat16
+        k_w           — shape [N_k],    dtype BFloat16 (affine scale)
+        k_eps         — float scalar
+
+    Expected Input Dims from trace:
+        [q_shape, q_w_shape, q_eps, k_shape, k_w_shape, k_eps, q_out_shape, k_out_shape]
+        e.g. [(12, 2048), (2048,), (), (12, 512), (512,), (), (12, 2048), (12, 512)]
+
+    Expected Input type from trace:
+        [dtype_q, dtype_q_w, dtype_q_eps, dtype_k, dtype_k_w, dtype_k_eps, dtype_q_out, dtype_k_out]
+
+    get_param_details uses Q at [0]/[1]; K shape/channels from [3]/[4] in __init__.
+    """
+
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
+        dims = event["args"]["Input Dims"]
+        self.k_shape = tuple(dims[3])
+        self.k_num_channels = int(dims[4][0])
+        self.k_num_elems = 1
+        for d in self.k_shape:
+            self.k_num_elems *= int(d)
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])  # q: [M, N_q]
+        dtype_in = event["args"]["Input type"][0]
+        stride_input = tuple(event["args"]["Input Strides"][0])
+        num_channels = event["args"]["Input Dims"][1][0]  # q_weight.shape[0]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (dtype_in, None),
+            "stride_input": stride_input,
+            "stride_output": None,
+            "num_channels": num_channels,
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        flops_q = super().flops()
+        rows_k = self.k_num_elems / self.k_num_channels
+        flops_k = rows_k * (2 * self.k_num_channels + 2)
+        flops_k += self.k_num_elems * (2 if self.is_affine else 1)
+        return flops_q + flops_k
+
+    def bytes(self):
+        bytes_q = super().bytes()
+        bytes_k = (
+            self.k_num_elems * self.bpe_in
+            + self.k_num_elems * self.bpe_out
+            + (self.k_num_channels * self.bpe_in if self.is_affine else 0)
+        )
+        return bytes_q + bytes_k
 
 
 class aiter_rmsnorm2d_fwd_with_dynamicquant_ck(RMSNorm):
@@ -180,8 +247,8 @@ class aiter_rmsnorm_quant(RMSNorm):
     Bytes: read input (BF16) + weight (BF16), write out (FP8) + per-group FP32 scales.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         try:
             self.group_size = int(event["args"]["Concrete Inputs"][5])
         except (KeyError, IndexError, ValueError, TypeError):
@@ -267,8 +334,8 @@ class fused_rms_mxfp4_quant(RMSNorm):
     via quant; bandwidth uses 0.5 B/elem for the FP4 packed tensor.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         input_dims = event["args"]["Input Dims"]
 
         self.has_res1 = False
@@ -354,9 +421,9 @@ class vllm_rocm_aiter_rmsnorm_fp8_group_quant(RMSNorm):
     Concrete Inputs[3] = group_size (e.g. '128')
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         # Normalization.__init__ sets num_elems, num_channels, bpe_in, etc.
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch)
         self.group_size = int(event["args"]["Concrete Inputs"][3])
 
     @staticmethod
@@ -410,7 +477,7 @@ class aiter_rmsnorm2d_fwd_with_add_ck(RMSNorm):
         e.g. [(4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), (), ()]
 
     FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
-    Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
+    Bytes: memory traffic per GPU (read input+residual_in+weight, write out+residual_out).
     """
 
     @staticmethod
@@ -462,7 +529,7 @@ class aiter_add_rmsnorm(aiter_rmsnorm2d_fwd_with_add_ck):
         e.g. [(4, 7168), (4, 7168), (4, 7168), (4, 7168), (7168,), ()]
 
     FLOPs: residual-add (num_elems) + RMSNorm (inherited from RMSNorm.flops()).
-    Bytes: HBM traffic per GPU (read input+residual_in+weight, write out+residual_out).
+    Bytes: memory traffic per GPU (read input+residual_in+weight, write out+residual_out).
 
     get_param_details, flops, and bytes are inherited from aiter_rmsnorm2d_fwd_with_add_ck.
     """
@@ -492,8 +559,8 @@ class vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant(RMSNorm):
     Concrete Inputs[4] = group_size (e.g. '128')
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.group_size = int(event["args"]["Concrete Inputs"][4])
 
     @staticmethod
@@ -575,9 +642,9 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         Read x + residual + weight; write padded output + updated residual.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.x_pad_to_multiple = int(event["args"]["Concrete Inputs"][4])
-        super().__init__(event, arch, python_path)
+        super().__init__(event, arch)
 
         N = self.num_channels
         if self.x_pad_to_multiple > 0:

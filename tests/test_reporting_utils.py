@@ -20,10 +20,8 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
     write_report_outputs,
 )
-from TraceLens.Agent.Analysis.category_analyses import (
-    analysis_utils as au,
-    kernel_fusion_analysis as kfa,
-)
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionCandidateBuilder
 from TraceLens.Reporting import (
     generate_multi_rank_collective_report_pytorch as coll_mod,
     generate_perf_report_pytorch_inference as inf_mod,
@@ -74,7 +72,6 @@ from tests.fixtures.reporting import (
     _write_trace,
 )
 from tests.test_trace2tree import _mk_event
-from unittest.mock import patch
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.extensions import (
     attention_perf_model_extensions as aext,
@@ -105,8 +102,9 @@ from tests.fixtures.agent import (
     _StubTree,
     _kernel_event,
     _write_minimal_orchestrator_csvs,
+    _write_resolved_config,
 )
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
+from tests.fixtures.perfmodel import _GDN_ANNOTATION
 from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from pathlib import Path
@@ -1152,13 +1150,13 @@ def test_collective_report_main_cli(tmp_path):
 
 
 class TestAnalysisUtilsAndReporting:
-    def test_perf_report_csv_dir_comparative(self, tmp_path):
+    def test_perf_report_csv_dir_reads_manifest(self, tmp_path):
         cat_dir = tmp_path / "category_data"
         cat_dir.mkdir()
         (cat_dir / "category_manifest.json").write_text(
-            json.dumps({"comparison_scope": "comparative"})
+            json.dumps({"focus_csv_dir": "/focus/csvs"})
         )
-        assert "perf_report_trace1_csvs" in au.perf_report_csv_dir(str(tmp_path))
+        assert au.perf_report_csv_dir(str(tmp_path)) == "/focus/csvs"
 
     def test_resolve_gpu_arch_and_node_span(self):
         arch = ru.resolve_gpu_arch(
@@ -2261,9 +2259,7 @@ class TestPush95Phase2:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
+        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
 
         old_argv = sys.argv
         sys.argv = [
@@ -2284,24 +2280,6 @@ class TestPush95Phase2:
             open(os.path.join(out, "category_data", "multi_kernel_data.json")).read()
         )
         assert "memcpy_summary" in mk and "nccl_summary" in mk
-
-    def test_gemm_origami_import_error_path(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        perf_model.GEMM._origami_import_error_printed = False
-        import builtins
-
-        real_import = builtins.__import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "origami":
-                raise ImportError("no origami")
-            return real_import(name, *args, **kwargs)
-
-        with patch.object(builtins, "__import__", fake_import):
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16", enable_origami=True
-            )
-        assert t is None
 
     def test_orchestrator_comparative_main(self, tmp_path, monkeypatch):
 
@@ -2324,11 +2302,9 @@ class TestPush95Phase2:
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
         monkeypatch.setattr(
-            op, "_extract_comparative_fusion_candidates", lambda *a, **k: []
+            FusionCandidateBuilder, "comparative", lambda self, diff_stats: []
         )
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
+        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
 
         old_argv = sys.argv
         sys.argv = [
@@ -2362,19 +2338,16 @@ class TestPush95Phase2:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"vector_fp32": 100.0}, peak_hbm_bw=5300
+            row, max_achievable_tflops={"vector_fp32": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "memory"
 
         fusion_dir = tmp_path / "category_data"
         fusion_dir.mkdir()
         (fusion_dir / "kernel_fusion_metrics.json").write_text(
-            json.dumps({"high_confidence_kernel_map": {"gemm_a": "fused_a"}})
+            json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
         )
-        assert au._load_fusion_map(str(tmp_path))["gemm_a"] == "fused_a"
-
-        ops = [{"kernel_names": ["a", "b"], "base_name": "Block", "instance_count": 2}]
-        assert len(kfa._filter_and_dedup(ops)) == 1
+        assert au._load_fusion_op_keys(str(tmp_path)) == {(None, "aten::mm", "x", "y")}
 
     def test_reporting_pftrace_and_collective(self, tmp_path):
 
@@ -2528,6 +2501,7 @@ class TestPush95Phase3:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": ["aten::mm", "aten::add"],
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_a'}]",
                     "[{'name': 'ew_add'}]",
@@ -2545,6 +2519,7 @@ class TestPush95Phase3:
             json.dumps(
                 {
                     "platform": "MI300X",
+                    "focus_csv_dir": str(csv_dir),
                     "gpu_utilization": {"total_time_ms": 1000.0},
                 }
             )
@@ -2554,21 +2529,19 @@ class TestPush95Phase3:
                 [
                     {
                         "module_name": "nn.Module: Block",
-                        "kernels": [
-                            {
-                                "name": "Cijk_a",
-                                "type": "GEMM",
-                                "dur_us": 100,
-                                "data_in_mb": 10.0,
-                            },
-                            {
-                                "name": "ew_add",
-                                "type": "Elementwise Add",
-                                "dur_us": 20,
-                                "data_in_mb": 2.0,
-                            },
-                        ],
+                        "base_name": "Block",
+                        "parent_chain": [],
                         "instance_count": 1,
+                        "kernel_count": 2,
+                        "kernels": [
+                            {"name": "gemm_a", "type": "GEMM", "dur_us": 100},
+                            {"name": "ew_add", "type": "Add", "dur_us": 20},
+                        ],
+                        "total_kernel_time_us": 120.0,
+                        "kernel_type_signature": ["GEMM", "Add"],
+                        "kernel_type_summary": {"GEMM": 1, "Add": 1},
+                        "fusion_kind": "gemm_epilogue",
+                        "confidence": "medium",
                     }
                 ]
             )
@@ -2576,7 +2549,7 @@ class TestPush95Phase3:
         (cat_dir / "arch_config.json").write_text(
             json.dumps(
                 {
-                    "peak_hbm_bw_tbs": 5.3,
+                    "peak_mem_bw_tbs": 5.3,
                     "max_achievable_tflops": {
                         "matrix_bf16": 1000.0,
                         "vector_fp32": 100.0,
@@ -2584,18 +2557,6 @@ class TestPush95Phase3:
                 }
             )
         )
-
-        candidates, manifest, csv_path = kfa.load_fusion_data(str(tmp_path))
-        lookup = kfa.build_kernel_perf_lookup(csv_path)
-        estimates = kfa.compute_fusion_impact_estimates(
-            candidates,
-            lookup,
-            peak_bw_tbs=5.3,
-            peak_maf_tflops={"matrix_bf16": 1000.0, "vector_fp32": 100.0},
-            baseline_ms=1000.0,
-            is_comparative=False,
-        )
-        assert isinstance(estimates, list)
 
         mod = importlib.import_module(
             "TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis"
@@ -2707,6 +2668,7 @@ class TestPush95Phase4:
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
         os.makedirs(csv_dir)
+        _write_resolved_config(out)
         pd.DataFrame(
             {
                 "type": ["total_time", "computation_time", "idle_time"],
@@ -2779,11 +2741,11 @@ class TestPush95Phase4:
         t1_csv = os.path.join(out, "perf_report_trace1_csvs")
         pd.DataFrame(
             {
-                "name": ["Cijk_A", "ew_add"],
-                "source": ["trace1", "trace1"],
-                "lowest_common_ancestor_id": [100, 100],
-                "kernel_time": [5000.0, 3000.0],
-                "gpu_op_uid": [10, 11],
+                "name": ["gemm_a", "ew_add", "gemm_a"],
+                "source": ["trace1", "trace1", "trace2"],
+                "lowest_common_ancestor_id": [100, 100, 100],
+                "kernel_time": [5000.0, 3000.0, 5000.0],
+                "gpu_op_uid": [10, 11, None],
             }
         ).to_csv(os.path.join(t1_csv, "diff_stats.csv"), index=False)
 

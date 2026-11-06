@@ -10,7 +10,7 @@ set -e
 usage() {
     echo "Usage: $0 <xdit-version> <path-to-TraceLens> [--base-image <image>] [docker build args...]"
     echo ""
-    echo "  xdit-version    One of: v26.6, v26.7"
+    echo "  xdit-version    One of: v26.6, v26.7, v26.8"
     echo "  --base-image    Override the default base Docker image for the selected xDiT version"
     echo ""
     echo "Examples:"
@@ -37,9 +37,14 @@ case "${XDIT_VERSION}" in
         PATCH_FILE="config_xdit_v26.7.patch"
         XDIT_CHECKOUT_CMD=""
         ;;
+    v26.8)
+        BASE_IMAGE="rocm/pytorch-xdit:v26.8"
+        PATCH_FILE="config_xdit_v26.8.patch"
+        XDIT_CHECKOUT_CMD=""
+        ;;
     *)
         echo "Error: unsupported xDiT version '${XDIT_VERSION}'"
-        echo "Supported versions: v26.6, v26.7"
+        echo "Supported versions: v26.6, v26.7, v26.8"
         exit 1
         ;;
 esac

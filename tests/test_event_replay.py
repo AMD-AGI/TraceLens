@@ -9,7 +9,7 @@ import time, pandas as pd, argparse, json, subprocess, pytest, os
 torch = pytest.importorskip("torch")
 torchvision_models = pytest.importorskip("torchvision").models
 from torch.profiler import ProfilerActivity, profile
-from TraceLens import EventReplay, EventReplayer, GPUEventAnalyser, TreePerfAnalyzer
+from TraceLens import EventReplayer, GPUEventAnalyser, TreePerfAnalyzer
 
 
 def profile_resnet(path=None):
@@ -289,8 +289,13 @@ def test_resnet(full_run_trace_path=None, output_csv_path=None):
 
     # now we test the batched replay
 
-    dir_batched_replay = os.path.dirname(EventReplay.__file__)
-    batched_replay_file = os.path.join(dir_batched_replay, "batched_replay.py")
+    # dirname(EventReplay.__file__) does not name batched_replay.py in source,
+    # so a change to that module would not select this test.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    batched_replay_file = os.path.join(
+        repo_root, "TraceLens", "EventReplay", "batched_replay.py"
+    )
+    dir_batched_replay = os.path.dirname(batched_replay_file)
     print(f"Running batched replay from directory: {dir_batched_replay}")
     cmd = [
         "python",  # run as "python ..."
