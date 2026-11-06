@@ -8,18 +8,17 @@
 
 Three validation levels, each at the boundary where issues are still fixable:
 
-Level 1 — validate_findings_file (Steps 7-8, within each sub-agent)
-    Structural check on a single findings file, including marker structure
-    via MarkerValidator (pairing, kind attributes, per-kind required attrs,
-    mandatory p_item). Sub-agent retries on failure.
+Level 1: validate_findings_file, run within each sub-agent on its own findings
+file. Structural check, including marker structure via MarkerValidator
+(pairing, kind attributes, per-kind required attrs, mandatory p_item). The
+sub-agent retries on failure.
 
-Level 2 — validate_subagent_outputs (Step 9, batch)
-    Cross-cutting checks that need all files: time sanity, coverage, priority.
+Level 2: validate_subagent_outputs, run once over all files. Cross-cutting
+checks: time sanity, coverage, priority.
 
-Level 3 — validate_report (Step 12.1, after report assembly)
-    Final analysis.md structure: headers, metrics table, placeholders,
-    and report-level marker structure via MarkerValidator (pairing, kind
-    attributes, mandatory top_ops).
+Level 3: validate_report, run after report assembly. Final analysis.md
+structure: headers, metrics table, placeholders, and report-level marker
+structure via MarkerValidator (pairing, kind attributes, mandatory top_ops).
 """
 
 import json
@@ -27,10 +26,14 @@ import os
 import re
 from collections import Counter
 from dataclasses import fields
+from itertools import pairwise
 
-from .kernel_fusion import FusionEstimate
-from .report_utils import load_manifest, _scan_findings_dir
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import SystemFindings
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionEstimate
+from TraceLens.Agent.Analysis.utils.report_utils import (
+    load_manifest,
+    _scan_findings_dir,
+)
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 # Constants
@@ -53,6 +56,15 @@ _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
 _FUSION_EMPTY_SENTENCE = "No kernel fusion opportunities detected."
 _DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
+_CARD_SPLIT_RE = re.compile(r"^(?=### )", re.MULTILINE)
+_H3_RE = re.compile(r"^### ", re.MULTILINE)
+_H2_RE = re.compile(r"^## ", re.MULTILINE)
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|[\s\-:|]+\|\s*$")
+_TOP_OPS_MARKER_RE = re.compile(
+    r"<!--\s*impact-begin([^>]*?\bkind=top_ops\b[^>]*?)-->(.*?)<!--\s*impact-end\s*-->",
+    re.DOTALL,
+)
+_BACKREF_RE = re.compile(r"\\(\d+)|\\g<([^>]*)>")
 _PRIORITY_ICONS = "🔴🟡🟢"
 PRIORITY_PREFIX_RE = re.compile(rf"^(?:[{_PRIORITY_ICONS}]\s*)?(?:P\d+:\s*)?")
 _SYSTEM_DATA_HEADER = ["Metric", "Value"]
@@ -136,6 +148,15 @@ _KNOWN_REPORT_PLACEHOLDERS = {
 # Level 1: per-file findings validation (called within each sub-agent)
 
 
+def _load_json(path, default):
+    """Parsed JSON at ``path``, or ``default`` when it is missing or unparseable."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
 def _metrics_json_for_findings(filepath):
     """Path to category_data/<stem>_metrics.json for a *_findings.md under category_findings/."""
     output_dir = os.path.dirname(os.path.dirname(filepath))
@@ -145,11 +166,7 @@ def _metrics_json_for_findings(filepath):
 
 def _load_findings_metrics(filepath):
     """Parsed metrics JSON for a *_findings.md, or {} when missing or unreadable."""
-    try:
-        with open(_metrics_json_for_findings(filepath)) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return _load_json(_metrics_json_for_findings(filepath), {})
 
 
 def _load_manifest_if_present(output_dir):
@@ -187,7 +204,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     if not os.path.exists(filepath):
         return False, [f"File not found: {filepath}"]
 
-    with open(filepath, "r") as f:
+    with open(filepath) as f:
         content = f.read()
 
     metrics = _load_findings_metrics(filepath)
@@ -209,9 +226,10 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             errors.append(f"Missing required section: {h}")
         header_positions.append(pos)
 
-    if all(p >= 0 for p in header_positions):
-        if header_positions[0] > header_positions[1]:
-            errors.append("## Recommendations must appear before ## Detailed Analysis")
+    if all(p >= 0 for p in header_positions) and (
+        header_positions[0] > header_positions[1]
+    ):
+        errors.append("## Recommendations must appear before ## Detailed Analysis")
 
     rec_start = content.find("## Recommendations")
     da_start = content.find("## Detailed Analysis")
@@ -227,7 +245,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             )
 
     relaxed_empty = (
-        tier == "compute" and metrics.get("category_findings") == []
+        tier == TIER_COMPUTE and metrics.get("category_findings") == []
     ) or system_entries == []
 
     p_items = []
@@ -256,7 +274,7 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
                     f"## Recommendations headings {headings} must be exactly "
                     f"{expected}, one card per metrics system_findings entry"
                 )
-            for card in re.split(r"^(?=### )", rec_section, flags=re.MULTILINE)[1:]:
+            for card in _CARD_SPLIT_RE.split(rec_section)[1:]:
                 errors.extend(
                     f"Card {card.splitlines()[0]!r} is missing {label}"
                     for label in _P_ITEM_LABELS
@@ -268,11 +286,10 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
         da_section = content[da_start:]
 
         candidates = _CANDIDATE_RE.findall(da_section)
-        if not relaxed_empty:
-            if not candidates:
-                errors.append(
-                    "No <!-- reasoning-candidate --> blocks in ## Detailed Analysis"
-                )
+        if not relaxed_empty and not candidates:
+            errors.append(
+                "No <!-- reasoning-candidate --> blocks in ## Detailed Analysis"
+            )
 
     if not relaxed_empty and p_items and candidates and len(p_items) != len(candidates):
         errors.append(
@@ -312,10 +329,9 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
         errors.extend(_system_block_errors(content, system_entries))
 
     # Marker structure validation.
-    file_class = "category_findings" if tier == "compute" else "system_findings"
     errors.extend(
         MarkerValidator.check_findings_file(
-            filepath, file_class, skip_p_item_required=relaxed_empty
+            filepath, skip_p_item_required=relaxed_empty
         )
     )
 
@@ -359,11 +375,7 @@ def _load_valid_args(*metrics_paths):
     impact_estimates[].rows / rows_trace1 / rows_trace2)."""
     valid = set()
     for p in metrics_paths:
-        try:
-            with open(p) as f:
-                d = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
+        d = _load_json(p, {})
         valid.update(
             op["args"]
             for op in d.get("operations", [])
@@ -381,12 +393,7 @@ def _load_valid_args(*metrics_paths):
 
 def _load_compute_data_metrics(metrics_path):
     """Return (args_set, launcher_paths_set, kernel_names_set) from one metrics JSON; empty on read failure."""
-    try:
-        with open(metrics_path) as f:
-            d = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return set(), set(), set()
-    ops = d.get("operations", [])
+    ops = _load_json(metrics_path, {}).get("operations", [])
     args = {op["args"] for op in ops if isinstance(op.get("args"), str)}
     paths = {
         op["launcher_path"]
@@ -406,15 +413,18 @@ def _iter_candidate_blocks(content, tier):
     range and the integer rank."""
     lines = content.splitlines()
     starts = [
-        (idx, _CANDIDATE_RE.search(line))
-        for idx, line in enumerate(lines)
-        if _CANDIDATE_RE.search(line)
+        (idx, m) for idx, line in enumerate(lines) if (m := _CANDIDATE_RE.search(line))
     ]
     for i, (idx, m) in enumerate(starts):
         if m.group(1) != tier:
             continue
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
         yield idx, end, int(m.group(2))
+
+
+def _split_row(line):
+    """Stripped cells of a markdown table row, tolerating leading indentation."""
+    return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
 def _find_data_table(lines, start, end):
@@ -439,14 +449,14 @@ def _find_data_table(lines, start, end):
     )
     if header_idx is None or header_idx + 1 >= end:
         return None
-    header_cols = [c.strip() for c in lines[header_idx].strip().strip("|").split("|")]
+    header_cols = _split_row(lines[header_idx])
 
     def rows():
         for row_idx in range(header_idx + 2, end):
             row = lines[row_idx]
             if not row.strip().startswith("|"):
                 break
-            yield row_idx + 1, [c.strip() for c in row.strip().strip("|").split("|")]
+            yield row_idx + 1, _split_row(row)
 
     return header_idx + 1, header_cols, rows()
 
@@ -497,32 +507,40 @@ def _validate_compute_data_tables(
         kp_idx = required_cols.index("Kernel Path")
         kn_idx = required_cols.index("Kernel Name")
         for row_line, cells in row_iter:
-            if valid_args and args_idx < len(cells) and cells[args_idx]:
-                if cells[args_idx] not in valid_args:
-                    errors.append(
-                        f"Args cell on line {row_line} does not match "
-                        f"operations[].args in {cat_metrics_basename} "
-                        f"(paste verbatim, keep <br>): {cells[args_idx]}"
-                    )
-            if valid_paths and kp_idx < len(cells) and cells[kp_idx]:
-                if cells[kp_idx] not in valid_paths:
-                    errors.append(
-                        f"Kernel Path cell on line {row_line} does not match "
-                        f"operations[].launcher_path in {cat_metrics_basename} "
-                        f"(paste verbatim): {cells[kp_idx]}"
-                    )
+            if (
+                valid_args
+                and args_idx < len(cells)
+                and cells[args_idx]
+                and cells[args_idx] not in valid_args
+            ):
+                errors.append(
+                    f"Args cell on line {row_line} does not match "
+                    f"operations[].args in {cat_metrics_basename} "
+                    f"(paste verbatim, keep <br>): {cells[args_idx]}"
+                )
+            if (
+                valid_paths
+                and kp_idx < len(cells)
+                and cells[kp_idx]
+                and cells[kp_idx] not in valid_paths
+            ):
+                errors.append(
+                    f"Kernel Path cell on line {row_line} does not match "
+                    f"operations[].launcher_path in {cat_metrics_basename} "
+                    f"(paste verbatim): {cells[kp_idx]}"
+                )
             if (
                 valid_kernel_names
                 and kn_idx < len(cells)
                 and cells[kn_idx]
                 and cells[kn_idx] != "—"
+                and cells[kn_idx] not in valid_kernel_names
             ):
-                if cells[kn_idx] not in valid_kernel_names:
-                    errors.append(
-                        f"Kernel Name cell on line {row_line} does not match "
-                        f"operations[].kernel_name_trunc in {cat_metrics_basename} "
-                        f"(paste verbatim): {cells[kn_idx]}"
-                    )
+                errors.append(
+                    f"Kernel Name cell on line {row_line} does not match "
+                    f"operations[].kernel_name_trunc in {cat_metrics_basename} "
+                    f"(paste verbatim): {cells[kn_idx]}"
+                )
     return errors
 
 
@@ -689,18 +707,17 @@ def _check_priority_consistency(output_dir, manifest):
     matching _check_time_sanity / _check_coverage). manifest is accepted for
     call-site symmetry with the other Step 9 checks.
     """
-    del manifest  # unused; kept for signature symmetry with sibling checks
     pd_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(pd_path):
         return {"status": "WARN", "messages": ["priority_data.json not found"]}
     try:
         with open(pd_path) as f:
-            pd = json.load(f)
+            priority_data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         return {"status": "WARN", "messages": [f"priority_data.json unreadable: {e}"]}
 
-    findings = pd.get("findings", []) or []
-    priorities = pd.get("priorities", []) or []
+    findings = priority_data.get("findings", []) or []
+    priorities = priority_data.get("priorities", []) or []
     messages = []
 
     scored = [
@@ -708,7 +725,7 @@ def _check_priority_consistency(output_dir, manifest):
         for i, f in enumerate(findings)
         if f.get("impact_score") is not None
     ]
-    for (i_a, s_a), (i_b, s_b) in zip(scored, scored[1:]):
+    for (i_a, s_a), (i_b, s_b) in pairwise(scored):
         if s_a < s_b:
             messages.append(
                 f"INV1: findings[] not sorted desc by impact_score at index "
@@ -788,7 +805,7 @@ def validate_report(output_dir, comparison_scope=None):
     if not os.path.exists(report_path):
         return False, ["<file not found>"]
 
-    with open(report_path, "r") as f:
+    with open(report_path) as f:
         content = f.read()
 
     if len(content.strip()) < 100:
@@ -802,14 +819,8 @@ def validate_report(output_dir, comparison_scope=None):
         if f"## {h}" not in content
     )
 
-    exec_start = content.find("## Executive Summary")
-    if exec_start >= 0:
-        next_section = content.find("\n## ", exec_start + 1)
-        exec_block = (
-            content[exec_start:next_section]
-            if next_section > 0
-            else content[exec_start:]
-        )
+    exec_block = _report_section(content, "## Executive Summary")
+    if exec_block is not None:
         if "|" not in exec_block:
             missing.append("No metrics table found under ## Executive Summary")
         else:
@@ -859,9 +870,7 @@ def _validate_exec_summary_nodes(exec_block, gpu_util):
     header = ["Metric", EXEC_TOTAL_COL, *nodes]
     totals = [gpu_util["total_time_ms"], *(n["total_time_ms"] for n in nodes.values())]
     rows = [
-        [c.strip() for c in ln.strip().strip("|").split("|")]
-        for ln in exec_block.splitlines()
-        if ln.lstrip().startswith("|")
+        _split_row(ln) for ln in exec_block.splitlines() if ln.lstrip().startswith("|")
     ]
     errors = []
     if rows[:1] != [header]:
@@ -875,7 +884,7 @@ def _validate_exec_summary_nodes(exec_block, gpu_util):
             f"Executive Summary needs a Total Time row with one cell per column {header}"
         )
         return errors
-    for column, cell, expected in zip(header[1:], total_row[1:], totals):
+    for column, cell, expected in zip(header[1:], total_row[1:], totals, strict=True):
         found = _LEADING_NUMBER_RE.match(cell)
         if not found or abs(float(found.group()) - expected) > _TOTAL_TIME_TOL_MS:
             errors.append(
@@ -899,14 +908,12 @@ def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scop
         comparison_scope: "standalone" or "comparative". When omitted,
             falls back to ``category_manifest.json``.
     """
-    kf_start = content.find("## Kernel Fusion Opportunities")
-    if kf_start < 0:
+    kf_section = _report_section(content, "## Kernel Fusion Opportunities")
+    if kf_section is None:
         return []
-    kf_next = content.find("\n## ", kf_start + 1)
-    kf_section = content[kf_start:kf_next] if kf_next > 0 else content[kf_start:]
 
     errors = []
-    for line_offset, line in enumerate(kf_section.splitlines()):
+    for line in kf_section.splitlines():
         if not line.strip().startswith("**Impact**"):
             continue
         impact_text = line.split("**Impact**")[-1].strip().lstrip(":").strip()
@@ -920,7 +927,7 @@ def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scop
                     f"kernels)' but got: {impact_text}"
                 )
         else:
-            if re.search(r"\(perf-model coverage", impact_text):
+            if "(perf-model coverage" in impact_text:
                 errors.append(
                     f"Kernel Fusion Impact format error: comparative mode "
                     f"should not include perf-model coverage parenthetical "
@@ -990,19 +997,14 @@ def _validate_report_priority_consistency(content, output_dir):
     a numeric impact_score (quantified or heuristic estimate), so p_item
     markers in this section must use numeric low/mid/high (never null).
     """
-    pd_path = os.path.join(output_dir, "priority_data.json")
-    if not os.path.exists(pd_path):
+    priority_data = _load_json(os.path.join(output_dir, "priority_data.json"), None)
+    if priority_data is None:
         return []
-    try:
-        with open(pd_path) as f:
-            pd = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return []
-    findings = pd.get("findings", []) or []
-    priorities = pd.get("priorities", []) or []
+    findings = priority_data.get("findings", []) or []
+    priorities = priority_data.get("priorities", []) or []
     errors = []
 
-    system_entries = pd.get("system_findings", []) or []
+    system_entries = priority_data.get("system_findings", []) or []
     expected_cards = [SystemFindings.card_title(e) for e in system_entries]
     system_section = _report_section(content, "## System-Level Optimizations") or ""
     headings = [
@@ -1093,11 +1095,7 @@ def _validate_report_priority_consistency(content, output_dir):
         if attrs.get(NODE_COL) != expected:
             errors.append(f"R6: {label} node={attrs.get(NODE_COL)!r} != {expected!r}")
 
-    for top_match in re.finditer(
-        r"<!--\s*impact-begin([^>]*?\bkind=top_ops\b[^>]*?)-->(.*?)<!--\s*impact-end\s*-->",
-        content,
-        re.DOTALL,
-    ):
+    for top_match in _TOP_OPS_MARKER_RE.finditer(content):
         node = dict(MarkerValidator.ATTR_RE.findall(top_match.group(1))).get(NODE_COL)
         expected = (
             len(priorities)
@@ -1108,8 +1106,7 @@ def _validate_report_priority_consistency(content, output_dir):
         n_rows = sum(
             1
             for ln in body.splitlines()
-            if ln.lstrip().startswith("|")
-            and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)
+            if ln.lstrip().startswith("|") and not _TABLE_SEPARATOR_RE.match(ln)
         )
         n_data_rows = max(0, n_rows - 1)
         if n_data_rows != expected:
@@ -1136,8 +1133,8 @@ def _extract_detailed_analysis_subsection(content, subsection_header):
     if sub_start < 0:
         return None
     sub_text = da_text[sub_start + len(subsection_header) :]
-    next_h3 = re.search(r"^### ", sub_text, re.MULTILINE)
-    next_h2 = re.search(r"^## ", sub_text, re.MULTILINE)
+    next_h3 = _H3_RE.search(sub_text)
+    next_h2 = _H2_RE.search(sub_text)
     ends = [pos.start() for pos in [next_h3, next_h2] if pos is not None]
     end = min(ends) if ends else len(sub_text)
     return sub_text[:end]
@@ -1157,9 +1154,9 @@ def _validate_report_reasoning_candidates(content):
     """
     errors = []
     checks = [
-        ("compute", "### Compute Kernel Insights"),
-        ("fusion", "### Kernel Fusion Insights"),
-        ("system", "### System-Level Insights"),
+        (TIER_COMPUTE, "### Compute Kernel Insights"),
+        (TIER_FUSION, "### Kernel Fusion Insights"),
+        (TIER_SYSTEM, "### System-Level Insights"),
     ]
     for tier, header in checks:
         subsection = _extract_detailed_analysis_subsection(content, header)
@@ -1228,8 +1225,6 @@ class MarkerValidator:
         "detail_estimate": ("low", "mid", "high"),
         "op_row": ("rank", "impacts"),
     }
-    # Compute findings files that do NOT need a p_item marker.
-    COMPUTE_NO_P_ITEM: set = set()
 
     @classmethod
     def _scan_family(
@@ -1322,32 +1317,30 @@ class MarkerValidator:
         return errors, set(kind_counts)
 
     @classmethod
-    def check_findings_file(cls, path, file_class, *, skip_p_item_required=False):
+    def _markers_of_kind(cls, text, kind):
+        """Attribute blobs of the impact-begin markers in ``text`` whose first
+        kind= is ``kind``."""
+        return [
+            m.group(1)
+            for m in cls.BEGIN_RE.finditer(text)
+            if (km := cls.KIND_ATTR_RE.search(m.group(1))) and km.group(1) == kind
+        ]
+
+    @classmethod
+    def check_findings_file(cls, path, *, skip_p_item_required=False):
         """Marker checks for a sub-agent findings file.
 
-        file_class must be "category_findings" or "system_findings". Adds
-        the per-tier "p_item required" check on top of `scan`.
+        Adds the "p_item required" check on top of `scan`.
         skip_p_item_required: when True (empty category_findings[] or system_findings[] per metrics), omit kind=p_item requirement.
         """
         rel = os.path.basename(path)
         with open(path) as f:
             text = f.read()
         errors, seen_kinds = cls.scan(text, rel)
-        if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
-            if not skip_p_item_required and "p_item" not in seen_kinds:
-                errors.append(f"{rel}: missing required kind=p_item")
-        if (
-            file_class == "system_findings"
-            and not skip_p_item_required
-            and "p_item" not in seen_kinds
-        ):
+        if not skip_p_item_required and "p_item" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=p_item")
         n_headings = len(_P_ITEM_RE.findall(text))
-        n_markers = sum(
-            1
-            for m in cls.BEGIN_RE.finditer(text)
-            if (km := cls.KIND_ATTR_RE.search(m.group(1))) and km.group(1) == "p_item"
-        )
+        n_markers = len(cls._markers_of_kind(text, "p_item"))
         if n_headings and n_markers and n_headings != n_markers:
             errors.append(
                 f"{rel}: {n_headings} ### P<N>: headings but {n_markers} kind=p_item markers"
@@ -1369,11 +1362,7 @@ class MarkerValidator:
                 continue
             n_rows = sum(1 for _ in table[2])
             block = "\n".join(lines[start:end])
-            for m in cls.BEGIN_RE.finditer(block):
-                inner = m.group(1)
-                km = cls.KIND_ATTR_RE.search(inner)
-                if not km or km.group(1) != "op_row":
-                    continue
+            for inner in cls._markers_of_kind(block, "op_row"):
                 im = cls.OP_ROW_IMPACTS_RE.search(inner)
                 impacts = im.group(1).strip() if im else ""
                 n_csv = (
@@ -1401,11 +1390,7 @@ class MarkerValidator:
                     candidates[i + 1].start() if i + 1 < len(candidates) else len(text)
                 )
             ]
-            has_marker = any(
-                (km := cls.KIND_ATTR_RE.search(m.group(1))) is not None
-                and km.group(1) == "detail_estimate"
-                for m in cls.BEGIN_RE.finditer(scope)
-            )
+            has_marker = bool(cls._markers_of_kind(scope, "detail_estimate"))
             if not (has_marker or bool(_NOT_QUANTIFIABLE_SENTINEL.search(scope))):
                 errors.append(
                     f"{rel}: reasoning-candidate rank={c.group(1)} missing "
@@ -1504,7 +1489,7 @@ def _missing_backrefs(replacement, rx):
     swallows at runtime. Returns the set of offending references.
     """
     bad = set()
-    for m in re.finditer(r"\\(\d+)|\\g<([^>]*)>", replacement):
+    for m in _BACKREF_RE.finditer(replacement):
         num, name = m.group(1), m.group(2)
         if num is not None:
             if int(num) > rx.groups:

@@ -1191,7 +1191,7 @@ def _valid_category_findings(rank=1):
 def test_check_findings_file_valid_category(tmp_path):
     p = tmp_path / "gemm_findings.md"
     _write(str(p), _valid_category_findings())
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert errors == []
 
 
@@ -1204,7 +1204,7 @@ def test_check_findings_file_missing_p_item(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert any("missing required kind=p_item" in e for e in errors)
 
 
@@ -1216,9 +1216,7 @@ def test_check_findings_file_skip_p_item_required(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(
-        str(p), "category_findings", skip_p_item_required=True
-    )
+    errors = MarkerValidator.check_findings_file(str(p), skip_p_item_required=True)
     assert errors == []
 
 
@@ -1232,7 +1230,7 @@ def test_check_findings_file_detail_estimate_missing(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert any("missing" in e and "detail_estimate" in e for e in errors)
 
 
@@ -3598,7 +3596,7 @@ def test_extract_detailed_analysis_subsection():
 def test_marker_validator_system_findings_requires_p_item(tmp_path):
     fp = tmp_path / "cpu_idle_findings.md"
     _write(str(fp), "## Recommendations\n\n## Detailed Analysis\n")
-    errors = MarkerValidator.check_findings_file(str(fp), "system_findings")
+    errors = MarkerValidator.check_findings_file(str(fp))
     assert any("missing required kind=p_item" in e for e in errors)
 
 
@@ -3610,7 +3608,7 @@ def test_marker_validator_p_item_heading_mismatch(tmp_path):
     )
     fp = tmp_path / "gemm_findings.md"
     _write(str(fp), text)
-    errors = MarkerValidator.check_findings_file(str(fp), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(fp))
     assert any("headings but" in e for e in errors)
 
 
