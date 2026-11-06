@@ -8,6 +8,8 @@
 Performance models for pseudo-op extensions.
 """
 
+import re
+
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
@@ -1286,3 +1288,132 @@ class sgl_kernel_fast_topk_transform_fused:
 
     def get_maf_type(self):
         return "vector"
+
+
+class paged_mqa_logits_preshuffle_synthetic:
+    """
+    Performance model for the DSA lightning-indexer paged MQA logits kernel
+    when it appears as a Synthetic Op (``hipModuleLaunchKernel`` launch,
+    no parent cpu_op, no ``Input Dims``).
+
+    Reference implementation:
+        aiter/ops/triton/gluon/pa_mqa_logits.py
+        aiter/ops/triton/attention/pa_mqa_logits.py
+
+    Computes scoring logits for top-k KV selection in MLA decode:
+        logits[i,j] = sum_h( w[i,h] * relu(Q[i,h,:] . K[j,:]) * kv_scale[j] )
+
+    NOT standard attention — no softmax, no V projection.
+
+    Roofline -- FLOPs:
+        2 * H * D * sum_len    (MFMA mat-vec; ReLU/weight/reduction not counted)
+
+    Roofline -- bytes moved:
+        bytes_read_Q   = seq_q * H * D * bpe_q          (FP8 = 1 byte)
+        bytes_read_W   = seq_q * H * 4                  (float32 weights)
+        bytes_read_KV  = kv_touched * (D * bpe_kv + 4)  (FP8 data + fp32 scale)
+        bytes_read_meta = 2 * seq_q * 4                 (cu_starts + cu_ends)
+        bytes_write    = sum_len * 4                     (float32 logits)
+
+    Parameters H, D are model-architecture constants (no tensor metadata
+    available on orphan Synthetic Ops).  Defaults: H=32, D=128 (GLM-52 MLA
+    indexer with TP=4).  Override via subclassing for other models.
+
+    sum_len and seq_q are derived from the iteration annotation's chunk
+    stats (g_sqsk, g_sq).  When the annotation is missing or unparseable,
+    flops() and bytes() return None.
+
+    Vendor roofline reference:
+        aiter/op_tests/op_benchmarks/triton/bench_fp8_mqa_logits.py
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    TOTAL_HEADS = 128
+    HEAD_DIM = 128
+    BPE_Q = 1
+    BPE_KV = 1
+    BPE_W = 4
+    BPE_OUT = 4
+
+    _NAME_PARAMS_RE = re.compile(r"NUM_HEADS_(\d+)_HEAD_SIZE_(\d+)")
+
+    @classmethod
+    def _parse_dims_from_event(cls, event):
+        """Try to extract NUM_HEADS and HEAD_SIZE from the event name or
+        its kernel_details (the GPU kernel name may carry Triton autotuned
+        config suffixes even when the parent event name does not)."""
+        m = cls._NAME_PARAMS_RE.search(event.get("name", ""))
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        for kd in event.get("kernel_details") or []:
+            m = cls._NAME_PARAMS_RE.search(kd.get("name", ""))
+            if m:
+                return int(m.group(1)), int(m.group(2))
+        return None, None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event, arch)
+
+    @classmethod
+    def get_param_details(cls, event, arch=None):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+            sum_len = stats["c_sqsk"] + stats["g_sqsk"]
+            seq_q = stats["c_sq"] + stats["g_sq"]
+            kv_touched = stats["c_sk"] + stats["g_sk"]
+            # Try parsing H and D from the event name or kernel_details
+            # (the Triton autotuned kernel name carries NUM_HEADS and
+            # HEAD_SIZE). Fall back to TOTAL_HEADS / TP from arch.
+            H_Q, d_h_qk = cls._parse_dims_from_event(event)
+            if H_Q is None:
+                tp = (arch or {}).get("tp_world_size")
+                if tp is None:
+                    return {"_no_perf": True}
+                H_Q = cls.TOTAL_HEADS // tp
+                d_h_qk = cls.HEAD_DIM
+            return {
+                "H_Q": H_Q,
+                "d_h_qk": d_h_qk,
+                "sum_len": sum_len,
+                "seq_q": seq_q,
+                "kv_touched": kv_touched,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return 2 * p["H_Q"] * p["d_h_qk"] * p["sum_len"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        H_Q, d_h_qk, seq_q = p["H_Q"], p["d_h_qk"], p["seq_q"]
+        kv_touched, sum_len = p["kv_touched"], p["sum_len"]
+        return (
+            seq_q * H_Q * d_h_qk * self.BPE_Q
+            + seq_q * H_Q * self.BPE_W
+            + kv_touched * (d_h_qk * self.BPE_KV + self.BPE_OUT)
+            + 2 * seq_q * self.BPE_OUT
+            + sum_len * self.BPE_OUT
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError
+
+    def bytes_bwd(self):
+        raise NotImplementedError
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        return "fp8"
