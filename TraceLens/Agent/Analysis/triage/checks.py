@@ -673,7 +673,7 @@ def check_inference_annotation_missing(run_dir, _stream_file):
     main_path = resolve_main_trace_path(run_dir)
     if not main_path or not os.path.exists(main_path):
         return FindingDraft(
-            "Main inference trace missing ",
+            "Main inference trace missing",
             f"No trace found at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )
@@ -686,7 +686,7 @@ def check_inference_annotation_missing(run_dir, _stream_file):
         # bare ValueError("Unknown file type") that check_corrupt_json guards against
         # (arbitrary resolved path) cannot arise here.
         return FindingDraft(
-            f"Main inference trace corrupted/invalid JSON at path: {main_path}",
+            "Main inference trace corrupted/invalid JSON",
             f"JSONDecodeError reading trace at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )

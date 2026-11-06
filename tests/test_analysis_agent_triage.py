@@ -1102,7 +1102,7 @@ def test_inference_annotation_no_main_trace(tmp_path):
     run_dir = make_run_dir(tmp_path)
     finding = check_inference_annotation_missing(str(run_dir), None)
     assert finding is not None
-    assert finding.failure_mode == "Main inference trace missing "
+    assert finding.failure_mode == "Main inference trace missing"
 
 
 def test_inference_annotation_present_returns_none(tmp_path):
