@@ -29,6 +29,7 @@ from ..ModelUtils.graph_schedule import (
     align_kernels,
     covering_annotation,
     invocation_from_annotation,
+    launch_arguments,
     launches_from_architecture,
     num_cus_from_trace,
     schedule_deepseek_v4,
@@ -1787,6 +1788,18 @@ class TreePerfAnalyzer:
                 return True
         return False
 
+    def _annotation_for(self, event):
+        """The step annotation whose span contains ``event``."""
+        steps = getattr(self, "_step_events", None)
+        if steps is None:
+            steps = [
+                candidate
+                for candidate in self.tree.events
+                if "step[" in (candidate.get("name") or "")
+            ]
+            self._step_events = steps
+        return covering_annotation(steps, event)
+
     def _launches_for(self, event):
         """The model's launch list for the invocation that replays ``event``.
 
@@ -1797,15 +1810,7 @@ class TreePerfAnalyzer:
             return None
         if event.get("name") not in ("hipGraphLaunch", "cudaGraphLaunch"):
             return None
-        steps = getattr(self, "_step_events", None)
-        if steps is None:
-            steps = [
-                candidate
-                for candidate in self.tree.events
-                if "step[" in (candidate.get("name") or "")
-            ]
-            self._step_events = steps
-        name = covering_annotation(steps, event)
+        name = self._annotation_for(event)
         if name is None:
             return None
         invocation = invocation_from_annotation(name)
@@ -1899,13 +1904,14 @@ class TreePerfAnalyzer:
             )
             if launch is not None:
                 # The kernel is this launch of the model forward. The row is
-                # that op, and its inputs are the tensors the launch was called
-                # with. Copy args so the launch event keeps its own.
+                # that op, with the dims, dtypes and strides a captured call
+                # of it would carry. Copy args so the launch event keeps its own.
                 synthetic_op["name"] = launch.op_name
                 synthetic_op["args"] = dict(cpu_op.get("args") or {})
-                synthetic_op["args"]["Input Dims"] = [
-                    list(shape) for shape in launch.input_shapes
-                ]
+                synthetic_op["args"].update(launch_arguments(launch))
+                annotation = self._annotation_for(cpu_op)
+                if annotation:
+                    synthetic_op["annotation"] = annotation
             elif registered is not None:
                 synthetic_op["name"] = registered
             else:

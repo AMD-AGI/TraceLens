@@ -484,6 +484,12 @@ def test_fused_wqkv_a_projects_q_lora_and_the_kv_head_together():
     assert [item.input_shapes for item in fused_gemms] == [
         ((4, 7168), (2048, 7168), (4, 56), (16, 56))
     ]
+    assert fused_gemms[0].input_types == (
+        "c10::Float8_e4m3fn",
+        "c10::Float8_e4m3fn",
+        "float",
+        "float",
+    )
     split_gemms = [
         item for item in _decode_launches(split, layer=2) if item.key == "gemm_a8w8"
     ]
@@ -491,6 +497,62 @@ def test_fused_wqkv_a_projects_q_lora_and_the_kv_head_together():
         (1536, 7168),
         (512, 7168),
     ]
+
+
+def test_graph_launch_arguments_drive_the_roofline():
+    """The captured call's dtype and stride record is what the roofline reads."""
+    from TraceLens.ModelUtils.graph_schedule import launch_arguments
+    from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+        moe_flydsl_stage1,
+    )
+    from TraceLens.PerfModel.extensions.perf_model_extensions import (
+        gemm_a8w8_blockscale_bpreshuffle,
+    )
+
+    gemm = next(
+        item
+        for item in _decode_launches(
+            replace(_pro(), facts=(("fuse_wqa_wkv", True),)), layer=2
+        )
+        if item.key == "gemm_a8w8"
+    )
+    event = {"name": gemm.op_name, "args": launch_arguments(gemm), "kernel_details": []}
+    model = gemm_a8w8_blockscale_bpreshuffle(event)
+    assert model.flops() > 0
+    assert model.bytes() > 0
+
+    stage1 = next(
+        item for item in _decode_launches(_moe_device(), layer=3) if item.key == "moe1"
+    )
+    event = {
+        "name": stage1.op_name,
+        "args": launch_arguments(stage1),
+        "kernel_details": [],
+    }
+    moe = moe_flydsl_stage1(event)
+    assert moe.flops() > 0
+    assert moe.bytes() > 0
+
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        mla_decode_v4_asm,
+    )
+
+    pooled = replace(_pooled(), num_cus=256)
+    mla = next(item for item in _decode_launches(pooled, layer=3) if item.key == "mla")
+    # The four scalars sit in front of the split buffers, as the captured call
+    # records them, and the split count is the one the search returns.
+    assert mla.input_shapes[9:13] == ((), (), (), ())
+    assert mla.input_shapes[13][1] == 16
+    assert mla.concrete[12] == "16"
+    attended = mla_decode_v4_asm(
+        {
+            "name": mla.op_name,
+            "args": launch_arguments(mla),
+            "kernel_details": [],
+        }
+    )
+    assert attended.param_details["num_kv_splits"] == 16
+    assert attended.bytes() > 0
 
 
 def test_compressor_width_follows_the_window_overlap():
@@ -512,6 +574,7 @@ def test_c4_indexer_runs_weights_proj_as_bf16_and_wq_b_as_blockscale():
     hgemm = [item for item in layer if item.key == "hgemm"]
     assert hgemm[0].input_shapes == ((4, 7168), (64, 7168))
     quants = [item.input_shapes for item in layer if item.key == "quant"]
+    # Output [T, K], the bf16 input viewed by the group, then the scales.
     assert quants[0] == ((4, 7168), (224, 128), (4, 56))
     assert quants[1] == ((4, 1536), (48, 128), (4, 12))
     assert quants[2] == ((4, 2048), (64, 128), (4, 16))
@@ -733,6 +796,96 @@ def test_decode_replay_prep_follows_the_backend_metadata_builders():
     assert sum(item.input_shapes == ((5,), ()) for item in prep) == 3
     assert [item.key for item in prep][-3:] == ["pad_pt", "sched_prep", "cta_info"]
     assert prep[-3].input_shapes == ((4, 4097),)
+
+
+def test_metadata_copies_record_the_engine_dtype_and_stride():
+    """A cast, a memcpy and a strided column stay distinct records.
+
+    ``seq_lens`` is int64 and the backend casts it to int32. The indptr pad
+    copies int32 to int32. The plan column is the int32 view of the uint8
+    DecodePlan, and a one-row column keeps that step through ``.to(int64)``.
+    """
+    from TraceLens.ModelUtils.graph_schedule import launch_arguments
+
+    records = [
+        launch_arguments(item) for item in _prep(_pooled()) if item.key == "copy"
+    ]
+    assert records[0]["Input type"] == ["int", "long int", "Scalar"]
+    assert records[0]["Input Strides"] == [[1], [1], []]
+    assert records[0]["Concrete Inputs"] == ["", "", "False"]
+    row_types = {
+        tuple(record["Input type"])
+        for record in records
+        if record["Input Dims"][0] == [4]
+    }
+    assert ("int", "long int", "Scalar") in row_types
+    assert ("int", "int", "Scalar") in row_types
+    assert ("long int", "int", "Scalar") in row_types
+
+    broadcast = next(
+        record
+        for record in records
+        if record["Input Dims"][0] == [4, 128]
+        and record["Input type"][:2] == ["long int", "long int"]
+    )
+    assert broadcast["Input Strides"][1] == [1, 0]
+    padded = next(record for record in records if record["Input Dims"][0] == [4, 8194])
+    assert padded["Input type"][:2] == ["int", "int"]
+    assert padded["Input Strides"] == [[8256, 1], [8194, 1], []]
+    column = next(record for record in records if record["Input Strides"][1] == [4])
+    assert column["Input type"] == ["long int", "int", "Scalar"]
+    assert column["Input Strides"][0] == [1]
+
+    prep = _prep(_pooled())
+    window = next(item for item in prep if item.input_shapes[:2] == ((4, 1), (1, 128)))
+    assert launch_arguments(window)["Input type"] == ["int", "int", "Scalar"]
+    assert launch_arguments(window)["Input Strides"] == [[1, 1], [128, 1], []]
+    assert any(
+        item.op_name == "aten::add" and item.input_types[:2] == ("long int", "long int")
+        for item in prep
+    )
+
+    one = [
+        launch_arguments(item)
+        for item in _prep(_pooled(), tokens=1)
+        if item.key == "copy"
+    ]
+    single = next(
+        record
+        for record in one
+        if record["Input Dims"][0] == [1, 128]
+        and record["Input type"][:2] == ["long int", "long int"]
+    )
+    assert single["Input Strides"][1] == [0, 0]
+    kept = next(
+        record
+        for record in one
+        if record["Input type"] == ["long int", "int", "Scalar"]
+        and record["Input Strides"][1] == [4]
+    )
+    assert kept["Input Strides"][0] == [4]
+
+
+def test_the_repeat_and_the_logits_gather_keep_their_view_strides():
+    from TraceLens.ModelUtils.graph_schedule import launch_arguments
+
+    launches = _decode_launches(_pro(), tokens=4)
+    expand = next(item for item in launches if item.key == "copy")
+    args = launch_arguments(expand)
+    assert args["Input type"] == ["c10::BFloat16", "c10::BFloat16", "Scalar"]
+    assert args["Input Strides"] == [
+        [114688, 7168, 7168, 28672, 7168, 1],
+        [0, 0, 28672, 7168, 7168, 1],
+        [],
+    ]
+    head = next(index for index, item in enumerate(launches) if item.key == "hc_head")
+    gather, cast = [item for item in launches[head:] if item.key == "copy"]
+    assert launch_arguments(gather)["Input Strides"] == [
+        [129280, 16160, 1],
+        [16160, 64640, 1],
+        [],
+    ]
+    assert launch_arguments(cast)["Input type"] == ["float", "c10::BFloat16", "Scalar"]
 
 
 def test_replay_prep_needs_the_pool_facts():

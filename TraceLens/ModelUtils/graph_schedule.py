@@ -109,6 +109,13 @@ class Launch:
     key: str
     input_shapes: tuple[tuple[int, ...], ...]
     layer: int | None = None
+    # Dtypes in argument order, as the profiler records them on the captured
+    # call. The roofline reads these, not only the shapes.
+    input_types: tuple[str, ...] = ()
+    # Scalar arguments, aligned with ``input_shapes``. ``""`` is a tensor.
+    concrete: tuple[str, ...] = ()
+    # Stride of each argument. Empty means the tensor is contiguous.
+    input_strides: tuple[tuple[int, ...], ...] = ()
 
 
 def graph_model_from_config(config: dict, tp: int) -> GraphModel:
@@ -394,13 +401,181 @@ def _follows(name: str, launch: Launch, previous: Launch | None) -> bool:
     return launch.key == "t_scan" and "rocprim" in name
 
 
+# Dtypes of each launch, in the argument order the captured call records.
+# The roofline indexes these positions; a launch keeps the prefix that fits
+# the tensors it actually passes.
+_BF16 = "c10::BFloat16"
+_FP8 = "c10::Float8_e4m3fn"
+_FP4 = "c10::Float4_e2m1fn_x2"
+_E8M0 = "c10::Float8_e8m0fnu"
+# c10 names the roofline's byte table already understands. ``seq_lens`` and the
+# request slots are int64; the HIP backend's ``cuda_int32_kwargs`` is int32.
+_I32 = "int"
+_I64 = "long int"
+_SCALAR = "Scalar"
+# ``CompressorDecodePlan.plan_d`` is a ``[batch, 16]`` uint8 DecodePlan.
+# ``view(int32)`` makes four words per row.
+_DECODE_PLAN_BYTES = 16
+_DTYPES = {
+    "gemm_a8w8": (_FP8, _FP8, "float", "float"),
+    "gemm_red": (_FP8, _FP8, "float", "float"),
+    "ck_gemm": (_FP8, _FP8, "float", "float"),
+    "ck_tile": (_FP8, _FP8, "float", "float"),
+    "gemm_mx": (_FP8, _FP8, _BF16, "unsigned char", "unsigned char"),
+    "gemm_sf": (_FP8, _FP8, _BF16, "unsigned char", "unsigned char"),
+    "hgemm": (_BF16, _BF16),
+    "tensile": (_BF16, _BF16),
+    "gate": (_BF16, _BF16),
+    # fused_moe_: hidden, packed w1, packed w2, weights, ids, then the scales.
+    "moe1": (_BF16, _FP4, _FP4, "float", "int", _E8M0, _E8M0),
+    "moe2": (_BF16, _FP4, _FP4, "float", "int", _E8M0, _E8M0),
+    "moe_red": (_BF16, _FP4, _FP4, "float", "int", _E8M0, _E8M0),
+    "rmsnorm": (_BF16, _BF16, _BF16),
+    # mla_decode_v4_asm: q, rope q, kv, kv rope, the index arrays, then the
+    # four scalars (max_seqlen_q, softmax scale, out_16_nosplit, num_kv_splits),
+    # the split buffers, and the valid-split scalar.
+    "mla": (
+        _FP8,
+        _BF16,
+        _FP8,
+        _BF16,
+        "int",
+        "int",
+        "int",
+        "int",
+        "float",
+        "Scalar",
+        "Scalar",
+        "Scalar",
+        "Scalar",
+        "float",
+        "float",
+        _BF16,
+        "int",
+        "Scalar",
+        "",
+    ),
+    # dynamic_per_group_scaled_quant(out, input, scales).
+    "quant": (_FP8, _BF16, "float"),
+    "wo_quant": (_FP8, _BF16, "float"),
+    # fused_dynamic_mx_quant_moe_sort_hip(out, scales, x, ...): x is bf16.
+    "mx_sort": (_FP4, _E8M0, _BF16, "int", "int", "float"),
+    "moe_sort": ("int", "int", "int", "int", _BF16),
+}
+
+
+def _row_major(shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Contiguous strides of ``shape``. An empty shape is a scalar argument."""
+    stride = [1] * len(shape)
+    step = 1
+    for index in range(len(shape) - 2, -1, -1):
+        step *= shape[index + 1]
+        stride[index] = step
+    return tuple(stride)
+
+
+def _expand_stride(
+    shape: tuple[int, ...],
+    stride: tuple[int, ...],
+    target: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Stride of ``tensor.expand(target)``, from ``inferExpandGeometry``.
+
+    A new leading axis takes the span of the axis after it, and an axis that
+    grows from one element is a broadcast (stride 0).
+    """
+    expanded = [0] * len(target)
+    sizes = [0] * len(target)
+    tensor_dim = len(shape)
+    for index in range(len(target) - 1, -1, -1):
+        offset = len(target) - 1 - index
+        dim = tensor_dim - 1 - offset
+        size = shape[dim] if dim >= 0 else 1
+        step = stride[dim] if dim >= 0 else sizes[index + 1] * expanded[index + 1]
+        sizes[index] = target[index]
+        expanded[index] = step if size == target[index] else 0
+    return tuple(expanded)
+
+
+def _is_contiguous(shape: tuple[int, ...], stride: tuple[int, ...]) -> bool:
+    """PyTorch contiguity: an axis of length 0 or 1 does not have to step."""
+    expected = 1
+    for size, step in zip(reversed(shape), reversed(stride)):
+        if size <= 1:
+            continue
+        if step != expected:
+            return False
+        expected *= size
+    return True
+
+
+def _dtype_cast_stride(
+    shape: tuple[int, ...], stride: tuple[int, ...]
+) -> tuple[int, ...]:
+    """``.to(dtype)`` keeps the stride when the source is already contiguous.
+
+    A single-element column is contiguous at any stride, so the cast of a
+    one-row plan column keeps the column step. A longer column is packed.
+    """
+    if _is_contiguous(shape, stride):
+        return stride
+    return _row_major(shape)
+
+
+def _unfold_repeat(
+    shape: tuple[int, ...], repeat: tuple[int, ...]
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Shape and destination stride of the copy inside ``Tensor.repeat``.
+
+    The repeat reference unfolds a contiguous buffer of the repeated shape and
+    copies the expanded input into that view, then permutes the view back.
+    """
+    padded = (1,) * (len(repeat) - len(shape)) + tuple(shape)
+    target = tuple(size * times for size, times in zip(padded, repeat))
+    ur_shape = list(target)
+    ur_stride = list(_row_major(target))
+    for dim, dim_size in enumerate(padded):
+        step = max(dim_size, 1)
+        ur_shape.append(dim_size)
+        ur_stride.append(ur_stride[dim])
+        ur_shape[dim] = (ur_shape[dim] - dim_size) // step + 1
+        ur_stride[dim] *= step
+    return tuple(ur_shape), tuple(ur_stride)
+
+
+def launch_arguments(launch: Launch) -> dict:
+    """The argument record a captured call of ``launch`` would carry.
+
+    The roofline reads ``Input Dims``, ``Input type`` and ``Input Strides``
+    from the CPU op. A replayed graph has no CPU op, so the launch supplies
+    the same three fields.
+    """
+    count = len(launch.input_shapes)
+    if launch.input_strides:
+        strides = [list(stride) for stride in launch.input_strides]
+    else:
+        strides = [list(_row_major(shape)) for shape in launch.input_shapes]
+    record = {
+        "Input Dims": [list(shape) for shape in launch.input_shapes],
+        "Input type": list(launch.input_types[:count]),
+        "Input Strides": strides,
+    }
+    if launch.concrete:
+        record["Concrete Inputs"] = list(launch.concrete)
+    return record
+
+
 def _launch(
     op_name: str,
     key: str,
     shapes: tuple[tuple[int, ...], ...],
     layer: int | None,
+    types: tuple[str, ...] | None = None,
+    concrete: tuple[str, ...] = (),
+    strides: tuple[tuple[int, ...], ...] = (),
 ) -> Launch:
-    return Launch(op_name, key, shapes, layer)
+    chosen = _DTYPES.get(key, ()) if types is None else types
+    return Launch(op_name, key, shapes, layer, chosen[: len(shapes)], concrete, strides)
 
 
 # FlyDSL packs two FP4 values into one stored element and scales every 32 of
@@ -432,17 +607,17 @@ def _aten_weight(m: int, k: int, n: int) -> tuple:
 
 
 def _quant_shapes(model: GraphModel, tokens: int, width: int) -> tuple:
-    """``dynamic_per_token_scaled_quant(x, out, scale)`` on a ``[T, K]`` activation.
+    """``dynamic_per_token_scaled_quant`` as the profiler records the call.
 
-    The quantized rows are viewed as ``[T * K / group, group]`` and the scale
-    is ``[T, K / group]``, where the group is the checkpoint's block width.
+    The fp8 output is ``[T, K]``. The bf16 input is viewed by the group, so it
+    is ``[T * K / group, group]``. The scale is ``[T, K / group]``. The
+    roofline reads that order: output, input, scales.
     """
-    shapes = ((tokens, width),)
     if len(model.weight_block_size) < 2:
-        return shapes
+        return ((tokens, width),)
     group = model.weight_block_size[1]
     groups = math.ceil(width / group)
-    return shapes + ((tokens * groups, group), (tokens, groups))
+    return ((tokens, width), (tokens * groups, group), (tokens, groups))
 
 
 def _compressor_width(ratio: int, head_dim: int) -> int:
@@ -1201,10 +1376,24 @@ def schedule_deepseek_v4(model: GraphModel, invocation: Invocation) -> list[Laun
         _launch("aiter::cross_device_reduce", "allreduce", hidden, None),
     ]
     if model.hc_mult > 1:
-        # ``hidden.unsqueeze(1).repeat(1, hc_mult, 1)`` copies through the
-        # expanded view ``(1, hc_mult, 1, tokens, 1, hidden)``.
-        expanded = (1, model.hc_mult, 1, t, 1, h)
-        launches.append(_aten("copy_", "copy", expanded, expanded, ()))
+        # ``hidden.unsqueeze(1).repeat(1, hc_mult, 1)`` copies the broadcast
+        # hidden state into the unfolded repeat view. Both sides are bf16.
+        view = (t, 1, h)
+        view_stride = (h, h, 1)
+        expanded, dest_stride = _unfold_repeat(view, (1, model.hc_mult, 1))
+        src_stride = _expand_stride(view, view_stride, expanded)
+        launches.append(
+            _aten(
+                "copy_",
+                "copy",
+                expanded,
+                expanded,
+                (),
+                types=(_BF16, _BF16, _SCALAR),
+                strides=(dest_stride, src_stride, ()),
+                concrete=("", "", "False"),
+            )
+        )
     if invocation.prefill:
         return _schedule_prefill(
             model,
@@ -1322,7 +1511,7 @@ def _schedule_prefill(
     # The graph hands back its two outputs, the normed hidden states and the
     # flattened streams ahead of ``hc_head``, through the shared output buffer.
     for width in (h, model.hc_mult * h):
-        launches.append(_aten("copy_", "copy", (t, width), (t, width), ()))
+        launches.append(_copy((t, width), _BF16, _BF16))
     return launches
 
 
@@ -1374,7 +1563,12 @@ def _prefill_attention(
             )
         )
         block.append(
-            _launch("aiter::dynamic_per_group_scaled_quant", "quant", ((t, h),), layer)
+            _launch(
+                "aiter::dynamic_per_group_scaled_quant",
+                "quant",
+                _quant_shapes(model, t, h),
+                layer,
+            )
         )
     # Prefill runs wq_a as one CK tile GEMM, not the decode split-K pair.
     block.append(
@@ -1416,7 +1610,13 @@ def _prefill_attention(
             *_indptr(t),
             *_indptr(t),
             _launch("sglang::prefill_indices", "pf_idx", ((t,),), layer),
-            _launch("aiter::mla_decode_v4_asm", "mla", (q, (kv, 1, head)), layer),
+            _launch(
+                "pseudo_mla_prefill_fwd",
+                "mla",
+                (q, (kv, 1, head)),
+                layer,
+                (_FP8, _FP8),
+            ),
             _launch("sglang::swa_scatter", "swa", (q,), layer),
             _launch("sglang::swa_scatter", "swa", (q,), layer),
             _launch(
@@ -1438,7 +1638,10 @@ def _prefill_attention(
                 layer,
             ),
             _launch(
-                "aiter::dynamic_per_group_scaled_quant", "quant", ((t, wo_b_k),), layer
+                "aiter::dynamic_per_group_scaled_quant",
+                "quant",
+                _quant_shapes(model, t, wo_b_k),
+                layer,
             ),
             _ck_gemm(model, t, wo_b_k, h, layer),
             _launch("aiter::cross_device_reduce", "allreduce", ((t, h),), layer),
@@ -1459,7 +1662,12 @@ def _prefill_c4(model, layer, t, h, q_lora, index_q_out, kv, chunks) -> list[Lau
             _aiter_weight(t, q_lora, index_q_out, ()),
             layer,
         ),
-        _launch("aiter::dynamic_per_group_scaled_quant", "quant", ((t, h),), layer),
+        _launch(
+            "aiter::dynamic_per_group_scaled_quant",
+            "quant",
+            _quant_shapes(model, t, h),
+            layer,
+        ),
         _ck_gemm(model, t, h, model.index_n_heads, layer),
         _launch(
             "aiter::rope_hadamard_rotate_activation_fp4quant",
@@ -1552,7 +1760,7 @@ def _prefill_moe(model, layer, t, h, inter, experts, routed) -> list[Launch]:
             _launch(
                 "aiter::dynamic_per_group_scaled_quant",
                 "quant",
-                ((t, h),) if packed else ((routed, h),),
+                _quant_shapes(model, t if packed else routed, h),
                 layer,
             ),
             _launch(
@@ -1570,7 +1778,9 @@ def _prefill_moe(model, layer, t, h, inter, experts, routed) -> list[Launch]:
             _launch(
                 "aiter::dynamic_per_group_scaled_quant",
                 "quant",
-                ((t, local_inter),) if packed else ((routed, inter),),
+                _quant_shapes(
+                    model, t if packed else routed, local_inter if packed else inter
+                ),
                 layer,
             ),
             _launch(
@@ -1662,7 +1872,11 @@ def _mla_shapes(model, pools, t, q, kv, ratio):
     rows = pools.kv_rows(ratio)
     heads = q[1]
     splits = _mla_splits(model, t)
+    # The four scalars sit between the sink and the split buffers, and the
+    # valid-split flag plus the unused last-page tensor follow the output.
     split_out = ((t, splits, heads, head), (t, splits, heads, 1)) if splits else ()
+    scalars = ((), (), (), ()) if splits else ()
+    tail = ((), ()) if splits else ()
     return (
         q,
         (t, heads, rope),
@@ -1673,10 +1887,32 @@ def _mla_shapes(model, pools, t, q, kv, ratio):
         (t * pools.gathered(ratio),),
         (t + 1,),
         (heads,),
+        *scalars,
         *split_out,
         q,
         (t,),
+        *tail,
     )
+
+
+def _mla_concrete(splits: int) -> tuple[str, ...]:
+    """Scalar values ``mla_decode_v4_asm`` is called with on the decode path.
+
+    ``max_seqlen_q`` is 1. The kernel ignores ``softmax_scale`` and the wrapper
+    passes 0. ``out_16_nosplit`` is the bf16 path only when there is one split.
+    ``use_valid_split_count_reduce`` is set when the kernel writes the per-request
+    split count. Tensor arguments are blank, in the order the profiler records.
+    """
+    if splits <= 0:
+        return ()
+    nosplit = splits == 1
+    values = [""] * 19
+    values[9] = "1"
+    values[10] = "0."
+    values[11] = "1" if nosplit else "0"
+    values[12] = str(splits)
+    values[17] = "0" if nosplit else "1"
+    return tuple(values)
 
 
 def _stage2_shapes(model, pools, t, q, kv, ratio):
@@ -1713,41 +1949,134 @@ def _fill_tail_shapes(model, pools: _Pools, tokens: int, ratio: int) -> tuple:
     )
 
 
-def _aten(name: str, key: str, *shapes: tuple[int, ...]) -> Launch:
+def _aten(
+    name: str,
+    key: str,
+    *shapes: tuple[int, ...],
+    types: tuple[str, ...] = (),
+    strides: tuple[tuple[int, ...], ...] = (),
+    concrete: tuple[str, ...] = (),
+) -> Launch:
     """A torch op the replay launches eagerly; ``()`` marks a scalar operand."""
-    return _launch(f"aten::{name}", key, shapes, None)
+    return _launch(
+        f"aten::{name}",
+        key,
+        shapes,
+        None,
+        types or None,
+        concrete,
+        strides=strides,
+    )
+
+
+def _copy(
+    shape: tuple[int, ...],
+    dst: str,
+    src: str,
+    dst_stride: tuple[int, ...] | None = None,
+    src_stride: tuple[int, ...] | None = None,
+) -> Launch:
+    """``aten::copy_`` of one tensor into another. The third argument is
+    ``non_blocking``, a scalar the copy kernel does not read."""
+    packed = _row_major(shape)
+    return _aten(
+        "copy_",
+        "copy",
+        shape,
+        shape,
+        (),
+        types=(dst, src, _SCALAR),
+        strides=(dst_stride or packed, src_stride or packed, ()),
+        concrete=("", "", "False"),
+    )
+
+
+def _scalar_binop(
+    name: str,
+    shape: tuple[int, ...],
+    dtype: str,
+    stride: tuple[int, ...] | None = None,
+) -> Launch:
+    """``tensor + python int`` or ``tensor - python int``.
+
+    The Python int is recorded as a long scalar and the alpha is 1, so the
+    kernel is the functor of the tensor's dtype.
+    """
+    return _aten(
+        name,
+        "t_add",
+        shape,
+        (),
+        (),
+        types=(dtype, _I64, _SCALAR),
+        strides=(stride or _row_major(shape), (), ()),
+        concrete=("", "", "1"),
+    )
 
 
 def _indptr(t: int) -> list[Launch]:
-    """``_lengths_to_indptr``: ``F.pad(cumsum(lengths), (1, 0))``."""
+    """``_lengths_to_indptr``: ``F.pad(cumsum(lengths, dtype=int32), (1, 0))``.
+
+    The cumsum is int32, so the pad's copy is an int32 memcpy.
+    """
     return [
         _aten("cumsum", "t_scan", (t,), (), ()),
         _aten("fill_", "t_fill", (t + 1,), ()),
-        _aten("copy_", "copy", (t,), (t,), ()),
+        _copy((t,), _I32, _I32),
     ]
+
+
+def _request_broadcast_stride(tokens: int, window: int) -> tuple[int, int]:
+    """``req_pool_indices`` broadcast across the sliding window.
+
+    Several requests are a ``(tokens, 1)`` column repeated over the window.
+    One request is a length-1 vector, and expanding that vector over the
+    window has a zero step on both axes.
+    """
+    if tokens == 1:
+        return _expand_stride((tokens,), (1,), (tokens, window))
+    return _expand_stride((tokens, 1), (1, 1), (tokens, window))
 
 
 def _swa_window_indices(model: GraphModel, pools: _Pools, t: int) -> list[Launch]:
     """``make_core_attn_metadata``: the sliding window's page indices, built from
-    the positions, the request-to-token table and the full-to-SWA map."""
+    the positions, the request-to-token table and the full-to-SWA map.
+
+    ``seq_lens`` is int64 and the backend casts it to int32. The window
+    subtraction is that int32 vector minus ``arange(window)``. Indexing casts
+    each index to int64: the int32 offsets, then the request slot broadcast
+    across the window, then the int32 locations read from ``req_to_token``
+    before the int64 full-to-SWA map. ``flash_mla`` wants int32 indices, and
+    the pad of an already-aligned window copies those int32 values.
+    """
     w = model.sliding_window
     table = (pools.slots, pools.context)
+    window = (t, w)
     return [
-        _aten("copy_", "copy", (t,), (t,), ()),
-        _aten("sub", "t_add", (t,), (), ()),
+        _copy((t,), _I32, _I64),
+        _scalar_binop("sub", (t,), _I32),
         _aten("arange", "t_arange", (), (), (), (0,)),
-        _aten("sub", "t_add", (t, 1), (1, w), ()),
+        _aten(
+            "sub",
+            "t_add",
+            (t, 1),
+            (1, w),
+            (),
+            types=(_I32, _I32, _SCALAR),
+            strides=((1, 1), (w, 1), ()),
+            concrete=("", "", "1"),
+        ),
         _aten("lt", "t_cmp", (t, w), ()),
         _aten("masked_fill_", "t_mfill", (t, w), (t, w), ()),
-        _aten("copy_", "copy", (t, w), (t, w), ()),
-        _aten("copy_", "copy", (t, w), (t, w), ()),
+        _copy(window, _I64, _I32),
+        _copy(window, _I64, _I64, src_stride=_request_broadcast_stride(t, w)),
         _aten("index", "t_index", table, ()),
         _aten("masked_fill_", "t_mfill", (t, w), (t, w), ()),
-        _aten("copy_", "copy", (t, w), (t, w), ()),
+        _copy(window, _I64, _I32),
         _aten("index", "t_index", (model.fact("kv_mapping_rows"),), ()),
-        _aten("copy_", "copy", (t, w), (t, w), ()),
-        _aten("copy_", "copy", (t, w), (t, w), ()),
-        _aten("sub", "t_add", (t,), (), ()),
+        _copy(window, _I32, _I64),
+        _copy(window, _I32, _I32),
+        _scalar_binop("sub", (t,), _I32),
         _aten("clamp", "t_clamp", (t,), (), ()),
         _aten("index", "t_index", (pools.slots, pools.page_table_width), ()),
         _aten("floor_divide", "t_fdiv", (t, pools.page_table_width), ()),
@@ -1767,15 +2096,32 @@ def _compression_indices(model: GraphModel, pools: _Pools, t: int) -> list[Launc
         )
     ]
     if 128 in model.compress_ratios:
+        # ``_pad_last_dim`` copies the raw table into the left of the aligned
+        # buffer, so the destination row is the aligned width wide.
         dense = pools.page_table_width * pools.page // 128
+        aligned = pools.dense_width
         launches += [
-            _aten("fill_", "t_fill", (t, pools.dense_width), ()),
-            _aten("copy_", "copy", (t, dense), (t, dense), ()),
-            _aten("copy_", "copy", (t, w), (t, w), ()),
+            _aten("fill_", "t_fill", (t, aligned), ()),
+            _copy(
+                (t, dense),
+                _I32,
+                _I32,
+                dst_stride=(aligned, 1),
+                src_stride=(dense, 1),
+            ),
+            _copy(
+                (t, w),
+                _I32,
+                _I32,
+                dst_stride=(pools._aligned(w), 1),
+                src_stride=(w, 1),
+            ),
         ]
+    # The compression kernel writes ``c4_out_loc`` and ``c128_out_loc`` as
+    # int64. Adding the SWA page offset keeps that dtype.
     launches += [
-        _aten("add", "t_add", (t,), (), ()),
-        _aten("add", "t_add", (t,), (), ()),
+        _scalar_binop("add", (t,), _I64),
+        _scalar_binop("add", (t,), _I64),
     ]
     if _INDEXER_RATIO in model.compress_ratios:
         top = model.index_topk
@@ -1783,7 +2129,13 @@ def _compression_indices(model: GraphModel, pools: _Pools, t: int) -> list[Launc
             _aten("clamp", "t_clamp", (t,), (), ()),
             _aten("clamp", "t_clamp", (t,), (), ()),
             _aten("fill_", "t_fill", (t, pools.sparse_width), ()),
-            _aten("copy_", "copy", (t, top), (t, top), ()),
+            _copy(
+                (t, top),
+                _I32,
+                _I32,
+                dst_stride=(pools.sparse_width, 1),
+                src_stride=(top, 1),
+            ),
         ]
     return launches
 
@@ -1792,10 +2144,23 @@ def _decode_streams(model: GraphModel, pools: _Pools, t: int) -> list[Launch]:
     """``runtime.build_decode_streams``: the three KV streams' index pointers and
     gather indices, then the ring-write slots ``_attach_unified_kv_decode_streams``
     derives from the request slots."""
-    launches = [_aten("copy_", "copy", (t,), (t,), ())]
+    # ``state_slot`` is the int64 request pool. The stream builder casts it
+    # to int32, and the three indptr pads copy int32 cumsums.
+    launches = [_copy((t,), _I32, _I64)]
     launches += _indptr(t)
     for _ in range(2):
-        launches.append(_aten("add", "t_add", (t,), (t,), ()))
+        launches.append(
+            _aten(
+                "add",
+                "t_add",
+                (t,),
+                (t,),
+                (),
+                types=(_I32, _I32, _SCALAR),
+                strides=((1,), (1,), ()),
+                concrete=("", "", "1"),
+            )
+        )
         launches += _indptr(t)
     launches.append(_aten("arange", "t_arange", (), (), (), (0,)))
     gathered = (
@@ -1820,12 +2185,39 @@ def _decode_streams(model: GraphModel, pools: _Pools, t: int) -> list[Launch]:
                 None,
             )
         )
+    # ``req_slot * ring + positions.to(int64) % ring``, then back to int32.
+    # The request slot is already int64, so only the positions cast copies.
     launches += [
-        _aten("mul", "t_mul", (t,), ()),
-        _aten("copy_", "copy", (t,), (t,), ()),
-        _aten("remainder", "t_rem", (t,), ()),
-        _aten("add", "t_add", (t,), (t,), ()),
-        _aten("copy_", "copy", (t,), (t,), ()),
+        _aten(
+            "mul",
+            "t_mul",
+            (t,),
+            (),
+            types=(_I64, _I64),
+            strides=((1,), ()),
+            concrete=("", ""),
+        ),
+        _copy((t,), _I64, _I32),
+        _aten(
+            "remainder",
+            "t_rem",
+            (t,),
+            (),
+            types=(_I64, _I64),
+            strides=((1,), ()),
+            concrete=("", ""),
+        ),
+        _aten(
+            "add",
+            "t_add",
+            (t,),
+            (t,),
+            (),
+            types=(_I64, _I64, _SCALAR),
+            strides=((1,), (1,), ()),
+            concrete=("", "", "1"),
+        ),
+        _copy((t,), _I32, _I64),
     ]
     return launches
 
@@ -1841,26 +2233,43 @@ def _indexer_write_metadata(model: GraphModel, pools: _Pools, t: int) -> list[La
         None,
     )
     launches = [plan] * sum(ratio in model.compress_ratios for ratio in (4, 128))
+    # ``translate_loc_from_full_to_swa(out_cache_loc).to(int32)``. Both the
+    # cache location and the map are int64.
     launches += [
         _aten("index", "t_index", (model.fact("kv_mapping_rows"),), ()),
-        _aten("copy_", "copy", (t,), (t,), ()),
+        _copy((t,), _I32, _I64),
     ]
     if _INDEXER_RATIO not in model.compress_ratios:
         return launches
+    # ``plan_words[:, 0].to(int64)`` reads a column of the int32 view of the
+    # uint8 plan. A one-element column is contiguous, so the cast keeps its
+    # step; ``seq_lens - ratio`` and ``seq_lens % ratio`` then read that step.
+    column = (_DECODE_PLAN_BYTES // 4,)
+    kept = _dtype_cast_stride((t,), column)
     launches += [
-        _aten("copy_", "copy", (t,), (t,), ()),
-        _aten("sub", "t_add", (t,), (), ()),
+        _copy((t,), _I64, _I32, dst_stride=kept, src_stride=column),
+        _scalar_binop("sub", (t,), _I64, stride=kept),
         _aten("ge", "t_cmp", (t,), ()),
         _aten("lt", "t_cmp", (t,), ()),
         _aten("bitwise_and", "t_and", (t,), (t,)),
         _aten("fill_", "t_fill", (t,), ()),
         _aten("where", "t_where", (t,), (t,), (t,)),
-        _aten("remainder", "t_rem", (t,), ()),
+        _aten(
+            "remainder",
+            "t_rem",
+            (t,),
+            (),
+            types=(_I64, _I64),
+            strides=(kept, ()),
+            concrete=("", ""),
+        ),
         _aten("eq", "t_eq", (t,), ()),
         _aten("bitwise_and_", "t_and", (t,), (t,)),
         _aten("fill_", "t_fill", (t,), ()),
         _aten("where", "t_where", (t,), (t,), (t,)),
-        _aten("copy_", "copy", (t,), (t,), ()),
+        # ``fp4_q_positions = positions.to(int64)``. positions is the int32
+        # casual position, so this is a packed cast.
+        _copy((t,), _I64, _I32),
         _launch(
             "sglang::pad_page_table", "pad_pt", ((t, pools.page_table_width),), None
         ),
@@ -1918,10 +2327,15 @@ def _logits_tail(model: GraphModel, tokens: int, hidden: int) -> list[Launch]:
         ),
     ]
     if tokens > 1:
+        # The all-gather buffer is ``(tp, tokens, vocab / tp)``, contiguous.
+        # ``permute(1, 0, 2)`` moves it to ``(tokens, tp, vocab / tp)``, so the
+        # source strides follow that order and the destination is packed.
         gathered = (tokens, model.tp, local_vocab)
-        launches.append(_aten("copy_", "copy", gathered, gathered, ()))
+        packed = _row_major((model.tp, tokens, local_vocab))
+        src_stride = (packed[1], packed[0], packed[2])
+        launches.append(_copy(gathered, _BF16, _BF16, src_stride=src_stride))
     logits = (tokens, model.vocab_size)
-    launches.append(_aten("copy_", "copy", logits, logits, ()))
+    launches.append(_copy(logits, "float", _BF16))
     return launches
 
 
@@ -2046,12 +2460,14 @@ def _attention_block(
                 layer,
             )
         )
+    mla = _mla_shapes(model, pools, t, q, kv, ratio)
     block.append(
         _launch(
             "aiter::mla_decode_v4_asm",
             "mla",
-            _mla_shapes(model, pools, t, q, kv, ratio),
+            mla,
             layer,
+            concrete=_mla_concrete(_mla_splits(model, t) if pools else 0),
         )
     )
     block.append(
@@ -2395,7 +2811,15 @@ def _with_token_count(launch: Launch, tokens: int) -> Launch:
         ((tokens,) + shape[1:]) if shape and shape[0] == 0 else shape
         for shape in launch.input_shapes
     )
-    return Launch(launch.op_name, launch.key, shapes, launch.layer)
+    return Launch(
+        launch.op_name,
+        launch.key,
+        shapes,
+        launch.layer,
+        launch.input_types,
+        launch.concrete,
+        launch.input_strides,
+    )
 
 
 def covering_annotation(events: list[dict], launch: dict) -> str | None:
