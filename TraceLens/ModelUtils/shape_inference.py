@@ -5918,9 +5918,14 @@ class ShapeInferencer:
         attr = node.metadata.get("attr_name") or ""
         if attr and attr in self._meta_shapes:
             return self._meta_shapes[attr]
-        # Try matching via class_name + layer index patterns.
+        # A colon-separated id segment can name a module. An inlined call is
+        # namespaced with ``::`` (``@fn_l732_repeat_kv::@op_...``), and splitting
+        # that on a single colon yields an empty segment. ``named_modules()``
+        # records the root module under that same empty name, and its forward
+        # output is the model's logits, so every inlined op was sized as the
+        # whole model. An empty segment names no module.
         for part in node.id.split(":"):
-            if part in self._meta_shapes:
+            if part and part in self._meta_shapes:
                 return self._meta_shapes[part]
         return None
 

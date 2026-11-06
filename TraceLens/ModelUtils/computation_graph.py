@@ -2084,12 +2084,25 @@ def _wire_all_predecessor_edges(
                     # vanished from a graph whose source multiplies by it.
                     continue
                 link = (source_index, target_index)
+                # A chained stand-in for this argument sits in its operand slot.
+                # Removing it and appending the real producer pushes that
+                # argument past operands that were already in the right place:
+                # ``matmul(query, key.transpose)`` then reads the transpose on
+                # the left.
+                stale_at: int | None = None
+
+                def _drop_stale(stale: tuple[int, int]) -> None:
+                    nonlocal stale_at
+                    if stale not in graph.links or stale == link:
+                        return
+                    if stale_at is None:
+                        stale_at = graph.links.index(stale)
+                    graph.links.remove(stale)
+                    graph.link_output_ports.pop(stale, None)
+                    graph.link_port_labels.pop(stale, None)
+
                 if previous_source is not None and previous_source != source_index:
-                    stale = (previous_source, target_index)
-                    if stale in graph.links:
-                        graph.links.remove(stale)
-                        graph.link_output_ports.pop(stale, None)
-                        graph.link_port_labels.pop(stale, None)
+                    _drop_stale((previous_source, target_index))
                 if arg_name in ordinal_map:
                     # A tuple slot's consumer was chained onto the frame tail.
                     # Drop the other slots' edges so it keeps only its own.
@@ -2109,11 +2122,7 @@ def _wire_all_predecessor_edges(
                         )
                         if other_index is None or other_index == source_index:
                             continue
-                        stale = (other_index, target_index)
-                        if stale in graph.links:
-                            graph.links.remove(stale)
-                            graph.link_output_ports.pop(stale, None)
-                            graph.link_port_labels.pop(stale, None)
+                        _drop_stale((other_index, target_index))
                 # A module call reading a specific slot of a multi-output
                 # producer (``k_norm(key_states)`` where ``key_states`` is
                 # ordinal 1 of an ``unbind``) tags its edge with that ordinal so
@@ -2134,7 +2143,10 @@ def _wire_all_predecessor_edges(
                     else None
                 )
                 if link not in graph.links:
-                    graph.links.append(link)
+                    if stale_at is not None:
+                        graph.links.insert(stale_at, link)
+                    else:
+                        graph.links.append(link)
                     if port_str is not None:
                         graph.link_output_ports[link] = port_str
                 elif port_str is not None and not _link_output_port_recorded(
@@ -2437,14 +2449,32 @@ def _resolve_deferred_method_inputs(graph: ComputationGraph) -> None:
             continue
         if not (0 <= consumer_index < len(graph.nodes)):
             continue
-        rebuilt = [
-            (src, dst)
-            for src, dst in graph.links
-            if not (dst == consumer_index and src == wrong_index)
-        ]
-        if (source_index, consumer_index) not in rebuilt:
-            rebuilt.append((source_index, consumer_index))
-        graph.links = rebuilt
+        old = (wrong_index, consumer_index)
+        new = (source_index, consumer_index)
+        # The stand-in occupies the argument's slot. Dropping it and appending
+        # the real producer puts that argument last, so a matmul whose query
+        # was the stand-in reads the key transpose as its left operand.
+        if new in graph.links:
+            graph.links = [link for link in graph.links if link != old]
+        else:
+            replaced = False
+            rebuilt: list[tuple[int, int]] = []
+            for link in graph.links:
+                if link == old and not replaced:
+                    rebuilt.append(new)
+                    replaced = True
+                    continue
+                if link == old:
+                    continue
+                rebuilt.append(link)
+            if not replaced:
+                rebuilt.append(new)
+            graph.links = rebuilt
+        for meta in (graph.link_port_labels, graph.link_output_ports):
+            if old in meta and new not in meta:
+                meta[new] = meta.pop(old)
+            else:
+                meta.pop(old, None)
     graph.deferred_method_inputs = []
 
 

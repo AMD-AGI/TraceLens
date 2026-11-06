@@ -4824,7 +4824,7 @@ def _inline_nested_free_functions(
         name = _synthetic_call_function_name(call_attr)
         nested_func = module_functions[name]
         bound = _nested_call_param_values(
-            nested_func, call_attr, caller, param_values or {}
+            nested_func, call_attr, caller, param_values or {}, self_values
         )
         nested_values = (
             {
@@ -5032,6 +5032,15 @@ def _multi_op_free_functions(
         # Filtered, never raw: a default is in force only if no visible caller
         # overrides it and the function is not entered from unparsed code.
         settled = _settled_param_defaults(func, module_functions, class_nodes)
+        # A dispatched kernel is ``interface(self, q, k, v, ...)``. The body
+        # names that first parameter ``module`` and reads constructor scalars
+        # off it (``module.num_key_value_groups`` into ``repeat_kv``). Seed the
+        # marker so the nested call binds the scalar; ``_config_value`` still
+        # treats the marker itself as unknown.
+        if call_attr == SYNTHETIC_ATTENTION:
+            params = _free_function_param_list(func)
+            if params and params[0] not in settled:
+                settled = {**settled, params[0]: _MODULE_REF}
         analysis = _forward_operations_from_forward(
             func,
             self_values=self_values,
@@ -6115,6 +6124,11 @@ def effective_forward_calls(cls: ClassStructure) -> list[str]:
 
 
 _UNKNOWN = object()
+# ``eager(self, ...)`` then ``repeat_kv(key, module.num_key_value_groups)``: the
+# parameter is the module, so an attribute read on it is a ``self`` scalar. The
+# marker is not a value any branch should see; ``_config_value`` treats it as
+# unknown.
+_MODULE_REF = object()
 # A constructor attribute that is scalar-*typed* (an int/float/str/bool setting
 # built from config reads and arithmetic) but whose concrete value could not be
 # resolved -- e.g. ``self.qkv_dim = self.head_dim * self.num_heads`` when the
@@ -6724,7 +6738,10 @@ def _settled_param_defaults(
 
 
 def _bound_call_param_values(
-    func: ast.FunctionDef, call: ast.Call, caller_values: dict[str, Any]
+    func: ast.FunctionDef,
+    call: ast.Call,
+    caller_values: dict[str, Any],
+    self_values: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Callee parameter values settled by THIS call site, or ``None`` if none can be.
 
@@ -6732,17 +6749,36 @@ def _bound_call_param_values(
     its value across: ``get_vision_attention_seqlens`` defaults ``merge_temporal``
     to False and forwards it by keyword, which is how the branch inside
     ``get_vision_cu_seqlens`` becomes decidable two frames from the default.
+
+    A module attribute does too. ``repeat_kv(key, module.num_key_value_groups)``
+    is called from a free function whose ``module`` parameter was ``self``, and
+    ``self.num_key_value_groups`` is a constructor scalar. Without that, the
+    expand keeps its size-1 axis and grouped-query attention stays at the KV
+    head count.
     """
     if any(keyword.arg is None for keyword in call.keywords):
         return None
     names = [arg.arg for arg in func.args.posonlyargs + func.args.args]
     bound: dict[str, Any] = {}
+    module_values = self_values or {}
 
     def resolve(value: ast.expr) -> Any:
         if isinstance(value, ast.Constant):
             return value.value
-        if isinstance(value, ast.Name) and value.id in caller_values:
-            return caller_values[value.id]
+        if isinstance(value, ast.Name):
+            if value.id == "self":
+                return _MODULE_REF
+            if value.id in caller_values:
+                return caller_values[value.id]
+            return _UNKNOWN
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and resolve(value.value) is _MODULE_REF
+        ):
+            got = module_values.get(value.attr, _UNKNOWN)
+            if isinstance(got, (int, float, bool, str)):
+                return got
         return _UNKNOWN
 
     for index, arg in enumerate(call.args):
@@ -6787,6 +6823,7 @@ def _nested_call_param_values(
     call_attr: str,
     caller: ast.FunctionDef | None,
     caller_values: dict[str, Any],
+    self_values: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Callee parameter values this particular call site settles.
 
@@ -6804,7 +6841,9 @@ def _nested_call_param_values(
             continue
         if line is not None and node.lineno != line:
             continue
-        return _bound_call_param_values(callee, node, caller_values)
+        return _bound_call_param_values(
+            callee, node, caller_values, self_values
+        )
     return None
 
 
@@ -6864,7 +6903,12 @@ def _config_value(
         if node.id == "config":
             return config
         if param_values is not None and node.id in param_values:
-            return param_values[node.id]
+            got = param_values[node.id]
+            # The module passed into a free function (``eager(self)`` binds
+            # ``module`` to this marker). It is not a scalar a branch can test.
+            if got is _MODULE_REF:
+                return _UNKNOWN
+            return got
         # A constructor commonly settles a scalar through a local before storing
         # it on ``self`` (``sparse_cfg = config.sparse_attention_config;
         # self.idx_head_dim = sparse_cfg["sparse_index_dim"]``). ``self_values``
@@ -11157,17 +11201,17 @@ class _ForwardOperationExtractor:
             and inner.id in self.shape_slice_tokens
         ):
             token = self.shape_slice_tokens[inner.id]
-            if token.endswith(_WHOLE_SHAPE_SUFFIX):
-                # A local bound from a tensor's WHOLE shape, spread back over a
-                # reshape: GLM's experts flatten to ``[B*S, H]``, accumulate, and
-                # close with ``.view(*orig_shape)``. Mark it a snapshot so the
-                # resolver reads the tensor it NAMES rather than the one being
-                # reshaped -- and here that is certain rather than merely likely,
-                # because restoring a tensor's entire shape onto itself would do
-                # nothing at all, which is not what the call is for.
-                snapshots = getattr(self, "_pending_shape_snapshots", None)
-                if snapshots is not None and token not in snapshots:
-                    snapshots.append(token)
+            # The local was bound earlier, so it records the tensor it was read
+            # from, which is not necessarily the one this view reshapes. A
+            # whole-shape restore (GLM's experts flatten, then
+            # ``.view(*orig_shape)``) and a leading-axes slice
+            # (``input_shape = hidden_states.shape[:-1]`` reused on the query)
+            # are the same kind of read. An inline ``x.shape[:-1]`` written in
+            # the call itself never lands here, so marking the local does not
+            # make that form look up a different tensor.
+            snapshots = getattr(self, "_pending_shape_snapshots", None)
+            if snapshots is not None and token not in snapshots:
+                snapshots.append(token)
             return ["*" + token]
         return [self._render_shape_dim(arg)]
 
@@ -11191,7 +11235,9 @@ class _ForwardOperationExtractor:
             if snapshots is not None and token not in snapshots:
                 snapshots.append(token)
             return token
-        resolved = _config_value(elt, {}, self.self_values)
+        resolved = _config_value(
+            elt, {}, self.self_values, getattr(self, "param_values", None)
+        )
         if isinstance(resolved, int) and not isinstance(resolved, bool):
             return str(resolved)
         return ast.unparse(elt)

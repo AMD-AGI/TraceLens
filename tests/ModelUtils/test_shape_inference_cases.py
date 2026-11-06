@@ -730,6 +730,23 @@ def test_lookup_meta_shape_via_id_segment():
     assert out is not None and out.shape == ("B", "S", 321)
 
 
+def test_lookup_meta_shape_skips_the_empty_segment_of_an_inlined_call():
+    """``::`` in an inlined op id must not match the root module.
+
+    ``named_modules()`` records the model itself under ``""``, and an inlined
+    call is namespaced ``@fn_...::@op_...``. Splitting that id on ``:`` yields
+    an empty segment, so the lookup used to hand every such op the model's own
+    output -- the logits -- and skip the op's real rule.
+    """
+    inf = _make_inferencer()
+    inf._meta_shapes[""] = TensorSpec(("B", "S", 248320), "bfloat16")
+    node = _node(
+        "Unsqueeze",
+        node_id="seq:15:@fn_l732_repeat_kv::@op_l718_c20_unsqueeze:0",
+    )
+    assert inf._lookup_meta_shape(node) is None
+
+
 def test_lookup_meta_shape_empty_returns_none():
     inf = _make_inferencer()
     assert inf._lookup_meta_shape(_node("Linear")) is None
@@ -1962,6 +1979,25 @@ def test_resolve_view_shape_collapses_head_block_when_star_ref_lower_rank():
     # collapses when there is a genuine multi-dim tail to merge.
     flat = TensorSpec(("B", 128), "float16")
     assert _resolve_view_shape("*x.shape[:-1], -1", flat, {}) == ("B", 128)
+
+
+def test_resolve_view_shape_snapshot_reads_the_named_tensor():
+    """A shape local reused on a different tensor keeps that tensor's rank.
+
+    ``input_shape = hidden_states.shape[:-1]`` then
+    ``query.view(*input_shape, -1, head_dim)`` views the chunked query
+    ``[B, S, heads, head_dim * 2]``, not ``hidden_states``. Reading the leading
+    axes off the query keeps the head axis and leaves ``-1`` equal to 1.
+    """
+    query = TensorSpec(("B", "S", 24, 256), "bfloat16")
+    out = _resolve_view_shape(
+        "*hidden_states.shape[:-1], -1, 256",
+        query,
+        {},
+        {"hidden_states": ("B", "S", 5120)},
+        frozenset({"hidden_states.shape[:-1]"}),
+    )
+    assert out == ("B", "S", 24, 256)
 
 
 def test_parse_split_sizes_nested_and_failure():
