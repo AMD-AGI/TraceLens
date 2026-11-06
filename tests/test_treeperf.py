@@ -573,6 +573,72 @@ class TestTreePerfAnalyzer:
         )
         assert kept.arch["num_cus"] == 80
 
+        cus_only = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": [{"numSms": 256}]},
+        )
+        cus_arch = TreePerfAnalyzer(
+            cus_only,
+            rebuild_tree=False,
+            arch={"name": "MI355X", "num_cus": 80, "lds_capacity": 65536},
+        )
+        assert cus_arch.arch["num_cus"] == 256
+        assert cus_arch.arch["lds_capacity"] == 65536
+
+        lds_only = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={
+                "deviceProperties": [{"maxSharedMemoryPerMultiProcessor": 163840}]
+            },
+        )
+        lds_arch = TreePerfAnalyzer(
+            lds_only,
+            rebuild_tree=False,
+            arch={"name": "MI355X", "num_cus": 80, "lds_capacity": 65536},
+        )
+        assert lds_arch.arch["num_cus"] == 80
+        assert lds_arch.arch["lds_capacity"] == 163840
+
+        untouched = TreePerfAnalyzer(tree, rebuild_tree=False, arch=None)
+        assert untouched.arch is None
+
+    def test_device_property_readers_reject_incomplete_metadata(self):
+        assert TraceEventUtils.num_cus_from_trace(None) is None
+        assert TraceEventUtils.lds_capacity_from_trace({}) is None
+        assert TraceEventUtils.num_cus_from_trace({"deviceProperties": []}) is None
+        assert (
+            TraceEventUtils.lds_capacity_from_trace({"deviceProperties": None}) is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace(
+                {"deviceProperties": ["not-a-device", {"numSms": 256}]}
+            )
+            is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace({"deviceProperties": [{"numSms": 0}]})
+            is None
+        )
+        assert (
+            TraceEventUtils.lds_capacity_from_trace(
+                {
+                    "deviceProperties": [
+                        {"maxSharedMemoryPerMultiProcessor": 163840},
+                        {"maxSharedMemoryPerMultiProcessor": 65536},
+                    ]
+                }
+            )
+            is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace(
+                {"deviceProperties": [{"numSms": 256}, {"numSms": 256}]}
+            )
+            == 256
+        )
+
     def test_get_df_gpu_timeline_detect_recompute(self):
         events = [
             _make_gpu_event(1, 0, 100, "kernel"),
