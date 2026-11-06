@@ -14,9 +14,9 @@ for the analysis report pipeline.
 import csv
 import json
 import os
-from collections import defaultdict
-from typing import List
 import re
+from collections import defaultdict
+
 import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
@@ -28,6 +28,11 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
+# Constants
+MODEL_INFO_FIELDS = ("model", "architecture", "scale", "precision")
+# A compute category below this share of compute time is not listed as unmodeled.
+_UNMODELED_COMPUTE_FRACTION = 0.05
+
 
 def write_csv(path, rows, fieldnames, verbose=False):
     """Write ``rows`` (a list of dicts) to ``path`` as CSV with ``fieldnames``
@@ -38,9 +43,6 @@ def write_csv(path, rows, fieldnames, verbose=False):
         writer.writerows(rows)
     if verbose:
         print("  Written: {} ({} rows)".format(path, len(rows)))
-
-
-MODEL_INFO_FIELDS = ("model", "architecture", "scale", "precision")
 
 
 def prepare_model_identification_data(output_dir: str) -> bool:
@@ -150,6 +152,19 @@ def _scan_findings_dir(output_dir: str, subdir: str) -> dict:
     return result
 
 
+def _split_failed(raw: dict) -> tuple[dict, list]:
+    """Split ``{category_name: content}`` into the findings that completed and
+    ``[{category, content}]`` for the ones that reported ``Status: ERROR``."""
+    findings = {}
+    failed = []
+    for name, content in raw.items():
+        if "Status: ERROR" in content:
+            failed.append({"category": name, "content": content})
+        else:
+            findings[name] = content
+    return findings, failed
+
+
 def load_findings(output_dir):
     """Load all findings from system-level and compute kernel subagents.
 
@@ -161,30 +176,18 @@ def load_findings(output_dir):
         manifest: the full category manifest dict
         top_ops: list of top operations from the manifest
     """
-    raw_system = _scan_findings_dir(output_dir, "system_findings")
-    system_findings = {}
-    failed_system = []
-    for name, content in raw_system.items():
-        if "Status: ERROR" in content:
-            failed_system.append({"category": name, "content": content})
-        else:
-            system_findings[name] = content
+    system_findings, failed_system = _split_failed(
+        _scan_findings_dir(output_dir, "system_findings")
+    )
+    compute_findings, failed_compute = _split_failed(
+        _scan_findings_dir(output_dir, "category_findings")
+    )
 
-    raw_compute = _scan_findings_dir(output_dir, "category_findings")
-    compute_findings = {}
-    failed_compute = []
-    for name, content in raw_compute.items():
-        if "Status: ERROR" in content:
-            failed_compute.append({"category": name, "content": content})
-        else:
-            compute_findings[name] = content
-
-    manifest = {}
-    top_ops = []
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    if os.path.exists(manifest_path):
+    try:
         manifest = load_manifest(output_dir)
-        top_ops = manifest.get("top_operations", [])
+    except FileNotFoundError:
+        manifest = {}
+    top_ops = manifest.get("top_operations", [])
 
     result = {
         "system_findings": system_findings,
@@ -211,7 +214,7 @@ def load_findings(output_dir):
     return result
 
 
-def _rollup_quantified(findings: List[dict], per_node: bool) -> List[dict]:
+def _rollup_quantified(findings: list[dict], per_node: bool) -> list[dict]:
     """Quantified findings summed per category (per node and category when
     ``per_node``), sorted by ``impact_score`` descending.
 
@@ -296,16 +299,16 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             "computation_time_percent", 0
         )
         computation_time_ms = baseline_ms * computation_pct / 100
-        threshold_ms = computation_time_ms * 0.05
+        threshold_ms = computation_time_ms * _UNMODELED_COMPUTE_FRACTION
 
-        all_estimates: List[dict] = []
-        findings: List[dict] = []
-        system_findings: List[dict] = []
+        all_estimates: list[dict] = []
+        findings: list[dict] = []
+        system_findings: list[dict] = []
         for fname in sorted(os.listdir(category_data_dir)):
             if not fname.endswith("_metrics.json"):
                 continue
             fpath = os.path.join(category_data_dir, fname)
-            with open(fpath, "r") as f:
+            with open(fpath) as f:
                 metrics = json.load(f)
             if metrics.get("status") in ("ERROR", "NO_DATA"):
                 continue
@@ -326,7 +329,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 "display_name", cat_entry["name"]
             )
 
-        priorities: List[dict] = []
+        priorities: list[dict] = []
         # The cap would empty short nodes' Top Ops tables: single trace only.
         for rank, rec in enumerate(
             (
@@ -403,7 +406,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             "system_findings": SystemFindings.rank(system_findings),
             "all_estimates": all_estimates,
         }
-    except Exception:
+    except Exception:  # Step 8.5 calls this bare and relies on the empty fallback file
         priority_data = {
             "baseline_ms": 0,
             "priorities": [],
