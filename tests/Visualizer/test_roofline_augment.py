@@ -31,6 +31,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
 
 def test_classify_kernel_by_name_not_module():
     assert classify_kernel("_inkling_rel_attention_kernel.kd") == "Attention"
+    assert classify_kernel("aiter::mla_a8w8_qh64_qseqlen1") == "Attention"
     assert classify_kernel("fused_moe_kernel.kd") == "MoE"
     # A bare Tensile GEMM is a GEMM even when launched from an attention module.
     assert classify_kernel("Cijk_Alik_Bljk_BBS_BH.kd", ["Model", "Attention"]) == "GEMM"

@@ -258,6 +258,7 @@ for the skill's full procedure.
 
 ## Related topics
 
+- [Plot an end-to-end roofline](./plot-e2e-roofline.md)
 - [Model op performance without a trace](./perf-model-without-trace.md)
 - [GEMM analysis in TraceLens](../conceptual/gemm-analysis.md)
 - [API reference](../reference/api-reference.md)

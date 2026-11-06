@@ -53,7 +53,16 @@ from typing import Any
 # when the roofline has no standalone GEMM category, i.e. projections are folded
 # into the attention/MoE boundary ops).
 _CATEGORY_MATCHERS: dict[str, tuple[str, ...]] = {
-    "Attention": ("rel_attention", "flash_attn", "fmha", "sdpa", "_attn_", "attention"),
+    "Attention": (
+        "rel_attention",
+        "flash_attn",
+        "fmha",
+        "sdpa",
+        "_attn_",
+        "attention",
+        # Fused latent attention: ``aiter::mla_*`` and ``opus_mla_*``.
+        "mla",
+    ),
     "MoE": ("fused_moe", "moe_", "_moe", "grouped_gemm", "expert"),
     "GEMM": ("cijk", "tensile", "cutlass", "::mm", "addmm", "gemm"),
 }
