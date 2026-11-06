@@ -110,7 +110,13 @@ def test_label_for_branches():
 
 
 def test_config_value_arithmetic_and_logic():
-    config = {"hidden": 12, "flag": True, "off": False, "nested": {"k": 7}}
+    config = {
+        "hidden": 12,
+        "flag": True,
+        "off": False,
+        "nested": {"k": 7},
+        "gap": None,
+    }
     sv: dict = {}
 
     assert _config_value(_expr("config.hidden % 5"), config, sv) == 2  # 1399-1400
@@ -132,6 +138,9 @@ def test_config_value_arithmetic_and_logic():
     assert _config_value(_expr("config.hidden >= 12"), config, sv) is True
     assert _config_value(_expr("config.hidden < 5"), config, sv) is False
     assert _config_value(_expr("config.hidden <= 12"), config, sv) is True
+    # An absent value ordered against an int is not a decision.
+    assert _config_value(_expr("config.gap < 8"), config, sv) is aa._UNKNOWN
+    assert _config_value(_expr("config.gap == 8"), config, sv) is False
 
     # getattr on config dict + nested attribute (1367-1370, 1382-1383)
     assert _config_value(_expr("getattr(config, 'hidden', 0)"), config, sv) == 12
@@ -703,7 +712,10 @@ def test_embedding_forward_is_introspected_and_records_one_lookup():
     cls = parsed.class_registry["VocabParallelEmbedding"]
     assert aa._dispatches_to_imported_kernel(cls, None) is False
     assert cls.forward_calls.count("@functional_embedding") == 1
-    assert any(call.startswith("@fn_") and "get_masked_input_and_mask" in call for call in cls.forward_calls)
+    assert any(
+        call.startswith("@fn_") and "get_masked_input_and_mask" in call
+        for call in cls.forward_calls
+    )
 
 
 def test_imported_kernel_with_a_local_helper_stays_a_boundary():

@@ -652,6 +652,14 @@ def _module_origin(module: str) -> str | None:
     pinned = pinned_module_origin(module)
     if pinned:
         return pinned
+    # A kernel library the modeling file imports and that is not installed.
+    # The same pinned-checkout read the kernel pipeline already uses, so the
+    # file is fetched into the local cache and never imported.
+    from TraceLens.ModelUtils.kernel_pipeline import package_source_file
+
+    packaged = package_source_file(module)
+    if packaged is not None:
+        return str(packaged)
     for entry in sys.path:
         base = Path(entry) if entry else Path.cwd()
         try:
@@ -7026,30 +7034,36 @@ def _config_value(
         values = [left, *comparators]
         for index, op in enumerate(node.ops):
             a, b = values[index], values[index + 1]
-            if isinstance(op, ast.Eq) and not (a == b):
+            try:
+                ordered = None
+                if isinstance(op, ast.Eq):
+                    ordered = a == b
+                elif isinstance(op, ast.NotEq):
+                    ordered = a != b
+                elif isinstance(op, ast.Gt):
+                    ordered = a > b
+                elif isinstance(op, ast.GtE):
+                    ordered = a >= b
+                elif isinstance(op, ast.Lt):
+                    ordered = a < b
+                elif isinstance(op, ast.LtE):
+                    ordered = a <= b
+                elif isinstance(op, ast.Is):
+                    ordered = a is b
+                elif isinstance(op, ast.IsNot):
+                    ordered = a is not b
+                elif isinstance(op, (ast.In, ast.NotIn)):
+                    if not isinstance(b, (tuple, list, set, frozenset, str)):
+                        return _UNKNOWN
+                    ordered = a in b
+                    if isinstance(op, ast.NotIn):
+                        ordered = not ordered
+            except TypeError:
+                # None compared with an int, and the other orderings Python
+                # refuses. The branch is not decided by a value we do not have.
+                return _UNKNOWN
+            if ordered is False:
                 return False
-            if isinstance(op, ast.NotEq) and not (a != b):
-                return False
-            if isinstance(op, ast.Gt) and not (a > b):
-                return False
-            if isinstance(op, ast.GtE) and not (a >= b):
-                return False
-            if isinstance(op, ast.Lt) and not (a < b):
-                return False
-            if isinstance(op, ast.LtE) and not (a <= b):
-                return False
-            if isinstance(op, ast.Is) and not (a is b):
-                return False
-            if isinstance(op, ast.IsNot) and not (a is not b):
-                return False
-            if isinstance(op, (ast.In, ast.NotIn)):
-                if not isinstance(b, (tuple, list, set, frozenset, str)):
-                    return _UNKNOWN
-                inside = a in b
-                if isinstance(op, ast.NotIn):
-                    inside = not inside
-                if not inside:
-                    return False
         return True
     return _UNKNOWN
 
@@ -7592,7 +7606,9 @@ class _RegimeDecider:
         self.self_values = dict(self_values or {})
         self.param_values = dict(param_values or {})
 
-    def outcome(self, test: ast.expr) -> bool | None:
+    def outcome(
+        self, test: ast.expr, _resolving: frozenset[str] = frozenset()
+    ) -> bool | None:
         """How the RUN being depicted answers *test*, or ``None`` if it does not.
 
         Answering here, at the branch, is what makes the choice reach
@@ -7601,7 +7617,7 @@ class _RegimeDecider:
         """
         facts = self.facts
         if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-            inner = self.outcome(test.operand)
+            inner = self.outcome(test.operand, _resolving)
             return None if inner is None else not inner
         if isinstance(test, ast.BoolOp):
             # Short-circuit, like the language does: one False part settles an
@@ -7612,7 +7628,7 @@ class _RegimeDecider:
             # cache both groups are False and so is the whole test, but
             # demanding that every part be known left it undecided and drew a
             # phi over a branch that cannot run.
-            parts = [self.outcome(value) for value in test.values]
+            parts = [self.outcome(value, _resolving) for value in test.values]
             settles = isinstance(test.op, ast.Or)
             if any(part is settles for part in parts):
                 return settles
@@ -7621,14 +7637,18 @@ class _RegimeDecider:
             return not settles
         if isinstance(test, ast.Name) and test.id in facts.value_locals:
             # The test is a name; what it was bound to is the real question.
-            return self.outcome(facts.value_locals[test.id])
+            # A binding that mentions its own name (``ready = cond and ready``)
+            # is not that question. Following it walks the same test forever.
+            if test.id in _resolving:
+                return None
+            return self.outcome(facts.value_locals[test.id], _resolving | {test.id})
         device_check = self._device_check_outcome(test)
         if device_check is not None:
             return device_check
         if isinstance(test, ast.IfExp):
-            chosen = self.outcome(test.test)
+            chosen = self.outcome(test.test, _resolving)
             if chosen is not None:
-                return self.outcome(test.body if chosen else test.orelse)
+                return self.outcome(test.body if chosen else test.orelse, _resolving)
         if ast.unparse(test).strip() in facts.layout_tests:
             return self._regime.is_packed
         if (

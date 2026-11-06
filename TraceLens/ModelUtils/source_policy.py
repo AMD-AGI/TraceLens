@@ -18,6 +18,7 @@ DEFAULT_ALLOWED_GITHUB_REPOS: frozenset[tuple[str, str]] = frozenset(
         ("fla-org", "flash-linear-attention"),
         ("vllm-project", "vllm"),
         ("sgl-project", "sglang"),
+        ("rocm", "aiter"),
     }
 )
 

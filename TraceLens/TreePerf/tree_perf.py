@@ -15,6 +15,7 @@ import pprint
 # TODO: warning should show the stack as well
 import warnings
 from collections import defaultdict
+from dataclasses import replace
 from functools import partial
 from typing import Any, Callable, Dict
 
@@ -28,6 +29,8 @@ from ..ModelUtils.graph_schedule import (
     align_kernels,
     covering_annotation,
     invocation_from_annotation,
+    launches_from_architecture,
+    num_cus_from_trace,
     schedule_deepseek_v4,
 )
 from ..PerfModel.torch_op_mapping import (
@@ -307,7 +310,15 @@ class TreePerfAnalyzer:
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
         # When set, each replayed graph is one run of this model. Its kernels
         # are paired, in order, with that run's launches and take their shapes.
+        # The trace's device block records the compute-unit count. The
+        # architecture table is only the fallback when that field is absent.
+        recorded_cus = num_cus_from_trace(self.trace_metadata)
+        if graph_model is not None and recorded_cus:
+            graph_model = replace(graph_model, num_cus=recorded_cus)
         self.graph_model = graph_model
+        # Engine modeling specs, keyed by "decode" / "prefill". The exporter
+        # fills this from the pinned checkout. Empty leaves the config schedule.
+        self.architectures = {}
         self.op_projections = default_op_projections(
             enable_origami_gemm, enable_origami_sdpa_tile
         )
@@ -1812,7 +1823,16 @@ class TreePerfAnalyzer:
         )
         schedule = cache.get(key)
         if schedule is None:
-            schedule = schedule_deepseek_v4(self.graph_model, invocation)
+            phase = "prefill" if invocation.prefill else "decode"
+            spec = getattr(self, "architectures", {}).get(phase)
+            introspected = (
+                launches_from_architecture(spec, self.graph_model, invocation)
+                if spec is not None
+                else None
+            )
+            schedule = introspected or schedule_deepseek_v4(
+                self.graph_model, invocation
+            )
             cache[key] = schedule
         return schedule
 
@@ -1846,7 +1866,9 @@ class TreePerfAnalyzer:
             """Emit one row per kernel. A graph launch with a model schedule
             pairs each kernel with the launch at that position."""
             ordered = sorted(kernels, key=lambda kernel: kernel.get("ts") or 0)
-            launches = self._launches_for(cpu_op) if self.graph_model is not None else None
+            launches = (
+                self._launches_for(cpu_op) if self.graph_model is not None else None
+            )
             assigned = (
                 align_kernels([kernel.get("name", "") for kernel in ordered], launches)
                 if launches
@@ -1881,13 +1903,13 @@ class TreePerfAnalyzer:
                 # with. Copy args so the launch event keeps its own.
                 synthetic_op["name"] = launch.op_name
                 synthetic_op["args"] = dict(cpu_op.get("args") or {})
-                synthetic_op["args"]["Input Dims"] = [list(shape) for shape in launch.input_shapes]
+                synthetic_op["args"]["Input Dims"] = [
+                    list(shape) for shape in launch.input_shapes
+                ]
             elif registered is not None:
                 synthetic_op["name"] = registered
             else:
-                synthetic_op["name"] = (
-                    f"{prefix_name}->{kernel['name']} (Synthetic Op)"
-                )
+                synthetic_op["name"] = f"{prefix_name}->{kernel['name']} (Synthetic Op)"
             synthetic_op["gpu_events"] = [kernel["UID"]]
             # The copy shares the launch's kernel list. This row owns one
             # kernel, the same way a capture merge attaches one replay kernel
@@ -1937,9 +1959,7 @@ class TreePerfAnalyzer:
             for child_uid in event.get("children", []):
                 traverse(child_uid, call_stack, child_nearest_cpu_op)
             if is_cpu_op:
-                _emit_synthetic_kernels(
-                    event["name"], _direct_kernels(event), event
-                )
+                _emit_synthetic_kernels(event["name"], _direct_kernels(event), event)
 
         def traverse(event_uid, call_stack=None, nearest_cpu_op=None):
             if event_uid in visited:

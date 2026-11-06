@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import warnings
+from dataclasses import replace
 from typing import Dict, Optional
 
 
@@ -38,6 +39,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     filename_request_bs,
 )
 from TraceLens.ModelUtils.graph_schedule import graph_model_from_config
+from TraceLens.PerfModel.origami_helper import gfx_and_cus
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -580,6 +582,133 @@ def add_truncated_kernel_details(
     return df[cols]
 
 
+def _inference_engine(events) -> Optional[str]:
+    """The engine whose modeling source this trace ran, when the events say so."""
+    saw_sglang = False
+    saw_vllm = False
+    for event in events:
+        name = (event.get("name") or "").lower()
+        if "sglang" in name:
+            saw_sglang = True
+        elif name.startswith("vllm::") or "/vllm/" in name:
+            saw_vllm = True
+    if saw_sglang:
+        return "sglang"
+    if saw_vllm:
+        return "vllm"
+    return None
+
+
+def _annotated_phases(events) -> set[str]:
+    from TraceLens.ModelUtils.graph_schedule import invocation_from_annotation
+
+    phases: set[str] = set()
+    for event in events:
+        name = event.get("name") or ""
+        if "step[" not in name:
+            continue
+        invocation = invocation_from_annotation(name)
+        if invocation is None:
+            continue
+        phases.add("prefill" if invocation.prefill else "decode")
+    return phases
+
+
+def _load_engine_architectures(config_path: Optional[str], events) -> dict:
+    """Read the engine's own modeling source for each phase in the trace.
+
+    The source is the pinned checkout the architecture loader already keeps
+    locally. The engine package does not have to be installed. A phase that
+    cannot be read is omitted and the config schedule covers that graph.
+    """
+    engine = _inference_engine(events)
+    if not config_path or engine is None:
+        return {}
+    phases = _annotated_phases(events) or {"decode"}
+    from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
+    from TraceLens.ModelUtils.extract import load_architecture
+
+    loaded = {}
+    for phase in sorted(phases):
+        try:
+            loaded[phase] = load_architecture(
+                config_path,
+                analyze_code=True,
+                detailed=True,
+                engine=engine,
+                regime=RuntimeRegime(
+                    phase=phase,
+                    cache="warm" if phase == "decode" else "cold",
+                    mode="inference",
+                    device="hip",
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - a source the analyzer cannot read
+            warnings.warn(
+                f"Could not read the {engine} modeling source for the "
+                f"{phase} graph: {exc}",
+                UserWarning,
+            )
+    return loaded
+
+
+def _kernel_library_facts(graph_model, engine) -> tuple:
+    """What the kernel library the engine's build pins fixes for this model."""
+    from TraceLens.ModelUtils.aiter_facts import moe_facts_for_model
+    from TraceLens.ModelUtils.engine_facts import kernel_library_commit
+    from TraceLens.ModelUtils.kernel_pipeline import _PACKAGE_ENGINE_PINS
+
+    pinned_by, variable = _PACKAGE_ENGINE_PINS["aiter"]
+    if engine != pinned_by:
+        return ()
+    return moe_facts_for_model(graph_model, kernel_library_commit(engine, variable))
+
+
+def _graph_model_with_engine_facts(graph_model, engine, events=()):
+    """Attach the numbers the engine's source and the run's pools fix.
+
+    The engine is read at the release the trace's python frames match. The
+    pool sizes come from the eager ops the profile recorded.
+    """
+    if graph_model is None or engine is None or graph_model.facts:
+        return graph_model
+    from TraceLens.ModelUtils.engine_facts import (
+        load_engine_facts,
+        trace_runtime_facts,
+        use_traced_engine_source,
+    )
+
+    events = list(events)
+    use_traced_engine_source(engine, events)
+    hip = graph_model.gfx_arch.startswith("gfx")
+    facts = load_engine_facts(engine, hip=hip) + trace_runtime_facts(events)
+    facts += _kernel_library_facts(graph_model, engine)
+    # A config that names no capture sizes takes the sizes the replays padded to.
+    buckets = dict(facts).get("replay_tokens") or ()
+    if graph_model.capture_buckets:
+        buckets = graph_model.capture_buckets
+    return replace(graph_model, facts=facts, capture_buckets=tuple(buckets))
+
+
+def _graph_model_on_device(graph_model, gpu_arch):
+    """Fill gfx, and the compute-unit count when the trace does not record it.
+
+    The mHC split policy is selected by that pair. The trace's
+    ``deviceProperties`` replace the compute-unit count once the profile is
+    loaded. This table is the fallback for a trace with no device block, and
+    it supplies the gfx name, which the trace does not record. A model that
+    already carries a device is left as is.
+    """
+    if graph_model is None or gpu_arch is None or graph_model.num_cus:
+        return graph_model
+    ident = gfx_and_cus(gpu_arch.get("name"))
+    num_cus = gpu_arch.get("num_cus") or (ident[1] if ident else 0)
+    gfx = gpu_arch.get("gfx") or (ident[0] if ident else "")
+    if not num_cus:
+        return graph_model
+    return replace(graph_model, num_cus=int(num_cus), gfx_arch=str(gfx))
+
+
 def generate_perf_report_pytorch(
     profile_json_path: str,
     augmented_tree: TraceToTree = None,
@@ -632,6 +761,7 @@ def generate_perf_report_pytorch(
         gpu_arch_platform=gpu_arch_platform,
         gpu_arch=gpu_arch,
     )
+    graph_model = _graph_model_on_device(graph_model, gpu_arch_json)
     add_python_func = (
         True
         if (
@@ -679,6 +809,15 @@ def generate_perf_report_pytorch(
 
     ## Apply annotation for vLLM eager and replay phase
     perf_analyzer.tree.apply_annotation(name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES)
+    if graph_model is not None:
+        perf_analyzer.architectures = _load_engine_architectures(
+            graph_model_config_path, perf_analyzer.tree.events
+        )
+        perf_analyzer.graph_model = _graph_model_with_engine_facts(
+            perf_analyzer.graph_model,
+            _inference_engine(perf_analyzer.tree.events),
+            perf_analyzer.tree.events,
+        )
 
     if extension_file:
         apply_extension(perf_analyzer, extension_file)

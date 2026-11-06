@@ -18,6 +18,28 @@ from math import ceil, gcd
 # Loaded on first use, so importing TraceLens doesn't load Origami's libraries.
 origami = None
 
+# Product name -> (gfx, compute units). The compute-unit counts are the ones
+# the hardware model and aiter's tuned kernels are built for.
+_GFX_CUS = {
+    "mi300": ("gfx942", 304),
+    "mi325": ("gfx942", 304),
+    "mi350": ("gfx950", 256),
+    "mi355": ("gfx950", 256),
+    "gfx942": ("gfx942", 304),
+    "gfx950": ("gfx950", 256),
+}
+
+
+def gfx_and_cus(name: str | None) -> tuple[str, int] | None:
+    """``(gfx, compute units)`` for a platform or gfx name, or ``None``."""
+    if not name:
+        return None
+    key = name.lower()
+    if key.endswith("x") and not key.startswith("gfx"):
+        key = key[:-1]
+    return _GFX_CUS.get(key)
+
+
 # TraceLens precision name -> origami.data_type_t member
 ORIGAMI_DTYPES = {
     "fp32": "Float",
@@ -449,29 +471,19 @@ class OrigamiHelper:
         if freq_mhz is None:
             warnings.warn("No frequency provided; Assuming 2200 MHz")
             freq_mhz = 2200
-        arch_name = arch_name.lower()
-        if arch_name.endswith("x"):
-            arch_name = arch_name[:-1]
-        name_to_arch = {
-            "mi300": "gfx942",
-            "mi325": "gfx942",
-            "mi350": "gfx950",
-            "mi355": "gfx950",
-        }
-        arch_name = name_to_arch.get(arch_name, arch_name)
+        ident = gfx_and_cus(arch_name)
+        arch_name = ident[0] if ident else arch_name.lower()
 
         # The origami python bindings only support the 3xx series
         arch_to_props = {
             # Architecture strings
             "gfx942": {
                 "arch": origami.architecture_t.gfx942,
-                "N_CU": 304,
                 "lds_capacity": 64 * 1024,  # 64 KB
                 "L2_capacity": 4 * 1024 * 1024,  # 4 MB
             },
             "gfx950": {
                 "arch": origami.architecture_t.gfx950,
-                "N_CU": 256,
                 "lds_capacity": 64 * 1024,  # 64 KB
                 "L2_capacity": 4 * 1024 * 1024,  # 4 MB
             },
@@ -480,7 +492,7 @@ class OrigamiHelper:
         props = arch_to_props[arch_name]  # throw an error for unknown devices
         return origami.get_hardware_for_arch(
             arch=props["arch"],
-            N_CU=props["N_CU"],
+            N_CU=ident[1],
             lds_capacity=props["lds_capacity"],
             L2_capacity=props["L2_capacity"],
             compute_clock_khz=freq_mhz * 1000,
