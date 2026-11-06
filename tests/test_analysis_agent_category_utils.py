@@ -1153,9 +1153,10 @@ def test_parse_kernel_breakdown_fwd_kernel_type():
 
 
 def test_parse_kernel_breakdown_strips_np_float64():
-    kd = "[{'name': 'k', 'mean_duration_us': np.float64(12.5)}]"
+    kd = "[{'name': 'kernel_a(anonymous namespace)', 'mean_duration_us': np.float64(12.5)}]"
     r = parse_kernel_breakdown(kd)
     assert r["total_kernel_time_us"] == 12.5
+    assert r["kernels"][0]["name"] == "kernel_a(anonymous namespace)"
 
 
 def test_parse_kernel_breakdown_empty():

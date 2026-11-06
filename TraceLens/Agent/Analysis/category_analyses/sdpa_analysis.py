@@ -69,7 +69,7 @@ def parse_kernel_breakdown(kernel_details_str: str) -> dict:
 
     try:
         kernel_str = str(kernel_details_str)
-        kernel_str = kernel_str.replace("np.float64(", "").replace(")", "")
+        kernel_str = kernel_str.replace("np.float64(", "")
 
         kernel_pattern = r"'name':\s*'([^']+)'.*?'mean_duration_us':\s*([0-9.]+)"
         matches = re.findall(kernel_pattern, kernel_str, re.DOTALL)
