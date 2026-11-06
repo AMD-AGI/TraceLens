@@ -78,9 +78,9 @@ KERNEL_TYPE_RULES = [
     (r"(?i)combined_routing_memset", "MoE Routing Memset", 20),
     (r"(?i)memset", "MemSet", 20),
     # ---- Band 20: fused MoE, norm and KV-store kernels ----
-    (r"(?i)swiglu|swiGlu", "MoE GateUp+SwiGLU GEMM", 20),
+    (r"(?i)swiglu", "MoE GateUp+SwiGLU GEMM", 20),
     (
-        r"(?i)fmoe.*g1u1.*silu|fmoe.*silu|mfma_moe\d+_silu_mul",
+        r"(?i)fmoe.*silu|mfma_moe\d+_silu_mul",
         "MoE GEMM+SiLU (aiter)",
         20,
     ),
@@ -105,7 +105,7 @@ KERNEL_TYPE_RULES = [
     ),
     (r"(?i)local_device_load_rmsnorm", "AllReduce+RMSNorm", 20),
     # ---- Band 20: Normalization ----
-    (r"(?i)Rmsnorm|rmsnorm2d", "RMSNorm", 20),
+    (r"(?i)rmsnorm", "RMSNorm", 20),
     (r"(?i)layer_norm|layernorm", "LayerNorm", 20),
     (r"(?i)batch_norm|batchnorm", "BatchNorm", 20),
     (r"(?i)l2norm_fwd|l2norm_kernel", "L2Norm", 20),
@@ -118,7 +118,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)_to_copy_add.*mean.*rsqrt", "RMSNorm (fused triton)", 20),
     # ---- Band 20: Attention and KV cache ----
     (r"(?i)attention_[23]d|unified_attention", "Attention (AMD unified)", 20),
-    (r"(?i)fmha[Ss]m\d+|fmhaSm100f", "Attention (NVIDIA fmha)", 20),
+    (r"(?i)fmhasm\d+", "Attention (NVIDIA fmha)", 20),
     (r"(?i)paged_attention|PagedAttention", "Attention (paged)", 20),
     (
         r"(?i)flash_attn|flash_fwd|attn_fwd|fmha|fort_native_sdpa",
@@ -127,7 +127,7 @@ KERNEL_TYPE_RULES = [
     ),
     (r"(?i)mla_a8w8", "Attention (MLA)", 20),
     (r"(?i)reduce_segments", "Attention Reduce", 20),
-    (r"(?i)reshape_and_cache_flash|reshape_and_cache", "KV Cache Store", 20),
+    (r"(?i)reshape_and_cache", "KV Cache Store", 20),
     # ---- Band 20: Linear attention ----
     (r"(?i)chunk_gated_delta_rule_fwd", "Linear Attention (chunk delta)", 20),
     (r"(?i)chunk_fwd_kernel_o", "Linear Attention (chunk fwd)", 20),
@@ -143,7 +143,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)topk_forward", "MoE TopK", 20),
     (r"(?i)topkGatingSoftmax", "MoE TopK Gating", 20),
     (r"(?i)grouped_topk", "TopK", 20),
-    (r"(?i)bitmatrix|_sum_bitmatrix", "MoE BitMatrix", 20),
+    (r"(?i)bitmatrix", "MoE BitMatrix", 20),
     (r"(?i)combined_routing_compute", "MoE Routing Compute", 20),
     (r"(?i)routingIndicesCluster|routingRenormalize", "MoE Routing (fused)", 20),
     (r"(?i)MoeSorting", "MoE Sorting", 20),
@@ -156,16 +156,10 @@ KERNEL_TYPE_RULES = [
     (r"(?i)gather_kernel|vectorized_gather", "Elementwise", 20),
     # ---- Band 15: fused triton Normalization, RoPE, quantization, activation ----
     (r"(?i)fused__to_copy_abs.*mean.*pow.*rsqrt", "RMSNorm (fused triton)", 15),
-    (r"(?i)fused__to_copy_add.*mean.*pow.*rsqrt", "RMSNorm (fused triton)", 15),
     (r"(?i)fused_add_copy__mean.*pow", "RMSNorm (fused triton residual)", 15),
     (
         r"(?i)fused__to_copy_add_copy__mean.*pow",
         "RMSNorm (fused triton residual)",
-        15,
-    ),
-    (
-        r"(?i)fused__to_copy_add_mean.*mul.*pow.*rsqrt",
-        "RMSNorm (fused triton)",
         15,
     ),
     (r"(?i)rotary|rope", "Rotary Embedding", 15),
@@ -181,7 +175,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)top_k|top_p|sampling|topk_topp", "Elementwise", 15),
     (r"(?i)\bsilu(_kernel)?\b|swish", "Activation (SiLU)", 15),
     (r"(?i)\bgelu\b", "Activation (GELU)", 15),
-    (r"(?i)splitKreduce|splitkreduce", "GEMM", 15),
+    (r"(?i)splitkreduce", "GEMM", 15),
     # ---- Band 15: copies, softmax and GEMM libraries ----
     (r"(?i)__amd_rocclr_copyBuffer", "Elementwise", 15),
     (r"(?i)memcpy32_post", "Elementwise", 15),
@@ -205,7 +199,7 @@ KERNEL_TYPE_RULES = [
     (r"(?i)_gemm_a\d+w\d+", "GEMM", 10),
     (r"(?i)bmm_MxE4m3.*MxE2m1", "GEMM", 10),
     (r"(?i)bmm_Bfloat16.*MxE2m1", "GEMM", 10),
-    (r"(?i)cublasLt|cublas", "GEMM", 10),
+    (r"(?i)cublas", "GEMM", 10),
     (r"(?i)rocm_aiter_gemm_a8w8", "GEMM", 10),
     # ---- Band 10: reduce, add and mul, then fused compiled GEMM ----
     (r"(?i)\breduce_kernel", "Reduce", 10),
@@ -316,7 +310,7 @@ class KernelTaxonomy:
         }
         self._matches: dict[str, tuple[str, int]] = {}
 
-    def _match(self, name: str) -> tuple[str, int]:
+    def match(self, name: str) -> tuple[str, int]:
         """Return the (kernel_type, priority) of the winning rule, memoized per name."""
         if (hit := self._matches.get(name)) is None:
             best_type, best_prio = UNKNOWN, 0
@@ -327,7 +321,7 @@ class KernelTaxonomy:
         return hit
 
     def classify(self, name: str) -> KernelClass:
-        return self._types[self._match(name)[0]]
+        return self._types[self.match(name)[0]]
 
     def is_compiled(self, name: str) -> bool:
         return self._COMPILED.match(name) is not None
@@ -348,7 +342,7 @@ def classify_kernel(name):
     Returns:
         (kernel_type, perf_category, priority)
     """
-    ktype, priority = TAXONOMY._match(name)
+    ktype, priority = TAXONOMY.match(name)
     return ktype, TAXONOMY.by_type(ktype).perf_category, priority
 
 
