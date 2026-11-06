@@ -88,8 +88,7 @@ def run_triage(run_dir, stream_file=None, detailed=False):
             remedy=draft.remedy,
         )
         findings.append(finding)
-        if spec.sublabel:
-            findings_by_sublabel[spec.sublabel] = finding
+        findings_by_sublabel[spec.sublabel] = finding
 
     # Second pass: annotate downstream findings with the sublabels of the
     # upstream checks that listed them in `implies_failures` and also failed.

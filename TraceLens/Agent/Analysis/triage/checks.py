@@ -89,9 +89,7 @@ class CheckSpec:
     detailed_only: bool = False
 
     def build_tag(self) -> str:
-        if self.sublabel:
-            return f"DIAG:{self.category}:{self.sublabel}_{self.name}"
-        return f"DIAG:{self.category}:{self.name}"
+        return f"DIAG:{self.category}:{self.sublabel}_{self.name}"
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +591,7 @@ def check_capture_missing(run_dir, _stream_file):
 # ---------------------------------------------------------------------------
 
 
-def check_high_idle(run_dir, stream_file):
+def check_high_idle(run_dir, _stream_file):
     timeline = _load_gpu_timeline(run_dir)
     idle = None
     source = None
@@ -629,17 +627,16 @@ def check_corrupt_json(run_dir, _stream_file):
         # orjson.JSONDecodeError subclasses ValueError; DataLoader also raises a
         # bare ValueError for an unknown/unloadable file type. Both mean the trace
         # is not parseable, so report corrupt rather than crash.
-        return FindingDraft(
-            "Trace file is corrupted/invalid JSON",
-            f"{type(e).__name__}: {str(e)[:150]}",
-            "Re-collect the trace; verify .json.gz files are not truncated",
-        )
+        evidence = f"{type(e).__name__}: {str(e)[:150]}"
     except OSError as e:
-        return FindingDraft(
-            "Trace file is corrupted/invalid JSON",
-            f"OSError reading trace: {str(e)[:150]}",
-            "Re-collect the trace; verify .json.gz files are not truncated",
-        )
+        evidence = f"OSError reading trace: {str(e)[:150]}"
+    else:
+        return None
+    return FindingDraft(
+        "Trace file is corrupted/invalid JSON",
+        evidence,
+        "Re-collect the trace; verify .json.gz files are not truncated",
+    )
 
 
 def check_missing_cpu_op_shapes(run_dir, _stream_file):
@@ -912,7 +909,7 @@ def check_prefix_fail(_run_dir, stream_file):
 
 
 # ---------------------------------------------------------------------------
-# TraceLens agent workflow checks (continued — report)
+# TraceLens agent workflow checks (continued: report)
 # ---------------------------------------------------------------------------
 
 
@@ -936,7 +933,7 @@ def check_report_too_small(run_dir, _stream_file):
 
 
 # ---------------------------------------------------------------------------
-# TraceLens agent workflow checks (continued — subagent) / infra
+# TraceLens agent workflow checks (continued: subagent) / infra
 # ---------------------------------------------------------------------------
 
 
@@ -945,28 +942,27 @@ def check_resource_exhausted(_run_dir, stream_file):
         stripped = line.strip()
         try:
             record = json.loads(stripped)
+        except ValueError:
+            record = None
+        if isinstance(record, dict):
             rtype = record.get("type", "")
             if rtype == "error" and "RESOURCE_EXHAUSTED" in json.dumps(record):
-                return FindingDraft(
-                    "Context length exceeded (RESOURCE_EXHAUSTED)",
-                    "RESOURCE_EXHAUSTED error event in agent stream",
-                    "Reduce trace size before analysis",
-                )
-            if rtype == "system" and "RESOURCE_EXHAUSTED" in str(
+                evidence = "RESOURCE_EXHAUSTED error event in agent stream"
+            elif rtype == "system" and "RESOURCE_EXHAUSTED" in str(
                 record.get("error", "")
             ):
-                return FindingDraft(
-                    "Context length exceeded (RESOURCE_EXHAUSTED)",
-                    "RESOURCE_EXHAUSTED system error in agent stream",
-                    "Reduce trace size before analysis",
-                )
-        except (json.JSONDecodeError, ValueError):
-            if re.search(r"resource_exhausted", stripped, re.IGNORECASE):
-                return FindingDraft(
-                    "Context length exceeded (RESOURCE_EXHAUSTED)",
-                    f"resource_exhausted in stream: {stripped[:150]}",
-                    "Reduce trace size before analysis",
-                )
+                evidence = "RESOURCE_EXHAUSTED system error in agent stream"
+            else:
+                continue
+        elif re.search(r"resource_exhausted", stripped, re.IGNORECASE):
+            evidence = f"resource_exhausted in stream: {stripped[:150]}"
+        else:
+            continue
+        return FindingDraft(
+            "Context length exceeded (RESOURCE_EXHAUSTED)",
+            evidence,
+            "Reduce trace size before analysis",
+        )
     return None
 
 
@@ -987,8 +983,7 @@ def check_subagent_budget(run_dir, _stream_file):
             continue
         if name == "cpu_idle" and idle_pct is not None and idle_pct <= _HIGH_IDLE_PCT:
             continue
-        tier = cat.get("tier", "compute_kernel")
-        target_dir = system_dir if tier == "system" else findings_dir
+        target_dir = system_dir if cat.get("tier") == "system" else findings_dir
         if not os.path.isfile(os.path.join(target_dir, f"{name}_findings.md")):
             missing.append(name)
 
@@ -1053,7 +1048,12 @@ def check_disk_full(run_dir, stream_file):
     for dirpath, _dirnames, filenames in os.walk(run_dir):
         for fname in filenames:
             fpath = os.path.join(dirpath, fname)
-            if os.path.getsize(fpath) == 0 and not fname.startswith("."):
+            try:
+                size = os.path.getsize(fpath)
+            except OSError:
+                # Dangling symlink: nothing to measure.
+                continue
+            if size == 0 and not fname.startswith("."):
                 zero_byte.append(os.path.relpath(fpath, run_dir))
     if len(zero_byte) > _MAX_ZERO_BYTE_FILES:
         return FindingDraft(

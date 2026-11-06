@@ -1833,6 +1833,7 @@ def test_disk_full_zero_byte_files(tmp_path):
     run_dir = make_run_dir(tmp_path)
     for i in range(4):
         (run_dir / f"empty{i}.txt").touch()
+    (run_dir / "dangling").symlink_to(run_dir / "nowhere")
     finding = check_disk_full(str(run_dir), None)
     assert isinstance(finding, FindingDraft)
     assert finding.failure_mode == "Disk space exhausted"
@@ -1916,9 +1917,15 @@ def test_resource_exhausted_json_system(tmp_path):
     assert finding.evidence == "RESOURCE_EXHAUSTED system error in agent stream"
 
 
-def test_resource_exhausted_plain_regex(tmp_path):
-    # A non-JSON log line takes the except branch and matches case-insensitively.
-    stream = write_stream(tmp_path / "s.log", ["fatal: Resource_Exhausted on host"])
+@pytest.mark.parametrize(
+    "line",
+    ["fatal: Resource_Exhausted on host", ["Resource_Exhausted"]],
+    ids=["plain", "json_list"],
+)
+def test_resource_exhausted_plain_regex(tmp_path, line):
+    # Non-JSON and non-object JSON lines take the regex branch and match
+    # case-insensitively.
+    stream = write_stream(tmp_path / "s.log", [line])
     finding = check_resource_exhausted(str(tmp_path), stream)
     assert isinstance(finding, FindingDraft)
     assert finding.evidence.startswith("resource_exhausted in stream:")
