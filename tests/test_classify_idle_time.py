@@ -613,6 +613,29 @@ class TestDrain:
         assert rec["drain_type"] == "sync_drain"
         assert rec["sync_event_name"] == "cudaMemcpyAsync"
 
+    def test_copy_to_idle_gpu_is_starved(self):
+        # k0 ends at 100; the copy starts at 110, its own transfer runs 120-130, and the
+        # call keeps the host until 390. The copy only waited on itself.
+        tree = _build_tree(
+            kernels=[(0, 100, None), (120, 10, 0, 7, "gpu_memcpy"), (400, 10, 1)],
+            runtime=[("hipMemcpyAsync", 110, 280), ("hipLaunchKernel", 395, 3)],
+        )
+        rec = _macro(tree)[-1]
+        assert rec["preceding_gpu_event"] == "k1"
+        assert rec["drain_type"] == "starved"
+        assert rec["sync_event_name"] == "hipMemcpyAsync"
+        assert rec["sync_gain_us"] is None
+
+    def test_copy_behind_queued_work_drains(self):
+        # The copy starts at 50 while k0 runs to 200; its transfer runs 200-205.
+        tree = _build_tree(
+            kernels=[(0, 200, None), (200, 5, 0, 7, "gpu_memcpy"), (400, 10, 1)],
+            runtime=[("hipMemcpyAsync", 50, 160), ("hipLaunchKernel", 395, 3)],
+        )
+        (rec,) = _macro(tree)
+        assert rec["drain_type"] == "sync_drain"
+        assert rec["sync_gain_us"] == pytest.approx(160)
+
     def test_sync_after_launch_is_not_causal(self):
         (rec,) = _macro(self._tree(launch_ts=60))
         assert rec["drain_type"] == "starved"
@@ -1009,18 +1032,23 @@ class TestRealTraces:
         "platform,copy_call",
         [("mi300", "hipMemcpyWithStream"), ("h100", "cudaMemcpyAsync")],
     )
-    def test_owlv2_copy_drains_queue_on_both_vendors(self, platform, copy_call):
-        """Same model on AMD and NVIDIA: host copies drain the queue before ~0.1 s of
-        CPU work. On CUDA the blocking call is cudaMemcpyAsync to pageable memory."""
+    def test_owlv2_copy_to_idle_gpu_is_starved_on_both_vendors(
+        self, platform, copy_call
+    ):
+        """Same model on AMD and NVIDIA: host copies are issued after the GPU already
+        went idle, then ~0.1 s of CPU work follows. The copies waited only on their own
+        transfer, so the gaps are starved. On CUDA the blocking call is cudaMemcpyAsync
+        to pageable memory."""
         macro = [
             r
             for r in _classify_trace(os.path.join(TRACE_DIR, platform, OWLV2))
             if not r["label_noise"]
         ]
         total = sum(r["duration"] for r in macro)
-        drained = [r for r in macro if r["drain_type"] == "sync_drain"]
-        assert sum(r["duration"] for r in drained) > 0.9 * total
-        assert copy_call in {r["sync_event_name"] for r in drained}
+        starved = [r for r in macro if r["drain_type"] == "starved"]
+        assert sum(r["duration"] for r in starved) > 0.9 * total
+        assert copy_call in {r["sync_event_name"] for r in starved}
+        assert max(macro, key=lambda r: r["duration"])["label"] == "CPU_OP_DOMINATED"
 
 
 @pytest.fixture

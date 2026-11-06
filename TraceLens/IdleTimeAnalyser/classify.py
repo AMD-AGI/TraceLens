@@ -416,13 +416,15 @@ def _new_record(gap_start, gap_end):
     return rec
 
 
-def _find_sync_drain(rec, rt_index, gap_start, launch, preceding, th):
+def _find_sync_drain(rec, rt_index, gap_start, launch, gpu_by_end, i, th):
     """Set drain_type and sync_* fields.
 
     A sync drains the queue if it is on the launching thread, overlaps the gap start,
     returned before the next launch began, and started more than drain_overlap_us before
-    the GPU finished. sync_gain_us = min(sync duration, gap) bounds the idle that removing
-    that sync could save; it counts only this sync, not later ones in the same gap.
+    the GPU finished other work. A copy's own transfer is not queued work: a copy issued
+    to an idle GPU that then blocks the host is starved, not a drain.
+    sync_gain_us = min(sync duration, gap) bounds the idle that removing that sync could
+    save; it counts only this sync, not later ones in the same gap.
     """
     rec["drain_type"] = "starved"
     thread = (launch.get("pid"), launch.get("tid")) if launch is not None else None
@@ -440,7 +442,11 @@ def _find_sync_drain(rec, rt_index, gap_start, launch, preceding, th):
         args = rt.get("args", {})
         rec["sync_event_correlation"] = args.get("External id", args.get("correlation"))
         rec["sync_event_dur"] = rt.get("dur")
-        if preceding is not None and _t_end(preceding) - rt["ts"] > th.drain_overlap_us:
+        k = i
+        while k >= 0 and gpu_by_end[k].get("parent") == rt.get("UID"):
+            k -= 1
+        work = gpu_by_end[k] if k >= 0 else None
+        if work is not None and _t_end(work) - rt["ts"] > th.drain_overlap_us:
             rec["drain_type"] = "sync_drain"
             rec["sync_gain_us"] = min(rt.get("dur", 0.0), rec["duration"])
         return
@@ -547,7 +553,15 @@ def classify_idle_intervals(
             rec["launch_tid"] = launch.get("tid")
             rec["launch_to_start_us"] = gap_end - launch_end
             rec["launch_lead_us"] = gap_start - launch_end
-        _find_sync_drain(rec, rt_index, gap_start, launch, preceding, th)
+        _find_sync_drain(
+            rec,
+            rt_index,
+            gap_start,
+            launch,
+            gpu_by_end,
+            i if preceding is not None else -1,
+            th,
+        )
         pending.append((rec, launch))
 
     limit = th.launch_latency_us

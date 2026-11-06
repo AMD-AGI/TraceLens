@@ -160,12 +160,14 @@ what the CPU did during the gap.
 
 - **`sync_drain`:** A sync call on the launching thread was running within 2 µs
   before the gap start, returned before the next launch began, and started more than
-  `drain_overlap_us` before the preceding GPU op finished. The CPU was blocked
-  while the GPU drained its queue. Removing or moving the sync lets the CPU work
-  after it overlap with GPU work.
+  `drain_overlap_us` before the preceding GPU op finished. A copy's own transfer
+  doesn't count as the preceding op; the test uses the last GPU op before it. The
+  CPU was blocked while the GPU drained its queue. Removing or moving the sync lets
+  the CPU work after it overlap with GPU work.
 - **`starved`:** No such sync. The CPU didn't submit work in time. This includes
-  gaps where a sync was present but the queue was already empty. Only less CPU
-  work per GPU op helps.
+  gaps where a sync was present but the queue was already empty, such as a copy
+  issued to an idle GPU that keeps the host blocked after its transfer finishes.
+  Only less CPU work per GPU op helps.
 
 These runtime calls count as syncs:
 
