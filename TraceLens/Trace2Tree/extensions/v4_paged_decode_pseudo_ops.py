@@ -14,6 +14,9 @@ HCA) and geometry (H_Q, d_h) from its kernels, and stamp variant config as
 
 Works for both DeepSeek-V4-Flash (TP=1) and DeepSeek-V4-Pro (TP=4); mode mix and
 head count are detected from the trace.
+
+``stamp_v4_sparse_mla_mode`` reuses the same mode detection to stamp ``v4_mode``
+on each ``aiter::mla_sparse_prefill_fp8_asm_fwd`` call.
 """
 
 import os
@@ -28,6 +31,7 @@ SPARSE_DECODE_PATTERN = re.compile(
     r"paged_decode\.py\(\d+\):\s*sparse_attn_v4_paged_decode\b"
 )
 V4_ATTN_OP_NAME = "aiter::v4_attention_with_output"
+SPARSE_MLA_OP_NAME = "aiter::mla_sparse_prefill_fp8_asm_fwd"
 QK_NORM_ROPE_PATTERN = re.compile(r"qk_norm_rope_H(\d+)_D(\d+)_RD(\d+)")
 
 _HCA_PREFIXES = ("hca_compress_forward", "hca_norm_rope_scatter", "hca_")
@@ -55,6 +59,17 @@ def create_pseudo_ops_v4_paged_decode(trace_tree):
     py_funcs.sort(key=lambda e: (e.get("pid", 0), e.get("tid", 0), e.get("ts", 0)))
     for call_idx, py_func_evt in enumerate(py_funcs):
         _create_pseudo_op(trace_tree, py_func_evt, model_name, tp, call_idx)
+
+
+def stamp_v4_sparse_mla_mode(trace_tree):
+    """Stamp each sparse MLA call with its layer's mode, read from the layer's kernels."""
+    for uid in trace_tree.name2event_uids.get(SPARSE_MLA_OP_NAME, []):
+        evt = trace_tree.get_UID2event(uid)
+        v4_attn_evt = _find_v4_attn_ancestor(trace_tree, evt)
+        if v4_attn_evt is None:
+            continue
+        mode = _detect_v4_mode(_kernel_names_under(trace_tree, v4_attn_evt))
+        evt.setdefault("args", {})["v4_mode"] = mode
 
 
 def _find_sparse_decode_python_funcs(trace_tree):

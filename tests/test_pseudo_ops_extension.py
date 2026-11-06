@@ -72,6 +72,11 @@ from TraceLens.Trace2Tree.extensions.mla_prefill_pseudo_ops import (
     _find_prefill_cpu_op_child,
     create_pseudo_ops_mla_prefill,
 )
+from TraceLens.Trace2Tree.extensions.v4_paged_decode_pseudo_ops import (
+    SPARSE_MLA_OP_NAME,
+    V4_ATTN_OP_NAME,
+    stamp_v4_sparse_mla_mode,
+)
 
 # Add examples to path to import extension
 
@@ -1283,6 +1288,49 @@ class TestMlaPrefillPseudoOps:
         matched = _find_mla_prefill_python_funcs(tree)
         assert len(matched) == 1
         assert _find_prefill_cpu_op_child(tree, py_evt) is cpu_evt
+
+
+def _v4_sparse_mla_events(compress_kernel):
+    """One DeepSeek-V4 attention layer: a compress kernel, then the sparse MLA call."""
+    attn = _mk_event("cpu_op", V4_ATTN_OP_NAME, ts=0, dur=1000, pid=1, tid=1)
+    mla = _mk_event("cpu_op", SPARSE_MLA_OP_NAME, ts=500, dur=100, pid=1, tid=1)
+    events = [attn, mla]
+    _add_gpu_chain(events, attn, 1, compress_kernel, 100, 2000)
+    _add_gpu_chain(events, mla, 2, "mla_a8w8_qh128_sparse_pfl", 510, 2100)
+    return events
+
+
+class TestV4SparseMlaMode:
+    @pytest.mark.parametrize(
+        "kernel, mode",
+        [
+            ("fused_compress_attn_w32_D512_RD64_R4_OVL_SS8_KB64_flydsl", "csa"),
+            ("hca_compress_forward_w32_D512_R128_NW16_SL32_S128_flydsl", "hca"),
+        ],
+    )
+    def test_registry_stamps_layer_mode(self, kernel, mode):
+        tree = _build_tree(_v4_sparse_mla_events(kernel))
+        apply_pseudo_op_extensions(tree, verbose=True)
+        mla = next(e for e in tree.events if e["name"] == SPARSE_MLA_OP_NAME)
+        assert mla["args"]["v4_mode"] == mode
+
+    def test_skips_calls_outside_v4_attention(self):
+        mla = _mk_event("cpu_op", SPARSE_MLA_OP_NAME, ts=0, dur=100, pid=1, tid=1)
+        events = [mla]
+        _add_gpu_chain(events, mla, 1, "mla_a8w8_qh128_sparse_pfl", 10, 200)
+        tree = _build_tree(events)
+        stamp_v4_sparse_mla_mode(tree)
+        stamped = next(e for e in tree.events if e["name"] == SPARSE_MLA_OP_NAME)
+        assert "v4_mode" not in stamped["args"]
+
+    @pytest.mark.parametrize("launcher", [V4_ATTN_OP_NAME, "hipGraphLaunch"])
+    def test_compress_kernels_classify_as_attention(self, launcher):
+        for kernel in (
+            "fused_compress_attn_w32_D128_RD64_R4_OVL_SS8_KB64_KS4_Q_fp4nat_v3_rmsbf16_flydsl",
+            "hca_compress_forward_w32_D512_R128_NW16_SL32_S128_flydsl",
+        ):
+            row = {"name": f"{launcher}->{kernel} (Synthetic Op)"}
+            assert categorize_torch_op(row) == "InferenceAttention"
 
 
 class TestPseudoOpsRegistryMla:
