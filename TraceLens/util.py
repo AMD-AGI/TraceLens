@@ -1066,7 +1066,7 @@ class TraceEventUtils:
     def num_cus_from_trace(metadata: dict | None) -> int | None:
         """Compute units from ``deviceProperties``.
 
-        ``numSms`` is the compute-unit count on these ROCm traces.
+        ``numSms`` is the compute-unit count
         """
         return TraceEventUtils._agreed_device_int(metadata, "numSms")
 
@@ -1074,7 +1074,7 @@ class TraceEventUtils:
     def lds_capacity_from_trace(metadata: dict | None) -> int | None:
         """Per-CU LDS capacity in bytes.
 
-        ``maxSharedMemoryPerMultiProcessor`` is that capacity on these traces.
+        ``maxSharedMemoryPerMultiProcessor`` is the shared memory capacity
         """
         return TraceEventUtils._agreed_device_int(
             metadata, "maxSharedMemoryPerMultiProcessor"
