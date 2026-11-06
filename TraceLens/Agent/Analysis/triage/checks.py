@@ -613,7 +613,7 @@ def check_high_idle(run_dir, _stream_file):
 
     if idle is not None and idle > _HIGH_IDLE_PCT:
         return FindingDraft(
-            "High idle time (> 15% GPU idle)",
+            f"High idle time (> {_HIGH_IDLE_PCT}% GPU idle)",
             f"GPU idle time is {idle:.1f}% ({source})",
             "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
         )
@@ -829,7 +829,7 @@ def check_runtime_instability(run_dir, _stream_file):
     names = ", ".join((r.get("name") or "")[:60] for r in top)
     return FindingDraft(
         "Run-time instability across iterations / per cpu_op",
-        f"{len(unstable)} ops have Kernel Time std/mean > 0.25 (e.g. {names})",
+        f"{len(unstable)} ops have Kernel Time std/mean > {_RUNTIME_INSTABILITY_CV} (e.g. {names})",
         "Likely a profiler or system issue; verify if the variance is expected",
     )
 
