@@ -50,8 +50,8 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
-# Real traces have CSV cells far larger than csv's 131072-char default, which
-# would crash the trace-quality gate; lift the limit to the platform maximum.
+# Lift csv's 131072-char cell cap at import: the trace-quality gate and
+# Hyperloom's csv readers (via the utils import chain) both hit larger cells.
 csv.field_size_limit(sys.maxsize)
 
 # Constants
@@ -299,10 +299,7 @@ def _is_plumbing_wrapper(prefix: str) -> bool:
 
 
 def _strip_synthetic_suffix(name: str) -> str:
-    suffix = " (Synthetic Op)"
-    if name.endswith(suffix):
-        name = name[: -len(suffix)]
-    return name.strip()
+    return name.removesuffix(" (Synthetic Op)").strip()
 
 
 def _normalize_kernel_name(raw: str) -> str:
