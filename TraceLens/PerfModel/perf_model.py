@@ -3588,6 +3588,116 @@ class aten_unary_elementwise(UnaryElementwise):
         }
 
 
+class _TwoFlopUnary(aten_unary_elementwise):
+    """One special function per element, counted as two flops.
+
+    The fused-kernel table records that cost for ``aten.sqrt``,
+    ``aten.rsqrt``, and ``aten.reciprocal``. Bytes stay one read and one write.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 2 * nelems
+
+
+class aten_rsqrt(_TwoFlopUnary):
+    """``aten::rsqrt`` and ``aten::rsqrt_``."""
+
+
+class aten_sqrt(_TwoFlopUnary):
+    """``aten::sqrt`` and ``aten::sqrt_``."""
+
+
+class aten_reciprocal(_TwoFlopUnary):
+    """``aten::reciprocal`` and ``aten::reciprocal_``."""
+
+
+# Storage size of each ``c10::ScalarType``, in the order of
+# ``AT_FORALL_SCALAR_TYPES_WITH_COMPLEX_AND_QINTS``. The profiler stores this
+# ordinal in ``Concrete Inputs`` for ``aten::to`` and ``aten::_to_copy``.
+_SCALAR_TYPE_BPE = {
+    0: 1,  # Byte
+    1: 1,  # Char
+    2: 2,  # Short
+    3: 4,  # Int
+    4: 8,  # Long
+    5: 2,  # Half
+    6: 4,  # Float
+    7: 8,  # Double
+    8: 4,  # ComplexHalf
+    9: 8,  # ComplexFloat
+    10: 16,  # ComplexDouble
+    11: 1,  # Bool
+    12: 1,  # QInt8
+    13: 1,  # QUInt8
+    14: 4,  # QInt32
+    15: 2,  # BFloat16
+    16: 1,  # QUInt4x2
+    17: 1,  # QUInt2x4
+    18: 1,  # Bits1x8
+    19: 1,  # Bits2x4
+    20: 1,  # Bits4x2
+    21: 1,  # Bits8
+    22: 2,  # Bits16
+    23: 1,  # Float8_e5m2
+    24: 1,  # Float8_e4m3fn
+    25: 1,  # Float8_e5m2fnuz
+    26: 1,  # Float8_e4m3fnuz
+    27: 2,  # UInt16
+    28: 4,  # UInt32
+    29: 8,  # UInt64
+    44: 1,  # Float8_e8m0fnu
+    45: 1,  # Float4_e2m1fn_x2
+    46: 4,  # BComplex32
+}
+
+
+def scalar_type_bpe(token):
+    """Bytes of a profiler ``ScalarType`` ordinal, or ``None`` when it is not one."""
+    if token is None:
+        return None
+    text = str(token).strip()
+    if not text:
+        return None
+    try:
+        code = int(text)
+    except ValueError:
+        return None
+    return _SCALAR_TYPE_BPE.get(code)
+
+
+class aten_clone(aten_unary_elementwise):
+    """``aten::clone`` materializes a tensor. No arithmetic.
+
+    Bytes are one read and one write of the cloned dtype.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
+
+
+class aten_to(aten_unary_elementwise):
+    """``aten::to`` and ``aten::_to_copy``: a dtype or device copy.
+
+    No arithmetic. Bytes are the source width plus the destination width.
+    ``Concrete Inputs[1]`` is the ``ScalarType`` ordinal of a dtype cast. A
+    value that is not an ordinal keeps the source width, which is a same-dtype
+    copy onto another device.
+    """
+
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
+        concrete = (event.get("args") or {}).get("Concrete Inputs") or ()
+        dest = scalar_type_bpe(concrete[1] if len(concrete) > 1 else None)
+        if dest is not None:
+            self.bpe_out = dest
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
+
+
 class aten_replication_pad(UnaryElementwise):
     category = "elementwise"
     sheet_category = "UnaryElementwise"
@@ -3629,6 +3739,19 @@ class aten_replication_pad(UnaryElementwise):
         nelems_in = prod(self.param_details["input_shape"])
         nelems_out = self.nelems  # prod(output_shape) from base class
         return nelems_in * self.bpe_in + nelems_out * self.bpe_out
+
+
+class aten_pad(aten_replication_pad):
+    """``aten::pad`` copies the input into a padded buffer.
+
+    No arithmetic. ``Concrete Inputs[1]`` holds the pad widths, innermost
+    dimension first, the same order ``aten_replication_pad`` reads. Bytes read
+    the input and write the padded output.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
 
 
 class aten_upsample_nearest(UnaryElementwise):

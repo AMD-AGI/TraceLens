@@ -463,6 +463,14 @@ def test_dispatch_unary_elementwise():
     assert flops == 2 * 10 * 4096
 
 
+@pytest.mark.parametrize("label", ["sqrt", "rsqrt", "reciprocal"])
+def test_dispatch_special_unary_counts_two_flops_per_element(label):
+    category, _, flops, bytes_moved = _dispatch_op_cost(label, [(4, 256)], (4, 256), 2)
+    assert category == "UnaryElementwise"
+    assert flops == 2 * 4 * 256
+    assert bytes_moved == 2 * 4 * 256 * 2
+
+
 def test_dispatch_unary_elementwise_without_output_shape_is_unmodeled():
     assert _dispatch_op_cost("Silu", [(2, 10, 4096)], (), 2) is None
 

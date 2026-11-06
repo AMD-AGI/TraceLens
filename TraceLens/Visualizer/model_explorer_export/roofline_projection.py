@@ -115,6 +115,7 @@ from TraceLens.PerfModel.perf_model import (
     Reduce,
     Softmax,
     UnaryElementwise,
+    aten_sqrt,
 )
 from TraceLens.PerfModel.utils import torch_dtype_map
 from TraceLens.TreePerf.tree_perf import compute_roofline_time_and_bound
@@ -3428,7 +3429,10 @@ def _dispatch_op_cost(
     if label in _BINARY_POINTWISE_COMPUTATIONS:
         return _binary_elementwise_cost(input_shapes, output_shape, bpe)
     if label in _UNARY_POINTWISE_COMPUTATIONS:
-        return _unary_elementwise_cost(output_shape, bpe)
+        flops_func = (
+            aten_sqrt.flops_func if label in ("sqrt", "rsqrt", "reciprocal") else None
+        )
+        return _unary_elementwise_cost(output_shape, bpe, flops_func)
     if _is_embedding_lookup(computation):
         return _embedding_lookup_cost(input_shapes, output_shape, bpe)
     return None
@@ -3740,11 +3744,14 @@ def _softmax_cost(
 def _unary_elementwise_cost(
     output_shape: tuple[int, ...],
     bpe: float | None,
+    flops_func=None,
 ) -> tuple[str, str, float, float | None] | None:
     if not output_shape:
         return None
     nelems = prod(output_shape)
-    flops = UnaryElementwise.flops_func(nelems)
+    if flops_func is None:
+        flops_func = UnaryElementwise.flops_func
+    flops = flops_func(nelems)
     bytes_moved = (
         UnaryElementwise.bytes_func(nelems, bpe, bpe) if bpe is not None else None
     )
