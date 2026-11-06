@@ -143,17 +143,17 @@ def _reset_triage_caches(monkeypatch):
     """Isolate the two triage-module caches so tests don't leak into each other.
 
     ``checks._load_trace_json`` is ``lru_cache(maxsize=1)``: rewriting a file at
-    the same path and re-reading returns stale content. ``checks._PATH_REMAPS_CACHE``
+    the same path and re-reading returns stale content. ``checks._path_remaps``
     memoizes ``TRACELENS_PATH_REMAPS`` once, so a remap set in one test would bleed
     into the next. Clear both before and after each test, and strip the env var so
     remap tests start from a clean environment.
     """
     monkeypatch.delenv("TRACELENS_PATH_REMAPS", raising=False)
     checks._load_trace_json.cache_clear()
-    checks._PATH_REMAPS_CACHE = None
+    checks._path_remaps.cache_clear()
     yield
     checks._load_trace_json.cache_clear()
-    checks._PATH_REMAPS_CACHE = None
+    checks._path_remaps.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +654,7 @@ def _set_remaps(value):
     after the test, so we only need to prime them here.
     """
     os.environ["TRACELENS_PATH_REMAPS"] = value
-    checks._PATH_REMAPS_CACHE = None
+    checks._path_remaps.cache_clear()
 
 
 # ---------------------------------------------------------------------------

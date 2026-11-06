@@ -22,8 +22,8 @@ import json
 import math
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     focus_job_utilization,
@@ -53,7 +53,7 @@ class Finding:
     failure_mode: str
     evidence: str
     remedy: str
-    implied_by: List[str] = field(default_factory=list)
+    implied_by: list[str] = field(default_factory=list)
 
     def diag_line(self):
         suffix = (
@@ -84,8 +84,8 @@ class CheckSpec:
     sublabel: str
     name: str
     category: str
-    fn: Callable[[str, Optional[str]], Optional[FindingDraft]]
-    implies_failures: List[str] = field(default_factory=list)
+    fn: Callable[[str, str | None], FindingDraft | None]
+    implies_failures: list[str] = field(default_factory=list)
     detailed_only: bool = False
 
     def build_tag(self) -> str:
@@ -97,9 +97,9 @@ class CheckSpec:
 # ---------------------------------------------------------------------------
 
 _PATH_REMAPS_ENV = "TRACELENS_PATH_REMAPS"
-_PATH_REMAPS_CACHE = None
 _SDK_PREFIX_RE = re.compile(r"^\[claude-sdk\]\s*")
 _TBS_TFLOPS_EXEMPT_SUBSTRINGS = ("collective", "custom")
+_MAIN_TRACE_PATTERNS = ("*TP-0*.json*", "*rank0*.json*")
 
 # Trace files larger than this (bytes) are skipped by detection checks: parsing
 # multi-GB traces in-process is too costly for a fast triage pass.
@@ -121,6 +121,7 @@ _MIN_CPU_OP_SHAPES = 10
 _MAX_ZERO_BYTE_FILES = 3
 
 
+@functools.cache
 def _path_remaps():
     """Return the list of ``(old_prefix, new_prefix)`` remaps from the environment.
 
@@ -130,22 +131,17 @@ def _path_remaps():
 
         TRACELENS_PATH_REMAPS=/old_root/=/new_root/,/legacy/=/current/
     """
-    global _PATH_REMAPS_CACHE
-    if _PATH_REMAPS_CACHE is not None:
-        return _PATH_REMAPS_CACHE
-
     raw = os.environ.get(_PATH_REMAPS_ENV, "")
     pairs = []
     for chunk in raw.split(","):
-        chunk = chunk.strip()
-        if not chunk or "=" not in chunk:
+        pair = chunk.strip()
+        if not pair or "=" not in pair:
             continue
-        old, _, new = chunk.partition("=")
+        old, _, new = pair.partition("=")
         old = old.strip()
         new = new.strip()
         if old:
             pairs.append((old, new))
-    _PATH_REMAPS_CACHE = pairs
     return pairs
 
 
@@ -222,7 +218,7 @@ def resolve_main_trace_path(run_dir):
     """Resolve the main rank-0 trace file for a run."""
     trace_input = _trace_input_dir(run_dir)
     if trace_input:
-        for pattern in ("*TP-0*.json*", "*rank0*.json*"):
+        for pattern in _MAIN_TRACE_PATTERNS:
             matches = sorted(glob.glob(os.path.join(trace_input, pattern)))
             if matches:
                 return matches[0]
@@ -231,7 +227,7 @@ def resolve_main_trace_path(run_dir):
     for search_root in (os.path.join(run_dir, "trace_split"), run_dir):
         if not os.path.isdir(search_root):
             continue
-        for pattern in ("*TP-0*.json*", "*rank0*.json*"):
+        for pattern in _MAIN_TRACE_PATTERNS:
             matches = sorted(
                 glob.glob(os.path.join(search_root, "**", pattern), recursive=True)
             )
@@ -246,6 +242,11 @@ def resolve_capture_folder(run_dir):
     if not trace_input:
         return None
     return _resolve_path(os.path.join(trace_input, "capture_traces"), os.path.isdir)
+
+
+def _ancestor(path, levels):
+    """Return ``path`` ``levels`` directories up, clamped at the filesystem root."""
+    return os.path.normpath(os.path.join(path, *([".."] * levels)))
 
 
 def stream_lines(stream_file):
@@ -275,8 +276,12 @@ def stream_find(stream_file, pattern):
     return None
 
 
+def _manifest_path(run_dir):
+    return os.path.join(run_dir, "category_data", "category_manifest.json")
+
+
 def _load_manifest(run_dir):
-    path = os.path.join(run_dir, "category_data", "category_manifest.json")
+    path = _manifest_path(run_dir)
     if not os.path.isfile(path):
         return None
     with open(path) as f:
@@ -441,7 +446,7 @@ def _violator_evidence(label, rows, name_field="name", limit=3):
 
 
 def check_trace_missing(run_dir, _stream_file):
-    # Step 1: trace path from cmd_prefix / category_manifest
+    # Trace path from cmd_prefix / category_manifest
     trace_path = resolve_trace_path(run_dir)
     if trace_path:
         if os.path.exists(trace_path):
@@ -452,13 +457,14 @@ def check_trace_missing(run_dir, _stream_file):
             "Check profiling setting in workload, or if trace path passed in correctly",
         )
 
+    search_root = _ancestor(run_dir, 6)
+
     # Helper: list any *json.gz traces sitting 6 levels above the run_dir.
     def _nearby_traces():
-        nearby_root = os.path.normpath(os.path.join(run_dir, *([".."] * 6)))
-        if not os.path.isdir(nearby_root):
+        if not os.path.isdir(search_root):
             return []
         try:
-            return sorted(glob.glob(os.path.join(nearby_root, "*.json.gz")))[:10]
+            return sorted(glob.glob(os.path.join(search_root, "*.json.gz")))[:10]
         except OSError:
             return []
 
@@ -472,22 +478,22 @@ def check_trace_missing(run_dir, _stream_file):
     # Used only when no trace can be resolved at all, to help operators locate
     # the trace artefact wherever it actually landed.
     def _recursive_traces(limit=50):
-        nearby_root = os.path.normpath(os.path.join(run_dir, *([".."] * 6)))
-        if not os.path.isdir(nearby_root):
+        if not os.path.isdir(search_root):
             return None, []
         found = []
         try:
-            for dirpath, _, filenames in os.walk(nearby_root, followlinks=False):
+            for dirpath, _, filenames in os.walk(search_root, followlinks=False):
                 for name in filenames:
                     if name.endswith(".json.gz"):
                         found.append(os.path.join(dirpath, name))
                         if len(found) >= limit:
-                            return nearby_root, sorted(found)
+                            return search_root, sorted(found)
         except OSError:
+            # Unreadable subtree: report what was found so far.
             pass
-        return nearby_root, sorted(found)
+        return search_root, sorted(found)
 
-    # Step 2: trace_split exists with *.gz files but orchestrator never recorded a trace path
+    # trace_split exists with *.gz files but orchestrator never recorded a trace path
     split_dir = resolve_split_trace_dir(run_dir)
     if split_dir:
         gz_files = glob.glob(os.path.join(split_dir, "*.gz"))
@@ -501,7 +507,7 @@ def check_trace_missing(run_dir, _stream_file):
                 "Verify orchestrator wiring writes --profile_json_path / category_manifest.trace_path",
             )
 
-    # Step 3: main rank-0 trace from trace_input_manifest
+    # Main rank-0 trace from trace_input_manifest
     main_trace = resolve_main_trace_path(run_dir)
     if main_trace:
         return FindingDraft(
@@ -862,9 +868,8 @@ def check_step1_fail(run_dir, stream_file):
 
 
 def check_step2_5_fail(run_dir, stream_file):
-    manifest_path = os.path.join(run_dir, "category_data", "category_manifest.json")
     if os.path.isdir(os.path.join(run_dir, "perf_report_csvs")) and not os.path.isfile(
-        manifest_path
+        _manifest_path(run_dir)
     ):
         return FindingDraft(
             "Orchestrator preparation fails (Steps 2-5)",
@@ -1114,7 +1119,7 @@ def check_kernel_candidates_missing(run_dir_or_session_dir, _stream_file=None):
     if os.path.isfile(os.path.join(path, "session_breakdown.json")):
         session_dir = path
     else:
-        session_dir = os.path.normpath(os.path.join(path, *([".."] * 5)))
+        session_dir = _ancestor(path, 5)
 
     sbd_path = os.path.join(session_dir, "session_breakdown.json")
     if not os.path.isfile(sbd_path):
