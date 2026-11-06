@@ -138,6 +138,74 @@ def apply_pseudo_op_extensions(tree, verbose: bool = False):
         extensions.append(("MLA_V4_Stage2_Shapes", copy_mla_v4_stage2_shapes))
         if verbose:
             logger.info("Auto-detected MLA v4 stage2 kernels — will copy parent shapes")
+
+    # SGLang Flash sparse decode (_pa_decode_sparse_*) — bridge to V4 models.
+    has_sglang_sparse = any(
+        "_pa_decode_sparse_" in name or "aiter_sparse_decode_reduce" in name
+        for name in tree.name2event_uids
+    )
+    if has_sglang_sparse:
+        from .sglang_sparse_decode_pseudo_ops import (
+            create_pseudo_ops_sglang_sparse_decode,
+        )
+
+        extensions.append(
+            ("SGLang_Flash_Sparse_Decode", create_pseudo_ops_sglang_sparse_decode)
+        )
+        if verbose:
+            logger.info("Auto-detected SGLang Flash sparse-decode operations")
+
+    # Flash indexer (FP4 MQA logits / quant / topk parent / FlashMLA prep)
+    has_flash_indexer = any(
+        ("pa_mqa_logits_fp4" in name)
+        or ("quantize_fp4_indexer" in name)
+        or ("fused_k_norm_rope_flashmla" in name)
+        or name == "aten::topk"
+        for name in tree.name2event_uids
+    )
+    if has_flash_indexer:
+        from .sglang_flash_indexer_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_indexer,
+        )
+
+        extensions.append(
+            ("SGLang_Flash_Indexer", create_pseudo_ops_sglang_flash_indexer)
+        )
+        if verbose:
+            logger.info("Auto-detected SGLang Flash indexer operations")
+
+    # Flash mHC / MXFP8 / router / rmsnorm_fake_quant
+    has_flash_misc = any(
+        ("hc_boundary" in name)
+        or ("hc_mix_reduce_sinkhorn" in name)
+        or ("rmsnorm_fake_quant_fp8" in name)
+        or ("rocm_router_gemv_split_k" in name)
+        or ("rocm_router_gate" in name)
+        or ("mxfp8_native_blockscaled_linear" in name)
+        for name in tree.name2event_uids
+    )
+    if has_flash_misc:
+        from .sglang_flash_misc_pseudo_ops import create_pseudo_ops_sglang_flash_misc
+
+        extensions.append(("SGLang_Flash_Misc", create_pseudo_ops_sglang_flash_misc))
+        if verbose:
+            logger.info("Auto-detected SGLang Flash mHC/MXFP8/router ops")
+
+    # Flash MoE gemm2_a4w4 / moe_reduction Synthetic Op children under fused_moe_
+    has_flash_moe_children = any(
+        "gemm2_a4w4" in name or "moe_reduction_kernel" in name
+        for name in tree.name2event_uids
+    )
+    if has_flash_moe_children and "aiter::fused_moe_" in tree.name2event_uids:
+        from .sglang_flash_moe_children_pseudo_ops import (
+            create_pseudo_ops_sglang_flash_moe_children,
+        )
+
+        extensions.append(
+            ("SGLang_Flash_MoE_Children", create_pseudo_ops_sglang_flash_moe_children)
+        )
+        if verbose:
+            logger.info("Auto-detected Flash MoE gemm2/reduction children")
     if "_rocm_C::paged_attention" in tree.name2event_uids:
         from .paged_attn_perf_meta import mark_rocm_paged_attn_kvcache_dtype
 
