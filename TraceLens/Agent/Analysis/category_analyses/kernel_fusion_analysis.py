@@ -17,9 +17,6 @@ import json
 import os
 import sys
 
-_ANALYSIS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ANALYSIS_DIR)
-
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HIGH_CONFIDENCE_OP_KEYS,
     PEAK_MEM_BW_KEY,
@@ -29,15 +26,15 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     perf_report_csv_dir,
     write_metrics_json,
 )
-from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
-from utils.classify_kernels import TAXONOMY
-from utils.kernel_fusion import (
+from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
+from TraceLens.Agent.Analysis.utils.kernel_fusion import (
     CONFIDENCE_HIGH,
     OVERLAP_EFFICIENCY,
     FusionCandidate,
     FusionForms,
     FusionPricer,
 )
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 
 def load_fusion_data(output_dir: str):
