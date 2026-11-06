@@ -544,16 +544,24 @@ class TestTreePerfAnalyzer:
         assert len(df) == 1
 
     def test_arch_compute_units_come_from_the_trace(self):
-        devices = [{"name": "AMD Instinct MI355X", "numSms": 256}] * 2
+        devices = [
+            {
+                "name": "AMD Instinct MI355X",
+                "numSms": 256,
+                "maxSharedMemoryPerMultiProcessor": 163840,
+            }
+        ] * 2
         tree = TraceToTree(
             [],
             prune_nongpu_paths=False,
             trace_metadata={"deviceProperties": devices},
         )
-        supplied = {"name": "MI355X", "num_cus": 304}
+        supplied = {"name": "MI355X", "num_cus": 304, "lds_capacity": 64 * 1024}
         analyzer = TreePerfAnalyzer(tree, rebuild_tree=False, arch=supplied)
         assert analyzer.arch["num_cus"] == 256
+        assert analyzer.arch["lds_capacity"] == 163840
         assert supplied["num_cus"] == 304
+        assert supplied["lds_capacity"] == 64 * 1024
 
         mixed = TraceToTree(
             [],

@@ -260,6 +260,10 @@ def test_get_hardware_requires_the_trace_compute_unit_count():
 
     with pytest.raises(ValueError, match="numSms"):
         OrigamiHelper.get_hardware({"name": "mi355x", "freq_mhz": 2100})
+    with pytest.raises(ValueError, match="maxSharedMemoryPerMultiProcessor"):
+        OrigamiHelper.get_hardware(
+            {"name": "mi355x", "freq_mhz": 2100, "num_cus": 256}
+        )
 
 
 @pytest.mark.skipif(not HAS_ORIGAMI, reason="origami not installed")
@@ -268,7 +272,7 @@ class TestOrigamiHelper:
         from TraceLens.PerfModel.origami_helper import OrigamiHelper
 
         hardware = OrigamiHelper.get_hardware(
-            {"name": "mi300x", "freq_mhz": 2200, "num_cus": 304}
+            {"name": "mi300x", "freq_mhz": 2200, "num_cus": 304, "lds_capacity": 64 * 1024}
         )
         assert hardware.N_CU == 304
         assert hardware.lds_capacity == 64 * 1024
@@ -281,7 +285,7 @@ class TestOrigamiHelper:
         from TraceLens.PerfModel.origami_helper import OrigamiHelper
 
         hardware = OrigamiHelper.get_hardware(
-            {"name": "mi300x", "freq_mhz": 2200, "num_cus": 304}
+            {"name": "mi300x", "freq_mhz": 2200, "num_cus": 304, "lds_capacity": 64 * 1024}
         )
         helper = OrigamiHelper(
             m=128,
@@ -305,7 +309,12 @@ class TestOrigamiHelper:
 
         def time_us(num_cus):
             hardware = OrigamiHelper.get_hardware(
-                {"name": name, "freq_mhz": 2100, "num_cus": device_cus}
+                {
+                    "name": name,
+                    "freq_mhz": 2100,
+                    "num_cus": device_cus,
+                    "lds_capacity": 64 * 1024,
+                }
             )
             helper = OrigamiHelper(
                 128, 4096, 128, 1, bf16, bf16, bf16, hardware, num_cus=num_cus
