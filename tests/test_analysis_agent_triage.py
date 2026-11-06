@@ -2712,13 +2712,6 @@ def test_auto_detect_log_none_when_absent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_run_triage_missing_run_dir_exits(tmp_path, capsys):
-    with pytest.raises(SystemExit) as exc:
-        run_triage(str(tmp_path / "does_not_exist"))
-    assert exc.value.code == 1
-    assert "OUTPUT_INCOMPLETE" in capsys.readouterr().out
-
-
 def test_run_triage_warns_on_absent_stream_file(tmp_path, capsys):
     run_dir = make_run_dir(tmp_path)
     run_triage(str(run_dir), stream_file=str(tmp_path / "missing.ndjson"))
@@ -2853,6 +2846,16 @@ def test_main_requires_a_target(monkeypatch):
         main()
     # argparse.error exits with code 2.
     assert exc.value.code == 2
+
+
+def test_main_run_dir_missing_exits(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys, "argv", ["triage", "--run-dir", str(tmp_path / "does_not_exist")]
+    )
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 1
+    assert "OUTPUT_INCOMPLETE" in capsys.readouterr().out
 
 
 def test_main_run_dir_writable_writes_and_exits(tmp_path, monkeypatch, capsys):
