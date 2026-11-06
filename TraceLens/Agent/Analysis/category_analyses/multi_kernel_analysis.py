@@ -17,13 +17,10 @@ Outputs multi_kernel_metrics.json with severity assessments.
 import argparse
 import json
 import os
-import sys
 
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     load_manifest,
     perf_report_csv_dir,
     SystemFindings,
@@ -36,6 +33,7 @@ MEMCPY_PCT_THRESHOLD = 5
 MEMCPY_COUNT_THRESHOLD = 10
 EXPOSED_COMM_PCT_THRESHOLD = 5
 OVERLAP_RATIO_THRESHOLD = 0.7
+_MIN_COMM_US = 100
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
@@ -118,7 +116,7 @@ def classify_overlap_severity(overlap_analysis):
     comm_overlap_ratio = overlap_analysis.get("comm_overlap_ratio")
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
 
-    if comm_overlap_ratio is None or total_comm_us < 100:
+    if comm_overlap_ratio is None or total_comm_us < _MIN_COMM_US:
         return {
             "flagged": False,
             "details": "Insufficient communication data for overlap analysis",
@@ -242,21 +240,20 @@ def main():
         write_metrics_json(error_metrics, output_dir, "multi_kernel")
         return
 
-    with open(data_file, "r") as f:
+    with open(data_file) as f:
         mk_data = json.load(f)
 
-    print(f"  ✓ Loaded multi-kernel data")
+    print("  ✓ Loaded multi-kernel data")
 
     # Read GPU timeline for total time reference
     csv_dir = perf_report_csv_dir(output_dir)
     total_time_ms = 0
     try:
         gpu_timeline = pd.read_csv(f"{csv_dir}/gpu_timeline.csv")
-        for _, row in gpu_timeline.iterrows():
-            if row["type"] == "total_time":
-                total_time_ms = row["time ms"]
-                break
-    except Exception as e:
+        total_rows = gpu_timeline[gpu_timeline["type"] == "total_time"]
+        if not total_rows.empty:
+            total_time_ms = total_rows.iloc[0]["time ms"]
+    except (OSError, ValueError, KeyError) as e:
         print(f"  ⚠️  Could not read gpu_timeline.csv: {e}")
         # Fallback to overlap_analysis total time
         total_time_ms = (
@@ -287,13 +284,13 @@ def main():
         )
         if cross_validation["status"] == "PASS":
             print(
-                f"\n  ✓ Cross-validation: PASS (overlap metrics consistent with gpu_timeline.csv)"
+                "\n  ✓ Cross-validation: PASS (overlap metrics consistent with gpu_timeline.csv)"
             )
         else:
-            print(f"\n  ⚠️  Cross-validation: WARN")
+            print("\n  ⚠️  Cross-validation: WARN")
             for w in cross_validation.get("warnings", []):
                 print(f"    - {w}")
-    except Exception as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"\n  ⚠️  Cross-validation skipped: {e}")
 
     system_entries = [
@@ -346,7 +343,7 @@ def main():
 
     write_metrics_json(metrics, output_dir, "multi_kernel")
 
-    print(f"\n  ✓ Wrote multi_kernel_metrics.json")
+    print("\n  ✓ Wrote multi_kernel_metrics.json")
     print(f"  ✓ {len(system_findings)} system findings")
     print("=" * 80)
 
