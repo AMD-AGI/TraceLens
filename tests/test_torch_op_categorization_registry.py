@@ -10,12 +10,20 @@ Tests for the registry-based torch op categorizer.
 
 import pytest
 
+from TraceLens.PerfModel.extensions.perf_model_extensions import (
+    gemm_a16w16_asm,
+    gemm_a8w8_blockscale,
+    mhc_fused_post_pre_gemm_sqrsum,
+    mhc_post,
+    mhc_pre_big_fuse_rmsnorm,
+)
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
     build_sheet_category_to_op_names,
     categorize_torch_op,
     op_to_perf_model_class_map,
     register_op_categories,
+    resolve_perf_model_class,
 )
 
 
@@ -56,6 +64,21 @@ def _row(name, kernel_details=None):
         ("aiter::topk_softmax", "MoE_aux"),
         ("_C_cache_ops::reshape_and_cache_flash", "InferenceAttention"),
         ("aiter::silu_and_mul", "elementwise"),
+        ("aiter::mhc_post", "mHC"),
+        ("mhc_post_kernel", "mHC"),
+        ("mhc_pre_big_fuse_rmsnorm_kernel", "mHC"),
+        ("mhc_fused_post_pre_gemm_sqrsum_kernel", "mHC"),
+        ("gemm_a8w8_mx128_compute_t128x128x128_mw2_nw2_nb4_sk1_cm1_cn4", "GEMM"),
+        ("gemm_a8w8_mx128_compute_t128x256x128_mw2_nw2_nb3_sk1_cm1_cn4", "GEMM"),
+        ("gemm_a8w8_mx128_compute_t128x256x128_mw2_nw2_nb4_sk2_cm4_cn2_fsk", "GEMM"),
+        ("gemm_a8w8_mx128_compute_t256x256x128_mw2_nw2_nb2_sk1_cm1_cn4", "GEMM"),
+        ("gemm_a8w8_mx128_t128x128x256_mw2_nw2_nb3_sk4_cm1_cn1", "GEMM"),
+        ("gemm_a8w8_mx128_t16x1024x128_mw1_nw4_nb2_sk1_cm1_cn1", "GEMM"),
+        ("aiter::_opus_gemm_a16w16_launch_raw", "GEMM"),
+        (
+            "batched_gemm_a8w8_mx128_t128x256x128_mw2_nw2_nb4_sk1_cm1_cn1_mbn_pre32",
+            "other",
+        ),
         ("aten::sum", "reduce"),
         ("triton_per_token_quant_fp8", "triton"),
         ("record_param_comms_alltoall_base", "record_param_comms"),
@@ -64,6 +87,49 @@ def _row(name, kernel_details=None):
 )
 def test_categorize_torch_op_expected_categories(name, expected):
     assert categorize_torch_op(_row(name)) == expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        (
+            "gemm_a8w8_mx128_compute_t128x128x128_mw2_nw2_nb4_sk1_cm1_cn4",
+            gemm_a8w8_blockscale,
+        ),
+        (
+            "gemm_a8w8_mx128_compute_t128x256x128_mw2_nw2_nb3_sk1_cm1_cn4",
+            gemm_a8w8_blockscale,
+        ),
+        (
+            "gemm_a8w8_mx128_compute_t128x256x128_mw2_nw2_nb4_sk2_cm4_cn2_fsk",
+            gemm_a8w8_blockscale,
+        ),
+        (
+            "gemm_a8w8_mx128_compute_t256x256x128_mw2_nw2_nb2_sk1_cm1_cn4",
+            gemm_a8w8_blockscale,
+        ),
+        (
+            "gemm_a8w8_mx128_t128x128x256_mw2_nw2_nb3_sk4_cm1_cn1",
+            gemm_a8w8_blockscale,
+        ),
+        (
+            "gemm_a8w8_mx128_t16x1024x128_mw1_nw4_nb2_sk1_cm1_cn1",
+            gemm_a8w8_blockscale,
+        ),
+        ("aiter::_opus_gemm_a16w16_launch_raw", gemm_a16w16_asm),
+        ("mhc_post_kernel", mhc_post),
+        ("mhc_pre_big_fuse_rmsnorm_kernel", mhc_pre_big_fuse_rmsnorm),
+        ("mhc_fused_post_pre_gemm_sqrsum_kernel", mhc_fused_post_pre_gemm_sqrsum),
+        ("aiter::mhc_post", mhc_post),
+    ],
+)
+def test_resolve_dsv4_kernel_names(name, expected):
+    assert resolve_perf_model_class(name) is expected
+
+
+def test_batched_mx128_is_not_resolved():
+    name = "batched_gemm_a8w8_mx128_t128x256x128_mw2_nw2_nb4_sk1_cm1_cn1_mbn_pre32"
+    assert resolve_perf_model_class(name) is None
 
 
 @pytest.mark.parametrize(
