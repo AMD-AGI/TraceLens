@@ -4,11 +4,88 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import re
 import subprocess
+import urllib.request
 from datetime import datetime
 from setuptools import setup, find_packages
 
 _BASE_VERSION = "0.1.0"
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu/torch/"
+# Wheel files are siblings of the index directory, not children of it.
+_TORCH_CPU_WHEEL_BASE = "https://download.pytorch.org/whl/cpu/"
+_TORCH_CPU_WHEEL = re.compile(
+    r"^torch-(\d+\.\d+\.\d+)((?:\+|%2B)cpu)?-(cp\d+)-(cp\d+)-(.+)\.whl$"
+)
+
+
+def _torch_cpu_platform(tag):
+    if tag == "win_amd64":
+        return ("Windows", "AMD64")
+    if re.fullmatch(r"manylinux.+_x86_64", tag):
+        return ("Linux", "x86_64")
+    if re.fullmatch(r"manylinux.+_aarch64", tag):
+        return ("Linux", "aarch64")
+    if re.fullmatch(r"macosx_.+_arm64", tag):
+        return ("Darwin", "arm64")
+    return None
+
+
+def _torch_cpu_requirements():
+    """Newest CPU wheel for each Python version the extra can mark.
+
+    ``pip install torch`` installs the CUDA build from PyPI. The visualizer
+    only meta-traces, and package metadata cannot point at the CPU index, so
+    the extra lists the CPU wheel by URL. The index is read when this package
+    is built. Each Python from 3.10 up gets the newest wheel published for it.
+    """
+    request = urllib.request.Request(
+        _TORCH_CPU_INDEX,
+        headers={"User-Agent": "tracelens-setup"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            page = response.read().decode("utf-8", "replace")
+    except OSError as exc:
+        raise RuntimeError(
+            "Could not read the PyTorch CPU wheel index at "
+            f"{_TORCH_CPU_INDEX} to select the Visualizer torch wheel."
+        ) from exc
+
+    newest = {}
+    for name in set(re.findall(r"torch-[^\"'#<>\s]+\.whl", page)):
+        match = _TORCH_CPU_WHEEL.match(name)
+        if not match:
+            continue
+        version, _local, abi, abi2, platform_tag = match.groups()
+        if abi != abi2:
+            continue
+        platform = _torch_cpu_platform(platform_tag)
+        if platform is None:
+            continue
+        python = (int(abi[2]), int(abi[3:]))
+        if python < (3, 10):
+            continue
+        version_key = tuple(int(part) for part in version.split("."))
+        # Prefer manylinux_2_28 when one version publishes more than one tag.
+        rank = 1 if "manylinux_2_28" in platform_tag else 0
+        candidate = (version_key, rank, name.replace("+", "%2B"))
+        key = (python, platform)
+        current = newest.get(key)
+        if current is None or candidate[:2] > current[:2]:
+            newest[key] = candidate
+
+    if not newest:
+        raise RuntimeError(f"No CPU torch wheels found at {_TORCH_CPU_INDEX}.")
+
+    requirements = []
+    for (python, (system, machine)), (_version, _rank, wheel) in sorted(newest.items()):
+        requirements.append(
+            f'torch @ {_TORCH_CPU_WHEEL_BASE}{wheel} ; python_version == "{python[0]}.{python[1]}" '
+            f'and platform_system == "{system}" '
+            f'and platform_machine == "{machine}"'
+        )
+    return requirements
 
 
 def _wheel_version():
@@ -42,7 +119,7 @@ def _extras_require():
             "slodels[openai,anthropic,google-genai]",
         ],
         "Visualizer": [
-            "torch",
+            *_torch_cpu_requirements(),
             "transformers",
             "huggingface_hub>=0.20",
             # fla-core imports Triton at package import. The visualizer never
@@ -128,9 +205,9 @@ setup(
             "TraceLens_generate_perf_report_pftrace_hip_activity = TraceLens.Reporting.generate_perf_report_pftrace_hip_activity:main",
             "TraceLens_generate_perf_report_pftrace_memory_copy = TraceLens.Reporting.generate_perf_report_pftrace_memory_copy:main",
             "TraceLens_generate_perf_report_genesis = TraceLens.Reporting.generate_perf_report_genesis:main",
-            "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
-            "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main",
-            "TraceLens_model_roofline_projection = TraceLens.Visualizer.model_explorer_export.roofline_cli:main",
+            "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main [Visualizer]",
+            "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main [Visualizer]",
+            "TraceLens_model_roofline_projection = TraceLens.Visualizer.model_explorer_export.roofline_cli:main [Visualizer]",
             "TraceLens_split_trace = TraceLens.TraceUtils.split_trace.main:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",
