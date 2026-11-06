@@ -138,32 +138,17 @@ def _splitk_partial_bytes(tile, M, N):
     """fp32 split-K partials, written by the GEMM and read back by the reduce."""
     if not tile or tile["num_ksplit"] <= 1:
         return 0
-    ksplit = tile["num_ksplit"]
-    if not tile.get("fused_splitk"):
-        return 2 * ksplit * M * N * 4
-    # Each split publishes only its peers' rows of a padded tile; at split_k 2
-    # that is half the tile.
-    bm, bn = tile["bm"], tile["bn"]
-    rows = bm - bm // ksplit if ksplit == 2 else bm
-    return 2 * -(-M // bm) * -(-N // bn) * ksplit * rows * bn * 4
+    return 2 * tile["num_ksplit"] * M * N * 4
 
 
 _PRESHUFFLE_KERNEL_RE = re.compile(
     r"GROUP_K_(\d+)_GROUP_N_(\d+)_BLOCK_SIZE_M_(\d+)_BLOCK_SIZE_N_(\d+)"
     r"_BLOCK_SIZE_K_(\d+)_.*?NUM_KSPLIT_(\d+)_SPLITK_BLOCK_SIZE_(\d+)"
 )  ## Full the Tile Size for the GEMM
-_MX128_PRESHUFFLE_KERNEL_RE = re.compile(
-    r"gemm_a8w8_mx(\d+)_(?:[a-z]+_)?t(\d+)x(\d+)x(\d+).*?_sk(\d+)(?:_|$)"
-)  ## aiter FlyDSL tile_m x tile_n x tile_k and split_k
-_MX128_FUSED_SPLITK_RE = re.compile(r"_fsk(?:_|$)")
 _PRESHUFFLE_REDUCE_RE = re.compile(
     r"reduce_kernel_BLOCK_SIZE_M_(\d+)_BLOCK_SIZE_N_(\d+)"
     r"_ACTUAL_KSPLIT_(\d+)_MAX_KSPLIT_(\d+)"
 )  ## Add partial results and reduce the result
-_FLYDSL_SPLITK_REDUCE_RE = re.compile(r"gemm_a8w8_splitk_reduce_[a-z0-9]+_sk(\d+)_u\d+")
-_MXFP8_ASM_TILE_RE = re.compile(
-    r"f8gemm_[a-z0-9]+_mxfp8fp8_\w*?(\d+)x(\d+)_(\d+)x(\d+)"
-)  ## aiter ASM tile_m x tile_n and cluster_x x cluster_y
 
 
 def _event_kernel_names(event):
@@ -208,29 +193,6 @@ def _parse_preshuffle_launch(event):
                 "num_ksplit": ksplit,
                 "splitk_block": splitk,
             }
-        mx128_match = _MX128_PRESHUFFLE_KERNEL_RE.search(name)
-        dims = event.get("args", {}).get("Input Dims") or []
-        if mx128_match and dims and dims[0] and len(dims[0]) >= 2:
-            group, bm, bn, bk, ksplit = (int(v) for v in mx128_match.groups())
-            K = dims[0][-1]
-            splitk_extent = -(-K // ksplit)
-            # Scales are applied inside the scaled WMMA; a fused split-K
-            # exchanges partials inside the cluster instead of a reduce kernel.
-            tile = {
-                "group_k": group,
-                "group_n": group,
-                "bm": bm,
-                "bn": bn,
-                "bk": bk,
-                "num_ksplit": ksplit,
-                "splitk_block": -(-splitk_extent // bk) * bk,
-                "hw_scale": True,
-                "fused_splitk": bool(_MX128_FUSED_SPLITK_RE.search(name)),
-            }
-        flydsl_reduce = _FLYDSL_SPLITK_REDUCE_RE.search(name)
-        if flydsl_reduce:
-            ksplit = int(flydsl_reduce.group(1))
-            reduce = {"bm": 1, "bn": 1, "actual_ksplit": ksplit, "max_ksplit": ksplit}
         reduce_match = _PRESHUFFLE_REDUCE_RE.search(name)
         if reduce_match:
             rbm, rbn, actual, maximum = (int(v) for v in reduce_match.groups())
@@ -296,19 +258,13 @@ class gemm_a8w8_blockscale_preshuffle(gemm_a8w8_blockscale):
         k_iters = -(-tile["splitk_block"] // bk)
         dot = programs * k_iters * (2 * bm * bn * bk)
         # Scale the accumulator once per K tile.
-        if tile.get("hw_scale"):
-            scale = 0
-        elif tile["group_n"] >= bn and tile["group_k"] >= bk:
+        if tile["group_n"] >= bn and tile["group_k"] >= bk:
             scale = programs * k_iters * (bm + bm * bn)
         else:
             scale = programs * k_iters * (2 * bm * bn)
         reduce_flops = 0
         reduce = self.param_details.get("reduce")
-        if tile.get("fused_splitk"):
-            reduce_flops = (
-                -(-M // bm) * bm * -(-N // bn) * bn * (tile["num_ksplit"] - 1)
-            )
-        elif reduce and reduce["actual_ksplit"] > 1:
+        if reduce and reduce["actual_ksplit"] > 1:
             tiles = -(-M // reduce["bm"]) * -(-N // reduce["bn"])
             reduce_flops = (
                 tiles * reduce["bm"] * reduce["bn"] * (reduce["actual_ksplit"] - 1)
@@ -714,7 +670,26 @@ class opus_bmm_a8w8_mxscale_raw(GEMM):
 
 
 class batched_gemm_a8w8_mxscale_bpreshuffle(GEMM):
-    """HBM bytes of the token-major FP8 BMM, its e8m0 scales, and the implied BF16 [M, G, N] output; scales are applied inside the MMA."""
+    """
+    Performance model for AITER's batched_gemm_a8w8_mxscale_bpreshuffle.
+
+    Computes, for each group g: Y[m, g, n] = X[m, g, :] @ W[g, n, :].T
+    X is FP8 with shape (M, G, K) and W is preshuffled FP8 with shape (G, N, K).
+    Both carry e8m0 block scales with block size 128 along K. The op allocates
+    the BF16 output (M, G, N).
+
+        batched_gemm_a8w8_mxscale_bpreshuffle(x, w, x_scale, w_scale, dtype)
+
+    Roofline calculation -- FLOPs:
+        FLOPs = G * 2 * M * N * K
+
+    Roofline calculation -- Bytes:
+        bytes_X      = G * M * K * bpe(X)
+        bytes_W      = G * N * K * bpe(W)
+        bytes_output = G * M * N * bpe(output)
+        bytes_scale  = (numel(x_scale) + numel(w_scale)) * bpe(scale)
+        Total        = bytes_X + bytes_W + bytes_output + bytes_scale
+    """
 
     @staticmethod
     def get_param_details(event):
@@ -730,7 +705,6 @@ class batched_gemm_a8w8_mxscale_bpreshuffle(GEMM):
         out_dtype = gemm_a8w8_blockscale_bpreshuffle._OUT_DTYPE.get(
             code, "c10::BFloat16"
         )
-        tile, _ = _parse_preshuffle_launch(event)
         details = {
             "B": groups,
             "M": M,
@@ -747,21 +721,11 @@ class batched_gemm_a8w8_mxscale_bpreshuffle(GEMM):
             "x_scale_shape": tuple(dims[2]) if len(dims) > 2 else (),
             "w_scale_shape": tuple(dims[3]) if len(dims) > 3 else (),
             "scale_dtype": types[2] if len(types) > 2 else "unsigned char",
-            "tile": tile,
         }
         return add_logical_batch_size(details, event)
 
     def flops(self):
-        M, N, K = self.M, self.N, self.K
-        tile = self.param_details.get("tile")
-        if not tile:
-            # No launched tile in the trace; pad M to the MFMA tile the hardware runs.
-            return self.B * 2 * _pad_mfma_m(M) * N * K
-        bm, bn, bk = tile["bm"], tile["bn"], tile["bk"]
-        m = -(-M // bm) * bm
-        n = -(-N // bn) * bn
-        k = -(-K // bk) * bk
-        return self.B * 2 * m * n * k
+        return self.B * super().flops()
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         if not dense_counted_tensor(self.event, (0, 1, 2, 3)):
@@ -784,7 +748,26 @@ class batched_gemm_a8w8_mxscale_bpreshuffle(GEMM):
 
 
 class mxfp8_mxfp8_gemm_asm(GEMM):
-    """HBM bytes of the MXFP8 GEMM, its 1x32 e8m0 scales, and the BF16 output or [splitk, M, N] partials; the split-K reduce is a separate op."""
+    """
+    Performance model for AITER's _mxfp8_mxfp8_gemm_asm.
+
+    Computes: Y = X[M, K] @ W[N, K].T
+    X and W are FP8 with e8m0 block scales of block size 32 along K.
+    The traced output is BF16 of shape (M, N), or (split_k, M, N) when the
+    op writes split-K partials.
+
+        _mxfp8_mxfp8_gemm_asm(x, w, x_scale, w_scale, out, ..., split_k)
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K
+
+    Roofline calculation -- Bytes:
+        bytes_X      = M * K * bpe(X)
+        bytes_W      = N * K * bpe(W)
+        bytes_output = split_k * M * N * bpe(output)
+        bytes_scale  = (numel(x_scale) + numel(w_scale)) * bpe(scale)
+        Total        = bytes_X + bytes_W + bytes_output + bytes_scale
+    """
 
     @staticmethod
     def get_param_details(event):
@@ -796,17 +779,6 @@ class mxfp8_mxfp8_gemm_asm(GEMM):
         N, weight_k = dims[1]
         if K != weight_k:
             raise ValueError("MXFP8 GEMM activation and weight shapes do not agree")
-        tile = None
-        for name in _event_kernel_names(event):
-            match = _MXFP8_ASM_TILE_RE.search(name)
-            if match:
-                bm, bn, cluster_x, cluster_y = (int(v) for v in match.groups())
-                tile = {
-                    "bm": bm,
-                    "bn": bn,
-                    "cluster_x": cluster_x,
-                    "cluster_y": cluster_y,
-                }
         details = {
             "B": 1,
             "M": M,
@@ -824,19 +796,8 @@ class mxfp8_mxfp8_gemm_asm(GEMM):
             "w_scale_shape": tuple(dims[3]),
             "scale_dtype": types[2] if len(types) > 2 else "c10::Float8_e8m0fnu",
             "split_k": int(concrete[7]) if len(concrete) > 7 and concrete[7] else 1,
-            "tile": tile,
         }
         return add_logical_batch_size(details, event)
-
-    def flops(self):
-        M, N, K = self.M, self.N, self.K
-        tile = self.param_details.get("tile")
-        if not tile:
-            # No launched tile in the trace; pad M to the MFMA tile the hardware runs.
-            return 2 * _pad_mfma_m(M) * N * K
-        bm, bn = tile["bm"], tile["bn"]
-        # K is a multiple of 128 per split, so only M and N pad.
-        return 2 * -(-M // bm) * bm * -(-N // bn) * bn * K
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         if not dense_counted_tensor(self.event, (0, 1, 2, 3, 4)):

@@ -579,7 +579,7 @@ class TestPerfModelExtensions:
         assert tiled_model.flops() == 2 * 2 * 16 * 1024 * 4096 + 2 * 16 * 1024 * 32
         assert tiled_model.bytes() == model.bytes()
 
-    def test_deepseek_v4_mx128_bmm_pads_to_launched_tile(self):
+    def test_deepseek_v4_mx128_bmm_counts_logical_gemm(self):
         event = {
             "args": {
                 "Input Dims": [
@@ -603,27 +603,19 @@ class TestPerfModelExtensions:
         assert (model.B, model.M, model.N, model.K) == (16, 1, 1024, 4096)
         assert model.get_compute_precision() == "fp8"
         assert model.param_details["output_shape"] == (1, 16, 1024)
-        # No kernel name; M pads to the 16-row MFMA tile.
-        assert model.flops() == 16 * 2 * 16 * 1024 * 4096
+        # Logical GEMM only: kernel tile padding is not part of the op.
+        assert model.flops() == 16 * 2 * 1 * 1024 * 4096
         assert model.bytes() == (
             16 * (4096 + 1024 * 4096 + 1024 * 2) + 16 * 32 + 16 * 8 * 32
         )
 
-        tiled = dict(event)
-        tiled["kernel_details"] = [
+        named = dict(event)
+        named["kernel_details"] = [
             {"name": "batched_gemm_a8w8_mx128_t32x256x128_mw1_nw4_nb2_sk1_cm1_cn1_mbn"}
         ]
-        tiled_model = pext.batched_gemm_a8w8_mxscale_bpreshuffle(tiled)
-        tile = tiled_model.param_details["tile"]
-        assert (tile["bm"], tile["bn"], tile["bk"], tile["num_ksplit"]) == (
-            32,
-            256,
-            128,
-            1,
-        )
-        # Scales are applied inside the MMA, so only the padded matmul counts.
-        assert tiled_model.flops() == 16 * 2 * 32 * 1024 * 4096
-        assert tiled_model.bytes() == model.bytes()
+        named_model = pext.batched_gemm_a8w8_mxscale_bpreshuffle(named)
+        assert named_model.flops() == model.flops()
+        assert named_model.bytes() == model.bytes()
 
         strided = dict(event)
         strided["args"] = dict(
@@ -688,22 +680,15 @@ class TestPerfModelExtensions:
             512 * 16384 + 7168 * 16384 + 4 * 512 * 7168 * 2 + 512 * 512 + 7168 * 512
         )
 
-        tiled = dict(event)
-        tiled["kernel_details"] = [
+        named = dict(event)
+        named["kernel_details"] = [
             {"name": "aiter::f8gemm_bf16_mxfp8fp8_BpreShuffle_256x256_4x2_ps"}
         ]
-        tiled_model = pext.mxfp8_mxfp8_gemm_asm(tiled)
-        assert tiled_model.param_details["tile"] == {
-            "bm": 256,
-            "bn": 256,
-            "cluster_x": 4,
-            "cluster_y": 2,
-        }
-        # N=7168 is 28 full 256-wide tiles, so only the padded grid is counted.
-        assert tiled_model.flops() == 2 * 512 * 7168 * 16384
-        assert tiled_model.bytes() == model.bytes()
+        named_model = pext.mxfp8_mxfp8_gemm_asm(named)
+        assert named_model.flops() == model.flops()
+        assert named_model.bytes() == model.bytes()
 
-        odd = dict(tiled)
+        odd = dict(named)
         odd["args"] = dict(event["args"], **{"Input Strides": []})
         odd["args"]["Input Dims"] = [
             [8, 1536],
@@ -717,8 +702,8 @@ class TestPerfModelExtensions:
         ]
         odd["args"]["Concrete Inputs"] = ["", "", "", "", "", "", "0", "1"]
         odd_model = pext.mxfp8_mxfp8_gemm_asm(odd)
-        # 8 decode rows still run a full 256-row tile.
-        assert odd_model.flops() == 2 * 256 * 8192 * 1536
+        # Short M is the op's M; the kernel's 256-row tile is not counted.
+        assert odd_model.flops() == 2 * 8 * 8192 * 1536
 
         strided = dict(event)
         strided["args"] = dict(
@@ -1464,65 +1449,19 @@ class TestPerfModelExtensions:
         # No tile; M pads 1->16 to the MFMA tile the hardware runs.
         assert logical.flops() == 2 * 16 * 2048 * 7168 + 16 * 2048 * (7168 // 128)
         assert logical.bytes() == 14760672 - 2 * 4 * 1 * 2048 * 4
-        mx128 = {
-            "args": gemm["args"],
-            "kernel_details": [
-                {"name": ("gemm_a8w8_mx128_t16x1024x128_" "mw1_nw4_nb2_sk1_cm1_cn1")}
-            ],
-        }
-        mx128_model = pext.gemm_a8w8_blockscale_bpreshuffle(mx128)
-        assert mx128_model.param_details["tile"] == {
-            "group_k": 128,
-            "group_n": 128,
-            "bm": 16,
-            "bn": 1024,
-            "bk": 128,
-            "num_ksplit": 1,
-            "splitk_block": 7168,
-            "hw_scale": True,
-            "fused_splitk": False,
-        }
-        # Scaled WMMA applies the block scales, so only the dot products count.
-        assert mx128_model.flops() == 2 * 56 * (2 * 16 * 1024 * 128)
-        assert mx128_model.bytes() == logical.bytes()
-        mx128_reduce = {
-            "args": gemm["args"],
-            "kernel_details": [
-                {"name": "gemm_a8w8_mx128_t16x256x128_mw1_nw4_nb2_sk2_cm1_cn1"},
-                {"name": "gemm_a8w8_splitk_reduce_bf16_sk2_u2"},
-            ],
-        }
-        reduce_model = pext.gemm_a8w8_blockscale_bpreshuffle(mx128_reduce)
-        assert reduce_model.flops() == 16 * 28 * (2 * 16 * 256 * 128) + 2048
-        assert reduce_model.bytes() == logical.bytes() + 2 * 2 * 1 * 2048 * 4
-        mx128_splitk = {
-            "args": gemm["args"],
-            "kernel_details": [
-                {
-                    "name": (
-                        "gemm_a8w8_mx128_compute_t128x256x128_"
-                        "mw2_nw2_nb4_sk2_cm4_cn2_fsk"
-                    )
-                }
-            ],
-        }
-        splitk_model = pext.gemm_a8w8_blockscale_bpreshuffle(mx128_splitk)
-        assert splitk_model.param_details["tile"] == {
-            "group_k": 128,
-            "group_n": 128,
-            "bm": 128,
-            "bn": 256,
-            "bk": 128,
-            "num_ksplit": 2,
-            "splitk_block": 3584,
-            "hw_scale": True,
-            "fused_splitk": True,
-        }
-        # 2 splits x 8 N-tiles, 28 K-steps each, plus the in-cluster sum of
-        # the padded 128-row tiles.
-        assert splitk_model.flops() == 16 * 28 * (2 * 128 * 256 * 128) + 128 * 2048
-        # Each split writes and reads back its peer's 64 rows of every tile.
-        assert splitk_model.bytes() == logical.bytes() + 2 * 8 * 2 * 64 * 256 * 4
+        # MX128 kernel names carry a tile and split-K. Those are the kernel's,
+        # so the op is costed from its shapes, the same as with no kernel name.
+        for kernel_name in (
+            "gemm_a8w8_mx128_t16x1024x128_mw1_nw4_nb2_sk1_cm1_cn1",
+            "gemm_a8w8_mx128_t16x256x128_mw1_nw4_nb2_sk2_cm1_cn1",
+            "gemm_a8w8_mx128_compute_t128x256x128_mw2_nw2_nb4_sk2_cm4_cn2_fsk",
+        ):
+            mx128_model = pext.gemm_a8w8_blockscale_bpreshuffle(
+                {"args": gemm["args"], "kernel_details": [{"name": kernel_name}]}
+            )
+            assert mx128_model.param_details["tile"] is None
+            assert mx128_model.flops() == logical.flops()
+            assert mx128_model.bytes() == logical.bytes()
         assert (
             pext.gemm_a8w8_blockscale_bpreshuffle(
                 {"args": {"Input Dims": [[1, 8], [], [], []], "Input type": []}}
