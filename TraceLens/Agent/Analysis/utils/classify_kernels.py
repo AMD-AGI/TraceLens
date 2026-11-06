@@ -114,6 +114,11 @@ KERNEL_TYPE_RULES = [
         "RMSNorm (shared expert + norm)",
         20,
     ),
+    (
+        r"(?i)fused_(?:_to_copy_)?add_copy__mean.*pow",
+        "RMSNorm (fused triton residual)",
+        20,
+    ),
     (r"(?i)rsqrt.*mean.*pow|mean.*mul.*pow.*rsqrt", "RMSNorm (fused triton)", 20),
     (r"(?i)_to_copy_add.*mean.*rsqrt", "RMSNorm (fused triton)", 20),
     # ---- Band 20: Attention and KV cache ----
@@ -156,12 +161,6 @@ KERNEL_TYPE_RULES = [
     (r"(?i)gather_kernel|vectorized_gather", "Elementwise", 20),
     # ---- Band 15: fused triton Normalization, RoPE, quantization, activation ----
     (r"(?i)fused__to_copy_abs.*mean.*pow.*rsqrt", "RMSNorm (fused triton)", 15),
-    (r"(?i)fused_add_copy__mean.*pow", "RMSNorm (fused triton residual)", 15),
-    (
-        r"(?i)fused__to_copy_add_copy__mean.*pow",
-        "RMSNorm (fused triton residual)",
-        15,
-    ),
     (r"(?i)rotary|rope", "Rotary Embedding", 15),
     (
         r"(?i)per_token_group_quant|dynamic_per_group_scaled_quant",

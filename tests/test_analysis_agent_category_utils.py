@@ -282,6 +282,12 @@ def _name_key(name):
             ("add", "norm"),
         ),
         (
+            "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt_0",
+            "RMSNorm (fused triton residual)",
+            "Normalization",
+            ("add", "norm"),
+        ),
+        (
             "triton_poi_fused__to_copy_add_mean_moe_forward_shared_pow_rsqrt_0",
             "RMSNorm (shared expert + norm)",
             "Normalization",
