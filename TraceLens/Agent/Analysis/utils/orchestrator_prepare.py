@@ -96,6 +96,7 @@ CATEGORY_SKILL_MAP = {
     "record_param_comms": "generic-op-analyzer",
     "moe_comm_fwd": "generic-op-analyzer",
     "moe_comm_bwd": "generic-op-analyzer",
+    "datamovement": "generic-op-analyzer",
 }
 
 
