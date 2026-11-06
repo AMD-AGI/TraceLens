@@ -236,7 +236,7 @@ def _rollup_quantified(findings: list[dict], per_node: bool) -> list[dict]:
         entry["impact_score"] += f.get("impact_score", 0)
         entry["impact_score_low"] += f.get("impact_score_low", 0)
         entry["impact_score_high"] += f.get("impact_score_high", 0)
-        entry["operation_count"] += f.get("operation_count", 0)
+        entry["operation_count"] += f.get("member_count", 0)
     return sorted(
         [
             {

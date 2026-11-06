@@ -210,7 +210,7 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 150.0,
                 "impact_score_low": 127.0,
                 "impact_score_high": 173.0,
-                "operation_count": 2,
+                "member_count": 2,
             },
         ],
     }
@@ -239,7 +239,7 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 80.0,
                 "impact_score_low": 68.0,
                 "impact_score_high": 92.0,
-                "operation_count": 1,
+                "member_count": 1,
             },
         ],
     }
