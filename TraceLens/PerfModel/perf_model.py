@@ -9,7 +9,13 @@ import warnings
 from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-from .utils import name2bpe, optional_float, parse_bool, torch_dtype_map
+from .utils import (
+    name2bpe,
+    optional_float,
+    parse_bool,
+    scalar_type_bpe,
+    torch_dtype_map,
+)
 
 
 # 1. GEMM
@@ -3588,6 +3594,62 @@ class aten_unary_elementwise(UnaryElementwise):
         }
 
 
+class _TwoFlopUnary(aten_unary_elementwise):
+    """One special function per element, counted as two flops.
+
+    The fused-kernel table records that cost for ``aten.sqrt``,
+    ``aten.rsqrt``, and ``aten.reciprocal``. Bytes stay one read and one write.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 2 * nelems
+
+
+class aten_rsqrt(_TwoFlopUnary):
+    """``aten::rsqrt`` and ``aten::rsqrt_``."""
+
+
+class aten_sqrt(_TwoFlopUnary):
+    """``aten::sqrt`` and ``aten::sqrt_``."""
+
+
+class aten_reciprocal(_TwoFlopUnary):
+    """``aten::reciprocal`` and ``aten::reciprocal_``."""
+
+
+class aten_clone(aten_unary_elementwise):
+    """``aten::clone`` materializes a tensor. No arithmetic.
+
+    Bytes are one read and one write of the cloned dtype.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
+
+
+class aten_to(aten_unary_elementwise):
+    """``aten::to`` and ``aten::_to_copy``: a dtype or device copy.
+
+    No arithmetic. Bytes are the source width plus the destination width.
+    ``Concrete Inputs[1]`` is the ``ScalarType`` ordinal of a dtype cast. A
+    value that is not an ordinal keeps the source width, which is a same-dtype
+    copy onto another device.
+    """
+
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
+        concrete = (event.get("args") or {}).get("Concrete Inputs") or ()
+        dest = scalar_type_bpe(concrete[1] if len(concrete) > 1 else None)
+        if dest is not None:
+            self.bpe_out = dest
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
+
+
 class aten_replication_pad(UnaryElementwise):
     category = "elementwise"
     sheet_category = "UnaryElementwise"
@@ -3629,6 +3691,19 @@ class aten_replication_pad(UnaryElementwise):
         nelems_in = prod(self.param_details["input_shape"])
         nelems_out = self.nelems  # prod(output_shape) from base class
         return nelems_in * self.bpe_in + nelems_out * self.bpe_out
+
+
+class aten_pad(aten_replication_pad):
+    """``aten::pad`` copies the input into a padded buffer.
+
+    No arithmetic. ``Concrete Inputs[1]`` holds the pad widths, innermost
+    dimension first, the same order ``aten_replication_pad`` reads. Bytes read
+    the input and write the padded output.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
 
 
 class aten_upsample_nearest(UnaryElementwise):
@@ -6158,15 +6233,14 @@ class hipblaslt_gemm_fp4(GEMM):
         assert (
             bpeA is not None and bpeB is not None
         ), f"Data types of A and B are not supported: {dtype_A_B}"
-        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
-        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
-        # bypass it and compute bytes explicitly so we can fold in the
-        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
+        # K is the logical element count. name2bpe counts one FP4 value, so
+        # M*K*bpe is the packed storage. GEMM.bytes_func cannot fold in the
+        # E8M0 block scales, which add about 3% to the operand bandwidth.
         M, N, K = self.M, self.N, self.K
         block = self.MXFP4_BLOCK_SIZE
         scales_per_row = (K + block - 1) // block
-        bytes_A = M * (K // 2) * bpeA
-        bytes_B = N * (K // 2) * bpeB
+        bytes_A = M * K * bpeA
+        bytes_B = N * K * bpeB
         bpe_scaleA = name2bpe(self.param_details.get("dtype_scaleA")) or 1
         bpe_scaleB = name2bpe(self.param_details.get("dtype_scaleB")) or 1
         bytes_scaleA = M * scales_per_row * bpe_scaleA

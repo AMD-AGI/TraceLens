@@ -1158,8 +1158,8 @@ class gemm_afp4wfp4(GEMM):
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
-        self.bpe_mat1 = 0.5  # FP4 packed
-        self.bpe_mat2 = 0.5  # FP4 packed
+        self.bpe_mat1 = name2bpe("fp4")
+        self.bpe_mat2 = name2bpe("fp4")
         self.bpe_output = name2bpe(dtype_A_B[2])
         self.bpe_bias = name2bpe(dtype_A_B[2])  # unused (bias=False)
 

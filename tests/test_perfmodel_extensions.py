@@ -95,6 +95,7 @@ from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     vllm_rocm_aiter_triton_add_rmsnorm_pad,
 )
 from TraceLens.PerfModel import kernel_name_parser, perf_model
+from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
 from TraceLens.PerfModel.op_projections import op_work, origami_gemm_op_projection
 from tests.fixtures.perfmodel import (
     _ARCH,
@@ -2063,7 +2064,7 @@ class TestUtilsCoverage:
         [
             ("double", 8),
             ("c10::float8_e5m2", 1),
-            ("c10::float4_e2m1fn_x2", 1),
+            ("c10::float4_e2m1fn_x2", 0.5),
             (None, None),
         ],
     )
@@ -2459,6 +2460,103 @@ class TestElementwiseReduceCoverage:
         model = perf_model.aten_unary_elementwise(event)
         assert model.flops() == 4 * 256
         assert model.bytes() > 0
+
+    def test_aten_rsqrt_counts_two_flops_per_element(self):
+        event = {
+            "args": {
+                "Input Dims": [(4, 256), (4, 256)],
+                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                "Input Strides": [(256, 1), (256, 1)],
+            }
+        }
+        model = perf_model.aten_rsqrt(event)
+        assert model.flops() == 2 * 4 * 256
+        assert model.bytes() == 2 * 4 * 256 * 2
+        assert op_to_perf_model_class_map["aten::rsqrt"] is perf_model.aten_rsqrt
+        assert op_to_perf_model_class_map["aten::rsqrt_"] is perf_model.aten_rsqrt
+
+    def test_sqrt_and_reciprocal_count_two_flops_per_element(self):
+        event = {
+            "args": {
+                "Input Dims": [(4, 256), (4, 256)],
+                "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                "Input Strides": [(256, 1), (256, 1)],
+            }
+        }
+        for cls, name, inplace in (
+            (perf_model.aten_sqrt, "aten::sqrt", "aten::sqrt_"),
+            (perf_model.aten_reciprocal, "aten::reciprocal", "aten::reciprocal_"),
+        ):
+            model = cls(event)
+            assert model.flops() == 2 * 4 * 256
+            assert model.bytes() == 2 * 4 * 256 * 2
+            assert op_to_perf_model_class_map[name] is cls
+            assert op_to_perf_model_class_map[inplace] is cls
+
+    def test_clone_is_a_copy(self):
+        event = {
+            "args": {
+                "Input Dims": [(4, 128), []],
+                "Input type": ["long int", ""],
+                "Input Strides": [(128, 1), []],
+                "Concrete Inputs": ["", ""],
+            }
+        }
+        model = perf_model.aten_clone(event)
+        assert model.flops() == 0
+        assert model.bytes() == 2 * 4 * 128 * 8
+        assert op_to_perf_model_class_map["aten::clone"] is perf_model.aten_clone
+
+    def test_to_casts_between_the_recorded_scalar_types(self):
+        event = {
+            "args": {
+                "Input Dims": [[4], [], [], [], []],
+                "Input type": ["long int", "Scalar", "Scalar", "Scalar", ""],
+                "Input Strides": [[1], [], [], [], []],
+                "Concrete Inputs": ["", "3", "False", "False", ""],
+            }
+        }
+        model = perf_model.aten_to(event)
+        assert model.flops() == 0
+        assert model.bytes() == 4 * (8 + 4)
+        copied = {
+            "args": {
+                "Input Dims": [[4, 128], [], [], [], [], [], []],
+                "Input type": ["int", "Scalar", "", "", "", "Scalar", ""],
+                "Input Strides": [[128, 1], [], [], [], [], [], []],
+                "Concrete Inputs": ["", "4", "", "", "", "False", ""],
+            }
+        }
+        cast = perf_model.aten_to(copied)
+        assert cast.flops() == 0
+        assert cast.bytes() == 4 * 128 * (4 + 8)
+        same_device = {
+            "args": {
+                "Input Dims": [[4, 128], [], [], [], []],
+                "Input type": ["int", "Scalar", "Scalar", "Scalar", ""],
+                "Input Strides": [[128, 1], [], [], [], []],
+                "Concrete Inputs": ["", "", "False", "False", ""],
+            }
+        }
+        moved = perf_model.aten_to(same_device)
+        assert moved.bytes() == 2 * 4 * 128 * 4
+        assert op_to_perf_model_class_map["aten::to"] is perf_model.aten_to
+        assert op_to_perf_model_class_map["aten::_to_copy"] is perf_model.aten_to
+
+    def test_pad_writes_the_widened_buffer(self):
+        event = {
+            "args": {
+                "Input Dims": [[4, 8194], [], [], []],
+                "Input type": ["int", "ScalarList", "", "Scalar"],
+                "Input Strides": [[8194, 1], [], [], []],
+                "Concrete Inputs": ["", "[0, 62]", "", "-1."],
+            }
+        }
+        model = perf_model.aten_pad(event)
+        assert model.flops() == 0
+        assert model.param_details["output_shape"] == (4, 8256)
+        assert model.bytes() == (4 * 8194 + 4 * 8256) * 4
+        assert op_to_perf_model_class_map["aten::pad"] is perf_model.aten_pad
 
     def test_aten_binary_elementwise(self):
         event = {
