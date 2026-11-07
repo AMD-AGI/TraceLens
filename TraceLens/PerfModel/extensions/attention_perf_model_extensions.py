@@ -1417,3 +1417,99 @@ class paged_mqa_logits_preshuffle_synthetic:
 
     def get_compute_precision(self):
         return "fp8"
+
+
+class muse_extend_synthetic(InferenceAttention):
+    """
+    Performance model for _muse_extend_kernel.
+
+    Reference implementation:
+        sglang/srt/rocm_muse_spark/muse_extend_gluon.py
+
+    Target-model EXTEND (chunked-prefill / speculative-verify) attention for
+    MuseSparkForConditionalGeneration, issued through the aiter extend backend
+    (``_forward_extend_unified``) with Ulysses sequence parallelism. Standard
+    causal attention with an MQA KV cache; not MLA.
+
+    Appears as an orphan Synthetic Op with no Input Dims, so head geometry is
+    taken from the model architecture and the token aggregates come from the
+    enclosing ``step[EXTEND ...]`` iteration annotation (context terms only;
+    generation terms are zero).
+
+    Expected annotation:
+        step[EXTEND bs=.. c_sq=.. c_sqsq=.. c_sqsk=.. c_sk=..]
+
+    Architecture (Muse-Spark-Open-816B-A42B, derived from trace side-channels):
+        hidden 8192 = 64 query heads x 128 head_dim; MQA with 1 KV head.
+        Per rank H_Q = 64 / TP (RoPE moves (H_Q + H_KV) * head_dim per token;
+        sglang::store_cache writes H_KV * head_dim = 128 fp8 bytes per token).
+
+    Roofline -- FLOPs (inherited from InferenceAttention.flops_func):
+        H_Q * (d_h_qk + d_h_v) * (2 * c_sqsk - c_sqsq)
+
+    Roofline -- bytes moved (inherited from InferenceAttention.bytes_func):
+        Q / output / current-chunk K,V in bf16; cached K,V in fp8 KV cache.
+
+    Notes:
+        H_Q needs the TP world size and the byte cost needs the KV-cache dtype;
+        both are gathered from the event stream by ``_detect_run_arch`` into
+        ``arch`` (TP from an aiter collective, KV dtype from the cache-write op).
+        If either is undetectable the model returns no perf estimate rather than
+        guess. SWA layers are modeled as full causal (upper bound for windowed
+        layers, exact for full layers).
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    TOTAL_Q_HEADS = 64
+    HEAD_DIM = 128
+    H_KV = 1
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event, arch)
+        self.B = self.param_details["B"]
+        self.N_Q = self.param_details["N_Q"]
+        self.H_Q = self.param_details["H_Q"]
+        self.N_KV = self.param_details["N_KV"]
+        self.H_KV = self.param_details["H_KV"]
+        self.d_h_qk = self.param_details["d_h_qk"]
+        self.d_h_v = self.param_details["d_h_v"]
+
+    @classmethod
+    def get_param_details(cls, event, arch=None):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+            # H_Q needs TP; the byte cost needs the KV-cache dtype. Both are
+            # detected from the trace by _detect_run_arch; if either is unknown
+            # the model emits no estimate rather than guess.
+            tp = (arch or {}).get("tp_world_size")
+            dtype_KV = (arch or {}).get("kv_cache_dtype")
+            if not tp or not dtype_KV:
+                return InferenceAttention.no_perf_param_details()
+            H_Q = max(1, cls.TOTAL_Q_HEADS // tp)
+            return {
+                "B": 1,
+                "N_Q": stats["c_sq"],
+                "H_Q": H_Q,
+                "N_KV": stats["c_sk"],
+                "H_KV": cls.H_KV,
+                "d_h_qk": cls.HEAD_DIM,
+                "d_h_v": cls.HEAD_DIM,
+                "dropout": 0.0,
+                "causal": True,
+                "flash_impl": True,
+                **stats,
+                "dtype_Q": "c10::BFloat16",
+                "dtype_KV": dtype_KV,
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("c10::BFloat16")

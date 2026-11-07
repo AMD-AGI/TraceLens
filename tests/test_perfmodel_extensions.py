@@ -6958,11 +6958,36 @@ class TestSyntheticOpPerfModels:
         assert cxx_dtype_to_torch("unknown_type") is None
 
     def test_detect_tp_world_size(self):
-        from TraceLens.TreePerf.tree_perf import _detect_tp_world_size
+        from TraceLens.TreePerf.tree_perf import _detect_run_arch, _detect_tp_world_size
 
+        # Per-event detector
+        assert _detect_tp_world_size({"name": self.AR_NAME}) == 4
+        assert _detect_tp_world_size({"name": "no_allreduce"}) is None
+        # Orchestrator finds it in a stream
         events = [{"name": "some_op"}, {"name": self.AR_NAME}, {"name": "another_op"}]
-        assert _detect_tp_world_size(events) == 4
-        assert _detect_tp_world_size([{"name": "no_allreduce"}]) is None
+        assert _detect_run_arch(events).get("tp_world_size") == 4
+        assert _detect_run_arch([{"name": "no_allreduce"}]).get("tp_world_size") is None
+
+    def test_detect_kv_cache_dtype(self):
+        from TraceLens.TreePerf.tree_perf import (
+            _detect_kv_cache_dtype,
+            _detect_run_arch,
+        )
+
+        fp8 = {
+            "name": "sglang::store_cache",
+            "args": {"Input type": ["unsigned char", "unsigned char", "long int"]},
+        }
+        bf16 = {
+            "name": "reshape_and_cache",
+            "args": {"Input type": ["c10::BFloat16", "long int"]},
+        }
+        assert _detect_kv_cache_dtype(fp8) == "unsigned char"
+        assert _detect_kv_cache_dtype(bf16) == "c10::BFloat16"
+        assert _detect_kv_cache_dtype({"name": "aten::mm", "args": {}}) is None
+        # Orchestrator gathers both facts in one pass
+        facts = _detect_run_arch([{"name": self.AR_NAME}, fp8])
+        assert facts == {"tp_world_size": 4, "kv_cache_dtype": "unsigned char"}
 
     def test_propagate_annotation(self):
         from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops

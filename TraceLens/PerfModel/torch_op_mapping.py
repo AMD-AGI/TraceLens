@@ -68,6 +68,7 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
     (re.compile(r".*allreduce_fusion_kernel_1stage"), "CustomCollective"),
     (re.compile(r".*(?:paged_)?mqa_logits"), "InferenceAttention"),
+    (re.compile(r".*_muse_extend_kernel"), "InferenceAttention"),
 ]
 
 
@@ -495,6 +496,25 @@ def _match_mqa_logits(name):
 
 
 register_perf_model_matcher(_match_mqa_logits)
+
+
+def _match_muse_extend(name):
+    """Resolve the Muse-Spark target-model EXTEND (chunked-prefill / verify)
+    attention Triton kernel when it appears as a Synthetic Op. Excludes
+    python_function source-line frames (e.g. 'muse_extend_gluon.py(348): ...')
+    so the parent is not intercepted before the Synthetic Op is created."""
+    if ".py(" in name:
+        return None
+    if "_muse_extend_kernel" in name:
+        from TraceLens.PerfModel.extensions import (
+            attention_perf_model_extensions as _a,
+        )
+
+        return _a.muse_extend_synthetic
+    return None
+
+
+register_perf_model_matcher(_match_muse_extend)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,
