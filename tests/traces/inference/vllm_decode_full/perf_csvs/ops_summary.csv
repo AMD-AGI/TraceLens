@@ -14,4 +14,4 @@ aten::copy_,NA,45.1494140625,45.1494140625,10,0.0451494140625,10,['elementwise']
 triton_poi_fused_0,nn.Module: GraphModule,10.59765625,10.59765625,1,0.01059765625,1,['triton'],"['triton_poi_fused_0', 'nn.Module: GraphModule_0', 'nn.Module: GptOssForCausalLM_0']",0.09887997381667041,99.87499683369045
 aiter::rms_norm,nn.Module: GraphModule,5.9990234375,5.9990234375,1,0.0059990234375,1,['RMSNorm'],"['aiter::rms_norm', 'nn.Module: GraphModule_0', 'nn.Module: GptOssForCausalLM_0']",0.055973062952064716,99.93096989664251
 aten::sub,NA,4.439453125,4.439453125,1,0.004439453125,1,['elementwise'],['aten::sub'],0.04142170668730037,99.97239160332981
-aten::index,NA,2.958984375,4.91796875,1,0.002958984375,1,['IndexedCopy'],['aten::index'],0.02760839667015401,99.99999999999997
+aten::index,NA,2.958984375,4.91796875,1,0.002958984375,1,['DataMovement'],['aten::index'],0.02760839667015401,99.99999999999997

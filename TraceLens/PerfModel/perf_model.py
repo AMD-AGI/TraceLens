@@ -3148,7 +3148,7 @@ class IndexedCopy:
       (embedding and index-select backward).
     """
 
-    category = "IndexedCopy"
+    category = "DataMovement"
     bwd_category = None
     kind = "rows"
     # Forward reads the row and writes it. Dense backward also reads the

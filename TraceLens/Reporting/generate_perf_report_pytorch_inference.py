@@ -39,7 +39,6 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     filename_request_bs,
 )
 from TraceLens.ModelUtils.graph_schedule import graph_model_from_config
-from TraceLens.PerfModel.origami_helper import gfx_and_cus
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -690,22 +689,39 @@ def _graph_model_with_engine_facts(graph_model, engine, events=()):
     return replace(graph_model, facts=facts, capture_buckets=tuple(buckets))
 
 
-def _graph_model_on_device(graph_model, gpu_arch):
-    """Fill gfx, and the compute-unit count when the trace does not record it.
+# Product name -> gfx. The trace does not record the gfx name. Compute units
+# are never taken from a table: they come from the trace's deviceProperties.
+_GFX_BY_PRODUCT = {
+    "mi300": "gfx942",
+    "mi325": "gfx942",
+    "mi350": "gfx950",
+    "mi355": "gfx950",
+}
 
-    The mHC split policy is selected by that pair. The trace's
-    ``deviceProperties`` replace the compute-unit count once the profile is
-    loaded. This table is the fallback for a trace with no device block, and
-    it supplies the gfx name, which the trace does not record. A model that
+
+def _gfx_for_product(name: Optional[str]) -> str:
+    if not name:
+        return ""
+    key = name.lower()
+    if key.endswith("x") and not key.startswith("gfx"):
+        key = key[:-1]
+    return _GFX_BY_PRODUCT.get(key, key if key.startswith("gfx") else "")
+
+
+def _graph_model_on_device(graph_model, gpu_arch):
+    """Fill the gfx name and the compute-unit count from the device arch.
+
+    The mHC split policy is selected by that pair. The compute-unit count is
+    the trace's ``num_cus`` (``deviceProperties`` numSms). A trace that records
+    no device leaves it at zero rather than assuming a count. A model that
     already carries a device is left as is.
     """
     if graph_model is None or gpu_arch is None or graph_model.num_cus:
         return graph_model
-    ident = gfx_and_cus(gpu_arch.get("name"))
-    num_cus = gpu_arch.get("num_cus") or (ident[1] if ident else 0)
-    gfx = gpu_arch.get("gfx") or (ident[0] if ident else "")
+    num_cus = gpu_arch.get("num_cus")
     if not num_cus:
         return graph_model
+    gfx = gpu_arch.get("gfx") or _gfx_for_product(gpu_arch.get("name"))
     return replace(graph_model, num_cus=int(num_cus), gfx_arch=str(gfx))
 
 

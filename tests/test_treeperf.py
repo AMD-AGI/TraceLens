@@ -543,6 +543,102 @@ class TestTreePerfAnalyzer:
         df = analyzer.get_df_kernels(launcher_detail=True, cpu_op_detail=True)
         assert len(df) == 1
 
+    def test_arch_compute_units_come_from_the_trace(self):
+        devices = [
+            {
+                "name": "AMD Instinct MI355X",
+                "numSms": 256,
+                "maxSharedMemoryPerMultiProcessor": 163840,
+            }
+        ] * 2
+        tree = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": devices},
+        )
+        supplied = {"name": "MI355X", "num_cus": 304, "lds_capacity": 64 * 1024}
+        analyzer = TreePerfAnalyzer(tree, rebuild_tree=False, arch=supplied)
+        assert analyzer.arch["num_cus"] == 256
+        assert analyzer.arch["lds_capacity"] == 163840
+        assert supplied["num_cus"] == 304
+        assert supplied["lds_capacity"] == 64 * 1024
+
+        mixed = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": [{"numSms": 256}, {"numSms": 104}]},
+        )
+        kept = TreePerfAnalyzer(
+            mixed, rebuild_tree=False, arch={"name": "MI355X", "num_cus": 80}
+        )
+        assert kept.arch["num_cus"] == 80
+
+        cus_only = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": [{"numSms": 256}]},
+        )
+        cus_arch = TreePerfAnalyzer(
+            cus_only,
+            rebuild_tree=False,
+            arch={"name": "MI355X", "num_cus": 80, "lds_capacity": 65536},
+        )
+        assert cus_arch.arch["num_cus"] == 256
+        assert cus_arch.arch["lds_capacity"] == 65536
+
+        lds_only = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={
+                "deviceProperties": [{"maxSharedMemoryPerMultiProcessor": 163840}]
+            },
+        )
+        lds_arch = TreePerfAnalyzer(
+            lds_only,
+            rebuild_tree=False,
+            arch={"name": "MI355X", "num_cus": 80, "lds_capacity": 65536},
+        )
+        assert lds_arch.arch["num_cus"] == 80
+        assert lds_arch.arch["lds_capacity"] == 163840
+
+        untouched = TreePerfAnalyzer(tree, rebuild_tree=False, arch=None)
+        assert untouched.arch is None
+
+    def test_device_property_readers_reject_incomplete_metadata(self):
+        assert TraceEventUtils.num_cus_from_trace(None) is None
+        assert TraceEventUtils.lds_capacity_from_trace({}) is None
+        assert TraceEventUtils.num_cus_from_trace({"deviceProperties": []}) is None
+        assert (
+            TraceEventUtils.lds_capacity_from_trace({"deviceProperties": None}) is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace(
+                {"deviceProperties": ["not-a-device", {"numSms": 256}]}
+            )
+            is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace({"deviceProperties": [{"numSms": 0}]})
+            is None
+        )
+        assert (
+            TraceEventUtils.lds_capacity_from_trace(
+                {
+                    "deviceProperties": [
+                        {"maxSharedMemoryPerMultiProcessor": 163840},
+                        {"maxSharedMemoryPerMultiProcessor": 65536},
+                    ]
+                }
+            )
+            is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace(
+                {"deviceProperties": [{"numSms": 256}, {"numSms": 256}]}
+            )
+            == 256
+        )
+
     def test_get_df_gpu_timeline_detect_recompute(self):
         events = [
             _make_gpu_event(1, 0, 100, "kernel"),

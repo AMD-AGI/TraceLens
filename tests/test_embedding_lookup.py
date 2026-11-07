@@ -57,7 +57,7 @@ def test_aten_embedding_gathers_weight_rows():
     assert model.get_maf_type() == "vector"
 
     work = op_work(model)
-    assert work.category == "IndexedCopy"
+    assert work.category == "DataMovement"
     assert work.gflops == 0
     assert work.bytes_moved == model.bytes()
     # Dense backward of the same lookup re-reads the updated row.
@@ -356,5 +356,5 @@ def test_missing_index_tensor_is_rejected():
 def test_common_ops_resolve_to_the_lookup_model(name, cls):
     assert resolve_perf_model_class(name) is cls
     assert op_to_perf_model_class_map[name] is cls
-    assert cls.category == "IndexedCopy"
-    assert categorize_torch_op({"name": name}) == "IndexedCopy"
+    assert cls.category == "DataMovement"
+    assert categorize_torch_op({"name": name}) == "DataMovement"
