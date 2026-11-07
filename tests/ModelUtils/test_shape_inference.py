@@ -1908,6 +1908,76 @@ def __init__(self, dim):
     assert isinstance(locals_map["other"][0], ast.Constant)
 
 
+def test_partial_rotary_factor_sizes_the_rope_buffer_from_the_config():
+    """``int(head_dim * partial_rotary_factor)`` is the arange stop.
+
+    The factor is a float the config stores (``0.25``) or the call's own
+    default (``1.0``) when the key is absent. It must not be truncated to
+    ``0`` before the multiply, and two classes that size ``inv_freq``
+    differently must not share one answer.
+    """
+    import ast
+
+    from TraceLens.ModelUtils.shape_inference import ModuleParameterSpec
+
+    src = """
+class Rope(nn.Module):
+    def __init__(self, config):
+        self.rope_type = self.config.rope_parameters["rope_type"]
+        rope_init_fn = self.compute_default_rope_parameters
+        if self.rope_type != "default":
+            rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
+        self.inv_freq = nn.Buffer(inv_freq, persistent=False)
+    @staticmethod
+    def compute_default_rope_parameters(config, device=None):
+        partial_rotary_factor = config.rope_parameters.get("partial_rotary_factor", 1.0)
+        head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        dim = int(head_dim * partial_rotary_factor)
+        inv_freq = torch.arange(0, dim, 2)
+        return inv_freq, 1.0
+
+class OtherRope(nn.Module):
+    def __init__(self, config):
+        self.inv_freq = nn.Buffer(torch.arange(64), persistent=False)
+"""
+    tree = ast.parse(src)
+    classes = {node.name: node for node in tree.body}
+    ctx = _make_inferencer(head_dim=256).context
+    config = {
+        "head_dim": 256,
+        "hidden_size": 5120,
+        "num_attention_heads": 24,
+        "rope_parameters": {
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 1000000.0,
+            "rope_type": "default",
+        },
+    }
+    registry = ModuleDimRegistry()
+    registry._capture_buffer_shapes("Rope", classes["Rope"], config=config, context=ctx)
+    # 256 * 0.25 = 64, and arange(0, 64, 2) has 32 entries.
+    assert registry.parameter[("Rope", "inv_freq")].shape == (32,)
+
+    missing = dict(config)
+    # The factor key is absent; rope_type is still default, so the same method
+    # runs and the ``.get`` default (1.0) is the factor.
+    missing["rope_parameters"] = {"rope_type": "default"}
+    bare = ModuleDimRegistry()
+    bare._capture_buffer_shapes("Rope", classes["Rope"], config=missing, context=ctx)
+    # The call's default 1.0 keeps the whole head: arange(0, 256, 2) is 128.
+    assert bare.parameter[("Rope", "inv_freq")].shape == (128,)
+
+    registry._capture_buffer_shapes(
+        "OtherRope", classes["OtherRope"], config=config, context=ctx
+    )
+    assert registry.parameter[("OtherRope", "inv_freq")].shape == (64,)
+    assert "inv_freq" in registry.ambiguous_parameters
+    assert registry.lookup_parameter("inv_freq", "Rope").shape == (32,)
+    assert registry.lookup_parameter("inv_freq", None) is None
+    assert ModuleParameterSpec(shape=(32,)) == registry.parameter[("Rope", "inv_freq")]
+
+
 def test_arange_length_resolves_positional_and_keyword_bounds():
     """A RoPE init helper's ``torch.arange(...)`` length, in every call shape
     the source can spell: one bound, two, three, and the keyword form."""

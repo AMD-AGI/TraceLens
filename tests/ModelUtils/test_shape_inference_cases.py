@@ -414,6 +414,46 @@ def test_torch_op_shape_no_inputs_or_unknown_builder():
     assert inf._torch_op_shape(_node("NotAnOp"), [TensorSpec(("B", "S", 8))]) is None
 
 
+def test_slice_bound_by_another_tensors_axis_is_a_concrete_width():
+    """``rotary_dim = cos.shape[-1]`` then ``q[..., :rotary_dim]`` is that axis.
+
+    The complementary tail is the rest of the source width. When ``cos`` is
+    not in scope the bound stays the name the source wrote.
+    """
+    inf = _make_inferencer()
+    source = TensorSpec(("B", 24, "S", 256))
+    head = _node(
+        "Slice",
+        details=[
+            "slice: (..., :rotary_dim)",
+            "shape_locals: rotary_dim=cos.shape[-1]",
+        ],
+    )
+    tail = _node(
+        "Slice",
+        details=[
+            "slice: (..., rotary_dim:)",
+            "shape_locals: rotary_dim=cos.shape[-1]",
+        ],
+    )
+    inf._frame_parameter_shapes = lambda node, root: {"cos": (3, "S", 1, 64)}  # type: ignore[method-assign]
+    assert inf._infer_node_output(head, [source], root=None).shape == (
+        "B",
+        24,
+        "S",
+        64,
+    )
+    assert inf._infer_node_output(tail, [source], root=None).shape == (
+        "B",
+        24,
+        "S",
+        192,
+    )
+    inf._frame_parameter_shapes = lambda node, root: {}  # type: ignore[method-assign]
+    unresolved = inf._infer_node_output(head, [source], root=None)
+    assert unresolved.shape[-1] == "rotary_dim"
+
+
 def test_concrete_dim_and_shape_helpers():
     inf = _make_inferencer(head_dim=64)
     assert inf._concrete_dim("B") == 2
@@ -2027,6 +2067,36 @@ def test_resolve_dim_expr_subscript_int_and_symbolic_paren():
     # Symbolic algebra requiring parenthesisation.
     paren = _ast.parse("(B + 1) * 2", mode="eval").body
     assert _resolve_dim_expr(paren, config={}, local_vars={}, context=ctx) == "(B+1)*2"
+    # A float factor survives until int() truncates it. int(0.25) used to be 0.
+    factor = _ast.parse(
+        'int(config.head_dim * config.rope_parameters.get("partial_rotary_factor", 1.0))',
+        mode="eval",
+    ).body
+    assert (
+        _resolve_dim_expr(
+            factor,
+            config={
+                "head_dim": 256,
+                "rope_parameters": {"partial_rotary_factor": 0.25},
+            },
+            local_vars={},
+            context=ctx,
+        )
+        == 64
+    )
+    defaulted = _ast.parse(
+        'config.rope_parameters.get("partial_rotary_factor", 1.0)',
+        mode="eval",
+    ).body
+    assert (
+        _resolve_dim_expr(
+            defaulted,
+            config={"rope_parameters": {}},
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
 
 
 def test_parse_module_ctor_tensor_factory_and_full():

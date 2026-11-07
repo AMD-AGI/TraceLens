@@ -58,6 +58,7 @@ def _inferencer(registry):
     self._owner_classes = {}
     self._owner_class_refs = []
     self._frame_step_shapes = {}
+    self._frame_slot_shapes = {}
     self._frame_parameters = {}
     self._tensor_specs = {}
     self._caller_entry_spec = None
@@ -195,3 +196,142 @@ class TestAFrameIsPublishedToItsParentByItsDeclaredReturn:
         )
         # Reading it by its bare attr cannot say WHICH of the two is meant.
         assert ("", "compressor") not in self._frame_step_shapes
+
+
+class TestATupleSlotReachesTheCalleeThatUnpacksIt:
+    def test_the_unpacked_parameter_reads_that_return_slot(self) -> None:
+        root = _block(
+            None,
+            "Model",
+            [
+                _block("rotary_emb", "Rotary"),
+                _block(
+                    "layers",
+                    "Decoder",
+                    [_block("self_attn", "Attention")],
+                ),
+            ],
+        )
+        registry = {
+            "Model": _structure(
+                forward_step_predecessor_args={
+                    "layers": {"position_embeddings": "rotary_emb"}
+                }
+            ),
+            "Decoder": _structure(
+                # Forwarded, not computed here: the layer's own parameter,
+                # listed as a boundary read of the attention call.
+                forward_step_boundary_params={"self_attn": ("position_embeddings",)},
+            ),
+            "Attention": _structure(
+                forward_step_boundary_arg_params={
+                    "@positional_l10_apply_rotary": {
+                        "cos": ("position_embeddings", 0),
+                        "sin": ("position_embeddings", 1),
+                    }
+                }
+            ),
+            "Rotary": _structure(
+                forward_return_order=["cos", "sin"],
+                forward_return_slots={
+                    "cos": "@op_l201_c14_to",
+                    "sin": "@op_l201_c33_to",
+                },
+            ),
+        }
+        self = _inferencer(registry)
+        cos = SimpleNamespace(
+            id="rotary_emb:@op_l201_c14_to:4",
+            metadata={"attr_name": "@op_l201_c14_to"},
+            label="To",
+        )
+        self._record_frame_step(cos, TensorSpec(shape=(3, "S", 1, 64), dtype="f32"), root)
+        # The bare call still has no single shape: two tensors came back.
+        assert ("", "rotary_emb") not in self._frame_step_shapes
+        assert self._frame_slot_shapes[("", "rotary_emb", 0)] == (3, "S", 1, 64)
+        node = SimpleNamespace(
+            id="layers:self_attn:@positional_l10_apply_rotary:@op_l697_c20_slice:2",
+            metadata={},
+            label="Slice",
+        )
+        assert self._frame_parameter_shapes(node, root)["cos"] == (3, "S", 1, 64)
+
+    def test_a_separately_inferred_section_reads_the_callers_slot(self) -> None:
+        # The decoder is annotated as its own tree, after the text model has
+        # already recorded what ``rotary_emb`` returned. The call is not in
+        # this tree; the slot table is the record of it.
+        root = _block(None, "Decoder", [_block("self_attn", "Attention")])
+        registry = {
+            "Model": _structure(
+                init_assignments={"layers": "Decoder"},
+                forward_step_predecessor_args={
+                    "layers": {"position_embeddings": "rotary_emb"}
+                },
+            ),
+            "Decoder": _structure(
+                forward_step_boundary_params={"self_attn": ("position_embeddings",)},
+            ),
+            "Attention": _structure(
+                forward_step_boundary_arg_params={
+                    "@positional_l10_apply_rotary": {
+                        "cos": ("position_embeddings", 0)
+                    }
+                }
+            ),
+        }
+        self = _inferencer(registry)
+        self._frame_slot_shapes[("language_model", "rotary_emb", 0)] = (3, "S", 1, 64)
+        node = SimpleNamespace(
+            id="self_attn:@positional_l10_apply_rotary:@op_l697_c20_slice:2",
+            metadata={},
+            label="Slice",
+        )
+        assert self._frame_parameter_shapes(node, root)["cos"] == (3, "S", 1, 64)
+
+    def test_an_inlined_return_reaches_an_inlined_call(self) -> None:
+        # Both the rotary module and the attention call are flattened into the
+        # root frame, so the cast is not under ``rotary_emb`` and the slice's
+        # parent class is not the class that recorded the boundary.
+        root = _block(None, "Model")
+        registry = {
+            "Model": _structure(
+                init_assignments={"rotary_emb": "Rotary", "layers": "Decoder"},
+                forward_step_predecessor_args={
+                    "layers": {"position_embeddings": "rotary_emb"}
+                },
+            ),
+            "Decoder": _structure(
+                init_assignments={"self_attn": "Attention"},
+                forward_step_boundary_params={"self_attn": ("position_embeddings",)},
+            ),
+            "Attention": _structure(
+                forward_step_boundary_arg_params={
+                    "@positional_l10_apply_rotary": {
+                        "cos": ("position_embeddings", 0)
+                    }
+                }
+            ),
+            "Rotary": _structure(
+                forward_return_order=["cos", "sin"],
+                forward_return_slots={
+                    "cos": "@op_l201_c14_to",
+                    "sin": "@op_l201_c33_to",
+                },
+            ),
+        }
+        self = _inferencer(registry)
+        cos = SimpleNamespace(
+            id="@op_l201_c14_to:4",
+            metadata={"attr_name": "@op_l201_c14_to"},
+            label="To",
+        )
+        self._record_frame_step(
+            cos, TensorSpec(shape=(3, "S", 1, 64), dtype="f32"), root
+        )
+        assert self._frame_slot_shapes[("", "rotary_emb", 0)] == (3, "S", 1, 64)
+        node = SimpleNamespace(
+            id="@positional_l10_apply_rotary:@op_l697_c20_slice:2",
+            metadata={},
+            label="Slice",
+        )
+        assert self._frame_parameter_shapes(node, root)["cos"] == (3, "S", 1, 64)

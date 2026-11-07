@@ -6506,6 +6506,20 @@ def _schema_arguments(op: str, node: ast.Call) -> dict[str, ast.expr]:
 
 _DIM_DETAIL_METHODS = _REDUCTION_METHODS | {"unsqueeze", "squeeze", "gather"}
 
+
+def _rendered_dim_expr(expr: ast.AST, param_values: dict[str, Any] | None) -> str:
+    """Dim text, with a literal parameter standing in for its name.
+
+    ``cos.unsqueeze(unsqueeze_dim)`` leaves the axis as the parameter's name
+    unless this call's value is known. A default the caller left alone is that
+    value (``unsqueeze_dim=1``); a name with no settled value stays the name.
+    """
+    if isinstance(expr, ast.Name) and param_values:
+        value = param_values.get(expr.id)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+    return ast.unparse(expr)
+
 # How far ``_extent_source_producers`` chases a generator bound through
 # intermediate host-scalar locals (``n_windows = compressed.shape[1] //
 # self.block`` is two hops). Bounded so a self-referential or deeply chained
@@ -10517,14 +10531,20 @@ class _ForwardOperationExtractor:
                 bound = _schema_arguments(call_name, node)
                 for name in ("dim", "keepdim"):
                     if name in bound:
-                        details.append(f"{name}: {ast.unparse(bound[name])}")
+                        details.append(
+                            f"{name}: {_rendered_dim_expr(bound[name], self.param_values)}"
+                        )
             else:
                 # No schema to consult: keep the long-standing reading.
                 if node.args:
-                    details.append(f"dim: {ast.unparse(node.args[0])}")
+                    details.append(
+                        f"dim: {_rendered_dim_expr(node.args[0], self.param_values)}"
+                    )
                 for keyword in node.keywords:
                     if keyword.arg in {"dim", "keepdim"}:
-                        details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+                        details.append(
+                            f"{keyword.arg}: {_rendered_dim_expr(keyword.value, self.param_values)}"
+                        )
         if call_name == "topk":
             # ``x.topk(k, dim=...)`` / ``torch.topk(x, k, dim=...)``: this call's own
             # k sets the output width. A MoE gate picks experts-per-token with one
