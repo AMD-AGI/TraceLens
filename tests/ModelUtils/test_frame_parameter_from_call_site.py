@@ -245,7 +245,9 @@ class TestATupleSlotReachesTheCalleeThatUnpacksIt:
             metadata={"attr_name": "@op_l201_c14_to"},
             label="To",
         )
-        self._record_frame_step(cos, TensorSpec(shape=(3, "S", 1, 64), dtype="f32"), root)
+        self._record_frame_step(
+            cos, TensorSpec(shape=(3, "S", 1, 64), dtype="f32"), root
+        )
         # The bare call still has no single shape: two tensors came back.
         assert ("", "rotary_emb") not in self._frame_step_shapes
         assert self._frame_slot_shapes[("", "rotary_emb", 0)] == (3, "S", 1, 64)
@@ -273,9 +275,7 @@ class TestATupleSlotReachesTheCalleeThatUnpacksIt:
             ),
             "Attention": _structure(
                 forward_step_boundary_arg_params={
-                    "@positional_l10_apply_rotary": {
-                        "cos": ("position_embeddings", 0)
-                    }
+                    "@positional_l10_apply_rotary": {"cos": ("position_embeddings", 0)}
                 }
             ),
         }
@@ -306,9 +306,7 @@ class TestATupleSlotReachesTheCalleeThatUnpacksIt:
             ),
             "Attention": _structure(
                 forward_step_boundary_arg_params={
-                    "@positional_l10_apply_rotary": {
-                        "cos": ("position_embeddings", 0)
-                    }
+                    "@positional_l10_apply_rotary": {"cos": ("position_embeddings", 0)}
                 }
             ),
             "Rotary": _structure(

@@ -1119,7 +1119,7 @@ def test_the_exporter_reads_the_engine_checkout_for_each_phase(monkeypatch):
 
 
 def test_the_exporter_attaches_the_engine_facts_once(monkeypatch):
-    from TraceLens.ModelUtils.graph_schedule import GraphModel
+    from TraceLens.TreePerf.graph_schedule import GraphModel
 
     calls = []
     monkeypatch.setattr(
@@ -1158,7 +1158,7 @@ def test_the_exporter_takes_the_graph_buckets_from_the_replays_when_the_config_h
 ):
     from dataclasses import replace
 
-    from TraceLens.ModelUtils.graph_schedule import GraphModel
+    from TraceLens.TreePerf.graph_schedule import GraphModel
 
     monkeypatch.setattr(
         "TraceLens.ModelUtils.engine_facts.load_engine_facts",

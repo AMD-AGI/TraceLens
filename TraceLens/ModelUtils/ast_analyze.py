@@ -6520,6 +6520,7 @@ def _rendered_dim_expr(expr: ast.AST, param_values: dict[str, Any] | None) -> st
             return str(value)
     return ast.unparse(expr)
 
+
 # How far ``_extent_source_producers`` chases a generator bound through
 # intermediate host-scalar locals (``n_windows = compressed.shape[1] //
 # self.block`` is two hops). Bounded so a self-referential or deeply chained
@@ -6855,9 +6856,7 @@ def _nested_call_param_values(
             continue
         if line is not None and node.lineno != line:
             continue
-        return _bound_call_param_values(
-            callee, node, caller_values, self_values
-        )
+        return _bound_call_param_values(callee, node, caller_values, self_values)
     return None
 
 

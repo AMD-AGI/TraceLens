@@ -2603,10 +2603,7 @@ class ShapeInferencer:
                     ).get(base_submodule_attr(self._frame_attr(frame))) or {}
                     mapping = boundary.get(name)
                     parent = self._parent_frame(frame, root)
-                    if (
-                        isinstance(mapping, tuple)
-                        and parent is not None
-                    ):
+                    if isinstance(mapping, tuple) and parent is not None:
                         origin, ordinal = mapping
                         source = self._slot_producer_node(
                             parent,
@@ -2803,8 +2800,7 @@ class ShapeInferencer:
                     getattr(structure, "forward_step_predecessor_args", None) or {}
                 ).get(call_attr) or {}
                 boundary = (
-                    getattr(structure, "forward_step_boundary_arg_params", None)
-                    or {}
+                    getattr(structure, "forward_step_boundary_arg_params", None) or {}
                 ).get(call_attr) or {}
         if not arguments and not boundary:
             return {}
@@ -2888,9 +2884,7 @@ class ShapeInferencer:
         registry = getattr(self.spec, "class_registry", None) or {}
         found: list[tuple[str, Any]] = []
         for name, structure in registry.items():
-            arguments = (
-                getattr(structure, "forward_step_predecessor_args", None) or {}
-            )
+            arguments = getattr(structure, "forward_step_predecessor_args", None) or {}
             boundary = (
                 getattr(structure, "forward_step_boundary_arg_params", None) or {}
             )
@@ -3002,9 +2996,7 @@ class ShapeInferencer:
             callee_name or ""
         )
         slots = getattr(callee, "forward_return_slots", None) or {}
-        order = list(getattr(callee, "forward_return_order", None) or []) or list(
-            slots
-        )
+        order = list(getattr(callee, "forward_return_order", None) or []) or list(slots)
         if not 0 <= ordinal < len(order):
             return None
         internal = slots.get(order[ordinal])
@@ -3019,7 +3011,9 @@ class ShapeInferencer:
             return next(iter(hits))
         return None
 
-    def _argument_producer(self, structure: Any, call_attr: str, parameter: str) -> str | None:
+    def _argument_producer(
+        self, structure: Any, call_attr: str, parameter: str
+    ) -> str | None:
         """What the call passes for ``parameter``.
 
         A tensor computed in the caller is named in ``predecessor_args``. A
@@ -3080,9 +3074,7 @@ class ShapeInferencer:
         slot = ordinals.get(parameter, ordinal)
         if is_method_input(producer):
             forwarded = method_input_param(producer) or parameter
-            return self._parameter_slot_shape(
-                parent, forwarded, slot, root, seen=seen
-            )
+            return self._parameter_slot_shape(parent, forwarded, slot, root, seen=seen)
         producer_attr = base_submodule_attr(str(producer))
         if isinstance(slot, int):
             recorded = self._frame_slot_shapes.get((parent, producer_attr, slot))
@@ -3144,9 +3136,7 @@ class ShapeInferencer:
             )
             if 0 <= slot < len(order):
                 step_attr = slots.get(order[slot])
-        return self._producer_node(
-            parent, producer_attr, step_attr, root, producers
-        )
+        return self._producer_node(parent, producer_attr, step_attr, root, producers)
 
     def _producer_node(
         self,
@@ -8743,9 +8733,7 @@ def _collect_init_scalar_attrs(
                         # to stay visible so a later ``int(head * factor)`` can
                         # truncate it. Only a whole number is a dimension.
                         local_vars[target.id] = resolved
-                    elif isinstance(target, _pyast.Attribute) and _is_self_attr(
-                        target
-                    ):
+                    elif isinstance(target, _pyast.Attribute) and _is_self_attr(target):
                         local_vars[target.attr] = resolved
                         if isinstance(resolved, int):
                             extra.setdefault(target.attr, resolved)
@@ -9477,7 +9465,11 @@ def _eval_config_condition(
     ):
         return _eval_config_condition(test.left, config=config, local_vars=local_vars)
     # ``self.rope_type != "default"`` — a string the checkpoint actually stores.
-    if isinstance(test, ast.Compare) and len(test.ops) == 1 and len(test.comparators) == 1:
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and len(test.comparators) == 1
+    ):
         left = _config_literal(test.left, config, local_vars)
         right = _config_literal(test.comparators[0], config, local_vars)
         if left is not None and right is not None:

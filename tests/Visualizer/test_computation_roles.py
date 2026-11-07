@@ -126,7 +126,11 @@ def test_a_boundary_port_carries_the_walk_between_frames():
     for node in nodes:
         if node["id"] == "softmax":
             node["incomingEdges"] = [
-                {"sourceNodeId": "port", "sourceNodeOutputId": "0", "targetNodeInputId": "0"}
+                {
+                    "sourceNodeId": "port",
+                    "sourceNodeOutputId": "0",
+                    "targetNodeInputId": "0",
+                }
             ]
     core = attention_core_ids(nodes)
     assert {"scores", "masked", "softmax", "values"} <= core

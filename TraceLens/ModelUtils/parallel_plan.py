@@ -28,8 +28,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import torch
-
 _log = logging.getLogger(__name__)
 
 # What each Hugging Face parallel style does to the activation. The mesh the
@@ -1072,6 +1070,8 @@ def _dtype_bytes(dtype: str | None) -> int | None:
     table of numbers that can drift from what the installed torch build does."""
     if not dtype:
         return None
+    import torch
+
     key = dtype.lower()
     key = _DTYPE_ALIASES.get(key, key)
     torch_dtype = getattr(torch, key, None)

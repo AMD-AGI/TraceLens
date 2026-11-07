@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Launch list of a DeepSeek-V4 graph, with the input shapes of each launch.
+"""TreePerf launch list of a DeepSeek-V4 graph, with the input shapes of each launch.
 
 A replayed graph is one run of the SGLang DeepSeek-V4 forward at one token
 count. That forward is one attention block and one MoE block per layer. The

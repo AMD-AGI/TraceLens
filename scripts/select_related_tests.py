@@ -83,21 +83,37 @@ class _ImportCollector(ast.NodeVisitor):
     def __init__(self, package):
         self.package = package
         self.imports = set()
+        self.module_imports = set()
         self.paths = set()
+        self._function_depth = 0
 
     def visit_Import(self, node):
         for alias in node.names:
             self.imports.add(alias.name)
+            if self._function_depth == 0:
+                self.module_imports.add(alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
         base = _relative_module(self.package, node.level, node.module)
         if base:
             self.imports.add(base)
+            if self._function_depth == 0:
+                self.module_imports.add(base)
             for alias in node.names:
                 if alias.name != "*":
-                    self.imports.add(f"{base}.{alias.name}")
+                    imported = f"{base}.{alias.name}"
+                    self.imports.add(imported)
+                    if self._function_depth == 0:
+                        self.module_imports.add(imported)
         self.generic_visit(node)
+
+    def visit_FunctionDef(self, node):
+        self._function_depth += 1
+        self.generic_visit(node)
+        self._function_depth -= 1
+
+    visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_If(self, node):
         # Typing-only imports are not executed at collection time.
@@ -110,6 +126,8 @@ class _ImportCollector(ast.NodeVisitor):
             arg = node.args[0]
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 self.imports.add(arg.value)
+                if self._function_depth == 0:
+                    self.module_imports.add(arg.value)
         suffix = _path_join_suffix(node)
         if suffix:
             self.paths.add(suffix)
@@ -156,11 +174,15 @@ def select_related_tests(repo_root, changed_paths):
             modules.setdefault(name, path)
             aliases.setdefault(name, name)
 
-    imports, path_literals = _parse_imports(root, py_files, modules)
+    imports, module_imports, path_literals = _parse_imports(root, py_files, modules)
     resolved = {
         module: _resolve_imports(names, aliases) for module, names in imports.items()
     }
-    if _touches_package_import_cone(changed, modules, resolved):
+    module_resolved = {
+        module: _resolve_imports(names, aliases)
+        for module, names in module_imports.items()
+    }
+    if _touches_package_import_cone(changed, modules, module_resolved):
         return Selection("all", ())
 
     dependents = _dependents(resolved, modules)
@@ -379,6 +401,7 @@ def _py_in_dir(root, directory):
 
 def _parse_imports(root, py_files, modules):
     imports = {}
+    module_imports = {}
     path_literals = {}
     alias_of = _alias_map(modules)
     for rel in py_files:
@@ -398,8 +421,9 @@ def _parse_imports(root, py_files, modules):
         )
         collector.visit(tree)
         imports[canonical] = collector.imports
+        module_imports[canonical] = collector.module_imports
         path_literals[canonical] = collector.paths
-    return imports, path_literals
+    return imports, module_imports, path_literals
 
 
 def _resolve_imports(names, aliases):

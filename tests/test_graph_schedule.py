@@ -10,7 +10,7 @@ from dataclasses import replace
 
 from types import SimpleNamespace
 
-from TraceLens.ModelUtils.graph_schedule import (
+from TraceLens.TreePerf.graph_schedule import (
     GraphModel,
     Invocation,
     align_kernels,
@@ -501,7 +501,7 @@ def test_fused_wqkv_a_projects_q_lora_and_the_kv_head_together():
 
 def test_graph_launch_arguments_drive_the_roofline():
     """The captured call's dtype and stride record is what the roofline reads."""
-    from TraceLens.ModelUtils.graph_schedule import launch_arguments
+    from TraceLens.TreePerf.graph_schedule import launch_arguments
     from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
         moe_flydsl_stage1,
     )
@@ -670,7 +670,7 @@ def _moe_device(**facts):
 
 
 def test_aiter_pads_tokens_to_the_table_key():
-    from TraceLens.ModelUtils.graph_schedule import _padded_moe_tokens
+    from TraceLens.TreePerf.graph_schedule import _padded_moe_tokens
 
     tiers = (32768, 131072)
     assert [_padded_moe_tokens(n, tiers) for n in (1, 2, 3, 4, 5, 1000)] == [
@@ -805,7 +805,7 @@ def test_metadata_copies_record_the_engine_dtype_and_stride():
     copies int32 to int32. The plan column is the int32 view of the uint8
     DecodePlan, and a one-row column keeps that step through ``.to(int64)``.
     """
-    from TraceLens.ModelUtils.graph_schedule import launch_arguments
+    from TraceLens.TreePerf.graph_schedule import launch_arguments
 
     records = [
         launch_arguments(item) for item in _prep(_pooled()) if item.key == "copy"
@@ -867,7 +867,7 @@ def test_metadata_copies_record_the_engine_dtype_and_stride():
 
 
 def test_the_repeat_and_the_logits_gather_keep_their_view_strides():
-    from TraceLens.ModelUtils.graph_schedule import launch_arguments
+    from TraceLens.TreePerf.graph_schedule import launch_arguments
 
     launches = _decode_launches(_pro(), tokens=4)
     expand = next(item for item in launches if item.key == "copy")
@@ -900,7 +900,7 @@ def test_the_fp4_write_metadata_chain_exists_only_with_an_indexer_layer():
 
 
 def test_copies_match_a_memcpy_and_an_elementwise_kernel():
-    from TraceLens.ModelUtils.graph_schedule import _matches
+    from TraceLens.TreePerf.graph_schedule import _matches
 
     assert _matches("__amd_rocclr_copyBuffer", "copy")
     assert _matches("void at::native::direct_copy_kernel_cuda(...)", "copy")
@@ -931,7 +931,7 @@ def test_the_logits_gather_copy_needs_more_than_one_token():
 
 
 def test_a_dropped_tuned_row_gives_way_to_the_atomic_flydsl_fallback():
-    from TraceLens.ModelUtils.graph_schedule import _moe_dispatch
+    from TraceLens.TreePerf.graph_schedule import _moe_dispatch
 
     device = _moe_device()
     model = replace(device)
@@ -946,7 +946,7 @@ def test_a_dropped_tuned_row_gives_way_to_the_atomic_flydsl_fallback():
 
 
 def test_a_scan_with_a_state_kernel_and_a_gemm_with_a_split_reduction_align():
-    from TraceLens.ModelUtils.graph_schedule import Launch, align_kernels
+    from TraceLens.TreePerf.graph_schedule import Launch, align_kernels
 
     scan = Launch("aten::cumsum", "t_scan", ((4,), (), ()), None)
     mm = Launch("aten::mm", "tensile", ((4, 4), (4, 4)), 0)
@@ -960,7 +960,7 @@ def test_a_scan_with_a_state_kernel_and_a_gemm_with_a_split_reduction_align():
 
 
 def test_the_prefill_graph_ends_with_the_norm_and_both_output_copies():
-    from TraceLens.ModelUtils.graph_schedule import Invocation, schedule_deepseek_v4
+    from TraceLens.TreePerf.graph_schedule import Invocation, schedule_deepseek_v4
 
     model = _pro()
     launches = schedule_deepseek_v4(

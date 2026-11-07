@@ -25,7 +25,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
-from ..ModelUtils.graph_schedule import (
+from .graph_schedule import (
     align_kernels,
     covering_annotation,
     invocation_from_annotation,

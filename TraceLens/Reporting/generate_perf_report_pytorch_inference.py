@@ -38,7 +38,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     CaptureAnnotation,
     filename_request_bs,
 )
-from TraceLens.ModelUtils.graph_schedule import graph_model_from_config
+from TraceLens.TreePerf.graph_schedule import graph_model_from_config
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
@@ -599,7 +599,7 @@ def _inference_engine(events) -> Optional[str]:
 
 
 def _annotated_phases(events) -> set[str]:
-    from TraceLens.ModelUtils.graph_schedule import invocation_from_annotation
+    from TraceLens.TreePerf.graph_schedule import invocation_from_annotation
 
     phases: set[str] = set()
     for event in events:
