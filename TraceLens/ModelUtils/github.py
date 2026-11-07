@@ -206,6 +206,48 @@ def fetch_github_file(
     return cache_file
 
 
+def list_github_files(
+    ref: GitHubRef,
+    pattern: str,
+    *,
+    cache_root: Path | None = None,
+    source_policy=None,
+) -> list[str]:
+    """Paths in the repo at this ref that match the regular expression ``pattern``.
+
+    The listing is one request to the git trees API and is cached with the
+    files. An unreachable listing is an empty one.
+    """
+    import json
+
+    from TraceLens.ModelUtils.source_policy import SourcePolicy, get_source_policy
+
+    policy = source_policy or get_source_policy()
+    if isinstance(policy, SourcePolicy):
+        policy.require_github_repo_allowed(ref.owner, ref.repo)
+
+    cache_file = cached_file_path(ref, "_tree.json", cache_root=cache_root)
+    if cache_file.is_file():
+        paths = json.loads(cache_file.read_text(encoding="utf-8"))
+    else:
+        url = (
+            f"https://api.github.com/repos/{ref.owner}/{ref.repo}"
+            f"/git/trees/{ref.ref}?recursive=1"
+        )
+        try:
+            tree = json.loads(_download_bytes(url))
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError):
+            return []
+        paths = [
+            item["path"] for item in tree.get("tree", []) if item["type"] == "blob"
+        ]
+        if tree.get("truncated"):
+            return [path for path in paths if re.search(pattern, path)]
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(paths), encoding="utf-8")
+    return [path for path in paths if re.search(pattern, path)]
+
+
 # Repos whose source answers for a module the analysed model imports, as
 # (ref, prefix) where *prefix* is the path under which the repo lays out its
 # top-level packages (`src` for transformers). One entry per model analysed.

@@ -15,6 +15,7 @@ import pprint
 # TODO: warning should show the stack as well
 import warnings
 from collections import defaultdict
+from dataclasses import replace
 from functools import partial
 from typing import Any, Callable, Dict
 
@@ -24,10 +25,21 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
+from .graph_schedule import (
+    align_kernels,
+    covering_annotation,
+    invocation_from_annotation,
+    launch_arguments,
+    launches_from_architecture,
+    num_cus_from_trace,
+    schedule_deepseek_v4,
+)
 from ..PerfModel.torch_op_mapping import (
+    OP_CATEGORY_REGISTRY,
     categorize_torch_op,
     get_perf_model_category,
     op_to_perf_model_class_map,
+    registered_op_for_kernel,
     resolve_perf_model_class,
 )
 from ..Trace2Tree.extensions import apply_pseudo_op_extensions
@@ -67,6 +79,15 @@ UNIQUE_ARGS_GROUPING_COLS = (
 )
 # Prefix of the perf-model parameter columns that roofline sheets group by.
 PERF_PARAM_PREFIX = "param: "
+
+
+def _by_time_then_uid(event):
+    """Order events by start time, then UID.
+
+    Several kernels in one launch can share a timestamp. UID is the stable
+    tie break; timestamp order alone follows whatever order the walk produced.
+    """
+    return (event.get("ts") or 0, event.get("UID") or 0)
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -284,6 +305,7 @@ class TreePerfAnalyzer:
         metadata_events=None,
         kernel_metadata_keyword_filters=None,
         enable_origami_sdpa_tile=False,
+        graph_model=None,
     ):
         self.jax = jax
         self.GPUEventAnalyser = GPUEventAnalyser if not jax else JaxGPUEventAnalyser
@@ -308,6 +330,17 @@ class TreePerfAnalyzer:
         self.arch = arch
         self.enable_origami_gemm = enable_origami_gemm
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
+        # When set, each replayed graph is one run of this model. Its kernels
+        # are paired, in order, with that run's launches and take their shapes.
+        # The trace's device block records the compute-unit count. The
+        # architecture table is only the fallback when that field is absent.
+        recorded_cus = num_cus_from_trace(self.trace_metadata)
+        if graph_model is not None and recorded_cus:
+            graph_model = replace(graph_model, num_cus=recorded_cus)
+        self.graph_model = graph_model
+        # Engine modeling specs, keyed by "decode" / "prefill". The exporter
+        # fills this from the pinned checkout. Empty leaves the config schedule.
+        self.architectures = {}
         self.op_projections = default_op_projections(
             enable_origami_gemm, enable_origami_sdpa_tile
         )
@@ -489,7 +522,7 @@ class TreePerfAnalyzer:
                 "stream": kernel.get("args", {}).get("stream", None),
                 "gpu_op_uid": kernel.get("UID"),
             }
-            for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
+            for kernel in sorted(list_kernels, key=_by_time_then_uid)
         ]
         filtered_busy_times = {
             label: self._busy_time(self._kernels_under(cpu_op_list, keep_kernel))
@@ -740,6 +773,10 @@ class TreePerfAnalyzer:
             groupby_cols.append("is_recompute")
         for col in param_cols:
             df_perf_metrics[col] = df_perf_metrics[col].astype(str)
+        # UID_first is the first row in the group. Sort so it is the smallest
+        # UID, not whichever row the tree walk happened to emit first.
+        if "UID" in df_perf_metrics.columns:
+            df_perf_metrics = df_perf_metrics.sort_values("UID", kind="mergesort")
         # TODO warn user if nans in the performance metrics
         # Perform the aggregation
         df_perf_metrics_summary = df_perf_metrics.groupby(
@@ -939,7 +976,7 @@ class TreePerfAnalyzer:
         # Sort launcher UIDs by the start time of their events
         sorted_launcher_uids = sorted(
             launcher_to_kernels.keys(),
-            key=lambda uid: self.tree.get_UID2event(uid).get("ts", 0),
+            key=lambda uid: _by_time_then_uid(self.tree.get_UID2event(uid)),
         )
 
         events_by_uid = self.tree.events_by_uid
@@ -967,7 +1004,7 @@ class TreePerfAnalyzer:
                     "dur": kernel["dur"],
                     "stream": kernel.get("args", {}).get("stream", None),
                 }
-                for kernel in sorted(kernels, key=lambda k: k.get("ts", 0))
+                for kernel in sorted(kernels, key=_by_time_then_uid)
             ]
             event["op category"] = self.op_categorizer(event)
             self._compute_overlap_info(event, kernels)
@@ -977,11 +1014,12 @@ class TreePerfAnalyzer:
 
     def _compute_overlap_info(self, event, kernels):
         """Set overlap_pct, overlapping_kernel_names, overlapping_kernels_details on event."""
+        kernels = sorted(kernels, key=_by_time_then_uid)
         event["overlapping_kernel_names"] = list(
             dict.fromkeys(
                 self.tree.get_UID2event(uid).get("name", None)
                 for kernel in kernels
-                for uid in kernel.get("overlapping_uids", set())
+                for uid in sorted(kernel.get("overlapping_uids") or ())
             )
         )
         total_kernel_runtime = (
@@ -995,7 +1033,7 @@ class TreePerfAnalyzer:
 
         overlapping_details = []
         for kernel in kernels:
-            for uid in kernel.get("overlapping_uids", set()):
+            for uid in sorted(kernel.get("overlapping_uids") or ()):
                 ov_event = self.tree.get_UID2event(uid)
                 overlap_start = max(kernel["ts"], ov_event.get("ts", 0))
                 overlap_end = min(kernel["t_end"], ov_event.get("t_end", 0))
@@ -1040,7 +1078,7 @@ class TreePerfAnalyzer:
             total_overlap_time = 0
             for kernel in kernels:
                 ov_intervals = []
-                for uid in kernel.get("overlapping_uids", set()):
+                for uid in sorted(kernel.get("overlapping_uids") or ()):
                     ov_evt = self.tree.get_UID2event(uid)
                     os = max(kernel["ts"], ov_evt.get("ts", 0))
                     oe = min(kernel["t_end"], ov_evt.get("t_end", 0))
@@ -1776,6 +1814,59 @@ class TreePerfAnalyzer:
                 return True
         return False
 
+    def _annotation_for(self, event):
+        """The step annotation whose span contains ``event``."""
+        steps = getattr(self, "_step_events", None)
+        if steps is None:
+            steps = [
+                candidate
+                for candidate in self.tree.events
+                if "step[" in (candidate.get("name") or "")
+            ]
+            self._step_events = steps
+        return covering_annotation(steps, event)
+
+    def _launches_for(self, event):
+        """The model's launch list for the invocation that replays ``event``.
+
+        Only a graph launch has that list. The step annotation that contains
+        the launch supplies the batch and the sequence length.
+        """
+        if self.graph_model is None:
+            return None
+        if event.get("name") not in ("hipGraphLaunch", "cudaGraphLaunch"):
+            return None
+        name = self._annotation_for(event)
+        if name is None:
+            return None
+        invocation = invocation_from_annotation(name)
+        if invocation is None:
+            return None
+        cache = getattr(self, "_launch_cache", None)
+        if cache is None:
+            cache = {}
+            self._launch_cache = cache
+        key = (
+            invocation.batch_size,
+            invocation.seq_len,
+            invocation.past_len,
+            invocation.tokens,
+        )
+        schedule = cache.get(key)
+        if schedule is None:
+            phase = "prefill" if invocation.prefill else "decode"
+            spec = getattr(self, "architectures", {}).get(phase)
+            introspected = (
+                launches_from_architecture(spec, self.graph_model, invocation)
+                if spec is not None
+                else None
+            )
+            schedule = introspected or schedule_deepseek_v4(
+                self.graph_model, invocation
+            )
+            cache[key] = schedule
+        return schedule
+
     def collect_unified_perf_events(self, include_nccl=False):
         """
         Traverse the trace tree and collect events for unified perf analysis.
@@ -1802,10 +1893,27 @@ class TreePerfAnalyzer:
         next_uid = max(self.tree.events_by_uid.keys()) + 1
         _GPU = frozenset(c.value for c in TraceEventUtils.GpuEventCategories)
 
-        def _create_synthetic_op(prefix_name, kernel, cpu_op):
-            """Append one '<prefix_name>-><kernel> (Synthetic Op)' row owning
-            `kernel`, inheriting shape args from `cpu_op` (the enclosing cpu_op,
-            or the launcher when there is no cpu_op on the path)."""
+        def _emit_synthetic_kernels(prefix_name, kernels, cpu_op):
+            """Emit one row per kernel. A graph launch with a model schedule
+            pairs each kernel with the launch at that position."""
+            ordered = sorted(kernels, key=_by_time_then_uid)
+            launches = (
+                self._launches_for(cpu_op) if self.graph_model is not None else None
+            )
+            assigned = (
+                align_kernels([kernel.get("name", "") for kernel in ordered], launches)
+                if launches
+                else [None] * len(ordered)
+            )
+            for kernel, launch in zip(ordered, assigned):
+                _create_synthetic_op(prefix_name, kernel, cpu_op, launch)
+
+        def _create_synthetic_op(prefix_name, kernel, cpu_op, launch=None):
+            """Append one row owning `kernel`, inheriting shape args from
+            `cpu_op` (the enclosing cpu_op, or the launcher when there is no
+            cpu_op on the path). A kernel that identifies a registered op is
+            named as that op; otherwise the row is
+            '<prefix_name>-><kernel> (Synthetic Op)'."""
             nonlocal next_uid
             if not include_nccl and TraceEventUtils.is_communication_string(
                 kernel.get("name", "")
@@ -1814,8 +1922,42 @@ class TreePerfAnalyzer:
             synthetic_op = dict(cpu_op)
             synthetic_op["UID"] = next_uid
             next_uid += 1
-            synthetic_op["name"] = f"{prefix_name}->{kernel['name']} (Synthetic Op)"
+            # Name the row as the registered op the kernel identifies, which is
+            # the CPU op a capture merge would have reparented this kernel onto.
+            # An unmatched kernel stays a synthetic launch row.
+            registered = registered_op_for_kernel(
+                kernel.get("name", ""), OP_CATEGORY_REGISTRY
+            )
+            if launch is not None:
+                # The kernel is this launch of the model forward. The row is
+                # that op, with the dims, dtypes and strides a captured call
+                # of it would carry. Copy args so the launch event keeps its own.
+                synthetic_op["name"] = launch.op_name
+                synthetic_op["args"] = dict(cpu_op.get("args") or {})
+                synthetic_op["args"].update(launch_arguments(launch))
+                annotation = self._annotation_for(cpu_op)
+                if annotation:
+                    synthetic_op["annotation"] = annotation
+            elif registered is not None:
+                synthetic_op["name"] = registered
+            else:
+                synthetic_op["name"] = f"{prefix_name}->{kernel['name']} (Synthetic Op)"
             synthetic_op["gpu_events"] = [kernel["UID"]]
+            # The copy shares the launch's kernel list. This row owns one
+            # kernel, the same way a capture merge attaches one replay kernel
+            # to one CPU op. Categorizing from the launch's first kernel would
+            # label every kernel in the graph with that first kernel's category.
+            synthetic_op.pop("op category", None)
+            # The row's subtree is its own kernel. Perf-modeled rows time their
+            # subtree, so an empty children list reads as zero kernel time.
+            synthetic_op["children"] = [kernel["UID"]]
+            synthetic_op["kernel_details"] = [
+                {
+                    "name": kernel.get("name", ""),
+                    "dur": kernel.get("dur"),
+                    "stream": (kernel.get("args") or {}).get("stream"),
+                }
+            ]
             # Seed an empty base; build_df's per-kernel suffix walk reconstructs
             # the full root->kernel chain (the fresh UID never matches, so it
             # climbs all the way to the root).
@@ -1849,8 +1991,7 @@ class TreePerfAnalyzer:
             for child_uid in event.get("children", []):
                 traverse(child_uid, call_stack, child_nearest_cpu_op)
             if is_cpu_op:
-                for kernel in _direct_kernels(event):
-                    _create_synthetic_op(event["name"], kernel, event)
+                _emit_synthetic_kernels(event["name"], _direct_kernels(event), event)
 
         def traverse(event_uid, call_stack=None, nearest_cpu_op=None):
             if event_uid in visited:
@@ -1910,10 +2051,13 @@ class TreePerfAnalyzer:
             # "<launcher>-><kernel> (Synthetic Op)" row per directly-launched
             # kernel, then recurse to reach any deeper launchers.
             if child_nearest_cpu_op is None:
+                direct = []
                 for child_uid in event.get("children", []):
                     child = self.tree.get_UID2event(child_uid)
                     if child and self.event_to_category(child) in _GPU:
-                        _create_synthetic_op(event["name"], child, event)
+                        direct.append(child)
+                if direct:
+                    _emit_synthetic_kernels(event["name"], direct, event)
 
             # Non-leaf with GPU work but no perf model: recurse for finer ops
             # (and emit own-kernel synthetic ops if this is a cpu_op).
@@ -2367,6 +2511,12 @@ class TreePerfAnalyzer:
 
         if "has_perf_model" in df_temp.columns:
             agg_dict["has_perf_model"] = "first"
+
+        # ex_UID is UID_first. Sort so that is the smallest UID in the group.
+        # The tree walk's row order is not a stable choice, and equal kernel
+        # times are then ordered by this value.
+        if "UID" in df_temp.columns:
+            df_temp = df_temp.sort_values("UID", kind="mergesort")
 
         # Group and aggregate
         df_summary = df_temp.groupby(str_col_names, dropna=False, sort=False).agg(

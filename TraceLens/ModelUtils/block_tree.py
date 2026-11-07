@@ -55,6 +55,7 @@ from TraceLens.ModelUtils.ast_analyze import (
 )
 from TraceLens.ModelUtils.basic_ops import (
     BasicOpFilter,
+    forward_is_grouped_expert_kernel,
     resolve_is_basic,
 )
 from TraceLens.ModelUtils.blocks import (
@@ -218,6 +219,32 @@ def _substitute_single_op_subgraph(
     if input_source == substitute.input_source:
         return substitute
     return _clone_block_node(substitute, input_source=input_source)
+
+
+def collapse_grouped_expert_leaves(
+    node: BlockNode,
+    registry: dict[str, Any],
+    basic_ops: BasicOpFilter,
+) -> None:
+    """Turn a grouped-expert forward into the leaf the roofline filter asked for.
+
+    Variant subtrees are built while the spec's leaf filter is still the detailed
+    one, and the merge prefers those prebuilt trees over the later roofline
+    export trees. Collapsing here is what makes ``stop_at_roofline_ops`` reach
+    the layer that is actually drawn.
+    """
+    if not basic_ops.stops_at_grouped_moe:
+        return
+    registered = registry.get(node.class_name or "")
+    if forward_is_grouped_expert_kernel(
+        node.class_name or "",
+        registered.node if registered is not None else None,
+    ):
+        node.children.clear()
+        node.is_basic = True
+        return
+    for child in list(node.children):
+        collapse_grouped_expert_leaves(child, registry, basic_ops)
 
 
 def expand_block_tree_inplace(
@@ -817,7 +844,11 @@ def _label_for_call(
     if attr_name == SYNTHETIC_ATTENTION:
         return "Attention kernel"
     if displays_as_linear(attr_name, class_name):
-        return "Linear"
+        # ``VocabParallelEmbedding`` is in the engine linear-style table so its
+        # vocabulary shard is planned, but the op is a lookup. ``_label_for``
+        # names that lookup; only a real projection is ``Linear``.
+        if _classify_role(attr_name, class_name or "") != "embedding":
+            return "Linear"
     if class_name:
         role = _classify_role(attr_name, class_name)
         return _label_for(role, class_name, attr_name, classes)
@@ -2380,6 +2411,20 @@ def build_block_node(
     role = _classify_role(attr_name, class_name)
     label = _label_for_call(attr_name, class_name, registry)
 
+    if displays_as_linear(attr_name, class_name) and role != "embedding":
+        # An engine linear, including ``ParallelLMHead``, is a GEMM even when
+        # its class inherits an embedding ``forward``. Opening that forward
+        # would draw a lookup. The projection is the leaf. ``VocabParallelEmbedding``
+        # shares that linear-style table for sharding, but its role is the
+        # lookup, so its forward is walked instead.
+        return _leaf_node(
+            attr_name=attr_name,
+            class_name=class_name,
+            forward_order=forward_order,
+            details=details,
+            label="Linear",
+        )
+
     # A gated norm whose class lives in the registry (its forward is available)
     # carries a generically-resolved gate activation; surface it as the tagged
     # detail so a leaf-rendered gated norm reports its activation without any
@@ -2416,6 +2461,21 @@ def build_block_node(
             label=kernel_step_label(step_details) or "Kernel",
             details=attention_kernel_details(step_details),
             basic=False,
+        )
+
+    # GroupedGemm costs this whole forward. Opening it redraws the expert loop
+    # as ordinary GEMMs and the projection then has no MoE category to attach
+    # a fused MoE kernel to. Same rule as the roofline leaf list: stop where
+    # the PerfModel formula starts.
+    registered = registry.get(class_name)
+    if basic_ops.stops_at_grouped_moe and forward_is_grouped_expert_kernel(
+        class_name, registered.node if registered is not None else None
+    ):
+        return _leaf_node(
+            attr_name=attr_name,
+            class_name=class_name,
+            forward_order=forward_order,
+            details=details,
         )
 
     if resolve_is_basic(

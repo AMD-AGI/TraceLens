@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from math import ceil
 from pathlib import Path
 
 import pytest
@@ -32,8 +33,10 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _attr_text,
     _classify_normalization,
     _conv_cost,
+    _apply_expert_routing,
     _dispatch_op_cost,
     _embedding_lookup_cost,
+    _expert_loop_multiplier,
     _is_leaf_computation,
     _parse_conv_details,
     _engine_boundary_cost,
@@ -41,6 +44,8 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _introspect_weight_bpe,
     _finish_op,
     _graph_contains_draft,
+    _mla_attention_ops,
+    _moe_boundary_owns_routing,
     _moe_cost,
     _moe_extra_ops,
     _parse_op_node,
@@ -161,6 +166,14 @@ def test_resolve_dim_product_and_sum():
     assert resolve_dim("B*S", dims) == 20
     assert resolve_dim("past_len+S", dims) == 15
     assert resolve_dim("B*S+past_len", dims) == 25
+
+
+def test_resolve_dim_strips_spaces_around_operators():
+    # The graph writes ``S + n_windows`` and ``2 * ratio``. The spaces are part
+    # of the spelling, not of the symbol name.
+    dims = {"S": 4, "n_windows": 2, "ratio": 3}
+    assert resolve_dim("S + n_windows", dims) == 6
+    assert resolve_dim("2 * ratio", dims) == 6
 
 
 def test_resolve_dim_unresolved_symbol_raises():
@@ -739,7 +752,7 @@ def test_project_op_costs_an_embedding_lookup_as_gathered_rows():
         moe_intermediate_size=None,
     )
     assert op.modeled is True
-    assert op.category == "DataMovement"
+    assert op.category == "IndexedCopy"
     assert op.flops == 0
     # 8 tokens, hidden 8, bf16 rows read and written, plus int64 indices.
     assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
@@ -772,7 +785,7 @@ def test_project_op_costs_common_embedding_labels(computation):
         moe_intermediate_size=None,
     )
     assert op.modeled is True
-    assert op.category == "DataMovement"
+    assert op.category == "IndexedCopy"
     assert op.flops == 0
     assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
 
@@ -796,6 +809,133 @@ def test_project_op_costs_indexing_a_wider_tail_as_one_row():
     assert op.modeled is True
     assert op.flops == 0
     assert op.bytes == 2 * 8 * 32 * 2 + 8 * 8
+
+
+def test_project_op_costs_a_boolean_index_at_one_byte_per_element():
+    op = _project_op(
+        "m",
+        "idx",
+        "Indexing",
+        "Indexing",
+        "aten_op",
+        "[6, 2048] bool",
+        [["1"]],
+        {},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.category == "IndexedCopy"
+    assert op.flops == 0
+    # One index selects the whole mask row: read, write, and one int64 index.
+    assert op.bytes == 6 * 2048 * 1 * 2 + 1 * 8
+
+
+def test_project_op_costs_where_as_one_flop_per_output_at_the_output_dtype():
+    op = _project_op(
+        "w",
+        "w",
+        "Where",
+        "Where",
+        "aten_op",
+        "[nnz] int64",
+        [["8", "6"], ["nnz"]],
+        {"nnz": 4},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.category == "Where"
+    assert op.flops == 4
+    # Both inputs and the output are charged at int64, the output dtype.
+    assert op.bytes == (48 + 4 + 4) * 8
+
+
+def test_project_op_costs_index_add_as_a_scatter_into_updated_rows():
+    op = _project_op(
+        "a",
+        "a",
+        "Index add",
+        "Index add",
+        "aten_op",
+        "[16, 8] bfloat16",
+        [["16", "8"], ["4"], ["4", "8"]],
+        {},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.category == "IndexAdd"
+    # One add per source element. The other 12 rows of the accumulator stay put.
+    assert op.flops == 4 * 8
+    assert op.bytes == 4 * 8 * 2 * 3 + 4 * 8
+
+
+def test_expert_routing_costs_every_local_expert_at_the_mean(_reset_rt):
+    _RT.reset()
+    _RT.moe_top_k = 6
+    _RT.moe_num_experts = 288
+    _RT.ep = 4
+    _RT.routing_balance = 0.9
+    dims = {"B": 1, "S": 2048}
+    note = _apply_expert_routing(dims, None)
+    # 3072 assignments on this rank, 72 local experts, mean 42.666... -> 43.
+    assert dims["nnz"] == 43
+    assert note is not None
+    assert "72 local experts" in note
+    assert "43 tokens" in note
+    assert "not summed" in note
+    _RT.routing_balance = 0.5
+    again = {"B": 1, "S": 2048}
+    _apply_expert_routing(again, None)
+    assert again["nnz"] == 43
+    kept = {"B": 1, "S": 2048, "nnz": 7}
+    assert _apply_expert_routing(kept, {"nnz": 7}) is None
+    assert kept["nnz"] == 7
+
+
+def test_expert_loop_body_is_repeated_for_each_local_expert(_reset_rt):
+    _RT.reset()
+    _RT.moe_num_experts = 288
+    _RT.ep = 4
+    assert _expert_loop_multiplier("loop_iterations_288") == 72
+    assert _expert_loop_multiplier("loop_iterations_289") == 72
+    assert _expert_loop_multiplier("loop_iterations_72") == 72
+    assert _expert_loop_multiplier("loop_iterations_19") == 1
+    assert _expert_loop_multiplier("decoder/loop_iterations_288/_apply_gate") == 72
+    op = _project_op(
+        "n",
+        "loop_iterations_288",
+        "NotAKernel",
+        "NotAKernel",
+        "aten_op",
+        "[4] float32",
+        [],
+        {},
+        instances=2,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.instances == 2 * 72
+
+
+def test_routing_balance_rejects_a_fraction_outside_the_unit_interval():
+    with pytest.raises(ValueError):
+        project_roofline(object(), batch_size=1, seq_len=1, routing_balance=0)
+    with pytest.raises(ValueError):
+        project_roofline(object(), batch_size=1, seq_len=1, routing_balance=1.5)
+
+
+def test_routing_balance_defaults_to_90_percent():
+    args = roofline_cli.build_parser().parse_args(["--checkpoint", "unused"])
+    assert args.routing_balance == 0.9
 
 
 def test_project_op_leaves_a_general_gather_unmodeled():
@@ -986,7 +1126,7 @@ def test_project_roofline_fixture_coverage():
     assert rmsnorm_ops
 
     embed = next(op for op in projection.modeled_ops if op.name == "embed_tokens")
-    assert embed.category == "DataMovement"
+    assert embed.category == "IndexedCopy"
     assert embed.flops == 0
     assert embed.bytes > 0
 
@@ -1436,6 +1576,181 @@ def test_moe_role_is_costed_without_an_ffn_alias(_reset_rt):
         role="moe",
     )
     assert op.modeled and op.category == "MoE"
+
+
+def _score_matmul(**kwargs):
+    return _project_op(
+        "decoder/attn/scores",
+        "attn",
+        "MatMul",
+        "MatMul",
+        "torch_functional",
+        "[B, H, S, K] bfloat16",
+        [["B", "H", "S", "D"], ["B", "H", "D", "K"]],
+        {"B": 2, "H": 8, "S": 4, "D": 16, "K": 32},
+        instances=3,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+        **kwargs,
+    )
+
+
+def test_compress_ratios_keep_real_layers_and_drop_padding(_reset_rt):
+    from types import SimpleNamespace
+
+    spec = SimpleNamespace(
+        raw_config={
+            "compress_ratios": [128, 128, 4, 0, 0],
+            "sliding_window": 128,
+            "index_topk": 1024,
+        },
+        num_experts_per_tok=None,
+        moe_intermediate_size=None,
+        intermediate_size=None,
+        num_experts=None,
+        num_shared_experts=None,
+        num_attention_heads=128,
+        num_key_value_heads=1,
+        head_dim=512,
+        hidden_size=7168,
+        num_hidden_layers=3,
+        positional_encoding=None,
+        architectures=(),
+        model_type="deepseek_v4",
+        parallel_layout=None,
+    )
+    _populate_introspection(spec)
+    assert _RT.compress_ratios == (128, 128, 4)
+
+
+def test_mla_decode_uses_the_compressed_kv_span(_reset_rt):
+    # Two hierarchical layers (ratio 128) and one sparse layer (ratio 4). The
+    # sparse span caps the compressed slots at index_topk; the hierarchical
+    # span does not. Both use one latent KV head and the bf16 MLA byte model.
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        InferenceAttention,
+    )
+
+    _RT.reset()
+    _RT.compress_ratios = (128, 128, 4)
+    _RT.sliding_window = 128
+    _RT.index_topk = 1024
+    _RT.attn_heads = 128
+    _RT.attn_head_dim = 512
+    _RT.tp = 8
+    ops = _mla_attention_ops({"B": 3, "S": 1, "past_len": 28906}, "decode", None)
+    by_ratio = {op.name: op for op in ops}
+    assert set(by_ratio) == {"mla_ratio_4", "mla_ratio_128"}
+    sparse = by_ratio["mla_ratio_4"]
+    hierarchical = by_ratio["mla_ratio_128"]
+    assert sparse.instances == 1 and hierarchical.instances == 2
+    assert sparse.category == hierarchical.category == "Attention"
+    heads, width, queries = 16, 512, 3
+    sparse_span = 128 + 1024
+    hierarchical_span = 128 + ceil(28906 / 128)
+    assert sparse.flops == InferenceAttention.flops_func(
+        heads, width, width, 0, 0, queries * sparse_span
+    )
+    assert hierarchical.flops == InferenceAttention.flops_func(
+        heads, width, width, 0, 0, queries * hierarchical_span
+    )
+    assert sparse.bytes == InferenceAttention.bytes_func(
+        1, heads, 1, width, width, 0, 0, queries, queries * sparse_span, 2, 2
+    )
+    # A full-context SDPA over 128 heads would be far larger than one latent head.
+    assert sparse.flops < heads * 2 * queries * 28906 * width
+
+
+def test_mla_prefill_keeps_half_the_span(_reset_rt):
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        InferenceAttention,
+    )
+
+    _RT.reset()
+    _RT.compress_ratios = (4,)
+    _RT.sliding_window = 128
+    _RT.index_topk = 1024
+    _RT.attn_heads = 8
+    _RT.attn_head_dim = 64
+    _RT.tp = 1
+    ops = _mla_attention_ops({"B": 1, "S": 16}, "prefill", None)
+    assert len(ops) == 1
+    span = 128 + min(ceil(16 / 4), 1024)
+    attended = 16 * span
+    assert ops[0].flops == InferenceAttention.flops_func(
+        8, 64, 64, attended, attended, 0
+    )
+
+
+def test_a_matmul_read_as_attention_keeps_its_own_cost(_reset_rt):
+    _RT.reset()
+    plain = _score_matmul()
+    scored = _score_matmul(computation_role="attention")
+    assert plain.category == "GEMM"
+    assert scored.modeled and scored.category == "Attention"
+    # Only the family changes; the matmul's FLOPs and bytes do not.
+    assert scored.flops == plain.flops == 2 * (2 * 8 * 4) * 32 * 16
+    assert scored.bytes == plain.bytes
+    assert scored.instances == 3
+
+
+def test_a_step_of_attention_is_not_charged_the_whole_block(_reset_rt):
+    # The block formula prices the full SDPA for any ``attention`` role. A step
+    # read from its own computation must be priced as the one op it is.
+    _RT.reset()
+    _RT.attn_heads = 8
+    _RT.attn_head_dim = 16
+    block = _score_matmul(role="attention")
+    step = _score_matmul(computation_role="attention")
+    assert block.category == "Attention"
+    assert step.flops != block.flops
+    assert step.flops == 2 * (2 * 8 * 4) * 32 * 16
+
+
+def test_a_softmax_read_as_attention_runs_at_the_activation_precision(_reset_rt):
+    _RT.reset()
+    _RT.weight_bpe = 0.5  # FP4 checkpoint
+    gpu_arch = {
+        "mem_bw_gbps": 8000,
+        "max_achievable_tflops": {
+            "matrix_bf16": 1686,
+            "matrix_fp4": 5663,
+            "vector_bf16": 100,
+        },
+    }
+    op = _project_op(
+        "decoder/attn/scores",
+        "attn",
+        "MatMul",
+        "MatMul",
+        "torch_functional",
+        "[B, H, S, K] bfloat16",
+        [["B", "H", "S", "D"], ["B", "H", "D", "K"]],
+        {"B": 2, "H": 8, "S": 4, "D": 16, "K": 32},
+        instances=1,
+        gpu_arch=gpu_arch,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+        computation_role="attention",
+    )
+    gemm = _project_op(
+        "decoder/attn/scores",
+        "attn",
+        "MatMul",
+        "MatMul",
+        "torch_functional",
+        "[B, H, S, K] bfloat16",
+        [["B", "H", "S", "D"], ["B", "H", "D", "K"]],
+        {"B": 2, "H": 8, "S": 4, "D": 16, "K": 32},
+        instances=1,
+        gpu_arch=gpu_arch,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    # Two activations multiplied: no weight peak, whatever the checkpoint stores.
+    assert op.compute_spec == "matrix_bf16"
+    assert gemm.compute_spec == "matrix_fp4"
 
 
 def test_short_conv_leaf_uses_the_declared_kernel(_reset_rt):
@@ -2024,7 +2339,8 @@ def test_offline_draft_models_project_from_their_parsed_layers():
     )
     assert any(op.section.endswith("sliding_attention") for op in projected.ops)
     assert any(op.section.endswith("full_attention") for op in projected.ops)
-    assert projected.notes == []
+    assert projected.notes
+    assert all(note.startswith("Expert routing:") for note in projected.notes)
 
     nextn = load_architecture(
         FIXTURES / "sglang_nextn_like",
@@ -2040,3 +2356,141 @@ def test_offline_draft_models_project_from_their_parsed_layers():
     draft = [op for op in projected.ops if op.section.startswith("nextn")]
     assert draft and all(op.category != "MoE" for op in draft)
     assert any(op.category == "GEMM" for op in draft)
+
+
+_MOE_STOP_SOURCE = """
+class Linear(torch.nn.Module):
+    def __init__(self, in_features, out_features, bias=False):
+        pass
+
+    def forward(self, hidden_states):
+        return hidden_states
+
+
+class Experts(torch.nn.Module):
+    def __init__(self, config):
+        self.gate_up_proj = torch.nn.Parameter(torch.empty(4, 8, 8))
+        self.down_proj = torch.nn.Parameter(torch.empty(4, 8, 4))
+
+    def forward(self, hidden_states, top_k_index):
+        for expert_idx in top_k_index:
+            current = torch.nn.functional.linear(
+                hidden_states, self.gate_up_proj[expert_idx]
+            )
+            current = torch.nn.functional.linear(current, self.down_proj[expert_idx])
+        return hidden_states
+
+
+class Router(torch.nn.Module):
+    def __init__(self, config):
+        self.proj = Linear(8, 4)
+
+    def forward(self, hidden_states):
+        return self.proj(hidden_states)
+
+
+class SparseMoeBlock(torch.nn.Module):
+    def __init__(self, config):
+        self.gate = Router(config)
+        self.experts = Experts(config)
+
+    def forward(self, hidden_states):
+        indices = self.gate(hidden_states)
+        return self.experts(hidden_states, indices)
+
+
+class SharedExpertMoE(torch.nn.Module):
+    def __init__(self, config):
+        self.router = Linear(8, 4)
+        self.shared_expert = Linear(8, 8)
+
+    def forward(self, hidden_states):
+        return self.router(hidden_states) + self.shared_expert(hidden_states)
+
+
+class OneExpert(torch.nn.Module):
+    def __init__(self, config):
+        self.gate_proj = Linear(8, 8)
+        self.down_proj = Linear(8, 8)
+
+    def forward(self, hidden_states):
+        return self.down_proj(self.gate_proj(hidden_states))
+
+
+class PatternMoE(torch.nn.Module):
+    def __init__(self, config):
+        self.experts = OneExpert(config)
+
+    def forward(self, hidden_states):
+        mixed = hidden_states
+        for _index in range(4):
+            mixed = mixed + self.experts(hidden_states)
+        return mixed
+"""
+
+
+def _find_block(node, class_name):
+    if node.class_name == class_name:
+        return node
+    for child in node.children:
+        found = _find_block(child, class_name)
+        if found is not None:
+            return found
+    return None
+
+
+def test_roofline_stops_at_the_grouped_expert_forward():
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+    from TraceLens.ModelUtils.block_tree import build_block_node
+
+    analysis = analyze_source(_MOE_STOP_SOURCE, all_tensor_ops=True)
+    roofline = build_block_node(
+        attr_name="mlp",
+        class_name="SparseMoeBlock",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    experts = _find_block(roofline, "Experts")
+    assert experts is not None and experts.is_basic and not experts.children
+    assert _find_block(roofline, "Router") is not None
+
+    detailed = build_block_node(
+        attr_name="mlp",
+        class_name="SparseMoeBlock",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    opened = _find_block(detailed, "Experts")
+    assert opened is not None and opened.children
+
+    container = build_block_node(
+        attr_name="mlp",
+        class_name="SharedExpertMoE",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    assert {child.attr_name for child in container.children} >= {
+        "router",
+        "shared_expert",
+    }
+
+    # The loop lives in PatternMoE, so that forward is the grouped GEMM and
+    # stays shut. OneExpert, called from the loop, is an ordinary MLP: opened
+    # on its own it stays the two GEMMs, and stopping it would charge the full
+    # grouped formula once per expert.
+    outer = build_block_node(
+        attr_name="mlp",
+        class_name="PatternMoE",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    assert outer.is_basic and not outer.children
+    one = build_block_node(
+        attr_name="experts",
+        class_name="OneExpert",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    assert one.children
+    assert _moe_boundary_owns_routing("Experts") is False
+    assert _moe_boundary_owns_routing("SparseMoeBlock") is True

@@ -558,7 +558,7 @@ class ModuleDimRegistry:
         init_func = _find_init_function(class_node)
         if init_func is None:
             return
-        ast_locals = _function_ast_locals(init_func)
+        ast_locals = _function_ast_locals(init_func, config=config)
         dim_locals = _resolved_scalar_locals(init_func, config=config, context=context)
         for stmt in ast.walk(init_func):
             attr: str | None = None
@@ -596,9 +596,9 @@ class ModuleDimRegistry:
                 dim_locals=dim_locals,
             )
             if isinstance(length, int) and length > 0:
-                spec = ModuleParameterSpec(shape=(length,))
-                self.parameter[(class_name, attr)] = spec
-                self.parameter_by_attr.setdefault(attr, spec)
+                self._remember_parameter(
+                    class_name, attr, ModuleParameterSpec(shape=(length,))
+                )
                 continue
             # Not a 1-D ``arange``. A buffer built by a plain constructor states
             # its own shape and dtype -- ``nn.Buffer(torch.zeros(vocab_size,
@@ -616,8 +616,7 @@ class ModuleDimRegistry:
                 ),
             )
             if built is not None:
-                self.parameter[(class_name, attr)] = built
-                self.parameter_by_attr.setdefault(attr, built)
+                self._remember_parameter(class_name, attr, built)
 
     def _walk_init_body(
         self,
@@ -766,11 +765,22 @@ class ModuleDimRegistry:
             self.embedding[(class_name, target.attr)] = spec
             self.embedding_by_attr[target.attr] = spec
         elif isinstance(spec, ModuleParameterSpec):
-            self.parameter[(class_name, target.attr)] = spec
-            existing = self.parameter_by_attr.get(target.attr)
-            if existing is not None and existing.shape != spec.shape:
-                self.ambiguous_parameters.add(target.attr)
-            self.parameter_by_attr[target.attr] = spec
+            self._remember_parameter(class_name, target.attr, spec)
+
+    def _remember_parameter(
+        self, class_name: str, attr: str, spec: ModuleParameterSpec
+    ) -> None:
+        """Record a parameter under its class, and by attr when that is unique.
+
+        Two classes can both name ``inv_freq`` and size it differently. A
+        class-less lookup must not answer with one of them.
+        """
+        self.parameter[(class_name, attr)] = spec
+        existing = self.parameter_by_attr.get(attr)
+        if existing is not None and existing.shape != spec.shape:
+            self.ambiguous_parameters.add(attr)
+            return
+        self.parameter_by_attr.setdefault(attr, spec)
 
     def lookup_parameter(
         self, attr: str | None, class_name: str | None
@@ -2043,6 +2053,10 @@ class ShapeInferencer:
         # the caller names that argument by the attr that produced it -- so the
         # producer has to be findable by attr within the caller's own frame.
         self._frame_step_shapes: dict[tuple[str, str], tuple] = {}
+        # One returned tensor of a tuple-returning frame, keyed by
+        # ``(caller frame, call attr, return ordinal)``. The bare attr is not
+        # enough: it cannot say which slot a later ``name = pair[i]`` read.
+        self._frame_slot_shapes: dict[tuple[str, str, int], tuple] = {}
         self._last_input_sources: list[str] = []
         self._last_input_positions: list[int] = []
         self._owner_classes: dict[int, dict[str, str]] = {}
@@ -2447,6 +2461,11 @@ class ShapeInferencer:
             return
         frame = self._frame_prefix(str(getattr(node, "id", "")))
         self._frame_step_shapes[(frame, attr)] = tuple(output.shape)
+        # An inlined module leaves its ops in the CALLER's frame, including the
+        # root frame, which has no parent. Publish that before the parent check:
+        # the caller's ``init_assignments`` still say which callee returns this
+        # op, and a later section reads the slot by the call attr.
+        self._publish_inlined_return_slot(frame, attr, tuple(output.shape), root)
         # A submodule expanded into a frame leaves no node of its own for its
         # caller to read, so publish the frame to its parent under the attr the
         # parent calls it by. Which op that is comes from the class's DECLARED
@@ -2463,12 +2482,21 @@ class ShapeInferencer:
             attrs[self._frame_attr(frame)]
         )
         slots = getattr(structure, "forward_return_slots", None) or {}
+        order = list(getattr(structure, "forward_return_order", None) or []) or list(
+            slots
+        )
+        call_attr = self._frame_attr(frame)
+        for ordinal, slot_name in enumerate(order):
+            if slots.get(slot_name) == attr:
+                self._frame_slot_shapes[(parent, call_attr, ordinal)] = tuple(
+                    output.shape
+                )
         # Only a single-valued frame. Reading a tuple-returning frame by its
         # bare attr cannot say WHICH slot is meant, and a shape that states one
         # returned tensor's extents for another is worse than no answer.
         if len(slots) != 1 or attr != next(iter(slots.values())):
             return
-        self._frame_step_shapes[(parent, self._frame_attr(frame))] = tuple(output.shape)
+        self._frame_step_shapes[(parent, call_attr)] = tuple(output.shape)
 
     @staticmethod
     def _frame_attr(frame: str) -> str:
@@ -2565,6 +2593,27 @@ class ShapeInferencer:
                     if at < line and (latest is None or at > latest[0]):
                         latest = (at, producer)
                 if latest is None:
+                    # No local binding. The name may still be a callee parameter
+                    # unpacked from a caller's tuple (``cos`` from
+                    # ``position_embeddings``). That producer is in another
+                    # frame, so it is not in ``bindings``.
+                    boundary = (
+                        getattr(structure, "forward_step_boundary_arg_params", None)
+                        or {}
+                    ).get(base_submodule_attr(self._frame_attr(frame))) or {}
+                    mapping = boundary.get(name)
+                    parent = self._parent_frame(frame, root)
+                    if isinstance(mapping, tuple) and parent is not None:
+                        origin, ordinal = mapping
+                        source = self._slot_producer_node(
+                            parent,
+                            str(origin),
+                            ordinal,
+                            root,
+                            producers,
+                        )
+                        if source and source != node.id:
+                            constraints.append((source, node.id))
                     continue
                 source = producers.get((frame, latest[1]))
                 if source:
@@ -2712,8 +2761,11 @@ class ShapeInferencer:
         if cached is not None:
             return cached
         resolved = self._resolve_frame_parameters(frame, root, seen=set())
-        self._frame_parameters[(frame, id(root))] = resolved
-        self._owner_class_refs.append(root)
+        # A boundary slot that is not known yet must not be cached as absent.
+        # The producer may be inferred later; the next reader should look again.
+        if self._boundary_slots_resolved(frame, root, resolved):
+            self._frame_parameters[(frame, id(root))] = resolved
+            self._owner_class_refs.append(root)
         return resolved
 
     def _resolve_frame_parameters(
@@ -2729,17 +2781,390 @@ class ShapeInferencer:
         structure = (getattr(self.spec, "class_registry", None) or {}).get(
             parent_class or ""
         )
+        call_attr = base_submodule_attr(self._frame_attr(frame))
         arguments = (
             getattr(structure, "forward_step_predecessor_args", None) or {}
-        ).get(base_submodule_attr(self._frame_attr(frame)))
-        if not arguments:
+        ).get(call_attr) or {}
+        boundary = (
+            getattr(structure, "forward_step_boundary_arg_params", None) or {}
+        ).get(call_attr) or {}
+        owner_class = parent_class
+        if not arguments and not boundary:
+            # The callee was inlined, so this frame's class is the module that
+            # CONTAINS the call, not the class that wrote the boundary
+            # (``cos`` <- ``position_embeddings`` lives on the attention class).
+            found = self._class_with_call(call_attr)
+            if found is not None:
+                owner_class, structure = found
+                arguments = (
+                    getattr(structure, "forward_step_predecessor_args", None) or {}
+                ).get(call_attr) or {}
+                boundary = (
+                    getattr(structure, "forward_step_boundary_arg_params", None) or {}
+                ).get(call_attr) or {}
+        if not arguments and not boundary:
             return {}
         resolved: dict[str, tuple] = {}
         for parameter, producer in arguments.items():
             shape = self._producer_shape(parent, producer, root, seen=seen)
             if shape:
                 resolved[parameter] = shape
+        # A callee parameter that arrives as one slot of a caller's tuple
+        # (``cos, sin = position_embeddings``) is not in ``predecessor_args``.
+        # Its shape is that slot of the tensor the caller bound to the origin.
+        for parameter, mapping in boundary.items():
+            if parameter in resolved or not isinstance(mapping, tuple):
+                continue
+            origin, ordinal = mapping
+            shape = self._parameter_slot_shape(
+                parent, str(origin), ordinal, root, seen=set()
+            )
+            if shape is None and owner_class:
+                shape = self._forwarded_slot_shape(
+                    owner_class, str(origin), ordinal, seen=set()
+                )
+            if shape:
+                resolved[parameter] = shape
         return resolved
+
+    def _boundary_slots_resolved(
+        self, frame: str, root: BlockNode | None, resolved: dict[str, tuple]
+    ) -> bool:
+        """False when a boundary parameter of ``frame`` still has no shape."""
+        parent = self._parent_frame(frame, root)
+        if parent is None or root is None:
+            return True
+        structure = (getattr(self.spec, "class_registry", None) or {}).get(
+            self._frame_class_name(parent, root) or ""
+        )
+        boundary = (
+            getattr(structure, "forward_step_boundary_arg_params", None) or {}
+        ).get(base_submodule_attr(self._frame_attr(frame))) or {}
+        return all(parameter in resolved for parameter in boundary)
+
+    def _external_slot_shape(
+        self, class_name: str, parameter: str, ordinal: int | None
+    ) -> tuple | None:
+        """Shape of a parameter the caller of ``class_name`` passed in.
+
+        The callee is often inferred as its own section, so the call is not in
+        its block tree. The caller's return slot was recorded when that section
+        ran. One caller and one recorded slot answer; two different shapes do
+        not, because either could be the tensor this section was handed.
+        """
+        if not isinstance(ordinal, int):
+            return None
+        registry = getattr(self.spec, "class_registry", None) or {}
+        found: list[tuple] = []
+        for structure in registry.values():
+            assignments = getattr(structure, "init_assignments", None) or {}
+            arguments = getattr(structure, "forward_step_predecessor_args", None) or {}
+            for call_attr, mapping in arguments.items():
+                if assignments.get(call_attr) != class_name:
+                    continue
+                producer = mapping.get(parameter) if isinstance(mapping, dict) else None
+                if not producer or is_method_input(str(producer)):
+                    continue
+                producer_attr = base_submodule_attr(str(producer))
+                hits = [
+                    shape
+                    for (frame, attr, slot), shape in self._frame_slot_shapes.items()
+                    if slot == ordinal and base_submodule_attr(attr) == producer_attr
+                ]
+                unique = {hit for hit in hits}
+                if len(unique) == 1:
+                    found.append(next(iter(unique)))
+        unique_found = {item for item in found}
+        if len(unique_found) == 1:
+            return next(iter(unique_found))
+        return None
+
+    def _class_with_call(self, call_attr: str) -> tuple[str, Any] | None:
+        """``(class name, structure)`` that records ``call_attr``, if exactly one does."""
+        registry = getattr(self.spec, "class_registry", None) or {}
+        found: list[tuple[str, Any]] = []
+        for name, structure in registry.items():
+            arguments = getattr(structure, "forward_step_predecessor_args", None) or {}
+            boundary = (
+                getattr(structure, "forward_step_boundary_arg_params", None) or {}
+            )
+            if call_attr in arguments or call_attr in boundary:
+                found.append((str(name), structure))
+        if len(found) == 1:
+            return found[0]
+        return None
+
+    def _publish_inlined_return_slot(
+        self, frame: str, attr: str, shape: tuple, root: BlockNode | None
+    ) -> None:
+        """Record an inlined callee's return slot under the attr it is called by.
+
+        Inlining flattens the callee into whatever frame is being inferred, which
+        is not necessarily the class that constructs it. Every class that assigns
+        a callee whose declared return slot is this op publishes the same call
+        attr, and only when those shapes agree.
+        """
+        del root
+        registry = getattr(self.spec, "class_registry", None) or {}
+        hits: dict[tuple[str, str, int], set[tuple]] = {}
+        for structure in registry.values():
+            assignments = getattr(structure, "init_assignments", None) or {}
+            for call_attr, callee_name in assignments.items():
+                callee = registry.get(callee_name)
+                if callee is None:
+                    continue
+                slots = getattr(callee, "forward_return_slots", None) or {}
+                order = list(
+                    getattr(callee, "forward_return_order", None) or []
+                ) or list(slots)
+                for ordinal, slot_name in enumerate(order):
+                    if slots.get(slot_name) == attr:
+                        hits.setdefault((frame, str(call_attr), ordinal), set()).add(
+                            shape
+                        )
+        for key, shapes in hits.items():
+            if len(shapes) == 1:
+                self._frame_slot_shapes[key] = next(iter(shapes))
+
+    def _forwarded_slot_shape(
+        self,
+        class_name: str,
+        parameter: str,
+        ordinal: int | None,
+        *,
+        seen: set[tuple[str, str]],
+    ) -> tuple | None:
+        """Follow ``parameter`` out through callers until a recorded return slot.
+
+        Attention's ``position_embeddings`` is the decoder's own parameter, and
+        the text model passes ``rotary_emb`` for it. The block tree may have
+        inlined every one of those calls, so the walk is over the class registry
+        and the slots already recorded, not over frames.
+        """
+        key = (class_name, parameter)
+        if key in seen or not isinstance(ordinal, int):
+            return None
+        seen.add(key)
+        registry = getattr(self.spec, "class_registry", None) or {}
+        found: list[tuple] = []
+        for caller_name, structure in registry.items():
+            assignments = getattr(structure, "init_assignments", None) or {}
+            arguments = getattr(structure, "forward_step_predecessor_args", None) or {}
+            boundary = getattr(structure, "forward_step_boundary_params", None) or {}
+            for call_attr, callee in assignments.items():
+                if callee != class_name:
+                    continue
+                producer = (arguments.get(call_attr) or {}).get(parameter)
+                if producer and not is_method_input(str(producer)):
+                    shape = self._recorded_call_slot(str(producer), ordinal)
+                    if shape is None:
+                        shape = self._inlined_callee_slot(
+                            structure, str(producer), ordinal
+                        )
+                    if shape is not None:
+                        found.append(shape)
+                    continue
+                if parameter in (boundary.get(call_attr) or ()):
+                    shape = self._forwarded_slot_shape(
+                        str(caller_name), parameter, ordinal, seen=seen
+                    )
+                    if shape is not None:
+                        found.append(shape)
+        unique = {item for item in found}
+        if len(unique) == 1:
+            return next(iter(unique))
+        return None
+
+    def _recorded_call_slot(self, producer: str, ordinal: int) -> tuple | None:
+        producer_attr = base_submodule_attr(producer)
+        hits = {
+            shape
+            for (_frame, attr, slot), shape in self._frame_slot_shapes.items()
+            if slot == ordinal and base_submodule_attr(attr) == producer_attr
+        }
+        if len(hits) == 1:
+            return next(iter(hits))
+        return None
+
+    def _inlined_callee_slot(
+        self, caller: Any, producer: str, ordinal: int
+    ) -> tuple | None:
+        """Shape of an inlined callee's return op, recorded under its own attr."""
+        assignments = getattr(caller, "init_assignments", None) or {}
+        callee_name = assignments.get(base_submodule_attr(producer))
+        callee = (getattr(self.spec, "class_registry", None) or {}).get(
+            callee_name or ""
+        )
+        slots = getattr(callee, "forward_return_slots", None) or {}
+        order = list(getattr(callee, "forward_return_order", None) or []) or list(slots)
+        if not 0 <= ordinal < len(order):
+            return None
+        internal = slots.get(order[ordinal])
+        if not internal:
+            return None
+        hits = {
+            shape
+            for (_frame, attr), shape in self._frame_step_shapes.items()
+            if attr == internal or base_submodule_attr(attr) == internal
+        }
+        if len(hits) == 1:
+            return next(iter(hits))
+        return None
+
+    def _argument_producer(
+        self, structure: Any, call_attr: str, parameter: str
+    ) -> str | None:
+        """What the call passes for ``parameter``.
+
+        A tensor computed in the caller is named in ``predecessor_args``. A
+        tensor the caller was itself handed (``position_embeddings`` forwarded
+        into ``self_attn``) is only listed in ``boundary_params``: there is no
+        op inside the caller that produced it.
+        """
+        arguments = (
+            getattr(structure, "forward_step_predecessor_args", None) or {}
+        ).get(call_attr) or {}
+        producer = arguments.get(parameter)
+        if producer:
+            return str(producer)
+        forwarded = (
+            getattr(structure, "forward_step_boundary_params", None) or {}
+        ).get(call_attr) or ()
+        if parameter in forwarded:
+            return f"@method_input:{parameter}"
+        return None
+
+    def _parameter_slot_shape(
+        self,
+        frame: str,
+        parameter: str,
+        ordinal: int | None,
+        root: BlockNode | None,
+        *,
+        seen: set[tuple],
+    ) -> tuple | None:
+        """Shape of one slot of ``parameter`` as ``frame`` was handed it.
+
+        Walks out through forwarded parameters (``position_embeddings`` passed
+        unchanged into a child) until the call that produced the tuple, then
+        reads the recorded return slot. ``None`` when that producer has not
+        been inferred yet, or never returns a tuple this ordinal can name.
+        """
+        key = (frame, parameter, ordinal)
+        if key in seen or root is None:
+            return None
+        seen.add(key)
+        parent = self._parent_frame(frame, root)
+        if parent is None:
+            # This tree ends here. The parameter was passed in by a caller
+            # inferred as its own section; that caller's return slot is the shape.
+            if frame == "" and root.class_name:
+                return self._external_slot_shape(root.class_name, parameter, ordinal)
+            return None
+        structure = (getattr(self.spec, "class_registry", None) or {}).get(
+            self._frame_class_name(parent, root) or ""
+        )
+        call_attr = base_submodule_attr(self._frame_attr(frame))
+        producer = self._argument_producer(structure, call_attr, parameter)
+        if not producer:
+            return None
+        ordinals = (
+            getattr(structure, "forward_step_predecessor_ordinals", None) or {}
+        ).get(call_attr) or {}
+        slot = ordinals.get(parameter, ordinal)
+        if is_method_input(producer):
+            forwarded = method_input_param(producer) or parameter
+            return self._parameter_slot_shape(parent, forwarded, slot, root, seen=seen)
+        producer_attr = base_submodule_attr(str(producer))
+        if isinstance(slot, int):
+            recorded = self._frame_slot_shapes.get((parent, producer_attr, slot))
+            if recorded:
+                return recorded
+        return self._frame_step_shapes.get((parent, producer_attr))
+
+    def _slot_producer_node(
+        self,
+        frame: str,
+        parameter: str,
+        ordinal: int | None,
+        root: BlockNode | None,
+        producers: dict[tuple[str, str], str],
+        *,
+        seen: set[tuple] | None = None,
+    ) -> str | None:
+        """Node that produced one slot of ``parameter``, for inference order.
+
+        A slice can read ``cos.shape[-1]`` with no data edge onto ``cos``. The
+        sort still has to infer the tensor ``cos`` was unpacked from first, or
+        the read finds nothing and the width stays a name.
+        """
+        if seen is None:
+            seen = set()
+        key = (frame, parameter, ordinal)
+        if key in seen or root is None:
+            return None
+        seen.add(key)
+        parent = self._parent_frame(frame, root)
+        if parent is None:
+            return None
+        structure = (getattr(self.spec, "class_registry", None) or {}).get(
+            self._frame_class_name(parent, root) or ""
+        )
+        call_attr = base_submodule_attr(self._frame_attr(frame))
+        producer = self._argument_producer(structure, call_attr, parameter)
+        if not producer:
+            return None
+        ordinals = (
+            getattr(structure, "forward_step_predecessor_ordinals", None) or {}
+        ).get(call_attr) or {}
+        slot = ordinals.get(parameter, ordinal)
+        if is_method_input(producer):
+            forwarded = method_input_param(producer) or parameter
+            return self._slot_producer_node(
+                parent, forwarded, slot, root, producers, seen=seen
+            )
+        producer_attr = base_submodule_attr(str(producer))
+        step_attr: str | None = None
+        if isinstance(slot, int):
+            callee_name = self._tree_classes(root).get(producer_attr)
+            callee = (getattr(self.spec, "class_registry", None) or {}).get(
+                callee_name or ""
+            )
+            slots = getattr(callee, "forward_return_slots", None) or {}
+            order = list(getattr(callee, "forward_return_order", None) or []) or list(
+                slots
+            )
+            if 0 <= slot < len(order):
+                step_attr = slots.get(order[slot])
+        return self._producer_node(parent, producer_attr, step_attr, root, producers)
+
+    def _producer_node(
+        self,
+        parent_frame: str,
+        call_attr: str,
+        step_attr: str | None,
+        root: BlockNode | None,
+        producers: dict[tuple[str, str], str],
+    ) -> str | None:
+        """A recorded node for ``call_attr``'s ``step_attr`` under ``parent_frame``.
+
+        ``step_attr`` None means the call itself. Frame prefixes keep the step
+        markers node ids carry; the parent comparison strips those, which is
+        how the shape table is keyed too.
+        """
+        wanted = step_attr or call_attr
+        for (frame, attr), node_id in producers.items():
+            if attr != wanted and base_submodule_attr(attr) != wanted:
+                continue
+            owner = frame if step_attr is None else self._parent_frame(frame, root)
+            owner_attr = (
+                call_attr
+                if step_attr is None
+                else base_submodule_attr(self._frame_attr(frame))
+            )
+            if owner == parent_frame and owner_attr == call_attr:
+                return node_id
+        return None
 
     def _producer_shape(
         self, frame: str, producer: str, root: BlockNode | None, *, seen: set[str]
@@ -3091,6 +3516,10 @@ class ShapeInferencer:
         self._frame_entry_shapes = {}
         self._frame_step_shapes = {}
         self._frame_parameters = {}
+        # ``_frame_slot_shapes`` is NOT cleared. A nested section is annotated
+        # after the caller that produced its tuple inputs, and the slice inside
+        # the section reads that slot (``cos.shape[-1]``). Clearing it here
+        # would drop the only record of what the caller returned.
         self._last_input_sources: list[str] = []
         self._last_input_positions: list[int] = []
         # Multi-output nodes whose published slices genuinely divide the parent,
@@ -4629,6 +5058,25 @@ class ShapeInferencer:
                         resolved_bound = _snapshot_axis(
                             measured, frozenset({measured}), scope
                         )
+                        if isinstance(resolved_bound, int) and not isinstance(
+                            resolved_bound, bool
+                        ):
+                            # The local measured a real axis (``rotary_dim =
+                            # cos.shape[-1]``). Fold it the way a numeric bound
+                            # is folded, so the two complementary slices are
+                            # concrete widths rather than a name.
+                            width_int = width if isinstance(width, int) else None
+                            if takes_head:
+                                folded: DimExpr = resolved_bound
+                                if width_int is not None:
+                                    folded = max(0, min(resolved_bound, width_int))
+                            elif width_int is not None:
+                                folded = max(0, width_int - max(resolved_bound, 0))
+                            else:
+                                folded = f"{width}-({resolved_bound})"
+                            shape = list(source.shape)
+                            shape[at] = folded
+                            return TensorSpec(shape=tuple(shape), dtype=source.dtype)
                         if resolved_bound is not None:
                             name = str(resolved_bound)
                     narrowed = name if takes_head else f"{width}-({name})"
@@ -5918,9 +6366,14 @@ class ShapeInferencer:
         attr = node.metadata.get("attr_name") or ""
         if attr and attr in self._meta_shapes:
             return self._meta_shapes[attr]
-        # Try matching via class_name + layer index patterns.
+        # A colon-separated id segment can name a module. An inlined call is
+        # namespaced with ``::`` (``@fn_l732_repeat_kv::@op_...``), and splitting
+        # that on a single colon yields an empty segment. ``named_modules()``
+        # records the root module under that same empty name, and its forward
+        # output is the model's logits, so every inlined op was sized as the
+        # whole model. An empty segment names no module.
         for part in node.id.split(":"):
-            if part in self._meta_shapes:
+            if part and part in self._meta_shapes:
                 return self._meta_shapes[part]
         return None
 
@@ -8271,13 +8724,19 @@ def _collect_init_scalar_attrs(
                     resolved = _resolve_dim_expr(
                         value, config=config, local_vars=local_vars, context=ctx
                     )
-                    if not isinstance(resolved, int):
+                    if isinstance(resolved, bool) or not isinstance(
+                        resolved, (int, float)
+                    ):
                         continue
                     if isinstance(target, _pyast.Name):
+                        # A float factor (``partial_rotary_factor = 0.25``) has
+                        # to stay visible so a later ``int(head * factor)`` can
+                        # truncate it. Only a whole number is a dimension.
                         local_vars[target.id] = resolved
                     elif isinstance(target, _pyast.Attribute) and _is_self_attr(target):
                         local_vars[target.attr] = resolved
-                        extra.setdefault(target.attr, resolved)
+                        if isinstance(resolved, int):
+                            extra.setdefault(target.attr, resolved)
 
         _walk(init_func.body)
     return extra
@@ -8575,28 +9034,66 @@ def _call_class_name(node: ast.Call) -> str | None:
 
 def _function_ast_locals(
     func: ast.FunctionDef,
+    *,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, tuple[ast.AST, int | None]]:
     """Map local names to ``(value_expr, tuple_index)`` for a function's assignments.
 
     ``a = expr`` -> ``a: (expr, None)``; ``a, b = expr`` -> ``a: (expr, 0)``,
     ``b: (expr, 1)``. Used to chase a buffer tensor back through local aliases and
     tuple unpacks (e.g. ``inv_freq, self.scaling = rope_init_fn(...)``).
+
+    Walks in statement order. An ``if`` whose condition the config decides is
+    followed down the taken arm only, so a dead rebinding
+    (``if self.rope_type != "default": rope_init_fn = ...``) does not hide the
+    method the live arm calls.
     """
     locals_map: dict[str, tuple[ast.AST, int | None]] = {}
-    for stmt in ast.walk(func):
-        if isinstance(stmt, ast.AnnAssign):
-            if stmt.value is not None and isinstance(stmt.target, ast.Name):
-                locals_map[stmt.target.id] = (stmt.value, None)
-            continue
-        if not isinstance(stmt, ast.Assign):
-            continue
-        for target in stmt.targets:
-            if isinstance(target, ast.Name):
-                locals_map[target.id] = (stmt.value, None)
-            elif isinstance(target, (ast.Tuple, ast.List)):
-                for index, elt in enumerate(target.elts):
-                    if isinstance(elt, ast.Name):
-                        locals_map[elt.id] = (stmt.value, index)
+    scalars: dict[str, Any] = {}
+    resolved_config = config or {}
+
+    def record(target: ast.AST, value: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            locals_map[target.id] = (value, None)
+            literal = _config_literal(value, resolved_config, scalars)
+            if literal is not None and not isinstance(literal, (dict, list, tuple)):
+                scalars[target.id] = literal
+        elif isinstance(target, ast.Attribute) and _is_self_attr(target):
+            literal = _config_literal(value, resolved_config, scalars)
+            if literal is not None and not isinstance(literal, (dict, list, tuple)):
+                scalars[target.attr] = literal
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for index, elt in enumerate(target.elts):
+                if isinstance(elt, ast.Name):
+                    locals_map[elt.id] = (value, index)
+                elif isinstance(elt, ast.Attribute) and _is_self_attr(elt):
+                    pass
+
+    def walk(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    record(target, stmt.value)
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                record(stmt.target, stmt.value)
+            elif isinstance(stmt, ast.If):
+                branch = _eval_config_condition(
+                    stmt.test, config=resolved_config, local_vars=scalars
+                )
+                if branch is True:
+                    walk(stmt.body)
+                elif branch is False:
+                    walk(stmt.orelse)
+                else:
+                    # Unknown condition: both arms, later one wins, as before.
+                    walk(stmt.body)
+                    walk(stmt.orelse)
+            elif isinstance(stmt, (ast.For, ast.While, ast.With)):
+                walk(stmt.body)
+            elif isinstance(stmt, ast.Try):
+                walk(stmt.body)
+
+    walk(func.body)
     return locals_map
 
 
@@ -8848,7 +9345,7 @@ def _resolve_buffer_length(
                 class_node=class_node,
                 config=config,
                 context=context,
-                ast_locals=_function_ast_locals(method),
+                ast_locals=_function_ast_locals(method, config=config),
                 dim_locals=_resolved_scalar_locals(
                     method, config=config, context=context
                 ),
@@ -8897,6 +9394,33 @@ def _resolve_buffer_length(
     return None
 
 
+def _config_literal(
+    node: ast.AST, config: dict[str, Any], local_vars: dict[str, Any]
+) -> Any:
+    """A config or local value, including strings a dimension resolver ignores.
+
+    ``rope_type`` is ``"default"``, not a width. Conditions still have to read
+    it, or a branch that the checkpoint closes stays open.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return local_vars.get(node.id)
+    if isinstance(node, ast.Attribute) and _is_self_attr(node):
+        if node.attr in local_vars:
+            return local_vars[node.attr]
+        return config.get(node.attr)
+    if isinstance(node, ast.Attribute):
+        parent = _named_config_dict(node.value, config)
+        if isinstance(parent, dict) and node.attr in parent:
+            return parent[node.attr]
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        parent = _named_config_dict(node.value, config)
+        if isinstance(parent, dict) and node.slice.value in parent:
+            return parent[node.slice.value]
+    return None
+
+
 def _eval_config_condition(
     test: ast.AST,
     *,
@@ -8940,6 +9464,19 @@ def _eval_config_condition(
         and test.comparators[0].value is None
     ):
         return _eval_config_condition(test.left, config=config, local_vars=local_vars)
+    # ``self.rope_type != "default"`` — a string the checkpoint actually stores.
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and len(test.comparators) == 1
+    ):
+        left = _config_literal(test.left, config, local_vars)
+        right = _config_literal(test.comparators[0], config, local_vars)
+        if left is not None and right is not None:
+            if isinstance(test.ops[0], ast.Eq):
+                return left == right
+            if isinstance(test.ops[0], ast.NotEq):
+                return left != right
     return None
 
 
@@ -9034,6 +9571,68 @@ def _distributed_degree_dim(node: ast.AST) -> int | None:
     return None
 
 
+def _is_real(value: Any) -> bool:
+    """True for an int or float dimension. ``bool`` is an ``int`` subclass."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _fold_real(value: int | float) -> int | float:
+    """An integral float is a whole number of elements; anything else stays."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _numeric_dim(value: Any) -> int | float | None:
+    """A config value that is a number of elements, or a real factor.
+
+    Non-integral floats stay floats so ``int(head_dim * factor)`` can truncate
+    once, the way the source does. Strings that spell an integer still count.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return _fold_real(value)
+    return _int_dim(value)
+
+
+def _named_config_dict(node: ast.AST, config: dict[str, Any]) -> dict[str, Any] | None:
+    """The dict a ``config`` / ``self.config`` / nested-dict receiver points at.
+
+    ``None`` when ``node`` is not a config object. A nested field is returned
+    only when that field itself is a dict (``config.rope_parameters``), so a
+    numeric ``config.hidden_size`` is not mistaken for a mapping.
+    """
+    if isinstance(node, ast.Name) and node.id == "config":
+        return config
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and node.attr == "config"
+    ):
+        return config
+    if isinstance(node, ast.Attribute):
+        parent = _named_config_dict(node.value, config)
+        if isinstance(parent, dict):
+            value = parent.get(node.attr)
+            if isinstance(value, dict):
+                return value
+    if isinstance(node, ast.Subscript):
+        parent = _named_config_dict(node.value, config)
+        key = node.slice
+        if (
+            isinstance(parent, dict)
+            and isinstance(key, ast.Constant)
+            and key.value in parent
+            and isinstance(parent[key.value], dict)
+        ):
+            return parent[key.value]
+    return None
+
+
 def _resolve_dim_expr(
     node: ast.AST,
     *,
@@ -9044,8 +9643,15 @@ def _resolve_dim_expr(
     degree = _distributed_degree_dim(node)
     if degree is not None:
         return degree
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
         return int(node.value)
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if isinstance(node, ast.Constant) and isinstance(node.value, float):
+        # ``0.25`` is a factor, not a width. Truncating it here makes
+        # ``int(head_dim * 0.25)`` see ``0``. An integral float (``64.0``) is
+        # already a whole number of elements.
+        return int(node.value) if node.value.is_integer() else node.value
     if isinstance(node, ast.Name):
         if node.id in local_vars:
             return local_vars[node.id]
@@ -9061,6 +9667,12 @@ def _resolve_dim_expr(
         # `config.linear_attn_config["head_dim"]` and friends.
         key = node.slice
         if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            mapping = _named_config_dict(node.value, config)
+            if isinstance(mapping, dict) and key.value in mapping:
+                # Present but not a number (a nested dict, a rope type string):
+                # that is not a dimension. Falling through would publish the
+                # KEY as if it were the value.
+                return _numeric_dim(mapping[key.value])
             container = node.value
             if isinstance(container, ast.Attribute) and isinstance(
                 container.value, ast.Name
@@ -9107,7 +9719,11 @@ def _resolve_dim_expr(
             resolved = _resolve_dim_expr(
                 value, config=config, local_vars=local_vars, context=context
             )
-            if isinstance(resolved, int) and resolved:
+            if (
+                isinstance(resolved, (int, float))
+                and not isinstance(resolved, bool)
+                and resolved
+            ):
                 return resolved
         return None
     if isinstance(node, ast.BinOp):
@@ -9119,15 +9735,21 @@ def _resolve_dim_expr(
         )
         if left is None or right is None:
             return None
-        if isinstance(left, int) and isinstance(right, int):
+        if _is_real(left) and _is_real(right):
             if isinstance(node.op, ast.Add):
-                return left + right
+                return _fold_real(left + right)
             if isinstance(node.op, ast.Sub):
-                return left - right
+                return _fold_real(left - right)
             if isinstance(node.op, ast.Mult):
-                return left * right
-            if isinstance(node.op, (ast.FloorDiv, ast.Div)):
-                return left // right if right else None
+                return _fold_real(left * right)
+            if isinstance(node.op, ast.FloorDiv):
+                return _fold_real(left // right) if right else None
+            if isinstance(node.op, ast.Div):
+                # Two ints keep the long-standing floor: sizes are whole
+                # elements, and ``hidden // heads`` is often spelled ``/``.
+                if isinstance(left, int) and isinstance(right, int):
+                    return left // right if right else None
+                return _fold_real(left / right) if right else None
         return _symbolic_binop(left, right, node.op)
     if (
         isinstance(node, ast.Call)
@@ -9135,9 +9757,14 @@ def _resolve_dim_expr(
         and node.func.id == "int"
     ):
         if node.args:
-            return _resolve_dim_expr(
+            inner = _resolve_dim_expr(
                 node.args[0], config=config, local_vars=local_vars, context=context
             )
+            # ``int(head_dim * partial_rotary_factor)`` truncates here, matching
+            # Python, and not at the ``0.25`` literal.
+            if isinstance(inner, float):
+                return int(inner)
+            return inner
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -9157,6 +9784,27 @@ def _resolve_dim_expr(
         if all(isinstance(arg, int) for arg in args):
             return min(args) if node.func.id == "min" else max(args)
         return None
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and node.args
+        and not node.keywords
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    ):
+        # ``config.rope_parameters.get("partial_rotary_factor", 1.0)``. The
+        # default is what the call says, used only when the key is absent.
+        mapping = _named_config_dict(node.func.value, config)
+        if isinstance(mapping, dict):
+            key = node.args[0].value
+            if key in mapping:
+                return _numeric_dim(mapping[key])
+            if len(node.args) >= 2:
+                return _resolve_dim_expr(
+                    node.args[1], config=config, local_vars=local_vars, context=context
+                )
+            return None
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)

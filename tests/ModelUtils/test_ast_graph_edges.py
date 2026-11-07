@@ -13,6 +13,7 @@ defined here. It is not a lookup into an upstream modeling file.
 from __future__ import annotations
 
 import ast
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -316,6 +317,74 @@ def forward(self, x):
     assert views, [op.label for op in analysis.operations]
     detail = next(d for d in views[0].details if d.startswith("shape:"))
     assert detail == "shape: *x.shape[:-1], -1, 512", detail
+    # The slice local was bound before the view, so it is a snapshot of ``x``
+    # rather than a read of whatever tensor the view happens to be reshaping.
+    snapshots = next(d for d in views[0].details if d.startswith("shape_snapshots:"))
+    assert snapshots == "shape_snapshots: x.shape[:-1]", snapshots
+
+
+def test_inlined_repeat_binds_the_group_count():
+    # Qwen calls ``repeat_kv(key, module.num_key_value_groups)`` from
+    # ``eager_attention_forward(self, ...)``. ``n_rep`` is that constructor
+    # scalar (heads / kv heads). Left as a name, the expand keeps its size-1
+    # axis and the following reshape element-conserves back to the KV head
+    # count instead of the query head count.
+    source = """
+        def repeat_kv(hidden_states, n_rep):
+            batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+            hidden_states = hidden_states[:, :, None, :, :].expand(
+                batch, num_key_value_heads, n_rep, slen, head_dim
+            )
+            return hidden_states.reshape(
+                batch, num_key_value_heads * n_rep, slen, head_dim
+            )
+
+        def eager_attention_forward(module, query):
+            return repeat_kv(query, module.num_key_value_groups)
+
+        class M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.num_key_value_groups = 6
+
+            def forward(self, query):
+                attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+                    self.config._attn_implementation, eager_attention_forward
+                )
+                return attention_interface(self, query)
+    """
+    analysis = aa.analyze_source(textwrap.dedent(source), all_tensor_ops=True)
+    ops = [
+        op
+        for body in analysis.class_registry["M"].multi_op_methods.values()
+        for op in body
+    ]
+    expands = [op for op in ops if op.label == "Expand"]
+    assert expands, [op.label for op in ops]
+    detail = next(d for d in expands[0].details if d.startswith("shape:"))
+    assert "6" in detail.split(", "), detail
+
+
+def test_deferred_method_input_keeps_its_argument_slot():
+    # ``matmul(query, key.transpose)`` is chained before ``query`` exists, so
+    # the query edge is a stand-in that gets re-pointed once the arg is known.
+    # Re-pointing by appending made the transpose the left operand and the
+    # score came out ``[B, H, D, D]`` instead of ``[B, H, S, S]``.
+    graph = cg.ComputationGraph(
+        nodes=[
+            cg.GraphNodeSpec(key="stand-in"),
+            cg.GraphNodeSpec(key="transpose"),
+            cg.GraphNodeSpec(key="matmul"),
+            cg.GraphNodeSpec(key="query"),
+        ],
+        links=[(0, 2), (1, 2)],
+        link_port_labels={(0, 2): "query"},
+        deferred_method_inputs=[(2, "query_producer", 0)],
+        attr_output_indices={"query_producer": 3},
+    )
+    cg._resolve_deferred_method_inputs(graph)
+    assert graph.links == [(3, 2), (1, 2)]
+    assert graph.link_port_labels == {(3, 2): "query"}
 
 
 def test_extractor_models_index_bitwise_and_inplace_copy_consumers():

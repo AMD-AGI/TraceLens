@@ -14,6 +14,8 @@
 import os, shutil, numpy as np, pandas as pd, pytest, ast, re, gzip, json, glob
 from pandas.api.types import is_float_dtype
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+    _graph_model_with_engine_facts,
+    _load_engine_architectures,
     classify_graph_capture_trace,
     generate_perf_report_pytorch,
     generate_perf_report_pytorch as gen_inf,
@@ -683,6 +685,47 @@ class TestCaptureMergeHelpers:
         )
         assert "could not determine batch size" in capsys.readouterr().out
 
+    def test_scheduler_run_batch_uses_contained_step_batch(self, tmp_path, capsys):
+        _capture_tree_cache.clear()
+        replay = tmp_path / "replay.json.gz"
+        events = [
+            _mk_event("user_annotation", "scheduler.run_batch", 0, 1000, 1, 1, {}),
+            _mk_event(
+                "user_annotation",
+                "step[DECODE bs=1 g_sq=1 g_sqsq=1 g_sqsk=1 g_sk=1]",
+                10,
+                100,
+                1,
+                1,
+                {},
+            ),
+            _mk_event(
+                "cuda_runtime",
+                "hipGraphLaunch",
+                20,
+                40,
+                1,
+                1,
+                {"correlation": 1},
+            ),
+            _mk_event("kernel", "k", 25, 10, 1, 1, {"correlation": 1}),
+        ]
+        with gzip.open(replay, "wt", encoding="utf-8") as f:
+            json.dump({"traceEvents": events}, f)
+        folder = tmp_path / "cap"
+        folder.mkdir()
+        _write_capture_index(
+            folder,
+            [{"file": "missing.json", "batch_size": 1, "mode": "FULL"}],
+            [],
+        )
+        merge_capture_trace_into_graph(
+            str(folder), str(folder / "execution_details.json"), str(replay)
+        )
+        out = capsys.readouterr().out
+        assert "could not determine batch size" not in out
+        assert "step[DECODE bs=1" in out
+
     def test_align_capture_to_graph_memcpy(self):
         capture = [{"name": "cudaMemcpy", "args": {}}]
         graph = [{"name": "MemcpyHtoD", "args": {}}]
@@ -1051,3 +1094,103 @@ class TestInferenceReportSweep:
             topk_roofline_ops=5,
         )
         assert (tmp_path / "out" / "gpu_timeline.csv").exists()
+
+
+def test_the_exporter_reads_the_engine_checkout_for_each_phase(monkeypatch):
+    calls = []
+
+    def fake_load(path, **kwargs):
+        calls.append((path, kwargs["engine"], kwargs["regime"].phase))
+        return object()
+
+    monkeypatch.setattr("TraceLens.ModelUtils.extract.load_architecture", fake_load)
+    events = [
+        {"name": "sglang_profiler::gemm", "ts": 0},
+        {
+            "name": "step[DECODE bs=1 g_sq=1 g_sqsq=1 g_sqsk=1 g_sk=1]",
+            "ts": 0,
+            "dur": 10,
+        },
+    ]
+    loaded = _load_engine_architectures("config.json", events)
+    assert calls == [("config.json", "sglang", "decode")]
+    assert set(loaded) == {"decode"}
+    assert _load_engine_architectures("config.json", [{"name": "aten::mm"}]) == {}
+
+
+def test_the_exporter_attaches_the_engine_facts_once(monkeypatch):
+    from TraceLens.TreePerf.graph_schedule import GraphModel
+
+    calls = []
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.engine_facts.load_engine_facts",
+        lambda engine, hip=True: calls.append(engine) or (("fuse_wqa_wkv", True),),
+    )
+    model = GraphModel(
+        hidden_size=8,
+        q_lora_rank=4,
+        o_lora_rank=4,
+        num_attention_heads=2,
+        head_dim=4,
+        o_groups=1,
+        moe_intermediate_size=8,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        num_hidden_layers=1,
+        compress_ratios=(0,),
+        num_hash_layers=0,
+        vocab_size=16,
+        tp=1,
+        index_n_heads=2,
+        index_head_dim=4,
+        index_topk=2,
+    )
+    with_facts = _graph_model_with_engine_facts(model, "sglang")
+    assert with_facts.fact("fuse_wqa_wkv") is True
+    assert _graph_model_with_engine_facts(with_facts, "sglang") is with_facts
+    assert _graph_model_with_engine_facts(model, None) is model
+    assert _graph_model_with_engine_facts(None, "sglang") is None
+    assert calls == ["sglang"]
+
+
+def test_the_exporter_takes_the_graph_buckets_from_the_replays_when_the_config_has_none(
+    monkeypatch,
+):
+    from dataclasses import replace
+
+    from TraceLens.TreePerf.graph_schedule import GraphModel
+
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.engine_facts.load_engine_facts",
+        lambda engine, hip=True: (),
+    )
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.engine_facts.use_traced_engine_source",
+        lambda engine, events: None,
+    )
+    monkeypatch.setattr(
+        "TraceLens.ModelUtils.engine_facts.trace_runtime_facts",
+        lambda events: (("replay_tokens", (1, 4)),),
+    )
+    model = GraphModel(
+        hidden_size=8,
+        q_lora_rank=4,
+        o_lora_rank=4,
+        num_attention_heads=2,
+        head_dim=4,
+        o_groups=1,
+        moe_intermediate_size=8,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        num_hidden_layers=1,
+        compress_ratios=(0,),
+        num_hash_layers=0,
+        vocab_size=16,
+        tp=1,
+        index_n_heads=2,
+        index_head_dim=4,
+        index_topk=2,
+    )
+    assert _graph_model_with_engine_facts(model, "sglang").capture_buckets == (1, 4)
+    named = replace(model, capture_buckets=(2, 8))
+    assert _graph_model_with_engine_facts(named, "sglang").capture_buckets == (2, 8)

@@ -662,3 +662,125 @@ def test_config_failure_that_is_not_an_import_error_is_not_a_mismatch(monkeypatc
 
     monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", classmethod(_boom))
     assert model_env.detect_env_mismatch("some/checkpoint") is None
+
+
+def test_unrecognized_architecture_asks_for_a_newer_transformers(monkeypatch, tmp_path):
+    """A model type this release has no class for is a newer-transformers request."""
+    import transformers
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {"model_type": "deepseek_v41", "architectures": ["DeepseekV41ForCausalLM"]}
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(cls, *_a, **_k):
+        raise ValueError(
+            "The checkpoint you are trying to load has model type `deepseek_v41` "
+            "but Transformers does not recognize this architecture."
+        )
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", classmethod(_boom))
+    reason = model_env.detect_env_mismatch(tmp_path)
+    assert reason is not None
+    assert reason.startswith(model_env.NEWER_TRANSFORMERS_REASON)
+    assert "deepseek_v41" in reason
+
+
+def test_unrecognized_architecture_with_remote_code_stays(monkeypatch, tmp_path):
+    """auto_map means the class lives in the checkpoint, not in a future release."""
+    import transformers
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "custom_mla_moe",
+                "auto_map": {
+                    "AutoModelForCausalLM": "modeling_custom.CustomForCausalLM"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(cls, *_a, **_k):
+        raise ValueError(
+            "model type `custom_mla_moe` but Transformers does not recognize "
+            "this architecture."
+        )
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", classmethod(_boom))
+    assert model_env.detect_env_mismatch(tmp_path) is None
+
+
+def _capture_reexec(monkeypatch, installed, published):
+    monkeypatch.delenv(model_env.REEXEC_ENV_FLAG, raising=False)
+    _pin_installed(monkeypatch, installed)
+    monkeypatch.setattr(
+        model_env, "_published_transformers_versions", lambda: published
+    )
+    seen: dict[str, str] = {}
+
+    def _ensure(_checkpoint, version, **kwargs):
+        seen["version"] = version
+        seen["requirement"] = kwargs.get("requirement")
+        return Path("/env")
+
+    monkeypatch.setattr(model_env, "ensure_model_dependencies", _ensure)
+    monkeypatch.setattr(
+        model_env.subprocess,
+        "run",
+        lambda *_a, **_k: type("R", (), {"returncode": 0})(),
+    )
+    return seen
+
+
+def test_unrecognized_architecture_upgrades_past_an_older_pin(monkeypatch):
+    """The config pin wrote the file; it is not the release that contains the class."""
+    seen = _capture_reexec(monkeypatch, "5.16.1", ["5.6.0", "5.16.1", "5.20.2"])
+    monkeypatch.setattr(model_env, "required_transformers_version", lambda *_a: "5.6.0")
+    monkeypatch.setattr(
+        model_env,
+        "detect_env_mismatch",
+        lambda *_a, **_k: model_env.NEWER_TRANSFORMERS_REASON + ": deepseek_v41",
+    )
+
+    def _no_head():
+        raise AssertionError("a published newer release must win over git HEAD")
+
+    monkeypatch.setattr(model_env, "_transformers_head_commit", _no_head)
+    assert model_env.reexec_in_model_env("deepseek-ai/DeepSeek-V4.1-Flash", []) == 0
+    assert seen == {"version": "5.20.2", "requirement": "transformers==5.20.2"}
+
+
+def test_unrecognized_architecture_uses_head_when_nothing_published_is_newer(
+    monkeypatch,
+):
+    commit = "abc123def456abc123def456abc123def456abcd"
+    seen = _capture_reexec(monkeypatch, "5.16.1", ["5.6.0", "5.16.1"])
+    monkeypatch.setattr(model_env, "required_transformers_version", lambda *_a: "5.6.0")
+    monkeypatch.setattr(
+        model_env,
+        "detect_env_mismatch",
+        lambda *_a, **_k: model_env.NEWER_TRANSFORMERS_REASON,
+    )
+    monkeypatch.setattr(model_env, "_transformers_head_commit", lambda: commit)
+    assert model_env.reexec_in_model_env("deepseek-ai/DeepSeek-V4.1-Flash", []) == 0
+    assert seen == {
+        "version": commit,
+        "requirement": f"git+{model_env._TRANSFORMERS_GIT}@{commit}",
+    }
+
+
+def test_unrecognized_architecture_upgrades_without_a_config_pin(monkeypatch):
+    """No pin is not a reason to stay on a release that lacks the architecture."""
+    seen = _capture_reexec(monkeypatch, "5.16.1", ["5.16.1", "5.20.2"])
+    monkeypatch.setattr(model_env, "required_transformers_version", lambda *_a: None)
+    monkeypatch.setattr(
+        model_env,
+        "detect_env_mismatch",
+        lambda *_a, **_k: model_env.NEWER_TRANSFORMERS_REASON,
+    )
+    assert model_env.reexec_in_model_env("deepseek-ai/DeepSeek-V4.1-Flash", []) == 0
+    assert seen == {"version": "5.20.2", "requirement": "transformers==5.20.2"}

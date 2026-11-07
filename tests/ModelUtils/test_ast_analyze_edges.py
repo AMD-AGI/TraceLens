@@ -110,7 +110,13 @@ def test_label_for_branches():
 
 
 def test_config_value_arithmetic_and_logic():
-    config = {"hidden": 12, "flag": True, "off": False, "nested": {"k": 7}}
+    config = {
+        "hidden": 12,
+        "flag": True,
+        "off": False,
+        "nested": {"k": 7},
+        "gap": None,
+    }
     sv: dict = {}
 
     assert _config_value(_expr("config.hidden % 5"), config, sv) == 2  # 1399-1400
@@ -132,6 +138,9 @@ def test_config_value_arithmetic_and_logic():
     assert _config_value(_expr("config.hidden >= 12"), config, sv) is True
     assert _config_value(_expr("config.hidden < 5"), config, sv) is False
     assert _config_value(_expr("config.hidden <= 12"), config, sv) is True
+    # An absent value ordered against an int is not a decision.
+    assert _config_value(_expr("config.gap < 8"), config, sv) is aa._UNKNOWN
+    assert _config_value(_expr("config.gap == 8"), config, sv) is False
 
     # getattr on config dict + nested attribute (1367-1370, 1382-1383)
     assert _config_value(_expr("getattr(config, 'hidden', 0)"), config, sv) == 12
@@ -679,6 +688,54 @@ def test_dispatches_to_imported_kernel_via_runtime_selected_attribute():
         ),
     )
     assert aa._dispatches_to_imported_kernel(unconditional, None) is False
+
+
+def test_embedding_forward_is_introspected_and_records_one_lookup():
+    """An embedding module stays open: the gather is the kernel, and the two
+    spellings of that lookup are one gather."""
+    src = (
+        "class VocabParallelEmbedding:\n"
+        "    def __init__(self, quant_config):\n"
+        "        if quant_config is None:\n"
+        "            self.quant_method = UnquantizedEmbeddingMethod()\n"
+        "        else:\n"
+        "            self.quant_method = resolve_quant_method(quant_config)\n"
+        "    def forward(self, input_):\n"
+        "        if self.tp_size == 1:\n"
+        "            return self.quant_method.embedding(self, input_)\n"
+        "        masked, mask = get_masked_input_and_mask(input_)\n"
+        "        output = self.quant_method.embedding(self, masked)\n"
+        "        output = ops.vocab_parallel_embedding(input_, self.weight)\n"
+        "        return tensor_model_parallel_all_reduce(output)\n"
+    )
+    parsed = aa.analyze_source(src, filename="embed.py")
+    cls = parsed.class_registry["VocabParallelEmbedding"]
+    assert aa._dispatches_to_imported_kernel(cls, None) is False
+    assert cls.forward_calls.count("@functional_embedding") == 1
+    assert any(
+        call.startswith("@fn_") and "get_masked_input_and_mask" in call
+        for call in cls.forward_calls
+    )
+
+
+def test_imported_kernel_with_a_local_helper_stays_a_boundary():
+    """A local helper beside an imported kernel does not open the class.
+
+    Opening every such class registered DeepSeek's vision tower and the stack
+    picker then chose it over the language model.
+    """
+    src = (
+        "from kernels import fused_op\n"
+        "def prepare(x):\n"
+        "    return x\n"
+        "class VisionTower:\n"
+        "    def forward(self, x):\n"
+        "        y = prepare(x)\n"
+        "        return fused_op(y)\n"
+    )
+    parsed = aa.analyze_source(src, filename="vision.py")
+    cls = parsed.class_registry["VisionTower"]
+    assert aa._dispatches_to_imported_kernel(cls, aa.parse_python_ast(src)) is True
 
 
 def test_parse_layer_module_list_edge_returns():

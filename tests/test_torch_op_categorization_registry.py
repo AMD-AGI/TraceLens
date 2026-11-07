@@ -16,6 +16,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
     op_to_perf_model_class_map,
     register_op_categories,
+    registered_op_for_kernel,
 )
 
 
@@ -82,6 +83,84 @@ def test_categorize_torch_op_expected_categories(name, expected):
 def test_kernel_name_fallback(kernel_name, expected):
     row = _row("unknown_op_name", kernel_details=[{"name": kernel_name}])
     assert categorize_torch_op(row) == expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("hipGraphLaunch->Cijk_Alik_Bljk_MT16x16x256 (Synthetic Op)", "other"),
+        (
+            "hipGraphLaunch->void ck::kernel_gemm_xdl_cshuffle_v3"
+            "<ck::tensor_operation::element_wise::PassThrough> (Synthetic Op)",
+            "other",
+        ),
+        (
+            "hipGraphLaunch->aiter::mla_a8w8_qh64_qseqlen1_gqaratio64_nm (Synthetic Op)",
+            "other",
+        ),
+        (
+            "hipGraphLaunch->void aiter::mhc_pre_big_fuse_rmsnorm_kernel<std::bfloat16_t> (Synthetic Op)",
+            "mHC",
+        ),
+        ("hipGraphLaunch->aiter::mhc_post (Synthetic Op)", "mHC"),
+        (
+            "hipGraphLaunch->void at::native::elementwise_kernel<8, 4>() (Synthetic Op)",
+            "elementwise",
+        ),
+        ("hipGraphLaunch->totally_custom_kernel (Synthetic Op)", "other"),
+        (
+            "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)",
+            "InferenceAttention",
+        ),
+    ],
+)
+def test_synthetic_graph_row_uses_the_perf_report_categorizer(name, expected):
+    """A graph-replay row is categorized by the perf-report categorizer.
+
+    The launch's kernel list often starts with an ATen elementwise kernel.
+    That list must not relabel the kernel this row owns. A kernel takes a
+    registered op's category when its name contains that op at a kernel
+    boundary. An unrecognized kernel stays other.
+    """
+    row = _row(
+        name,
+        kernel_details=[{"name": "void at::native::elementwise_kernel<8, 4>()"}],
+    )
+    assert categorize_torch_op(row) == expected
+
+
+def test_registered_op_for_kernel_uses_the_longest_bounded_key():
+    registry = {
+        "aiter::mhc_pre": "mHC",
+        "aiter::mhc_pre_big_fuse_rmsnorm": "mHC",
+        "aiter::mhc_post": "mHC",
+        "aiter::gemm_a8w8": "GEMM",
+        "aiter::gemm_a8w8_blockscale_ck": "GEMM",
+    }
+    assert (
+        registered_op_for_kernel(
+            "void aiter::mhc_pre_big_fuse_rmsnorm_kernel<std::bfloat16_t>",
+            registry,
+        )
+        == "aiter::mhc_pre_big_fuse_rmsnorm"
+    )
+    assert (
+        registered_op_for_kernel(
+            "void aiter::mhc_post_kernel<std::bfloat16_t, 4>",
+            registry,
+        )
+        == "aiter::mhc_post"
+    )
+    assert (
+        registered_op_for_kernel(
+            "void aiter::gemm_a8w8_blockscale_ck_kernel<float>",
+            registry,
+        )
+        == "aiter::gemm_a8w8_blockscale_ck"
+    )
+    assert registered_op_for_kernel("Cijk_Alik_Bljk_MT16x16x256", registry) is None
+    assert registered_op_for_kernel("aiter::mla_a8w8_qh64", registry) is None
+    assert registered_op_for_kernel("mfma_moe1_silu_mul", registry) is None
 
 
 def test_registry_covers_every_perf_model_op():

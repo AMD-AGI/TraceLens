@@ -50,6 +50,20 @@ def _tarball(*names: str) -> bytes:
     return stream.getvalue()
 
 
+def test_an_uninstalled_kernel_module_is_read_from_the_local_cache(
+    tmp_path, monkeypatch
+):
+    """The modeling analyzer reads a pinned library file without importing it."""
+    cached = tmp_path / "aiter" / "ops" / "mhc.py"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("def mhc_pre():\n    return None\n", encoding="utf-8")
+    monkeypatch.setattr(kernel, "_KERNEL_SOURCE_CACHE", tmp_path)
+
+    from TraceLens.ModelUtils.ast_analyze import _module_origin
+
+    assert _module_origin("aiter.ops.mhc") == str(cached)
+
+
 def _function(text: str, name: str = "forward") -> ast.FunctionDef:
     tree = ast.parse(text)
     return next(

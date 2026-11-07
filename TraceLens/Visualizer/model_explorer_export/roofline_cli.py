@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Project a kernel-by-kernel roofline for a model checkpoint from its "
             "config and modeling source alone, with no trace or GPU run. Ops are "
             "costed with TraceLens.PerfModel's analytical FLOPs/bytes formulas; "
-            "ops with no direct formula (embeddings, reshapes, a convolution with "
+            "ops with no direct formula (reshapes, a convolution with "
             "no weight geometry) are reported as unmodeled rather than silently "
             "dropped."
         ),
@@ -106,6 +106,20 @@ def build_parser() -> argparse.ArgumentParser:
             "checkpoint declares. With no draft class, the depth is the fixed "
             "attention-plus-dense template. Leaves the graph already draws "
             "are not costed again."
+        ),
+    )
+    parser.add_argument(
+        "--routing-balance",
+        type=float,
+        default=0.9,
+        metavar="FRACTION",
+        help=(
+            "Mean expert load divided by the busiest expert's load "
+            "(default: 0.9, so the busiest expert carries about 1.11x the "
+            "mean). The projection sums every local expert at the mean load "
+            "(batch * seq * experts-per-token / num-experts, measured on this "
+            "EP rank). The fraction does not scale FLOPs. An explicit "
+            "--dim nnz= overrides the mean."
         ),
     )
     parser.add_argument(
@@ -313,6 +327,8 @@ def run_projection(args):
         gpu_arch=gpu_arch,
         num_predicted_tokens=args.num_predicted_tokens,
         checkpoint=checkpoint,
+        routing_balance=args.routing_balance,
+        phase=args.phase,
     )
     # Convolutional models: the graph draws one conv per stage (and the stem /
     # downsampling convs that lead those stages). Cost each live instance from a
@@ -336,6 +352,17 @@ def run_projection(args):
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    checkpoint = resolve_checkpoint_arg(checkpoint=args.checkpoint, source=args.source)
+    if checkpoint is not None:
+        from TraceLens.ModelUtils.model_env import reexec_in_model_env
+
+        status = reexec_in_model_env(
+            checkpoint,
+            list(sys.argv[1:] if argv is None else argv),
+            module="TraceLens.Visualizer.model_explorer_export.roofline_cli",
+        )
+        if status is not None:
+            return status
 
     try:
         projection, gpu_arch, layout_warnings = run_projection(args)

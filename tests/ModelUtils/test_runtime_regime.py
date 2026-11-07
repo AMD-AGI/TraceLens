@@ -516,3 +516,40 @@ class TestWhatTheConstructorReadsOutOfTheConfig:
             'config.linear_attn_config.get("absent", some_local)', self.CONFIG
         )
         assert out == "UNKNOWN"
+
+
+class TestANameBoundToItselfDoesNotRecurse:
+    """A local can be assigned an expression that mentions that same local.
+
+    Following the name back into that expression walks the test forever. The
+    branch stays undecided instead.
+    """
+
+    SOURCE = """
+def forward(self, hidden_states):
+    batch, seq_len, _ = hidden_states.shape
+    ready = hidden_states is not None and ready
+    decoding = seq_len == 1
+    if ready and decoding:
+        hidden_states = self.recurrent(hidden_states)
+    if decoding:
+        hidden_states = self.recurrent(hidden_states)
+    return hidden_states
+"""
+
+    def _func(self) -> ast.FunctionDef:
+        return ast.parse(self.SOURCE).body[0]
+
+    def test_the_cycle_is_undecided(self) -> None:
+        func = self._func()
+        outcome = _extractor(RuntimeRegime(phase="decode"), func)._regime_outcome(
+            _test_of(func, 0)
+        )
+        assert outcome is None
+
+    def test_an_alias_of_a_settled_test_still_answers(self) -> None:
+        func = self._func()
+        outcome = _extractor(RuntimeRegime(phase="decode"), func)._regime_outcome(
+            _test_of(func, 1)
+        )
+        assert outcome is True

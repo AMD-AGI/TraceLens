@@ -90,6 +90,66 @@ def _kernel_name_fallback(row) -> Optional[str]:
     return None
 
 
+_SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
+
+
+def registered_op_for_kernel(
+    kernel_name: str, registry: Mapping[str, str]
+) -> Optional[str]:
+    """Registered op a device kernel name identifies, or ``None``.
+
+    A capture merge reparents the replay kernel onto the CPU op recorded into
+    the graph. Without that capture, the kernel name is the only record of the
+    op. The longest registry key that occurs in the kernel name is that op,
+    when the match ends at the kernel name or at ``<``, ``(``, or ``_kernel``.
+    A shorter key such as ``aiter::mhc_pre`` therefore does not claim
+    ``aiter::mhc_pre_big_fuse_rmsnorm_kernel``. Keys that are themselves full
+    synthetic-op strings stay exact-match only.
+    """
+    if not isinstance(kernel_name, str) or not kernel_name:
+        return None
+    best = None
+    best_len = -1
+    for key in registry:
+        if "->" in key or key.endswith(_SYNTHETIC_OP_SUFFIX):
+            continue
+        start = 0
+        while True:
+            idx = kernel_name.find(key, start)
+            if idx < 0:
+                break
+            start = idx + 1
+            if idx > 0 and (
+                kernel_name[idx - 1].isalnum() or kernel_name[idx - 1] in "_:"
+            ):
+                continue
+            rest = kernel_name[idx + len(key) :]
+            if rest and rest[0] not in "<(" and not rest.startswith("_kernel"):
+                continue
+            if len(key) > best_len:
+                best = key
+                best_len = len(key)
+                break
+    return best
+
+
+def synthetic_kernel_name(op_name: str) -> Optional[str]:
+    """Kernel named by a ``<launcher>-><kernel> (Synthetic Op)`` row.
+
+    A graph replay records the launch, not the CPU op that was captured into
+    the graph. The synthetic row is that missing op: the text after ``->`` is
+    the kernel the capture merge would have reparented onto its CPU op.
+    """
+    if not isinstance(op_name, str) or not op_name.endswith(_SYNTHETIC_OP_SUFFIX):
+        return None
+    body = op_name[: -len(_SYNTHETIC_OP_SUFFIX)]
+    arrow = body.find("->")
+    if arrow < 0:
+        return None
+    kernel = body[arrow + 2 :].strip()
+    return kernel or None
+
+
 def get_perf_model_category(perf_model_class: type, bwd: bool = False) -> Optional[str]:
     """Return the category declared by a perf model class."""
     attr_name = "bwd_category" if bwd else "category"
@@ -177,6 +237,24 @@ def _categorize_torch_op_from_registry(
     for pattern, category in patterns:
         if pattern.match(name):
             return category
+
+    # A synthetic graph row is one kernel. Categorize that kernel with this
+    # same registry, not the launch's kernel list: the launch's first kernel
+    # is often an ATen elementwise kernel and would label every kernel in the
+    # graph as elementwise.
+    kernel = synthetic_kernel_name(name)
+    if kernel is not None:
+        return _categorize_torch_op_from_registry(
+            {"name": kernel, "kernel_details": [{"name": kernel}]},
+            registry,
+            patterns,
+        )
+
+    # The kernel name embeds a registered op the way a capture-restored CPU
+    # op would have been named. Categorize that op; do not invent a category.
+    op_name = registered_op_for_kernel(name, registry)
+    if op_name is not None:
+        return registry[op_name]
 
     fallback = _kernel_name_fallback(row)
     if fallback is not None:
@@ -410,7 +488,7 @@ for op in bilinear_upsample_ops:
 # Embedding lookup is a gather: zero FLOPs, bytes for the gathered rows
 # (read and write) plus the index vector. Bag offsets are extra index reads.
 # Backward scatter-adds also re-read the updated row.
-data_movement_ops = {
+indexed_copy_ops = {
     "aten::embedding": perf_model.aten_embedding,
     "aten::embedding_backward": perf_model.aten_embedding_dense_backward,
     "aten::embedding_dense_backward": perf_model.aten_embedding_dense_backward,
@@ -427,7 +505,7 @@ data_movement_ops = {
     "aten::index_put_": perf_model.aten_index_put,
     "aten::_index_put_impl_": perf_model.aten_index_put,
 }
-for op_name, op_class in data_movement_ops.items():
+for op_name, op_class in indexed_copy_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 
 # ---------------------------------------------------------------------------

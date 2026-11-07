@@ -59,7 +59,9 @@ def build_roofline_basic_ops(
     for pattern in ROOFLINE_LEAF_PATTERNS:
         if pattern not in extra_add:
             extra_add.append(pattern)
-    return BasicOpFilter.from_cli(add=extra_add, remove=remove or [])
+    chosen = BasicOpFilter.from_cli(add=extra_add, remove=remove or [])
+    chosen.stops_at_grouped_moe = True
+    return chosen
 
 
 def load_model_spec(

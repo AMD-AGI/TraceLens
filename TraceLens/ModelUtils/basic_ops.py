@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 
 # Default leaf patterns: PyTorch ATen ops (avoid matching "Attention", etc.).
@@ -30,6 +31,8 @@ COMMON_LEAF_PATTERNS: tuple[str, ...] = (
 # Module classes with a direct, shape-only TraceLens.PerfModel formula (GEMM, CONV,
 # Normalization, Softmax). Used to stop expansion exactly at the granularity a
 # roofline projection can cost -- see BasicOpFilter.for_roofline().
+# A grouped-expert MoE is the same kind of stop (GroupedGemm costs the whole
+# expert loop) but it is not a name match: see forward_is_grouped_expert_kernel.
 ROOFLINE_LEAF_PATTERNS: tuple[str, ...] = (
     r"(?i)^Linear$",
     r"(?i)^Embedding$",
@@ -44,6 +47,46 @@ ROOFLINE_LEAF_PATTERNS: tuple[str, ...] = (
     r"(?i)^InstanceNorm\d*d$",
     r"(?i)^Softmax$",
 )
+
+# CamelCase tokens of a routed-expert module. Case-sensitive so an attribute
+# such as ``shared_experts`` is not mistaken for the class.
+_GROUPED_MOE_CLASS_RE = re.compile(r"MoE|Moe|Experts")
+
+
+def forward_is_grouped_expert_kernel(
+    class_name: str, class_node: ast.AST | None
+) -> bool:
+    """True when *class_name*'s own ``forward`` is the grouped expert GEMM.
+
+    That forward is one PerfModel op (:class:`GroupedGemm` over the selected
+    experts), so a roofline projection stops on it instead of opening the loop
+    into a GEMM per expert. Two near misses stay open:
+
+    - a MoE container whose children are already leaves (a router ``Linear``
+      and a shared expert) — those children are the ops with a formula;
+    - one expert MLP invoked from an outer ``for`` — the loop multiplies those
+      GEMMs, and stopping here would charge the full grouped formula once per
+      expert.
+
+    A shared-expert class is the dense MLP, even when its name says expert.
+    """
+    if not class_name or class_node is None:
+        return False
+    if "shared" in class_name.lower():
+        return False
+    if _GROUPED_MOE_CLASS_RE.search(class_name) is None:
+        return False
+    forward = next(
+        (
+            item
+            for item in getattr(class_node, "body", ())
+            if isinstance(item, ast.FunctionDef) and item.name == "forward"
+        ),
+        None,
+    )
+    if forward is None:
+        return False
+    return any(isinstance(node, ast.For) for node in ast.walk(forward))
 
 
 # Submodule attribute names observed in modeling forwards (conv paths, etc.).
@@ -74,6 +117,7 @@ class BasicOpFilter:
         patterns: list[str | re.Pattern[str]],
         *,
         basic_only: bool = False,
+        stops_at_grouped_moe: bool = False,
     ) -> None:
         compiled: list[re.Pattern[str]] = []
         for pattern in patterns:
@@ -82,6 +126,10 @@ class BasicOpFilter:
             )
         self.patterns = compiled
         self.basic_only = basic_only
+        # GroupedGemm prices a routed-expert forward as one op. Set on the
+        # roofline filter so that forward stays a leaf; detailed diagrams still
+        # open it.
+        self.stops_at_grouped_moe = stops_at_grouped_moe
 
     @classmethod
     def from_cli(
@@ -121,12 +169,14 @@ class BasicOpFilter:
         A roofline projection costs a GEMM, a norm, a softmax, ... as one analytical
         op; expanding further (into the mean/rsqrt/mul chain behind an RMSNorm, say)
         only adds primitives the projection has no better formula for anyway.
+        A routed-expert forward is the same stop: GroupedGemm costs the loop, so
+        the loop is not opened into one GEMM per expert.
         """
         patterns = list(DEFAULT_BASIC_OP_PATTERNS)
         for pattern in ROOFLINE_LEAF_PATTERNS:
             if pattern not in patterns:
                 patterns.append(pattern)
-        return cls(patterns, basic_only=True)
+        return cls(patterns, basic_only=True, stops_at_grouped_moe=True)
 
     def is_basic(self, *names: str) -> bool:
         for name in names:
