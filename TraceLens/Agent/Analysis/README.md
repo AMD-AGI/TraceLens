@@ -66,7 +66,7 @@ pip install -e .
 The orchestrator runs against a PyTorch profiler trace. Collection is workload-specific:
 
 - **Generic Eager Traces**: Instrument your loop with `torch.profiler.profile(...)`, enabling CPU-side call-stack and shape capture (`with_stack=True`, `record_shapes=True`). Profile a representative steady-state window (a handful of steps, post-warmup) and log the trace with `prof.export_chrome_trace(...)`. A single rank's trace is enough for per-rank analysis. See [Collect a trace](../../../docs/how-to/generate-perf-report-pytorch.md#collect-a-trace).
-- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis.
+- **Inference Traces with Graph Capture**: Collection has framework-specific requirements. Follow guidelines in [Generate a PyTorch inference report](../../../docs/how-to/generate-perf-report-pytorch-inference.md). The [Profiling skill](../Profiling/README.md) automates vLLM/SGLang/ATOM benchmarking and PyTorch profiler trace collection via [Magpie](https://github.com/AMD-AGI/Magpie), producing analysis-ready traces. For graph-mode workloads you produce two artifacts: a graph-replay trace and a graph-capture folder. In inference mode with execution mode `graph replay + capture`, TraceLens merges call-stack and shape information from the capture folder into the replay tree before analysis. A DeepSeek-V4 replay can instead take shapes from the model config, with no capture folder. See [Shapes from the model config](../../../docs/how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config).
 
 ### 3. Establish a hardware performance baseline
 
@@ -325,7 +325,7 @@ The orchestrator supports two analysis modes, selected during Step 0. Step 1 run
 
 For inference mode, the orchestrator also asks for the execution mode:
 - **Eager mode** — only the trace file is needed
-- **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree
+- **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree. A DeepSeek-V4 replay can omit the capture folder and set `graph_model_config_path` and `graph_model_tp` on the run config. See [Shapes from the model config](../../../docs/how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config). The orchestrator does not ask for those two keys.
 
 ### Execution Environments
 

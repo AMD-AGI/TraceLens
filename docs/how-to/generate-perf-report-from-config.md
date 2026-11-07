@@ -59,6 +59,8 @@ jobs:
 | `jobs` | yes | List of jobs. See the job keys below. |
 | `aggregation` | no | `{policy: combine_by_node}`. Combines the jobs' reports. See [Combine reports](#combine-reports). |
 | any report option | no | Any parameter of the selected report function, by its Python name (for example `kernel_summary: true`, `topk_ops: 50`). Applies to every job. |
+| `graph_model_config_path` | no | Hugging Face `config.json`. `inference` only. Fills graph-kernel shapes from the model schedule. See [Shapes from the model config](./generate-perf-report-pytorch-inference.md#shapes-from-the-model-config). |
+| `graph_model_tp` | no | Tensor-parallel size of the traced rank. `inference` only. Default `1`. Used with `graph_model_config_path`. |
 
 ### Job keys
 
@@ -147,6 +149,29 @@ jobs:
 
 Speculative decoding uses the same config. The drafter and target graphs are
 in the same capture folder.
+
+### Inference with a model config
+
+A DeepSeek-V4 graph replay can take shapes from the checkpoint instead of a
+capture folder. `graph_model_config_path` and `graph_model_tp` are top-level,
+and they apply to every job:
+
+```yaml
+analysis_mode: inference
+output_dir: /data/dsv4/analysis_output
+graph_model_config_path: /data/dsv4/config.json
+graph_model_tp: 8
+jobs:
+  - trace_path: /data/dsv4/rank0.json.gz
+    platform: MI300X
+```
+
+`graph_model_tp` is the tensor-parallel size of the traced rank. The schedule
+reads the DeepSeek-V4 fields in `config.json` and pairs each graph kernel with
+the launch at that position. A kernel it does not recognize is left without
+shapes. Setting `capture_folder` on the job as well keeps the captured CPU ops
+for the graphs that were captured. See
+[Shapes from the model config](./generate-perf-report-pytorch-inference.md#shapes-from-the-model-config).
 
 ### Prefill and decode
 
