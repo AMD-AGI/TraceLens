@@ -81,6 +81,15 @@ UNIQUE_ARGS_GROUPING_COLS = (
 PERF_PARAM_PREFIX = "param: "
 
 
+def _by_time_then_uid(event):
+    """Order events by start time, then UID.
+
+    Several kernels in one launch can share a timestamp. UID is the stable
+    tie break; timestamp order alone follows whatever order the walk produced.
+    """
+    return (event.get("ts") or 0, event.get("UID") or 0)
+
+
 def normalize_dtype_to_precision(dtype_str):
     """
     Normalize a dtype string to a standard precision identifier.
@@ -513,7 +522,7 @@ class TreePerfAnalyzer:
                 "stream": kernel.get("args", {}).get("stream", None),
                 "gpu_op_uid": kernel.get("UID"),
             }
-            for kernel in sorted(list_kernels, key=lambda k: k.get("ts", 0))
+            for kernel in sorted(list_kernels, key=_by_time_then_uid)
         ]
         filtered_busy_times = {
             label: self._busy_time(self._kernels_under(cpu_op_list, keep_kernel))
@@ -764,6 +773,10 @@ class TreePerfAnalyzer:
             groupby_cols.append("is_recompute")
         for col in param_cols:
             df_perf_metrics[col] = df_perf_metrics[col].astype(str)
+        # UID_first is the first row in the group. Sort so it is the smallest
+        # UID, not whichever row the tree walk happened to emit first.
+        if "UID" in df_perf_metrics.columns:
+            df_perf_metrics = df_perf_metrics.sort_values("UID", kind="mergesort")
         # TODO warn user if nans in the performance metrics
         # Perform the aggregation
         df_perf_metrics_summary = df_perf_metrics.groupby(
@@ -963,7 +976,7 @@ class TreePerfAnalyzer:
         # Sort launcher UIDs by the start time of their events
         sorted_launcher_uids = sorted(
             launcher_to_kernels.keys(),
-            key=lambda uid: self.tree.get_UID2event(uid).get("ts", 0),
+            key=lambda uid: _by_time_then_uid(self.tree.get_UID2event(uid)),
         )
 
         events_by_uid = self.tree.events_by_uid
@@ -991,7 +1004,7 @@ class TreePerfAnalyzer:
                     "dur": kernel["dur"],
                     "stream": kernel.get("args", {}).get("stream", None),
                 }
-                for kernel in sorted(kernels, key=lambda k: k.get("ts", 0))
+                for kernel in sorted(kernels, key=_by_time_then_uid)
             ]
             event["op category"] = self.op_categorizer(event)
             self._compute_overlap_info(event, kernels)
@@ -1001,11 +1014,12 @@ class TreePerfAnalyzer:
 
     def _compute_overlap_info(self, event, kernels):
         """Set overlap_pct, overlapping_kernel_names, overlapping_kernels_details on event."""
+        kernels = sorted(kernels, key=_by_time_then_uid)
         event["overlapping_kernel_names"] = list(
             dict.fromkeys(
                 self.tree.get_UID2event(uid).get("name", None)
                 for kernel in kernels
-                for uid in kernel.get("overlapping_uids", set())
+                for uid in sorted(kernel.get("overlapping_uids") or ())
             )
         )
         total_kernel_runtime = (
@@ -1019,7 +1033,7 @@ class TreePerfAnalyzer:
 
         overlapping_details = []
         for kernel in kernels:
-            for uid in kernel.get("overlapping_uids", set()):
+            for uid in sorted(kernel.get("overlapping_uids") or ()):
                 ov_event = self.tree.get_UID2event(uid)
                 overlap_start = max(kernel["ts"], ov_event.get("ts", 0))
                 overlap_end = min(kernel["t_end"], ov_event.get("t_end", 0))
@@ -1064,7 +1078,7 @@ class TreePerfAnalyzer:
             total_overlap_time = 0
             for kernel in kernels:
                 ov_intervals = []
-                for uid in kernel.get("overlapping_uids", set()):
+                for uid in sorted(kernel.get("overlapping_uids") or ()):
                     ov_evt = self.tree.get_UID2event(uid)
                     os = max(kernel["ts"], ov_evt.get("ts", 0))
                     oe = min(kernel["t_end"], ov_evt.get("t_end", 0))
@@ -1882,7 +1896,7 @@ class TreePerfAnalyzer:
         def _emit_synthetic_kernels(prefix_name, kernels, cpu_op):
             """Emit one row per kernel. A graph launch with a model schedule
             pairs each kernel with the launch at that position."""
-            ordered = sorted(kernels, key=lambda kernel: kernel.get("ts") or 0)
+            ordered = sorted(kernels, key=_by_time_then_uid)
             launches = (
                 self._launches_for(cpu_op) if self.graph_model is not None else None
             )
@@ -2497,6 +2511,12 @@ class TreePerfAnalyzer:
 
         if "has_perf_model" in df_temp.columns:
             agg_dict["has_perf_model"] = "first"
+
+        # ex_UID is UID_first. Sort so that is the smallest UID in the group.
+        # The tree walk's row order is not a stable choice, and equal kernel
+        # times are then ordered by this value.
+        if "UID" in df_temp.columns:
+            df_temp = df_temp.sort_values("UID", kind="mergesort")
 
         # Group and aggregate
         df_summary = df_temp.groupby(str_col_names, dropna=False, sort=False).agg(

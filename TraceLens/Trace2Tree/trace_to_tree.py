@@ -1118,7 +1118,8 @@ class TraceToTree(BaseTraceToTree):
                     collect_bwd(child)
 
         collect_bwd(fwd_event)
-        return list(all_bwd_uids)
+        # A set of UIDs has no stable order. Callers walk this list.
+        return sorted(all_bwd_uids)
 
     def link_all_fwd_bwd_events(self):
         """

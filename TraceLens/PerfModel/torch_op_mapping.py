@@ -488,7 +488,7 @@ for op in bilinear_upsample_ops:
 # Embedding lookup is a gather: zero FLOPs, bytes for the gathered rows
 # (read and write) plus the index vector. Bag offsets are extra index reads.
 # Backward scatter-adds also re-read the updated row.
-data_movement_ops = {
+indexed_copy_ops = {
     "aten::embedding": perf_model.aten_embedding,
     "aten::embedding_backward": perf_model.aten_embedding_dense_backward,
     "aten::embedding_dense_backward": perf_model.aten_embedding_dense_backward,
@@ -505,7 +505,7 @@ data_movement_ops = {
     "aten::index_put_": perf_model.aten_index_put,
     "aten::_index_put_impl_": perf_model.aten_index_put,
 }
-for op_name, op_class in data_movement_ops.items():
+for op_name, op_class in indexed_copy_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 
 # ---------------------------------------------------------------------------

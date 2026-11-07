@@ -752,7 +752,7 @@ def test_project_op_costs_an_embedding_lookup_as_gathered_rows():
         moe_intermediate_size=None,
     )
     assert op.modeled is True
-    assert op.category == "DataMovement"
+    assert op.category == "IndexedCopy"
     assert op.flops == 0
     # 8 tokens, hidden 8, bf16 rows read and written, plus int64 indices.
     assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
@@ -785,7 +785,7 @@ def test_project_op_costs_common_embedding_labels(computation):
         moe_intermediate_size=None,
     )
     assert op.modeled is True
-    assert op.category == "DataMovement"
+    assert op.category == "IndexedCopy"
     assert op.flops == 0
     assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
 
@@ -827,7 +827,7 @@ def test_project_op_costs_a_boolean_index_at_one_byte_per_element():
         moe_intermediate_size=None,
     )
     assert op.modeled is True
-    assert op.category == "DataMovement"
+    assert op.category == "IndexedCopy"
     assert op.flops == 0
     # One index selects the whole mask row: read, write, and one int64 index.
     assert op.bytes == 6 * 2048 * 1 * 2 + 1 * 8
@@ -908,9 +908,7 @@ def test_expert_loop_body_is_repeated_for_each_local_expert(_reset_rt):
     assert _expert_loop_multiplier("loop_iterations_289") == 72
     assert _expert_loop_multiplier("loop_iterations_72") == 72
     assert _expert_loop_multiplier("loop_iterations_19") == 1
-    assert (
-        _expert_loop_multiplier("decoder/loop_iterations_288/_apply_gate") == 72
-    )
+    assert _expert_loop_multiplier("decoder/loop_iterations_288/_apply_gate") == 72
     op = _project_op(
         "n",
         "loop_iterations_288",
@@ -1128,7 +1126,7 @@ def test_project_roofline_fixture_coverage():
     assert rmsnorm_ops
 
     embed = next(op for op in projection.modeled_ops if op.name == "embed_tokens")
-    assert embed.category == "DataMovement"
+    assert embed.category == "IndexedCopy"
     assert embed.flops == 0
     assert embed.bytes > 0
 
