@@ -117,7 +117,7 @@ from TraceLens.PerfModel.perf_model import (
     UnaryElementwise,
 )
 from TraceLens.PerfModel.triton_compiled_perf_model import _FLOPS_PER_ELEM
-from TraceLens.PerfModel.utils import torch_dtype_map
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 from TraceLens.TreePerf.tree_perf import compute_roofline_time_and_bound
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
     build_model_explorer_payload,
@@ -126,18 +126,14 @@ from TraceLens.Visualizer.model_explorer_export.shapes import parse_shape_dims
 
 # Constants
 
-# Bytes per element by TraceLens.PerfModel.utils.torch_dtype_map's normalized
-# simulation-precision name. torch_dtype_map already maps every spelling of a
-# dtype TraceLens' dtype strings use (float16/bfloat16/fp8_e4m3/...) onto one of
-# these; name2bpe duplicates this table but keyed on trace-event (c10::) names,
-# which operator-export dtype strings are not.
+# Bytes per element by torch_dtype_map's simulation-precision name.
 _BYTES_PER_ELEMENT: dict[str, float] = {
-    "fp64": 8,
-    "fp32": 4,
-    "fp16": 2,
-    "bf16": 2,
-    "fp8": 1,
-    "fp4": 0.5,
+    "fp64": name2bpe("fp64"),
+    "fp32": name2bpe("fp32"),
+    "fp16": name2bpe("fp16"),
+    "bf16": name2bpe("bf16"),
+    "fp8": name2bpe("fp8"),
+    "fp4": name2bpe("fp4"),
 }
 
 # GEMM computation labels, split by how the op reaches the export: an actual

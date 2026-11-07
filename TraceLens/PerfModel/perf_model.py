@@ -9,7 +9,13 @@ import warnings
 from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-from .utils import name2bpe, optional_float, parse_bool, torch_dtype_map
+from .utils import (
+    name2bpe,
+    optional_float,
+    parse_bool,
+    scalar_type_bpe,
+    torch_dtype_map,
+)
 
 
 # 1. GEMM
@@ -3612,60 +3618,6 @@ class aten_reciprocal(_TwoFlopUnary):
     """``aten::reciprocal`` and ``aten::reciprocal_``."""
 
 
-# Storage size of each ``c10::ScalarType``, in the order of
-# ``AT_FORALL_SCALAR_TYPES_WITH_COMPLEX_AND_QINTS``. The profiler stores this
-# ordinal in ``Concrete Inputs`` for ``aten::to`` and ``aten::_to_copy``.
-_SCALAR_TYPE_BPE = {
-    0: 1,  # Byte
-    1: 1,  # Char
-    2: 2,  # Short
-    3: 4,  # Int
-    4: 8,  # Long
-    5: 2,  # Half
-    6: 4,  # Float
-    7: 8,  # Double
-    8: 4,  # ComplexHalf
-    9: 8,  # ComplexFloat
-    10: 16,  # ComplexDouble
-    11: 1,  # Bool
-    12: 1,  # QInt8
-    13: 1,  # QUInt8
-    14: 4,  # QInt32
-    15: 2,  # BFloat16
-    16: 1,  # QUInt4x2
-    17: 1,  # QUInt2x4
-    18: 1,  # Bits1x8
-    19: 1,  # Bits2x4
-    20: 1,  # Bits4x2
-    21: 1,  # Bits8
-    22: 2,  # Bits16
-    23: 1,  # Float8_e5m2
-    24: 1,  # Float8_e4m3fn
-    25: 1,  # Float8_e5m2fnuz
-    26: 1,  # Float8_e4m3fnuz
-    27: 2,  # UInt16
-    28: 4,  # UInt32
-    29: 8,  # UInt64
-    44: 1,  # Float8_e8m0fnu
-    45: 1,  # Float4_e2m1fn_x2
-    46: 4,  # BComplex32
-}
-
-
-def scalar_type_bpe(token):
-    """Bytes of a profiler ``ScalarType`` ordinal, or ``None`` when it is not one."""
-    if token is None:
-        return None
-    text = str(token).strip()
-    if not text:
-        return None
-    try:
-        code = int(text)
-    except ValueError:
-        return None
-    return _SCALAR_TYPE_BPE.get(code)
-
-
 class aten_clone(aten_unary_elementwise):
     """``aten::clone`` materializes a tensor. No arithmetic.
 
@@ -6281,15 +6233,14 @@ class hipblaslt_gemm_fp4(GEMM):
         assert (
             bpeA is not None and bpeB is not None
         ), f"Data types of A and B are not supported: {dtype_A_B}"
-        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
-        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
-        # bypass it and compute bytes explicitly so we can fold in the
-        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
+        # K is the logical element count. name2bpe counts one FP4 value, so
+        # M*K*bpe is the packed storage. GEMM.bytes_func cannot fold in the
+        # E8M0 block scales, which add about 3% to the operand bandwidth.
         M, N, K = self.M, self.N, self.K
         block = self.MXFP4_BLOCK_SIZE
         scales_per_row = (K + block - 1) // block
-        bytes_A = M * (K // 2) * bpeA
-        bytes_B = N * (K // 2) * bpeB
+        bytes_A = M * K * bpeA
+        bytes_B = N * K * bpeB
         bpe_scaleA = name2bpe(self.param_details.get("dtype_scaleA")) or 1
         bpe_scaleB = name2bpe(self.param_details.get("dtype_scaleB")) or 1
         bytes_scaleA = M * scales_per_row * bpe_scaleA

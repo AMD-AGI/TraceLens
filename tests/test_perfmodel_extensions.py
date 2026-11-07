@@ -2064,7 +2064,7 @@ class TestUtilsCoverage:
         [
             ("double", 8),
             ("c10::float8_e5m2", 1),
-            ("c10::float4_e2m1fn_x2", 1),
+            ("c10::float4_e2m1fn_x2", 0.5),
             (None, None),
         ],
     )
