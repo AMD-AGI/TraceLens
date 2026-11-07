@@ -3429,6 +3429,11 @@ def _dispatch_op_cost(
     if label in _BINARY_POINTWISE_COMPUTATIONS:
         return _binary_elementwise_cost(input_shapes, output_shape, bpe)
     if label in _UNARY_POINTWISE_COMPUTATIONS:
+        # sqrt, rsqrt, and reciprocal count two flops per element, the same
+        # weight _FLOPS_PER_ELEM in triton_compiled_perf_model.py assigns them
+        # for fused Triton kernels. Other unary labels keep one flop per
+        # element. The table itself is not used here: it omits many of these
+        # labels and gives others different weights (e.g. exp, sigmoid, gelu).
         flops_func = (
             aten_sqrt.flops_func if label in ("sqrt", "rsqrt", "reciprocal") else None
         )
