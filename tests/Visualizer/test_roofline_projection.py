@@ -460,14 +460,27 @@ def test_dispatch_unary_elementwise():
         "Silu", [(2, 10, 4096)], (2, 10, 4096), 2
     )
     assert category == "UnaryElementwise"
-    assert flops == 2 * 10 * 4096
+    # aten.silu is 4 in _FLOPS_PER_ELEM_TABLE.
+    assert flops == 4 * 2 * 10 * 4096
+    assert bytes_moved == 2 * 2 * 10 * 4096 * 2
 
 
-@pytest.mark.parametrize("label", ["sqrt", "rsqrt", "reciprocal"])
-def test_dispatch_special_unary_counts_two_flops_per_element(label):
+@pytest.mark.parametrize(
+    "label,per_elem",
+    [
+        ("sqrt", 2),
+        ("rsqrt", 2),
+        ("Reciprocal sqrt", 2),
+        ("reciprocal", 2),
+        ("exp", 4),
+        ("gelu", 8),
+        ("erf", 1),
+    ],
+)
+def test_dispatch_unary_flops_follow_the_fused_kernel_table(label, per_elem):
     category, _, flops, bytes_moved = _dispatch_op_cost(label, [(4, 256)], (4, 256), 2)
     assert category == "UnaryElementwise"
-    assert flops == 2 * 4 * 256
+    assert flops == per_elem * 4 * 256
     assert bytes_moved == 2 * 4 * 256 * 2
 
 
