@@ -521,6 +521,22 @@ def project_roofline(
     result = RooflineProjection(batch_size=batch_size, seq_len=seq_len)
     if routing_note:
         result.notes.append(routing_note)
+    # An opaque attention block (role attention, not one step of the softmax)
+    # already prices the whole layer. The eager matmul chain under it must not
+    # be priced again. A chain with no such block is the eager expansion of
+    # softmax attention, whose shapes stop at S and miss the KV cache.
+    opaque_attention: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        parsed = _parse_op_node(node)
+        if parsed is None:
+            continue
+        if _attr_text(node.get("attrs"), "role_basis") == ROLE_BASIS_COMPUTATION:
+            continue
+        if parsed[6] == "attention" and not _is_gated_delta(parsed[1]):
+            opaque_attention.add(str(node.get("id")))
+    replaced_eager_attention: set[str] = set()
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -569,6 +585,29 @@ def project_roofline(
         if _node_is_draft_container(node):
             # The synthetic stack, or the container's own drawn children, costs
             # this module. The container node itself is not a second copy.
+            continue
+        if _is_eager_softmax_step(node_id, computation, computation_role):
+            scope = _attention_scope(node_id)
+            if scope in opaque_attention:
+                continue
+            if scope not in replaced_eager_attention:
+                replaced_eager_attention.add(scope)
+                _dims_only, dtype = _split_shape_text(output_text)
+                bpe = (
+                    _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+                )
+                boundary = _softmax_attention_row(
+                    scope,
+                    section,
+                    instances,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                    heads=_eager_qk_heads(output_text, input_texts, dims),
+                )
+                if boundary is not None:
+                    result.ops.append(boundary)
             continue
         result.ops.append(op)
         _dims_only, dtype = _split_shape_text(output_text)
@@ -1063,7 +1102,11 @@ def _quant_matrix_rows(
             )
         )
 
-    _unary("weight_dequant", weight_elements, _RT.weight_bpe, bpe)
+    # fp8 weights are read by the GEMM itself (aiter/ck block-scale). A separate
+    # dequant would materialize a bf16 copy that those kernels do not write.
+    # Narrower schemes (fp4, int4) still expand the weight before the multiply.
+    if _RT.weight_bpe != 1:
+        _unary("weight_dequant", weight_elements, _RT.weight_bpe, bpe)
     if _RT.weight_bpe == 1:
         _unary("act_quant", act_elements, bpe, _RT.weight_bpe)
     return ops
@@ -1187,6 +1230,21 @@ def _project_op(
     # Introspective boundaries: the modeling source tags each module with a role
     # ("attention"/"ffn") and the arch spec says whether the model is MoE, so we
     # cost the custom attention and routed-expert blocks without matching names.
+    if role == "attention" and _is_gated_delta(computation):
+        # A stopped gated-delta kernel is linear in the sequence. The SDPA
+        # boundary below prices a quadratic score over the KV cache, which is
+        # the full-attention layer, not this one.
+        gdn = _gated_delta_cost(input_texts, dims, bpe)
+        if gdn is not None:
+            category, maf_type, flops, bytes_moved = gdn
+            try:
+                oshape = resolve_shape(_dims_only, dims)
+                base.output_elements = prod(oshape) if oshape else 1
+            except DimResolutionError:
+                base.output_elements = None
+            return _finish_op(
+                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
+            )
     if role == "attention":
         att = _attention_boundary_cost(dims, bpe)
         if att is not None:
@@ -1439,6 +1497,9 @@ class _RuntimeIntrospection:
         "dense_intermediate",
         "mtp_layers",
         "compress_ratios",
+        "config_attn_heads",
+        "config_attn_kv_heads",
+        "config_attn_head_dim",
     )
 
     def __init__(self):
@@ -1486,6 +1547,9 @@ class _RuntimeIntrospection:
         self.dense_intermediate = None
         self.mtp_layers = None
         self.compress_ratios = ()
+        self.config_attn_heads = None
+        self.config_attn_kv_heads = None
+        self.config_attn_head_dim = None
 
 
 _RT = _RuntimeIntrospection()
@@ -1588,6 +1652,12 @@ def _populate_introspection(spec):
     _RT.attention_bias = tcfg.get("attention_bias") is True
     _RT.mlp_bias = tcfg.get("mlp_bias") is True
     _RT.head_bias = tcfg.get("lm_head_bias", tcfg.get("head_bias")) is True
+    # Kept from the checkpoint. A hybrid model resolves a different head count
+    # in the linear-attention class, and that single constructor value must not
+    # become the softmax attention's width.
+    _RT.config_attn_heads = _RT.attn_heads
+    _RT.config_attn_kv_heads = _RT.attn_kv_heads
+    _RT.config_attn_head_dim = _RT.attn_head_dim
     _RT.variant_windows = _variant_windows(
         tcfg, _RT.sliding_window
     ) or _windows_from_variants(spec, tcfg, _RT.sliding_window)
@@ -1982,6 +2052,163 @@ def _shard_heads(n: int, degree: int) -> int:
 
 
 _WINDOW_UNSET = object()
+
+
+def _is_gated_delta(computation: str) -> bool:
+    return "gated_delta" in (computation or "").lower()
+
+
+def _attention_scope(node_id: str) -> str:
+    """The attention module a step belongs to.
+
+    Expanded steps are ``.../self_attn/seq:15:@attention:@op_...``. The marker
+    is ``@attention``, not a path segment, so every step of one module shares
+    one scope and is priced once.
+    """
+    head, sep, _tail = node_id.partition("@attention")
+    return head.rstrip("/:") if sep else node_id
+
+
+def _is_eager_softmax_step(
+    node_id: str, computation: str, computation_role: str
+) -> bool:
+    """A matmul/softmax that is one step of an expanded attention, not the block."""
+    return (
+        computation_role == ATTENTION_ROLE
+        and "@attention" in node_id
+        and not _is_gated_delta(computation)
+    )
+
+
+def _gated_delta_cost(
+    input_texts: list[list[str]],
+    dims: dict[str, Any],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """One gated-delta layer from its own q/k/v shapes.
+
+    The stopped kernel is called with q, k, v as ``[B, S, H, D]``, but the
+    drawn node also carries the packed projection and the per-head gates, so
+    the value tensor is the rank-4 input with the most heads. FLOPs are linear
+    in the tokens: the state is a ``d_v × d_k`` matrix per value head, not a
+    score against the KV cache. Projections are separate GEMMs.
+    """
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        gdn_attention_core,
+    )
+
+    try:
+        rank4 = [
+            shape
+            for text in input_texts
+            if text and (shape := resolve_shape(text, dims)) and len(shape) == 4
+        ]
+    except DimResolutionError:
+        return None
+    if not rank4:
+        return None
+    q = rank4[0]
+    v = max(rank4, key=lambda shape: shape[-2])
+    tokens = prod(q[:-2]) if len(q) > 2 else q[0]
+    h_v = v[-2]
+    d_v = v[-1]
+    d_k = q[-1]
+    if tokens <= 0 or h_v <= 0 or d_v <= 0 or d_k <= 0:
+        return None
+    flops = float(gdn_attention_core._gdn_flops_func(h_v, d_k, d_v, tokens))
+    bytes_moved = None
+    if bpe is not None:
+        bytes_moved = float(
+            gdn_attention_core._gdn_bytes_func(h_v, d_k, d_v, tokens, bpe)
+        )
+    return ATTENTION_CATEGORY, "matrix", flops, bytes_moved
+
+
+def _eager_qk_heads(
+    output_text: str,
+    input_texts: list[list[str]],
+    dims: dict[str, Any],
+) -> tuple[int, int] | None:
+    """``(query heads, head dim)`` from an expanded QK matmul, when it has them.
+
+    The query is ``[B, H, S, D]``. A hybrid checkpoint's linear attention
+    publishes a different head count, so the score matmul is the one that
+    says how wide this softmax layer is.
+    """
+    try:
+        shapes = [resolve_shape(text, dims) for text in input_texts[:2] if text]
+    except DimResolutionError:
+        return None
+    for shape in shapes:
+        if (
+            shape
+            and len(shape) == 4
+            and shape[-1] != shape[-2]
+            and shape[-1] > 1
+            and shape[-3] > 1
+        ):
+            return int(shape[-3]), int(shape[-1])
+    return None
+
+
+def _softmax_attention_row(
+    name: str,
+    section: str,
+    instances: int,
+    dims: dict[str, Any],
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+    heads: tuple[int, int] | None = None,
+) -> RooflineOp | None:
+    """One SDPA layer in place of the eager QK/softmax/AV chain.
+
+    That chain's key length is the query length, so a decode step (S=1) costs
+    nothing and a prefill is the full non-causal score matrix. These layers
+    are the full-attention variant, so the KV length is the whole cache and
+    the head count is this matmul's, not the linear attention's.
+    """
+    try:
+        b = resolve_dim(dims["B"], dims)
+        s = resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError):
+        return None
+    past = _resolve_past(dims)
+    n_kv = past + s
+    if heads is not None:
+        h_q, d_h = heads
+    else:
+        h_q = _RT.config_attn_heads or _RT.attn_heads
+        d_h = _RT.config_attn_head_dim or _RT.attn_head_dim
+    h_kv = _RT.config_attn_kv_heads or _RT.attn_kv_heads or h_q
+    if not h_q or not d_h or not h_kv:
+        att = _attention_boundary_cost(dims, bpe)
+        if att is None:
+            return None
+        category, maf_type, flops, bytes_moved = att
+    else:
+        h_q = _shard_heads(h_q, _RT.tp)
+        h_kv = _shard_heads(h_kv, _RT.tp)
+        causal = bool(_RT.causal_attention and past == 0 and s == n_kv)
+        flops = float(SDPA.flops_func(b, s, h_q, n_kv, h_kv, d_h, d_h, causal))
+        bytes_moved = (
+            float(SDPA.bytes_func(b, s, h_q, n_kv, h_kv, d_h, d_h, causal, bpe))
+            if bpe is not None
+            else None
+        )
+        category, maf_type = ATTENTION_CATEGORY, "matrix"
+    row = RooflineOp(
+        name=name,
+        section=section,
+        computation="sdpa",
+        operation="",
+        category=None,
+        modeled=False,
+        reason=None,
+        output_elements=None,
+        instances=instances,
+    )
+    return _finish_op(row, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
 
 
 def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):

@@ -45,6 +45,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _finish_op,
     _experts_touched,
     _formula_quant_rows,
+    _quant_matrix_rows,
     _graph_contains_draft,
     _mla_attention_ops,
     _moe_boundary_owns_routing,
@@ -595,6 +596,82 @@ def test_moe_cost_uses_introspected_weight_bpe():
         _RT.reset()
     # Weight reads dominate the GEMM, so a smaller weight dtype cuts total bytes.
     assert bytes_fp4 < bytes_bf16
+
+
+def test_gated_delta_cost_ignores_the_kv_cache():
+    # Qwen3.5's linear layers are a recurrent delta rule. One layer, one token,
+    # 48 value heads of 128: 48 * 7 * 128 * 128 = 5,505,024 FLOPs, whether the
+    # softmax cache is empty or hundreds of thousands of tokens long.
+    inputs = [
+        ["B", "S", "16", "128"],
+        ["B", "S", "16", "128"],
+        ["B", "S", "48", "128"],
+        ["B", "S", "48"],
+    ]
+
+    def project(past: int) -> RooflineOp:
+        return _project_op(
+            "decoder/linear_attn/@attention",
+            "decoder",
+            "torch_recurrent_gated_delta_rule",
+            "AttentionOp",
+            "",
+            "[B, S, 16, 128]",
+            inputs,
+            {"B": 1, "S": 1, "past_len": past},
+            48,
+            None,
+            None,
+            None,
+            role="attention",
+        )
+
+    short = project(0)
+    long = project(327680)
+    assert short.modeled and short.category == "Attention"
+    assert short.total_flops == pytest.approx(48 * 5_505_024)
+    assert long.total_flops == short.total_flops
+
+    # Prefill draws the packed qkv projection ahead of q, k, v. The value
+    # heads are the wider rank-4 tensor, and the sequence is B * S, not the
+    # packed width.
+    packed = _project_op(
+        "decoder/linear_attn/@attention",
+        "decoder",
+        "torch_chunk_gated_delta_rule",
+        "AttentionOp",
+        "",
+        "[B, S, 48, 128]",
+        [
+            ["B", "10240", "S"],
+            ["B", "S", "16", "128"],
+            ["B", "S", "16", "128"],
+            ["B", "S", "48", "128"],
+            ["B", "S", "48"],
+        ],
+        {"B": 1, "S": 64, "past_len": 0},
+        48,
+        None,
+        None,
+        None,
+        role="attention",
+    )
+    assert packed.total_flops == pytest.approx(48 * 64 * 5_505_024)
+
+
+def test_fp8_matrix_quantizes_the_activation_and_not_the_weight():
+    # An fp8 GEMM reads the packed weight. Dequantizing it into bf16 first is a
+    # pass the block-scale kernel does not run. The activation quant does.
+    _RT.reset()
+    try:
+        _RT.weight_bpe = 1
+        rows = _quant_matrix_rows(
+            "decoder/mlp", "decoder", 1, [(8, 32, 16)], 2.0, "bfloat16", None
+        )
+    finally:
+        _RT.reset()
+    names = [row.computation for row in rows]
+    assert names == ["act_quant"]
 
 
 def test_routed_experts_get_no_weight_dequant_row():
