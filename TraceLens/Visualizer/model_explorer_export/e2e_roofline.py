@@ -4,12 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""End-to-end roofline plot from a projection and a profile.
+"""End-to-end roofline plot from a profile and, where the profile has no cost, a projection.
 
-The projection supplies compulsory FLOPs and bytes, so the x-axis is arithmetic
-intensity of one forward. The profile supplies the time those kernels actually
-ran, so the y-axis is achieved TFLOP/s. Hardware roofs come from the GPU arch
-spec (``load_arch``, including ``$TL_EXTENSION``).
+FLOPs and bytes come from the profile when its ``GFLOPS`` and ``FLOPS/Byte``
+columns are filled. A kernel the trace could not model (a GPU-graph launch with
+no ``Input Dims``) falls back to the roofline projection. The profile always
+supplies the time. Hardware roofs come from the GPU arch spec (``load_arch``,
+including ``$TL_EXTENSION``).
 """
 
 from __future__ import annotations
@@ -63,6 +64,7 @@ DEFAULT_SERIES: tuple[Series, ...] = (
     Series("Prefill attention", "o", "prefill", ("Attention",), True),
     Series("Verify attention", "o", "decode", ("Attention",), False),
     Series("Routed MoE", "s", None, ("MoE",), False),
+    Series("Whole model", "P", None, None, False),
     Series("End to end", "D", None, None, False),
 )
 
@@ -86,6 +88,9 @@ class RooflinePoint:
     flops: float
     bytes: float
     time_us: float
+    # ``profile`` when every kernel of the series carried GFLOPS and FLOPS/Byte,
+    # ``export`` when none did, ``mixed`` when the series spans both.
+    cost_source: str = "export"
     # Set when the point sits above the roof it can reach. No kernel can run
     # faster than the roof, so the projection's FLOPs or bytes, or the kernels
     # matched to it, do not describe what ran.
@@ -147,8 +152,33 @@ def _time_column(fieldnames: Iterable[str] | None) -> str | None:
     return None
 
 
+def _profile_cost(
+    gflops: Any, intensity: Any, count: int
+) -> tuple[float, float] | None:
+    """Total FLOPs and bytes from one perf-report row.
+
+    ``GFLOPS`` is one launch and ``FLOPS/Byte`` is that launch's arithmetic
+    intensity, so the row's totals are ``GFLOPS * 1e9 * count`` and that
+    divided by the intensity. Empty or non-positive cells mean the trace had
+    no shape for this kernel.
+    """
+    try:
+        gflops_f = float(gflops)
+        intensity_f = float(intensity)
+    except (TypeError, ValueError):
+        return None
+    if gflops_f <= 0 or intensity_f <= 0 or count <= 0:
+        return None
+    flops = gflops_f * 1e9 * count
+    return flops, flops / intensity_f
+
+
 def load_profile_kernels(directory: Path) -> list[dict[str, Any]]:
-    """Kernel name, summed GPU time, and launch count from ``*_ops.csv``."""
+    """Kernel name, summed GPU time, launch count, and profile FLOPs and bytes.
+
+    FLOPs and bytes are set only when the row's ``GFLOPS`` and ``FLOPS/Byte``
+    are filled. A GPU-graph launch leaves them empty.
+    """
     kernels: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*_ops.csv")):
         with path.open(newline="", encoding="utf-8") as handle:
@@ -161,28 +191,40 @@ def load_profile_kernels(directory: Path) -> list[dict[str, Any]]:
                 if not raw:
                     continue
                 count_raw = row.get("operation_count") or ""
+                count = int(float(count_raw)) if count_raw else 0
+                cost = _profile_cost(row.get("GFLOPS"), row.get("FLOPS/Byte"), count)
                 kernels.append(
                     {
                         "name": row["name"],
                         "time_us": float(raw),
-                        "count": int(float(count_raw)) if count_raw else 0,
+                        "count": count,
+                        "flops": None if cost is None else cost[0],
+                        "bytes": None if cost is None else cost[1],
                     }
                 )
     return kernels
 
 
 def load_profile_json(path: Path) -> list[dict[str, Any]]:
-    """``[{name, time_us, count}]`` from a JSON file."""
+    """``[{name, time_us, count, flops, bytes}]`` from a JSON file.
+
+    ``flops`` and ``bytes`` are totals over ``count`` launches. Omit them when
+    the trace had no shape; the projection then supplies the cost.
+    """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
         raise ValueError(f"{path} must be a list of kernel records")
     kernels = []
     for item in payload:
+        flops = item.get("flops")
+        nbytes = item.get("bytes")
         kernels.append(
             {
                 "name": str(item["name"]),
                 "time_us": float(item["time_us"]),
                 "count": int(item.get("count") or 0),
+                "flops": None if not flops else float(flops),
+                "bytes": None if not nbytes else float(nbytes),
             }
         )
     return kernels
@@ -421,6 +463,151 @@ def flag_points_above_roof(
     return flagged, warnings
 
 
+def _has_profile_cost(kernel: dict[str, Any]) -> bool:
+    return bool(kernel.get("flops")) and bool(kernel.get("bytes"))
+
+
+def _scaled_export(
+    flops: float,
+    nbytes: float,
+    instances: int,
+    launch_count: int,
+    per_launch: float | None,
+    *,
+    one_forward: bool,
+) -> tuple[float, float]:
+    """Export FLOPs and bytes for ``launch_count`` launches, or one forward.
+
+    The same scale applies to both, so arithmetic intensity stays the
+    projection's. No launches and not one forward is no work: a category whose
+    kernels were not in this phase does not contribute.
+    """
+    if flops <= 0 or nbytes <= 0:
+        return 0.0, 0.0
+    if one_forward:
+        return flops, nbytes
+    if launch_count <= 0:
+        return 0.0, 0.0
+    if instances:
+        scale = launch_count / instances
+    elif per_launch:
+        scale = per_launch * launch_count / flops
+    else:
+        scale = 1.0
+    return flops * scale, nbytes * scale
+
+
+def _category_work(
+    kernels: list[dict[str, Any]],
+    flops: float,
+    nbytes: float,
+    instances: int,
+    per_launch: float | None,
+    *,
+    one_forward: bool,
+) -> tuple[float, float, str]:
+    """FLOPs, bytes, and which source produced them for one category.
+
+    The profile cost is used only when every matched kernel has it. One kernel
+    without ``GFLOPS`` means the profile does not describe the category, so the
+    whole category falls back to the export.
+    """
+    if kernels and all(_has_profile_cost(kernel) for kernel in kernels):
+        total_flops = sum(float(kernel["flops"]) for kernel in kernels)
+        total_bytes = sum(float(kernel["bytes"]) for kernel in kernels)
+        if not one_forward:
+            return total_flops, total_bytes, "profile"
+        _, launches = _measured_launches(kernels)
+        if instances and launches:
+            scale = instances / launches
+            return total_flops * scale, total_bytes * scale, "profile"
+    launch_count = 0
+    if kernels and not one_forward:
+        _, launch_count = _measured_launches(kernels)
+    exported = _scaled_export(
+        flops, nbytes, instances, launch_count, per_launch, one_forward=one_forward
+    )
+    if exported[0] <= 0:
+        return 0.0, 0.0, "none"
+    return exported[0], exported[1], "export"
+
+
+def _series_work(
+    matched: list[dict[str, Any]],
+    ops: tuple[dict[str, Any], ...],
+    categories: tuple[str, ...] | None,
+    *,
+    one_forward: bool,
+) -> tuple[float, float, str]:
+    """FLOPs and bytes for a series, profile first and export as the fallback."""
+    by_cat: dict[str, list[dict[str, Any]]] = {}
+    for op in _bucket_ops(ops, categories):
+        by_cat.setdefault(str(op.get("category")), []).append(op)
+    grouped: dict[str, list[dict[str, Any]]] = {cat: [] for cat in by_cat}
+    extra: list[dict[str, Any]] = []
+    for kernel in matched:
+        cat = classify_kernel(kernel["name"])
+        if cat in grouped:
+            grouped[cat].append(kernel)
+        elif _has_profile_cost(kernel):
+            extra.append(kernel)
+    flops = 0.0
+    nbytes = 0.0
+    sources: set[str] = set()
+    for cat, rows in by_cat.items():
+        total_flops, total_bytes, instances, per_launch = _bucket_cost(
+            tuple(rows), None
+        )
+        part_flops, part_bytes, source = _category_work(
+            grouped[cat],
+            total_flops,
+            total_bytes,
+            instances,
+            per_launch,
+            one_forward=one_forward,
+        )
+        flops += part_flops
+        nbytes += part_bytes
+        if source != "none":
+            sources.add(source)
+    if not one_forward:
+        for kernel in extra:
+            flops += float(kernel["flops"])
+            nbytes += float(kernel["bytes"])
+            sources.add("profile")
+    if not sources:
+        return 0.0, 0.0, "export"
+    source = "mixed" if len(sources) > 1 else sources.pop()
+    return flops, nbytes, source
+
+
+def _accounted_kernels(
+    matched: list[dict[str, Any]],
+    ops: tuple[dict[str, Any], ...],
+    categories: tuple[str, ...] | None,
+) -> list[dict[str, Any]]:
+    """Kernels whose time belongs with the work ``_series_work`` counted.
+
+    A kernel with no category and no profile cost has nothing to put on either
+    axis, so its time is left out rather than diluting the point. The same
+    applies to a category the projection does not contain.
+    """
+    known = {str(op.get("category")) for op in _bucket_ops(ops, categories)}
+    kept = []
+    for kernel in matched:
+        cat = classify_kernel(kernel["name"])
+        if _has_profile_cost(kernel) and (
+            cat is None or cat in known or categories is None
+        ):
+            if categories is not None and cat not in categories:
+                continue
+            kept.append(kernel)
+            continue
+        if cat in known:
+            kept.append(kernel)
+    return kept
+
+
 def build_points(
     regimes: list[Regime],
     kernels: list[dict[str, Any]],
@@ -450,37 +637,71 @@ def build_points(
             override = time_overrides_us.get(key)
             # End to end in a mixed capture only has phase-tagged kernels, which
             # are not the whole forward. Require an explicit one-forward time.
-            if spec.categories is None and multi_phase and override is None:
+            # Whole model is the attributed kernels, so it is plotted without one.
+            if spec.label == "End to end" and multi_phase and override is None:
                 warnings.append(
                     f"{spec.label} {regime.phase}: mixed capture has no "
                     "whole-forward time (pass --time-us)"
                 )
                 continue
-            total_flops, total_bytes, instances, per_launch = _bucket_cost(
-                regime.ops, spec.categories
-            )
-            if total_flops <= 0 or total_bytes <= 0:
-                continue
+            include = includes.get(key, ())
             matched = _matched_kernels(
                 kernels,
                 phase=regime.phase,
                 categories=spec.categories,
-                includes=includes.get(key, ()),
+                includes=() if spec.label == "Whole model" else include,
                 multi_phase=multi_phase,
             )
-            if override is not None:
+            # An include on Whole model adds unscoped kernels to the phase-tagged
+            # ones. On any other series the include is the whole match.
+            if spec.label == "Whole model" and include:
+                seen = {kernel["name"] for kernel in matched}
+                for kernel in _matched_kernels(
+                    kernels,
+                    phase=regime.phase,
+                    categories=spec.categories,
+                    includes=include,
+                    multi_phase=multi_phase,
+                ):
+                    if kernel["name"] not in seen:
+                        matched.append(kernel)
+                        seen.add(kernel["name"])
+            one_forward = override is not None
+            if one_forward:
                 time_us = override
-                # The override is one forward, so the numerator is the forward.
-                instances = 0
-                per_launch = None
-                launch_count = 0
-            elif not matched:
-                warnings.append(f"{spec.label} {regime.phase}: no profile time")
-                continue
             else:
-                time_us, launch_count = _measured_launches(matched)
+                accounted = _accounted_kernels(matched, regime.ops, spec.categories)
+                time_us = sum(kernel["time_us"] for kernel in accounted)
+                if (
+                    spec.label == "Whole model"
+                    and multi_phase
+                    and any(
+                        kernel_phase(kernel["name"]) is None
+                        and not is_communication(kernel["name"])
+                        for kernel in kernels
+                    )
+                    and not include
+                ):
+                    warnings.append(
+                        f"Whole model {regime.phase}: unscoped kernels are left "
+                        "out of a mixed capture (pass --kernels)"
+                    )
             if time_us <= 0:
-                warnings.append(f"{spec.label} {regime.phase}: no profile time")
+                # A series the projection does not contain, and that matched no
+                # kernel, is absent rather than missing its time.
+                bucket_flops, bucket_bytes, _, _ = _bucket_cost(
+                    regime.ops, spec.categories
+                )
+                if bucket_flops > 0 and bucket_bytes > 0:
+                    warnings.append(f"{spec.label} {regime.phase}: no profile time")
+                continue
+            total_flops, total_bytes, source = _series_work(
+                matched,
+                regime.ops,
+                spec.categories,
+                one_forward=one_forward,
+            )
+            if total_flops <= 0 or total_bytes <= 0:
                 continue
             points.append(
                 RooflinePoint(
@@ -488,12 +709,11 @@ def build_points(
                     phase=regime.phase,
                     concurrency=regime.concurrency,
                     arithmetic_intensity=total_flops / total_bytes,
-                    achieved_tflops=achieved_tflops(
-                        total_flops, instances, launch_count, time_us, per_launch
-                    ),
+                    achieved_tflops=total_flops / (time_us * 1e-6) / 1e12,
                     flops=total_flops,
                     bytes=total_bytes,
                     time_us=time_us,
+                    cost_source=source,
                 )
             )
     return points, warnings
@@ -723,9 +943,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="TraceLens_e2e_roofline_plot",
         description=(
-            "Plot an end-to-end roofline. X and the roofs come from a roofline "
-            "projection (or its category rollup). Y is that projection's FLOPs "
-            "divided by kernel time from a profile of the same regime."
+            "Plot an end-to-end roofline. FLOPs and bytes come from the profile "
+            "when it has them, and from a roofline projection otherwise. Y is "
+            "those FLOPs divided by kernel time from the same profile."
         ),
     )
     parser.add_argument("--title", required=True, help="Figure title")
@@ -853,7 +1073,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{point.series} phase={point.phase} concurrency={point.concurrency} "
             f"AI={point.arithmetic_intensity:.2f} FLOP/byte "
-            f"{point.achieved_tflops:.2f} TFLOP/s"
+            f"{point.achieved_tflops:.2f} TFLOP/s source={point.cost_source}"
         )
     print(f"Wrote {args.output}")
     return 0

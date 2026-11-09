@@ -14,18 +14,20 @@ See LICENSE for license information.
 Each point is an operation (prefill attention, verify attention, routed MoE, or
 the whole forward) at one concurrency.
 
-- **X** is arithmetic intensity from the roofline projection: FLOPs divided by
-  compulsory HBM bytes of one forward.
+- **X** is arithmetic intensity: FLOPs divided by compulsory HBM bytes. Both
+  come from the profile when the kernel's `GFLOPS` and `FLOPS/Byte` are
+  filled, and from the roofline projection when they are not.
 - **Y** is achieved TFLOP/s: those FLOPs divided by the time the matching
-  kernels ran in a profile of the same regime.
+  kernels ran in the profile.
 - **Roofs** come from the GPU arch spec. The diagonal is `mem_bw_gbps`. The
   horizontals are the bfloat16 and fp4 matrix peaks. A regime whose modeled
   FLOPs use more than one of those peaks also gets an end-to-end blend roof,
   the FLOP-weighted harmonic mean of the peaks.
 
 A projection alone puts every point on a roof. A profile of a GPU-graph replay
-has kernel time and no `Input Dims`, so it has no compulsory bytes. The plot
-uses one source for each axis.
+has kernel time and no `Input Dims`, so those kernels have no `GFLOPS`. The
+plot uses the projection for them and the profile for every kernel the trace
+did model. Whole model is the sum of those categories at one concurrency.
 
 ## Run the tool
 
@@ -67,16 +69,21 @@ arch directory (`MI300X`, `MI325X`) come from `$TL_EXTENSION`.
 
 ## What the profile contributes
 
-Y uses the `Kernel Time (µs)_sum` and `operation_count` columns of the
-perf-report `*_ops.csv` files.
+Y uses the `Kernel Time (µs)_sum` column of the perf-report `*_ops.csv` files.
 
-The projection gives the FLOPs of one forward for each series, and the number
-of times each op occurs in it (`instances`, written to the augmentation as
-`invocations`). The numerator is the series' FLOPs times
-`launches / instances`, which is the number of forwards the matched kernels
-ran. This is the work in a capture that contains many forwards. It uses the
-mean launch, not the costliest op, so a series that mixes cheap and expensive
-ops is not overstated.
+X uses `GFLOPS` and `FLOPS/Byte` from the same files when both are filled.
+`GFLOPS` is one launch, so the kernel's FLOPs are `GFLOPS × 1e9 ×
+operation_count` and its bytes are that divided by `FLOPS/Byte`. A series uses
+this total when every kernel matched to it has both cells. One kernel without
+them means the profile does not describe the series, and the projection
+supplies the whole series.
+
+The projection gives the FLOPs of one forward, and the number of times each op
+occurs in it (`instances`, written to the augmentation as `invocations`). The
+numerator is then the series' FLOPs times `launches / instances`, which is the
+number of forwards the matched kernels ran. This is the work in a capture that
+contains many forwards. It uses the mean launch, not the costliest op, so a
+series that mixes cheap and expensive ops is not overstated.
 
 Kernels with the same launch count are treated as parts of one launch, and
 their times are summed. Kernels with different launch counts are separate
@@ -96,7 +103,16 @@ which phase it ran is left out too. Assign it with:
 ```
 
 End to end on a mixed capture needs `--time-us`, because the phase-tagged
-kernels are not the whole forward.
+kernels are not the whole forward. `--time-us` is one forward, so the numerator
+is one forward's FLOPs.
+
+Whole model is every category at that concurrency. A category whose kernels all
+have `GFLOPS` contributes the profile total. A category that does not
+contributes the projection, scaled by the launches those kernels ran.
+Categories with no matched kernel are left out, because there is no time to put
+their FLOPs against. In a mixed capture, pass `--kernels PHASE|Whole model|SUBSTRING`
+for the kernels whose names do not say which phase they ran. The printed
+`source` is `profile`, `export`, or `mixed`.
 
 ## A point above the roof is an error in the inputs
 

@@ -108,11 +108,21 @@ def test_mixed_capture_keeps_phases_apart_and_skips_end_to_end():
         _kernel("aiter::cross_device_reduce_1stage", 6.5e9, 1),
     ]
     points, warnings = build_points(regimes, kernels)
-    by_series = {point.series: point for point in points}
-    assert set(by_series) == {"Verify attention", "Prefill attention"}
-    assert by_series["Verify attention"].time_us == 1.0e4
-    assert by_series["Prefill attention"].time_us == 5.0e4
+    by_series = {(point.series, point.phase): point for point in points}
+    assert set(by_series) == {
+        ("Verify attention", "decode"),
+        ("Prefill attention", "prefill"),
+        ("Whole model", "decode"),
+        ("Whole model", "prefill"),
+    }
+    assert by_series["Verify attention", "decode"].time_us == 1.0e4
+    assert by_series["Prefill attention", "prefill"].time_us == 5.0e4
+    # Only the phase-tagged attention kernel is attributable. The unscoped MoE
+    # kernel is not part of the whole-model point.
+    assert by_series["Whole model", "decode"].time_us == 1.0e4
+    assert by_series["Whole model", "prefill"].time_us == 5.0e4
     assert any("End to end" in warning for warning in warnings)
+    assert any("unscoped" in warning for warning in warnings)
 
 
 def test_include_assigns_an_unscoped_kernel_to_one_phase():
@@ -201,7 +211,13 @@ def test_profile_csv_and_plot(tmp_path):
     )
     kernels = load_profile_kernels(tmp_path)
     assert kernels == [
-        {"name": "hipGraphLaunch->aiter::mla_qseqlen1", "time_us": 20000.0, "count": 40}
+        {
+            "name": "hipGraphLaunch->aiter::mla_qseqlen1",
+            "time_us": 20000.0,
+            "count": 40,
+            "flops": None,
+            "bytes": None,
+        }
     ]
     regime = Regime(
         "decode",
@@ -264,6 +280,114 @@ def test_cli_joins_augmentation_and_profile(tmp_path):
     regimes = regimes_from_augmentation(augmentation)
     assert regimes[0].concurrency == 3
     assert regimes[0].ops[0]["flops_per_launch"] == 1.0e8
+
+
+def test_profile_flops_replace_the_export_when_every_kernel_has_them():
+    regime = Regime(
+        "decode",
+        3,
+        (_op("Attention", 4.0e9, 2.0e8, per_launch=1.0e8, instances=40),),
+    )
+    kernel = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    # The profile's own shapes, not the projection's 4e9 FLOPs / 2e8 bytes.
+    kernel["flops"] = 8.0e9
+    kernel["bytes"] = 1.0e8
+    points, warnings = build_points([regime], [kernel])
+    assert warnings == []
+    point = next(item for item in points if item.series == "Verify attention")
+    assert point.cost_source == "profile"
+    assert point.arithmetic_intensity == 80.0
+    assert point.achieved_tflops == pytest.approx(8.0e9 / 20.0e-6 / 1e12)
+
+
+def test_one_uncosted_kernel_keeps_the_export_for_the_category():
+    regime = Regime(
+        "decode",
+        3,
+        (_op("MoE", 61.0e6, 30.0e6, per_launch=1.0e6, instances=61),),
+    )
+    costed = _kernel("mfma_moe1_t32", 100.0, 10)
+    costed["flops"] = 1.0e15
+    costed["bytes"] = 1.0e12
+    bare = _kernel("mfma_moe_sorting", 50.0, 10)
+    points, _warnings = build_points(
+        [regime],
+        [costed, bare],
+        includes={("decode", "Routed MoE"): ("mfma_moe",)},
+    )
+    point = next(item for item in points if item.series == "Routed MoE")
+    assert point.cost_source == "export"
+    # The profile FLOPs are ignored: one kernel has no shape, so the export
+    # describes the category. Same launch count, so the two kernels are one launch.
+    assert point.achieved_tflops == pytest.approx(
+        achieved_tflops(61.0e6, 61, 10, 150.0)
+    )
+
+
+def test_whole_model_uses_profile_per_category_and_export_for_the_rest():
+    regime = Regime(
+        "decode",
+        3,
+        (
+            _op("Attention", 4.0e9, 2.0e8, instances=40),
+            _op("GEMM", 6.0e9, 1.0e9, instances=20, spec="matrix_bf16"),
+        ),
+    )
+    attention = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    attention["flops"] = 8.0e9
+    attention["bytes"] = 1.0e8
+    gemm = _kernel("Cijk_gemm", 100.0, 20)
+    points, _warnings = build_points([regime], [attention, gemm])
+    whole = next(item for item in points if item.series == "Whole model")
+    assert whole.cost_source == "mixed"
+    assert whole.flops == pytest.approx(8.0e9 + 6.0e9)
+    assert whole.bytes == pytest.approx(1.0e8 + 1.0e9)
+    assert whole.time_us == 120.0
+    assert whole.arithmetic_intensity == pytest.approx(whole.flops / whole.bytes)
+
+
+def test_whole_model_include_adds_unscoped_kernels_without_dropping_tagged():
+    regimes = [
+        Regime(
+            "decode",
+            3,
+            (
+                _op("Attention", 4.0e9, 2.0e8, instances=10),
+                _op("GEMM", 6.0e9, 1.0e9, instances=10),
+            ),
+        ),
+        Regime("prefill", 1, (_op("Attention", 8.0e9, 1.0e9, instances=4),)),
+    ]
+    kernels = [
+        _kernel("aiter::mla_qseqlen1", 100.0, 10),
+        _kernel("Cijk_Alik_Bljk", 50.0, 10),
+        _kernel("opus_mla_v4_prefill", 80.0, 4),
+    ]
+    points, _warnings = build_points(
+        regimes,
+        kernels,
+        includes={("decode", "Whole model"): ("Cijk",)},
+    )
+    whole = {
+        point.phase: point.time_us for point in points if point.series == "Whole model"
+    }
+    assert whole["decode"] == 150.0
+    assert whole["prefill"] == 80.0
+
+
+def test_profile_csv_reads_flops_and_bytes(tmp_path):
+    # 2 GFLOP/launch * 3 launches, at 4 FLOP/byte.
+    csv_path = tmp_path / "gemm_ops.csv"
+    csv_path.write_text(
+        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte\n"
+        "aten::mm,3,15,2.0,4.0\n"
+        "hipGraphLaunch->mfma_moe1,61,100,,\n",
+        encoding="utf-8",
+    )
+    kernels = {kernel["name"]: kernel for kernel in load_profile_kernels(tmp_path)}
+    assert kernels["aten::mm"]["flops"] == pytest.approx(6.0e9)
+    assert kernels["aten::mm"]["bytes"] == pytest.approx(1.5e9)
+    assert kernels["hipGraphLaunch->mfma_moe1"]["flops"] is None
 
 
 def test_launch_scaling_uses_the_mean_launch_not_the_costliest():
