@@ -23,10 +23,10 @@ the whole forward) at one concurrency.
   horizontals are the bfloat16, fp8, and fp4 matrix peaks, drawn when the spec
   lists them. Past the bfloat16 ridge the diagonal uses the linestyle of the
   fastest peak that still applies: dash-dot for fp8, dashed for fp4. Each
-  peak also has a gray copy of that roof at 75%, 50%, and 25%: the diagonal
-  and the horizontal are both scaled by that fraction, so the ridge stays put.
-  The copies get lighter as the fraction drops, and the 75% copy is still
-  lighter than the full roof. A regime
+  peak also has a gray copy of that roof at 75%, 50%, 25%, and 10%: the
+  diagonal and the horizontal are both scaled by that fraction, so the ridge
+  stays put. The copies get lighter as the fraction drops, and the 75% copy is
+  still lighter than the full roof. A regime
   whose modeled FLOPs use more than one of those peaks also gets an
   end-to-end blend roof, the FLOP-weighted harmonic mean of the peaks.
 

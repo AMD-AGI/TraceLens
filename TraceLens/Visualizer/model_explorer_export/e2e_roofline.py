@@ -55,8 +55,8 @@ _HARDWARE_ROOFS = (
 # Each compute roof is also drawn at these fractions: the bandwidth diagonal
 # and the horizontal, both scaled, so the ridge stays at the same intensity.
 # Each fraction has a gray between the full roofs (darkest, 0.45 and below)
-# and the paler gridlines, so 75% is darker than 50%, which is darker than 25%.
-_PEAK_FRACTIONS = ((0.75, "0.62"), (0.5, "0.86"), (0.25, "0.92"))
+# and the paler gridlines, so each lower fraction is paler than the one above.
+_PEAK_FRACTIONS = ((0.75, "0.62"), (0.5, "0.86"), (0.25, "0.92"), (0.1, "0.96"))
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
 _ABOVE_ROOF_COLOR = "#D62728"
 
