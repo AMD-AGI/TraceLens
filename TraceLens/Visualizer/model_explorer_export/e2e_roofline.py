@@ -745,7 +745,49 @@ def build_points(
                     cost_source=source,
                 )
             )
+    points = _drop_whole_model_matching_end_to_end(points, warnings)
     return points, warnings
+
+
+def _same_measurement(left: RooflinePoint, right: RooflinePoint) -> bool:
+    """True when two points are the same forward: same place, same work, same time."""
+
+    def close(a: float, b: float) -> bool:
+        return abs(a - b) <= 1e-6 * max(abs(a), abs(b), 1.0)
+
+    return (
+        left.phase == right.phase
+        and left.concurrency == right.concurrency
+        and close(left.flops, right.flops)
+        and close(left.bytes, right.bytes)
+        and close(left.time_us, right.time_us)
+    )
+
+
+def _drop_whole_model_matching_end_to_end(
+    points: list[RooflinePoint], warnings: list[str]
+) -> list[RooflinePoint]:
+    """Omit Whole model where it is the same forward as End to end.
+
+    Whole model sums the kernels attributed to the phase. End to end is one
+    forward. When every kernel is attributed, those are one measurement, and
+    drawing both puts two markers on one point.
+    """
+    ends = [point for point in points if point.series == "End to end"]
+    if not ends:
+        return points
+    kept: list[RooflinePoint] = []
+    for point in points:
+        if point.series == "Whole model" and any(
+            _same_measurement(point, end) for end in ends
+        ):
+            warnings.append(
+                f"Whole model {point.phase} matches End to end, "
+                "so only End to end is drawn"
+            )
+            continue
+        kept.append(point)
+    return kept
 
 
 def _fmt_number(value: float) -> str:
@@ -995,15 +1037,19 @@ def plot_e2e_roofline(
     for label, group in by_series.items():
         spec = series_by_label.get(label)
         marker = spec.marker if spec else "o"
-        open_marker = spec.open_marker if spec else False
         for point in group:
             color = colors[point.concurrency]
+            # Hollow is the prefill half of {prefill, decode} x {series}.
+            hollow = point.phase == "prefill"
             ax.scatter(
                 [point.arithmetic_intensity],
                 [point.achieved_tflops],
                 marker=marker,
                 s=60,
-                facecolors="none" if open_marker else color,
+                # White, not transparent: a hollow point covers any filled
+                # point drawn underneath it at the same place, such as Whole
+                # model's plus, which otherwise shows through its center.
+                facecolors="white" if hollow else color,
                 # A point above the roof is a modeling or matching error, not a
                 # measurement, so it is outlined in red instead of drawn plain.
                 edgecolors=_ABOVE_ROOF_COLOR if point.above_roof else color,
@@ -1012,21 +1058,49 @@ def plot_e2e_roofline(
             )
 
     handles, labels = ax.get_legend_handles_labels()
+    # The points are {prefill, decode} x {attention, whole model, end to end}.
+    # Fill is the phase. The marker is the series.
+    families: list[tuple[str, str]] = []
+    seen_families: set[str] = set()
     for spec in series:
         if spec.label not in by_series:
             continue
-        handles.append(
-            plt.Line2D(
-                [],
-                [],
-                marker=spec.marker,
-                linestyle="None",
-                markerfacecolor="none" if spec.open_marker else "0.2",
-                markeredgecolor="0.2",
-                markersize=8,
-            )
+        family = "Attention" if spec.categories == ("Attention",) else spec.label
+        if family in seen_families:
+            continue
+        seen_families.add(family)
+        families.append((family, spec.marker))
+    point_family = {
+        label: (
+            "Attention"
+            if series_by_label[label].categories == ("Attention",)
+            else label
         )
-        labels.append(spec.label)
+        for label in by_series
+        if label in series_by_label
+    }
+    for family, marker in families:
+        for phase in ("prefill", "decode"):
+            if not any(
+                point.phase == phase and point_family.get(point.series) == family
+                for point in points
+            ):
+                continue
+            # One concurrency has one color, so the swatches use it. Several
+            # concurrencies keep gray swatches and a separate color key.
+            ink = colors[concurrencies[0]] if len(concurrencies) == 1 else "0.2"
+            handles.append(
+                plt.Line2D(
+                    [],
+                    [],
+                    marker=marker,
+                    linestyle="None",
+                    markerfacecolor="none" if phase == "prefill" else ink,
+                    markeredgecolor=ink,
+                    markersize=8,
+                )
+            )
+            labels.append(f"{family}, {phase}")
     if any(point.above_roof for point in points):
         handles.append(
             plt.Line2D(
@@ -1041,7 +1115,8 @@ def plot_e2e_roofline(
             )
         )
         labels.append("Above the roof: FLOPs, bytes, or kernels do not match")
-    for concurrency in concurrencies:
+    # A single concurrency is the only color on the plot, so naming it adds nothing.
+    for concurrency in concurrencies if len(concurrencies) > 1 else ():
         handles.append(
             plt.Line2D(
                 [],

@@ -90,7 +90,9 @@ def test_point_uses_projection_intensity_and_profile_time():
         [regime],
         [_kernel("aiter::mla_qseqlen1", 20.0, 40)],
     )
-    assert warnings == []
+    assert warnings == [
+        "Whole model decode matches End to end, so only End to end is drawn"
+    ]
     point = next(item for item in points if item.series == "Decode attention")
     assert point.arithmetic_intensity == 4.0e9 / 2.0e8
     assert point.achieved_tflops == pytest.approx(achieved_tflops(4.0e9, 40, 40, 20.0))
@@ -180,6 +182,25 @@ def test_same_launch_count_is_one_launch_and_different_counts_add():
     assert point.achieved_tflops == pytest.approx(
         achieved_tflops(61.0e6, 61, 14, 190.0)
     )
+
+
+def test_whole_model_is_omitted_when_it_is_the_same_forward_as_end_to_end():
+    regime = Regime(
+        "decode",
+        1,
+        (_op("GEMM", 6.0e9, 1.0e9, spec="matrix_bf16"),),
+    )
+    points, warnings = build_points(
+        [regime],
+        [_kernel("decode/gemm", 1.0e3, 1)],
+        time_overrides_us={
+            ("decode", "End to end"): 1.0e3,
+            ("decode", "Whole model"): 1.0e3,
+        },
+    )
+    assert "Whole model" not in {point.series for point in points}
+    assert any(point.series == "End to end" for point in points)
+    assert any("matches End to end" in warning for warning in warnings)
 
 
 def test_time_override_is_one_forward():
@@ -294,7 +315,9 @@ def test_profile_flops_replace_the_export_when_every_kernel_has_them():
     kernel["flops"] = 8.0e9
     kernel["bytes"] = 1.0e8
     points, warnings = build_points([regime], [kernel])
-    assert warnings == []
+    assert warnings == [
+        "Whole model decode matches End to end, so only End to end is drawn"
+    ]
     point = next(item for item in points if item.series == "Decode attention")
     assert point.cost_source == "profile"
     assert point.arithmetic_intensity == 80.0
@@ -338,8 +361,13 @@ def test_whole_model_uses_profile_per_category_and_export_for_the_rest():
     attention["flops"] = 8.0e9
     attention["bytes"] = 1.0e8
     gemm = _kernel("Cijk_gemm", 100.0, 20)
-    points, _warnings = build_points([regime], [attention, gemm])
-    whole = next(item for item in points if item.series == "Whole model")
+    points, warnings = build_points([regime], [attention, gemm])
+    # The attributed sum is the whole forward, so Whole model is not drawn
+    # beside End to end. End to end carries the same per-category mix.
+    assert warnings == [
+        "Whole model decode matches End to end, so only End to end is drawn"
+    ]
+    whole = next(item for item in points if item.series == "End to end")
     assert whole.cost_source == "mixed"
     assert whole.flops == pytest.approx(8.0e9 + 6.0e9)
     assert whole.bytes == pytest.approx(1.0e8 + 1.0e9)
