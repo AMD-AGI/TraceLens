@@ -336,7 +336,7 @@ annotations and graph-capture tracing:
 | `ATOM_ENABLE_DETAILED_ANNOTATION` | env var    | When`1`, execution-step annotations carry roofline metrics (`sqsq`, `sqsk`, `sk`) alongside the batch and token counts. The aggregates are computed only while the profiler is running, so unprofiled steps pay nothing. |
 | `ATOM_PROFILER_MORE`              | env var    | When`1`, records shapes and CPU call stacks, which the report needs for shape-level analysis.                                                                                                                                  |
 | `--torch-profiler-dir DIR`        | server arg | Destination for the profiler traces. ATOM writes one subdirectory per rank (`rank_N/`).                                                                                                                                        |
-| `--mark-trace`                    | server arg | Enables the graph-capture profiler, writing one trace per captured batch size to`capture_traces/bs_{bs}_rank{N}.json.gz`. Recent nightlies add a query-length field and use `bs_{bs}_q_{q}_rank{N}.json.gz` instead.         |
+| `--mark-trace`                    | server arg | Enables the graph-capture profiler. Target files are `bs_{bs}_rank{N}.json.gz` or `bs_{bs}_q_{q}_rank{N}.json.gz`. Drafter files are `draft_step_forward_bs_{bs}_rank{N}.json.gz`. TraceLens keys both by the request batch size in the file name.         |
 
 ```bash
 export ATOM_PROFILER_MORE=1
@@ -470,7 +470,43 @@ TraceLens_generate_perf_report_pytorch_inference \
 When `--capture_folder` is set, TraceLens first classifies the capture traces
 (writing an `execution_details.json` in the folder if one isn't already present),
 then merges the matching subtrees into the graph tree before running the standard
-analysis.
+analysis. Each `execution_details.json` entry lists the following fields for each capture trace:
+
+| Entry | Description |
+| --- | --- |
+| `file` | The capture trace file name. |
+| `batch_size` | The token-level batch size. |
+| `mode` | Compilation strategy. Either `FULL` or `PIECEWISE`. |
+| `capture_type` | `target`, `drafter` or `drafter_extend`; `target` when absent. Used for speculative decoding. |
+| `request_bs` | The request-level batch size. |
+| `token` | The most common leading dimension across the input tensors. Meant to be proxy for token-level batch size. |
+| `num_captures` | The number of `StreamBeginCapture` runtime events in the file; one or fewer is `FULL`, and more than one is `PIECEWISE`. |
+
+### Speculative decoding
+
+In non-speculative inference, every execution root is a **target** model forward pass that merges with a single set of target capture traces. Speculative decoding adds a **drafter** model that proposes multiple output tokens per iteration. The drafter model has its own capture traces, so the merge must correctly match every replay root with the correct capture root for both target and drafter models.
+
+TraceLens classifies capture files by role using filename patterns
+(`capture_type` in `execution_details.json`):
+
+| Filename pattern | Role |
+| --- | --- |
+| `*Draft*` / `*_speculator*` / `*draft_step_forward*` | `drafter` |
+| `*DraftExtend*` | `drafter_extend` |
+| Everything else | `target` |
+
+Each framework uses different annotations to mark execution roots in the replay
+trace. TraceLens matches these annotations to determine the role and batch size
+for merge:
+
+| Framework | Target prefill | Target decode | Drafter decode | Drafter prefill / extend |
+| --- | --- | --- | --- | --- |
+| SGLang | `step[EXTEND ...]` | `step[VERIFY bs=N]` | `draft` | `draft_extend` |
+| vLLM | `execute_*` | `execute_*` | `sample_*` | `sample_*` |
+| ATOM | `prefill[...]` | `decode[bs=N ... spec=...]` | `propose_*[1/...]` | `propose_*[0/...]` |
+
+Drafter annotations typically carry no batch size of their own so they borrow it
+from the adjacent target root.
 
 ## Inference-oriented options
 

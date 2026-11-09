@@ -566,7 +566,7 @@ for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:10]:
 
 **ATOM trace naming convention:**
 - `rank_{N}/*.pt.trace.json.gz` — one GPU trace per rank, each in its own subdirectory
-- `capture_traces/bs_{bs}_rank{N}.json.gz` — one graph-capture trace per captured batch size (only with `--mark-trace`). Current nightlies add a query-length field and name these `bs_{bs}_q_{q}_rank{N}.json.gz` instead. The rename landed between `nightly_202607221602` (old form) and `nightly_202608141640`, and is still in place as of `nightly_202608171540`, so treat it as the current convention. Match on the `bs_` prefix rather than the exact pattern. TraceLens itself is unaffected: `classify_graph_capture_trace` discovers capture files by extension, not by filename pattern.
+- `capture_traces/bs_{bs}_rank{N}.json.gz` — target graph, one per captured request batch (only with `--mark-trace`). Current nightlies add a query-length field and name these `bs_{bs}_q_{q}_rank{N}.json.gz`. Drafter decode graphs are `draft_step_forward_bs_{bs}_rank{N}.json.gz`. TraceLens keys both by the request batch size in the file name.
 - Expect `TP` rank subdirectories. Magpie collects these with `rglob`, so the nesting is handled automatically.
 
 ### Step 6: Split Traces for Analysis

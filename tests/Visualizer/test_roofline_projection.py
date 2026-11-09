@@ -33,6 +33,8 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _classify_normalization,
     _conv_cost,
     _dispatch_op_cost,
+    _embedding_lookup_cost,
+    _is_leaf_computation,
     _parse_conv_details,
     _engine_boundary_cost,
     _engine_head_cost,
@@ -721,6 +723,161 @@ def test_project_op_records_an_unresolved_input_dim():
     assert "unresolved input dim" in op.reason
 
 
+def test_project_op_costs_an_embedding_lookup_as_gathered_rows():
+    op = _project_op(
+        "embed_tokens",
+        "embed_tokens",
+        "Embedding",
+        "Embedding",
+        "nn_module",
+        "[B, S, H] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.category == "DataMovement"
+    assert op.flops == 0
+    # 8 tokens, hidden 8, bf16 rows read and written, plus int64 indices.
+    assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
+
+
+@pytest.mark.parametrize(
+    "computation",
+    [
+        "aten::embedding",
+        "EmbeddingBag",
+        "Token Embedding",
+        "Indexing",
+        "Index select",
+        "aten::index",
+    ],
+)
+def test_project_op_costs_common_embedding_labels(computation):
+    op = _project_op(
+        "embed",
+        "embed",
+        computation,
+        computation,
+        "aten_op",
+        "[B, S, H] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.category == "DataMovement"
+    assert op.flops == 0
+    assert op.bytes == 8 * 8 * 2 + 8 * 8 * 2 + 8 * 8
+
+
+def test_project_op_costs_indexing_a_wider_tail_as_one_row():
+    # ``x[idx]`` on a rank-3 table keeps the tail, so one index selects H*D.
+    op = _project_op(
+        "idx",
+        "idx",
+        "Indexing",
+        "Indexing",
+        "aten_op",
+        "[B, S, H, D] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8, "D": 4},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.flops == 0
+    assert op.bytes == 2 * 8 * 32 * 2 + 8 * 8
+
+
+def test_project_op_leaves_a_general_gather_unmodeled():
+    op = _project_op(
+        "g",
+        "g",
+        "Gather",
+        "Gather",
+        "aten_op",
+        "[B, S, H] bfloat16",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is False
+
+
+def test_embedding_lookup_is_a_leaf_the_opaque_tile_must_not_recost():
+    assert _is_leaf_computation("Embedding") is True
+    assert _is_leaf_computation("Indexing") is True
+
+
+def test_embedding_lookup_without_a_width_is_unmodeled():
+    op = _project_op(
+        "embed",
+        "embed",
+        "Embedding",
+        "Embedding",
+        "nn_module",
+        "[B, S, H]",
+        [["B", "S"]],
+        {"B": 2, "S": 4, "H": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is False
+    assert _embedding_lookup_cost([(2, 4)], (), 2) is None
+
+
+def test_embedding_lookup_falls_back_when_no_input_is_an_index_vector():
+    # A missing input, a tensor at least as wide as the output, and an input
+    # that does not divide the output are not index vectors. The row count is
+    # then the output with its last axis removed.
+    op = _project_op(
+        "idx",
+        "idx",
+        "Indexing",
+        "Indexing",
+        "aten_op",
+        "[B, H] bfloat16",
+        [[], ["B", "H", "D"], ["K"]],
+        {"B": 2, "H": 4, "D": 8, "K": 3},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled is True
+    assert op.bytes == 2 * 2 * 4 * 2 + 2 * 8
+
+    vector = _project_op(
+        "idx",
+        "idx",
+        "Indexing",
+        "Indexing",
+        "aten_op",
+        "[N] bfloat16",
+        [["N"]],
+        {"N": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert vector.bytes == 2 * 8 * 2 + 8
+
+
 def test_project_op_records_an_unmapped_computation():
     op = _project_op(
         "n1",
@@ -828,8 +985,10 @@ def test_project_roofline_fixture_coverage():
     ]
     assert rmsnorm_ops
 
-    unmodeled_names = {op.name for op in projection.unmodeled_ops}
-    assert "embed_tokens" in unmodeled_names
+    embed = next(op for op in projection.modeled_ops if op.name == "embed_tokens")
+    assert embed.category == "DataMovement"
+    assert embed.flops == 0
+    assert embed.bytes > 0
 
     totals = projection.totals()
     assert totals["total_flops"] > 0

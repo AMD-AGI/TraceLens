@@ -1,0 +1,47 @@
+[
+  {
+    "file": "graph_capture_rank_0.1792619001866517199.pt.trace.json.gz",
+    "batch_size": 4,
+    "mode": "FULL",
+    "capture_type": "target",
+    "request_bs": null,
+    "token": 4,
+    "num_captures": 1
+  },
+  {
+    "file": "graph_capture_rank_0_speculator.1792618841120045242.pt.trace.json.gz",
+    "batch_size": 1,
+    "mode": "PIECEWISE",
+    "capture_type": "drafter",
+    "request_bs": null,
+    "token": 1,
+    "num_captures": 2
+  },
+  {
+    "file": "graph_capture_rank_0_speculator.1792618844045420480.pt.trace.json.gz",
+    "batch_size": 4,
+    "mode": "FULL",
+    "capture_type": "drafter",
+    "request_bs": null,
+    "token": 4,
+    "num_captures": 1
+  },
+  {
+    "file": "graph_capture_rank_0_speculator.1792618846834061349.pt.trace.json.gz",
+    "batch_size": 4,
+    "mode": "FULL",
+    "capture_type": "drafter",
+    "request_bs": null,
+    "token": 4,
+    "num_captures": 1
+  },
+  {
+    "file": "graph_capture_rank_0_speculator.1792618846941447675.pt.trace.json.gz",
+    "batch_size": 1,
+    "mode": "FULL",
+    "capture_type": "drafter",
+    "request_bs": null,
+    "token": 1,
+    "num_captures": 1
+  }
+]
