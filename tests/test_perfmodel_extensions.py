@@ -6679,3 +6679,344 @@ class TestPerfModelDeepCoverage2:
             }
         )
         assert ce.get_compute_precision() is not None
+
+
+class TestSyntheticOpPerfModels:
+    """Tests for perf models that handle orphan Synthetic Ops."""
+
+    AR_NAME = (
+        "hipLaunchKernel->void aiter::allreduce_fusion_kernel_1stage"
+        "<std::bfloat16_t, std::bfloat16_t, 4, false>"
+        "(aiter::RankData*, aiter::RankSignals, aiter::Signal*, int, "
+        "std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, "
+        "std::bfloat16_t*, float*, int, int, int, int, float, "
+        "std::bfloat16_t*) (Synthetic Op)"
+    )
+
+    MQA_PAGED_NAME = (
+        "hipModuleLaunchKernel->_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle"
+        " (Synthetic Op)"
+    )
+
+    MQA_NONPAGED_NAME = (
+        "hipModuleLaunchKernel->_gluon_fp8_mqa_logits_kernel"
+        "_NUM_HEADS_32_HEAD_SIZE_128_BLOCK_KV_64_NUM_WARPS_2"
+        " (Synthetic Op)"
+    )
+
+    ANNOTATION_WITH_STATS = (
+        "step[VERIFY bs=6 g_sq=6 g_sk=87381 g_sqsq=36"
+        " g_sqsk=524286 c_sq=0 c_sk=0 c_sqsq=0 c_sqsk=0]"
+    )
+
+    ANNOTATION_PREFILL = (
+        "step[EXTEND bs=3 toks=29224 c_sq=29224 c_sqsq=638555048"
+        " c_sqsk=7418358184 c_sk=368232]"
+    )
+
+    ANNOTATION_BARE = "step[VERIFY bs=1]"
+
+    def test_allreduce_resolve_and_categorize(self):
+        from TraceLens.PerfModel.torch_op_mapping import (
+            categorize_torch_op,
+            resolve_perf_model_class,
+        )
+
+        cls = resolve_perf_model_class(self.AR_NAME)
+        assert cls is not None
+        assert cls.__name__ == "allreduce_fusion_kernel_1stage_synthetic"
+        assert categorize_torch_op({"name": self.AR_NAME}) == "CustomCollective"
+
+    def test_allreduce_normal(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            allreduce_fusion_kernel_1stage_synthetic,
+        )
+
+        event = {
+            "name": self.AR_NAME,
+            "args": {"grid": [6, 1, 1], "block": [768, 1, 1]},
+        }
+        model = allreduce_fusion_kernel_1stage_synthetic(event)
+        assert model.param_details["M"] == 6
+        assert model.param_details["N"] == 6144
+        assert model.param_details["world_size"] == 4
+        assert model.flops() == 6 * (5 * 6144 + 2)
+        assert model.bytes() == 4 * 6 * 6144 * 2 + 6144 * 2
+
+    def test_allreduce_no_roofline(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            allreduce_fusion_kernel_1stage_synthetic,
+        )
+
+        event = {
+            "name": self.AR_NAME,
+            "args": {"grid": [6, 1, 1], "block": [768, 1, 1]},
+        }
+        model = allreduce_fusion_kernel_1stage_synthetic(event)
+        assert not hasattr(model, "get_maf_type")
+        assert not hasattr(model, "get_compute_precision")
+
+    def test_allreduce_grid_cap(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            allreduce_fusion_kernel_1stage_synthetic,
+        )
+
+        event = {
+            "name": self.AR_NAME,
+            "args": {"grid": [80, 1, 1], "block": [768, 1, 1]},
+        }
+        model = allreduce_fusion_kernel_1stage_synthetic(event)
+        assert model.param_details.get("_no_perf") is True
+        assert model.flops() is None
+        assert model.bytes() is None
+
+    def test_allreduce_unparseable_name(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            allreduce_fusion_kernel_1stage_synthetic,
+        )
+
+        event = {
+            "name": "some_random_kernel",
+            "args": {"grid": [6, 1, 1], "block": [768, 1, 1]},
+        }
+        model = allreduce_fusion_kernel_1stage_synthetic(event)
+        assert model.param_details.get("_no_perf") is True
+        assert model.flops() is None
+
+    def test_allreduce_unknown_dtype(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            allreduce_fusion_kernel_1stage_synthetic,
+        )
+
+        name = self.AR_NAME.replace("std::bfloat16_t", "weird_type")
+        event = {"name": name, "args": {"grid": [6, 1, 1], "block": [768, 1, 1]}}
+        model = allreduce_fusion_kernel_1stage_synthetic(event)
+        assert model.param_details.get("_no_perf") is True
+
+    def test_allreduce_fp16(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            allreduce_fusion_kernel_1stage_synthetic,
+        )
+
+        name = self.AR_NAME.replace("std::bfloat16_t", "std::half_t").replace(
+            "4, false", "8, true"
+        )
+        event = {"name": name, "args": {"grid": [4, 1, 1], "block": [512, 1, 1]}}
+        model = allreduce_fusion_kernel_1stage_synthetic(event)
+        assert model.param_details["M"] == 4
+        assert model.param_details["N"] == 512 * 8
+        assert model.param_details["world_size"] == 8
+
+    def test_allreduce_can_model(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            allreduce_fusion_kernel_1stage_synthetic,
+        )
+
+        good = {"name": self.AR_NAME, "args": {"grid": [6, 1, 1], "block": [768, 1, 1]}}
+        assert allreduce_fusion_kernel_1stage_synthetic.can_model(good) is True
+        bad_no_grid = {"name": self.AR_NAME, "args": {}}
+        assert allreduce_fusion_kernel_1stage_synthetic.can_model(bad_no_grid) is False
+        bad_name = {
+            "name": "aten::mm",
+            "args": {"grid": [1, 1, 1], "block": [256, 1, 1]},
+        }
+        assert allreduce_fusion_kernel_1stage_synthetic.can_model(bad_name) is False
+
+    def test_mqa_logits_resolve_and_categorize(self):
+        from TraceLens.PerfModel.torch_op_mapping import (
+            categorize_torch_op,
+            resolve_perf_model_class,
+        )
+
+        for name in [self.MQA_PAGED_NAME, self.MQA_NONPAGED_NAME]:
+            cls = resolve_perf_model_class(name)
+            assert cls is not None
+            assert cls.__name__ == "paged_mqa_logits_preshuffle_synthetic"
+            assert categorize_torch_op({"name": name}) == "InferenceAttention"
+
+    def test_mqa_logits_python_func_excluded(self):
+        from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
+
+        name = "aiter/ops/triton/attention/fp8_mqa_logits.py(82): fp8_mqa_logits"
+        assert resolve_perf_model_class(name) is None
+
+    def test_mqa_logits_with_annotation_and_tp(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {
+            "name": self.MQA_PAGED_NAME,
+            "annotation": self.ANNOTATION_WITH_STATS,
+            "args": {},
+        }
+        arch = {"tp_world_size": 4}
+        model = paged_mqa_logits_preshuffle_synthetic(event, arch=arch)
+        assert model.param_details["H_Q"] == 32
+        assert model.param_details["d_h_qk"] == 128
+        assert model.flops() == 2 * 32 * 128 * 524286
+        assert model.bytes() is not None
+        assert model.get_maf_type() == "matrix"
+        assert model.get_compute_precision() == "fp8"
+
+    def test_mqa_logits_nonpaged_parses_from_name(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {
+            "name": self.MQA_NONPAGED_NAME,
+            "annotation": self.ANNOTATION_PREFILL,
+            "args": {},
+        }
+        model = paged_mqa_logits_preshuffle_synthetic(event)
+        assert model.param_details["H_Q"] == 32
+        assert model.param_details["d_h_qk"] == 128
+        assert model.flops() == 2 * 32 * 128 * 7418358184
+
+    def test_mqa_logits_from_kernel_details(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {
+            "name": "aiter_func",
+            "annotation": self.ANNOTATION_PREFILL,
+            "args": {},
+            "kernel_details": [
+                {
+                    "name": "_gluon_fp8_mqa_logits_kernel_NUM_HEADS_32_HEAD_SIZE_128_BLOCK_KV_64",
+                    "dur": 100,
+                }
+            ],
+        }
+        model = paged_mqa_logits_preshuffle_synthetic(event)
+        assert model.param_details["H_Q"] == 32
+        assert model.flops() is not None
+
+    def test_mqa_logits_no_annotation(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {"name": self.MQA_NONPAGED_NAME, "args": {}}
+        model = paged_mqa_logits_preshuffle_synthetic(event)
+        assert model.param_details.get("_no_perf") is True
+        assert model.flops() is None
+        assert model.bytes() is None
+
+    def test_mqa_logits_bare_annotation(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {
+            "name": self.MQA_NONPAGED_NAME,
+            "annotation": self.ANNOTATION_BARE,
+            "args": {},
+        }
+        model = paged_mqa_logits_preshuffle_synthetic(event)
+        assert model.param_details.get("_no_perf") is True
+
+    def test_mqa_logits_no_tp_no_name_dims(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {
+            "name": self.MQA_PAGED_NAME,
+            "annotation": self.ANNOTATION_WITH_STATS,
+            "args": {},
+        }
+        model = paged_mqa_logits_preshuffle_synthetic(event)
+        assert model.param_details.get("_no_perf") is True
+
+    def test_mqa_logits_tp8(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {
+            "name": self.MQA_PAGED_NAME,
+            "annotation": self.ANNOTATION_WITH_STATS,
+            "args": {},
+        }
+        arch = {"tp_world_size": 8}
+        model = paged_mqa_logits_preshuffle_synthetic(event, arch=arch)
+        assert model.param_details["H_Q"] == 16
+
+    def test_cxx_dtype_to_torch(self):
+        from TraceLens.PerfModel.utils import cxx_dtype_to_torch
+
+        assert cxx_dtype_to_torch("std::bfloat16_t") == "c10::BFloat16"
+        assert cxx_dtype_to_torch("std::half_t") == "c10::Half"
+        assert cxx_dtype_to_torch("__half") == "c10::Half"
+        assert cxx_dtype_to_torch("float") == "float"
+        assert cxx_dtype_to_torch("unknown_type") is None
+
+    def test_detect_tp_world_size(self):
+        from TraceLens.TreePerf.tree_perf import _detect_tp_world_size
+
+        events = [{"name": "some_op"}, {"name": self.AR_NAME}, {"name": "another_op"}]
+        assert _detect_tp_world_size(events) == 4
+        assert _detect_tp_world_size([{"name": "no_allreduce"}]) is None
+
+    def test_propagate_annotation(self):
+        from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops
+
+        class FakeTree:
+            events = [
+                {
+                    "cat": "user_annotation",
+                    "name": "step[DECODE bs=4]",
+                    "ts": 0,
+                    "dur": 1000,
+                },
+            ]
+
+        events = [
+            {"name": "op1", "ts": 100, "dur": 10},
+            {"name": "op2", "ts": 200, "dur": 10, "annotation": "already_set"},
+        ]
+        _propagate_annotation_to_synthetic_ops(FakeTree(), events)
+        assert events[0]["annotation"] == "step[DECODE bs=4]"
+        assert events[1]["annotation"] == "already_set"
+
+    def test_mqa_logits_verify_with_enriched_annotation(self):
+        """If step[VERIFY] had chunk stats, parsing succeeds and roofline is computable."""
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        enriched_verify = (
+            "step[VERIFY bs=6 g_sq=6 g_sk=87381 g_sqsq=36"
+            " g_sqsk=524286 c_sq=0 c_sk=0 c_sqsq=0 c_sqsk=0]"
+        )
+        event = {
+            "name": self.MQA_PAGED_NAME,
+            "annotation": enriched_verify,
+            "args": {},
+        }
+        arch = {"tp_world_size": 4}
+        model = paged_mqa_logits_preshuffle_synthetic(event, arch=arch)
+        assert "_no_perf" not in model.param_details
+        assert model.param_details["H_Q"] == 32
+        assert model.param_details["d_h_qk"] == 128
+        assert model.param_details["sum_len"] == 524286
+        assert model.param_details["seq_q"] == 6
+        assert model.param_details["kv_touched"] == 87381
+        assert model.flops() == 2 * 32 * 128 * 524286
+        assert model.bytes() > 0
+        assert model.get_maf_type() == "matrix"
+        assert model.get_compute_precision() == "fp8"
+
+    def test_propagate_annotation_no_annotations(self):
+        """Early return when trace has no user_annotation events."""
+        from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops
+
+        class FakeTree:
+            events = [{"cat": "cpu_op", "name": "no_annotations_here"}]
+
+        events = [{"name": "op1", "ts": 100, "dur": 10}]
+        _propagate_annotation_to_synthetic_ops(FakeTree(), events)
+        assert "annotation" not in events[0]

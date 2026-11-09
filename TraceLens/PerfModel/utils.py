@@ -222,6 +222,23 @@ def torch_dtype_map(dtype):
     return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
 
 
+_CXX_DTYPE_TO_TORCH = {
+    "std::bfloat16_t": "c10::BFloat16",
+    "std::half_t": "c10::Half",
+    "__half": "c10::Half",
+    "std::float_t": "float",
+    "float": "float",
+}
+
+
+def cxx_dtype_to_torch(cxx_dtype):
+    """Map a C++ type name from a HIP kernel signature to a torch dtype string.
+
+    Returns None if the type is not recognized.
+    """
+    return _CXX_DTYPE_TO_TORCH.get(cxx_dtype)
+
+
 def parse_bool(input):
     if isinstance(input, bool):
         return input

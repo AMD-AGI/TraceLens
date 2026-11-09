@@ -8,8 +8,13 @@
 Performance models for custom collective operation extensions.
 """
 
+import re
 from math import prod
-from TraceLens.PerfModel.utils import dense_counted_tensor, name2bpe
+from TraceLens.PerfModel.utils import (
+    cxx_dtype_to_torch,
+    dense_counted_tensor,
+    name2bpe,
+)
 
 
 class CustomCollective:
@@ -439,3 +444,127 @@ class sgl_kernel_reg_all_gather_into_tensor(CustomCollective):
 
     def bytes(self):
         return (self.num_elems + self.num_elems_out) * self.bpe_in
+
+
+_AR_1STAGE_RE = re.compile(
+    r"allreduce_fusion_kernel_1stage<([^,]+),\s*([^,]+),\s*(\d+),\s*(true|false)>"
+)
+
+
+class allreduce_fusion_kernel_1stage_synthetic(CustomCollective):
+    """
+    Performance model for the ``allreduce_fusion_kernel_1stage`` GPU kernel
+    when it appears as a Synthetic Op (launched via AITER JIT, no parent
+    PyTorch cpu_op and therefore no ``Input Dims``).
+
+    Derives M, N, world_size, and dtype from the HIP launch grid/block dims
+    and the C++ template parameters embedded in the kernel name.
+
+    Grid mapping (verified against ``custom_all_reduce.cuh:1945``):
+        grid.x  = min(token_num, 80)  — capped at kMaxBlocks=80; the kernel
+                  uses a grid-stride loop for overflow.  CUDA-graph captures
+                  are only made for small batch sizes so grid.x == token_num
+                  in practice, but this model will undercount M for
+                  token_num > 80.
+        block.x = ceil(out_hidden_dim / PACK_SIZE, WARP_SIZE) — derived from
+                  out_hidden_dim, not hidden_dim.  For GLM-52 (and most
+                  models) they are equal; if they differ, N will reflect
+                  out_hidden_dim.
+
+    Template params ``<T_in, T_out, W, use_fp32_acc>``:
+        T_in        — input dtype  (e.g. ``std::bfloat16_t``)
+        T_out       — output dtype
+        W           — world_size (number of TP ranks)
+        use_fp32_acc — accumulation precision flag
+
+    FLOPs: residual-add + RMSNorm (same as ``aiter_fused_allreduce_rmsnorm``).
+    Bytes: local HBM only (read inp + res_inp + weight, write res_out + out).
+    """
+
+    @staticmethod
+    def _parse_name(name):
+        m = _AR_1STAGE_RE.search(name)
+        if not m:
+            return None
+        return {
+            "cxx_dtype_in": m.group(1).strip(),
+            "cxx_dtype_out": m.group(2).strip(),
+            "world_size": int(m.group(3)),
+            "use_fp32_acc": m.group(4) == "true",
+        }
+
+    @classmethod
+    def can_model(cls, event):
+        args = event.get("args") or {}
+        grid = args.get("grid")
+        block = args.get("block")
+        if not grid or not block or grid[0] <= 0 or block[0] <= 0:
+            return False
+        return cls._parse_name(event.get("name", "")) is not None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        if self.param_details.get("_no_perf"):
+            self.num_elems = 0
+            self.num_channels = 0
+            self.bpe_in = 0
+            return
+        M = self.param_details["M"]
+        N = self.param_details["N"]
+        self.num_elems = M * N
+        self.num_channels = N
+        self.bpe_in = self.param_details["bpe_in"]
+
+    @staticmethod
+    def get_param_details(event):
+        name = event.get("name", "")
+        parsed = allreduce_fusion_kernel_1stage_synthetic._parse_name(name)
+        if parsed is None:
+            return {"_no_perf": True}
+
+        cxx_dtype = parsed["cxx_dtype_in"]
+        torch_dtype = cxx_dtype_to_torch(cxx_dtype)
+        if torch_dtype is None:
+            return {"_no_perf": True}
+        bpe_in = name2bpe(torch_dtype)
+        if bpe_in is None:
+            bpe_in = 2
+        pack_size = 16 // bpe_in
+
+        args = event.get("args") or {}
+        grid = args.get("grid", [0, 1, 1])
+        block = args.get("block", [0, 1, 1])
+
+        M = grid[0]
+        # grid.x is capped at kMaxBlocks=80; beyond that the kernel
+        # grid-strides so grid.x no longer equals the real token count.
+        if M >= 80:
+            return {"_no_perf": True}
+        N = block[0] * pack_size
+
+        return {
+            "M": M,
+            "N": N,
+            "world_size": parsed["world_size"],
+            "dtype_in": torch_dtype,
+            "bpe_in": bpe_in,
+            "op_shape": (M, N),
+        }
+
+    def flops(self):
+        if self.param_details.get("_no_perf") or self.num_elems == 0:
+            return None
+        add_flops = self.num_elems
+        non_norm_elems = self.num_elems // self.num_channels
+        rms_flops = non_norm_elems * (2 * self.num_channels + 2)
+        rms_flops += self.num_elems * 2
+        return add_flops + rms_flops
+
+    def bytes(self):
+        if self.param_details.get("_no_perf") or self.num_elems == 0:
+            return None
+        bytes_read = 2 * self.num_elems * self.bpe_in + self.num_channels * self.bpe_in
+        bytes_write = 2 * self.num_elems * self.bpe_in
+        return bytes_read + bytes_write
