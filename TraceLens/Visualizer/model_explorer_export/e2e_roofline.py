@@ -18,7 +18,7 @@ import argparse
 import csv
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -45,6 +45,7 @@ _COMM_MARKERS = (
 # The two compute roofs the plot always draws when the arch lists them.
 _HARDWARE_ROOFS = (("matrix_bf16", "bfloat16"), ("matrix_fp4", "fp4"))
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
+_ABOVE_ROOF_COLOR = "#D62728"
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,10 @@ class RooflinePoint:
     flops: float
     bytes: float
     time_us: float
+    # Set when the point sits above the roof it can reach. No kernel can run
+    # faster than the roof, so the projection's FLOPs or bytes, or the kernels
+    # matched to it, do not describe what ran.
+    above_roof: bool = False
 
 
 def bandwidth_tb_s(arch: dict[str, Any]) -> float:
@@ -186,8 +191,9 @@ def load_profile_json(path: Path) -> list[dict[str, Any]]:
 def regimes_from_augmentation(payload: dict[str, Any]) -> list[Regime]:
     """Category rollups from ``roofline_augmentation.json``.
 
-    Each category keeps ``flops_per_launch`` so a multi-step capture can scale
-    one forward's shape by the launch count.
+    Each category keeps its launch count (``invocations``) so a multi-step
+    capture can scale one forward by the launches it ran. A file from before
+    that field keeps ``flops_per_launch`` as the fallback.
     """
     regimes = payload.get("regimes")
     if not regimes and payload.get("regime"):
@@ -208,6 +214,7 @@ def regimes_from_augmentation(payload: dict[str, Any]) -> list[Regime]:
                     "total_bytes": facts.get("bytes") or 0.0,
                     "compute_spec": facts.get("compute_spec"),
                     "flops_per_launch": facts.get("flops_per_invocation") or None,
+                    "instances": facts.get("invocations") or 0,
                 }
             )
         out.append(
@@ -250,17 +257,25 @@ def _bucket_ops(ops: tuple[dict[str, Any], ...], categories: tuple[str, ...] | N
 
 def _bucket_cost(
     ops: tuple[dict[str, Any], ...], categories: tuple[str, ...] | None
-) -> tuple[float, float, float | None]:
+) -> tuple[float, float, int, float | None]:
+    """One forward's FLOPs and bytes, how many launches it is made of, and a
+    per-launch cost for rollups that predate the launch count."""
     chosen = _bucket_ops(ops, categories)
     total_flops = sum(float(op.get("total_flops") or 0.0) for op in chosen)
     total_bytes = sum(float(op.get("total_bytes") or 0.0) for op in chosen)
-    # A category rollup is one row with a per-launch cost. A bucket of many
-    # projection rows has no single launch cost; the caller then passes a
-    # one-forward profile, or --time-us.
+    # Each projection row is ``instances`` launches of one op, so a bucket is
+    # the sum of its rows' instances. Rows can differ in cost (a layer type per
+    # compression ratio), so the bucket has a mean launch, not a single cost.
+    # A bucket with an unknown instance count has no launch scaling.
+    counts = [int(op.get("instances") or 0) for op in chosen]
+    instances = sum(counts) if counts and all(counts) else 0
+    # A rollup written before the launch count was recorded is one row with the
+    # cost of its most expensive launch. It is only used when nothing better
+    # exists.
     per_launch = None
     if len(chosen) == 1 and chosen[0].get("flops_per_launch"):
         per_launch = float(chosen[0]["flops_per_launch"])
-    return total_flops, total_bytes, per_launch
+    return total_flops, total_bytes, instances, per_launch
 
 
 def flop_shares(ops: tuple[dict[str, Any], ...]) -> dict[str, float]:
@@ -334,23 +349,76 @@ def _measured_launches(matched: list[dict[str, Any]]) -> tuple[float, int]:
 
 def achieved_tflops(
     total_flops: float,
-    flops_per_launch: float | None,
+    instances: int,
     launch_count: int,
     time_us: float,
+    flops_per_launch: float | None = None,
 ) -> float:
     """Achieved TFLOP/s while the measured launches ran.
 
-    ``flops_per_launch * launch_count`` is the work in the capture when the
-    projection gives one launch's FLOPs. Otherwise the profile window is taken
-    as one forward and ``total_flops`` is the numerator.
+    ``total_flops`` is one forward over ``instances`` launches, so a capture
+    with ``launch_count`` launches ran ``launch_count / instances`` forwards.
+    Scaling the forward, not one row's launch, keeps a bucket right when its
+    rows differ in cost. A rollup with no launch count falls back to
+    ``flops_per_launch * launch_count``. With neither, the profile window is
+    taken as one forward and ``total_flops`` is the numerator.
     """
     if time_us <= 0:
         raise ValueError("measured time must be positive")
-    if flops_per_launch and launch_count > 0:
+    if instances and launch_count > 0:
+        flops = total_flops * launch_count / instances
+    elif flops_per_launch and launch_count > 0:
         flops = flops_per_launch * launch_count
     else:
         flops = total_flops
     return flops / (time_us * 1e-6) / 1e12
+
+
+def roof_tflops(arithmetic_intensity: float, arch: dict[str, Any]) -> float | None:
+    """The most a kernel at this intensity can reach on ``arch``.
+
+    The bandwidth line, capped by the highest matrix peak the plot draws, so a
+    kernel on a faster datatype than bf16 is not flagged. ``None`` when the
+    arch lists no peak.
+    """
+    peaks = arch.get("max_achievable_tflops") or {}
+    values = [float(peaks[key]) for key, _label in _HARDWARE_ROOFS if peaks.get(key)]
+    if not values:
+        return None
+    return min(bandwidth_tb_s(arch) * arithmetic_intensity, max(values))
+
+
+def flag_points_above_roof(
+    points: list[RooflinePoint],
+    arch: dict[str, Any],
+    *,
+    tolerance: float = 0.05,
+) -> tuple[list[RooflinePoint], list[str]]:
+    """Mark each point that sits above the roof it can reach.
+
+    Nothing runs faster than the roof, so a point above it (past ``tolerance``)
+    has FLOPs, bytes, or matched kernels that do not describe the work the
+    profile timed. The warning gives the memory rate the point implies.
+    """
+    flagged: list[RooflinePoint] = []
+    warnings: list[str] = []
+    bandwidth = bandwidth_tb_s(arch)
+    for point in points:
+        roof = roof_tflops(point.arithmetic_intensity, arch)
+        if roof is None or point.achieved_tflops <= roof * (1.0 + tolerance):
+            flagged.append(point)
+            continue
+        flagged.append(replace(point, above_roof=True))
+        implied = point.achieved_tflops / point.arithmetic_intensity
+        warnings.append(
+            f"{point.series} {point.phase} concurrency {point.concurrency}: "
+            f"{point.achieved_tflops:,.1f} TFLOP/s is above the "
+            f"{roof:,.1f} TFLOP/s roof at {point.arithmetic_intensity:.2f} "
+            f"FLOP/byte (implies {implied:,.1f} TB/s against {bandwidth:,.1f} "
+            "TB/s). The projection's FLOPs or bytes, or the kernels matched to "
+            "this series, do not describe what ran"
+        )
+    return flagged, warnings
 
 
 def build_points(
@@ -388,7 +456,7 @@ def build_points(
                     "whole-forward time (pass --time-us)"
                 )
                 continue
-            total_flops, total_bytes, per_launch = _bucket_cost(
+            total_flops, total_bytes, instances, per_launch = _bucket_cost(
                 regime.ops, spec.categories
             )
             if total_flops <= 0 or total_bytes <= 0:
@@ -403,6 +471,7 @@ def build_points(
             if override is not None:
                 time_us = override
                 # The override is one forward, so the numerator is the forward.
+                instances = 0
                 per_launch = None
                 launch_count = 0
             elif not matched:
@@ -420,7 +489,7 @@ def build_points(
                     concurrency=regime.concurrency,
                     arithmetic_intensity=total_flops / total_bytes,
                     achieved_tflops=achieved_tflops(
-                        total_flops, per_launch, launch_count, time_us
+                        total_flops, instances, launch_count, time_us, per_launch
                     ),
                     flops=total_flops,
                     bytes=total_bytes,
@@ -547,9 +616,11 @@ def plot_e2e_roofline(
                 marker=marker,
                 s=60,
                 facecolors="none" if open_marker else color,
-                edgecolors=color,
-                linewidths=1.6,
-                zorder=3,
+                # A point above the roof is a modeling or matching error, not a
+                # measurement, so it is outlined in red instead of drawn plain.
+                edgecolors=_ABOVE_ROOF_COLOR if point.above_roof else color,
+                linewidths=2.6 if point.above_roof else 1.6,
+                zorder=4 if point.above_roof else 3,
             )
         # Arrows follow concurrency inside one phase. A prefill point and a
         # decode point are different work, so they are not connected.
@@ -583,6 +654,20 @@ def plot_e2e_roofline(
             )
         )
         labels.append(spec.label)
+    if any(point.above_roof for point in points):
+        handles.append(
+            plt.Line2D(
+                [],
+                [],
+                marker="o",
+                linestyle="None",
+                markerfacecolor="none",
+                markeredgecolor=_ABOVE_ROOF_COLOR,
+                markeredgewidth=2.2,
+                markersize=8,
+            )
+        )
+        labels.append("Above the roof: FLOPs, bytes, or kernels do not match")
     for concurrency in concurrencies:
         handles.append(
             plt.Line2D(
@@ -753,6 +838,8 @@ def main(argv: list[str] | None = None) -> int:
         points, warnings = build_points(
             regimes, kernels, includes=includes, time_overrides_us=overrides
         )
+        points, roof_warnings = flag_points_above_roof(points, arch)
+        warnings.extend(roof_warnings)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"e2e_roofline: {exc}", file=sys.stderr)
         return 1

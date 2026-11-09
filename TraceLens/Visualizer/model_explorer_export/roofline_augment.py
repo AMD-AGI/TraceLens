@@ -106,6 +106,9 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
                 "bytes": 0.0,
                 "roofline_time_us": 0.0,
                 "bound_time": {},
+                # Launches in one forward: each projected row is ``instances``
+                # launches of one op (one per layer).
+                "invocations": 0,
                 # Per-invocation (one layer, one forward) FLOPs/bytes of the
                 # category's dominant op, used to scale against a trace kernel's
                 # measured per-invocation cost.
@@ -117,6 +120,7 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
         acc["flops"] += op.total_flops or 0.0
         acc["bytes"] += op.total_bytes or 0.0
         acc["roofline_time_us"] += op.total_roofline_time_us or 0.0
+        acc["invocations"] += op.instances or 0
         if op.roofline_bound:
             acc["bound_time"][op.roofline_bound] = acc["bound_time"].get(
                 op.roofline_bound, 0.0
@@ -143,6 +147,7 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
             "bytes": acc["bytes"],
             "flops_per_invocation": acc["flops_per_invocation"],
             "bytes_per_invocation": acc["bytes_per_invocation"],
+            "invocations": acc["invocations"],
             "vs_ridge": (
                 None
                 if ai is None or ridge is None

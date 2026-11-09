@@ -70,13 +70,19 @@ arch directory (`MI300X`, `MI325X`) come from `$TL_EXTENSION`.
 Y uses the `Kernel Time (µs)_sum` and `operation_count` columns of the
 perf-report `*_ops.csv` files.
 
-When the projection (or the augmentation rollup) gives a per-launch FLOP
-count, the numerator is that cost times the launch count. That is the work in
-a capture that contains many forwards. Kernels with the same launch count are
-treated as parts of one launch, and their times are summed. Kernels with
-different launch counts are separate launches, and the counts add. Without a
-per-launch cost, the numerator is one forward's FLOPs, so the profile time has
-to be one forward.
+The projection gives the FLOPs of one forward for each series, and the number
+of times each op occurs in it (`instances`, written to the augmentation as
+`invocations`). The numerator is the series' FLOPs times
+`launches / instances`, which is the number of forwards the matched kernels
+ran. This is the work in a capture that contains many forwards. It uses the
+mean launch, not the costliest op, so a series that mixes cheap and expensive
+ops is not overstated.
+
+Kernels with the same launch count are treated as parts of one launch, and
+their times are summed. Kernels with different launch counts are separate
+launches, and the counts add. Without `instances`, the numerator falls back to
+the per-launch cost times the launch count, and without that, to one forward's
+FLOPs, so the profile time has to be one forward.
 `--time-us PHASE|SERIES|MICROSECONDS` sets that one-forward time explicitly.
 
 Kernels are matched to a series by name (`classify_kernel`). A name that
@@ -91,6 +97,17 @@ which phase it ran is left out too. Assign it with:
 
 End to end on a mixed capture needs `--time-us`, because the phase-tagged
 kernels are not the whole forward.
+
+## A point above the roof is an error in the inputs
+
+Achieved TFLOP/s divided by arithmetic intensity is the HBM traffic the kernels
+would have to move, and it cannot exceed the memory bandwidth. A point more
+than 5% above the roof is outlined in red and reported on stderr with the TB/s
+it implies. It means the projected FLOPs or bytes, or the kernels matched to
+the series, do not describe what ran. The usual cause is a series that matches
+only some of an op's kernels, so its time is too small. For example, only the
+down-projection of an MoE carries `decode` in its name. Pass `--kernels` for
+the rest.
 
 ## Related topics
 
