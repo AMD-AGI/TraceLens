@@ -48,8 +48,8 @@ TraceLens_e2e_roofline_plot \
     --output roofline.png
 ```
 
-Repeat `--projection PHASE:CONCURRENCY:PATH` for each concurrency. Points of
-one series and one phase are joined by an arrow in concurrency order.
+Repeat `--projection PHASE:CONCURRENCY:PATH` for each concurrency. Each
+concurrency is a separate marker color.
 
 An orchestrator run already writes the category rollup. Pass that instead of
 the per-op JSON:

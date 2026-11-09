@@ -959,21 +959,6 @@ def plot_e2e_roofline(
                 linewidths=2.6 if point.above_roof else 1.6,
                 zorder=4 if point.above_roof else 3,
             )
-        # Arrows follow concurrency inside one phase. A prefill point and a
-        # decode point are different work, so they are not connected.
-        by_phase: dict[str, list[RooflinePoint]] = {}
-        for point in group:
-            by_phase.setdefault(point.phase, []).append(point)
-        for phase_points in by_phase.values():
-            ordered = sorted(phase_points, key=lambda item: item.concurrency)
-            for start, end in zip(ordered, ordered[1:]):
-                ax.annotate(
-                    "",
-                    xy=(end.arithmetic_intensity, end.achieved_tflops),
-                    xytext=(start.arithmetic_intensity, start.achieved_tflops),
-                    arrowprops={"arrowstyle": "->", "color": "0.65", "lw": 1.0},
-                    zorder=2,
-                )
 
     handles, labels = ax.get_legend_handles_labels()
     for spec in series:
