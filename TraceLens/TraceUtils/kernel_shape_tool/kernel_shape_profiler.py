@@ -13,13 +13,15 @@ drives ``enable()`` / ``disable()`` from the profiler window. See README.md.
 
 import contextlib
 import functools
+import gc
 import importlib
 import inspect
 import logging
 import pkgutil
 import sys
 import threading
-from typing import Any, Callable, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.library import Library
@@ -73,10 +75,14 @@ _enabled = False
 # The ``if not _enabled`` guard in each wrapper routes leaked calls to the original.
 _lib: Optional[Library] = None
 _op_counter = 0  # monotonic, never reset, so old op names stay valid
-_patches: List[Tuple[Any, str, Callable]] = []  # (module, attr, original_fn)
+# (module, attr, original_fn); attr is None for a closure cell (container is the cell)
+_patches: List[Tuple[Any, Optional[str], Callable]] = []
 _built_wrappers: dict = (
     {}
 )  # {qualified_name: (wrapper, original_fn)}, reused across cycles
+# Auto-discovery imports and scans every target module (seconds to minutes on a
+# large server); its result doesn't change between profiler windows.
+_discovered_entry_points: Optional[List[Tuple[str, str]]] = None
 
 
 def _get_or_create_lib() -> Library:
@@ -158,9 +164,39 @@ _KERNEL_ENTRY_POINTS = [
     # ── aiter regrouped Triton ops ──
     ("aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale", "gemm_a8w8_blockscale"),
     ("aiter.ops.triton.normalization.rmsnorm", "rms_norm"),
+    ("aiter.ops.triton.attention.unified_attention", "unified_attention"),
     # aiter's batched blockscale GEMM was renamed (not just moved); left to
     # auto-discovery rather than pinned to its long current name here.
 ]
+
+# Schema types for tensor params a launcher leaves unannotated, keyed by the
+# function's (__module__, __qualname__) so re-exports share one entry.
+_TENSOR_PARAM_HINTS: Dict[Tuple[str, str], Dict[str, str]] = {
+    ("aiter.ops.triton.attention.unified_attention", "unified_attention"): {
+        **dict.fromkeys(
+            ("q", "k", "v", "out", "cu_seqlens_q", "seqused_k", "block_table"), "Tensor"
+        ),
+        **dict.fromkeys(
+            (
+                "q_descale",
+                "k_descale",
+                "v_descale",
+                "q_scales",
+                "alibi_slopes",
+                "output_scale",
+                "qq_bias",
+                "sinks",
+            ),
+            "Tensor?",
+        ),
+    },
+}
+
+
+def _tensor_param_hints(fn: Callable) -> Dict[str, str]:
+    key = (getattr(fn, "__module__", ""), getattr(fn, "__qualname__", ""))
+    return _TENSOR_PARAM_HINTS.get(key, {})
+
 
 # Auto-discovery prefixes: enable() scans loaded modules under these and wraps
 # functions that look like kernel launchers (signature/source heuristics).
@@ -232,12 +268,14 @@ def _infer_schema_type(param: inspect.Parameter) -> Optional[str]:
 def _build_schema_from_sig(
     sig: inspect.Signature,
     skip_self: bool = False,
+    hints: Optional[Dict[str, str]] = None,
 ) -> Optional[Tuple[str, List[str], List[str]]]:
-    """Build a schema from signature annotations.
+    """Build a schema from signature annotations, then *hints* for unannotated params.
 
     Returns ``(schema_str, tensor_params, non_tensor_params)``, or ``None`` if
     there are no tensor params or the signature can't be mapped.
     """
+    hints = hints or {}
     tensor_params: List[str] = []
     non_tensor_params: List[str] = []
     schema_parts: List[str] = []
@@ -248,7 +286,7 @@ def _build_schema_from_sig(
         if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             return None
 
-        stype = _infer_schema_type(param)
+        stype = _infer_schema_type(param) or hints.get(name)
         if stype is not None and "Tensor" in stype:
             tensor_params.append(name)
             schema_parts.append(f"{stype} {name}")
@@ -405,13 +443,13 @@ def _resolve_target(module_path: str, attr_name: str):
         return mod, attr_name, fn, False
 
 
-def _patch_all_references(original_fn: Callable, wrapper_fn: Callable):
-    """Rebind every ``sys.modules`` reference to *original_fn* to *wrapper_fn*.
+def _index_module_references(target_ids: set) -> dict:
+    """``{id(fn): [(module, attr), ...]}`` for every ``sys.modules`` global bound to a target.
 
-    Handles the ``from X import Y`` pattern. Returns ``(module, attr, original_fn)``
-    tuples for later restoration.
+    One pass over all modules, shared by every entry point (a pass per entry point
+    is O(entry points x modules) and stalls the server when a window opens).
     """
-    patches = []
+    index: dict = {}
     for _mod_name, mod in list(sys.modules.items()):
         if mod is None:
             continue
@@ -419,14 +457,59 @@ def _patch_all_references(original_fn: Callable, wrapper_fn: Callable):
             mod_dict = vars(mod)
         except TypeError:
             continue
-        for attr_name in list(mod_dict.keys()):
+        for attr_name, obj in list(mod_dict.items()):
             if attr_name.startswith("__"):
                 continue
+            if id(obj) in target_ids:
+                index.setdefault(id(obj), []).append((mod, attr_name))
+    return index
+
+
+def _patch_all_references(original_fn: Callable, wrapper_fn: Callable, index: dict):
+    """Rebind every indexed ``sys.modules`` reference to *original_fn* to *wrapper_fn*.
+
+    Handles the ``from X import Y`` pattern. Returns ``(module, attr, original_fn)``
+    tuples for later restoration.
+    """
+    patches = []
+    for mod, attr_name in index.get(id(original_fn), ()):
+        try:
+            if vars(mod).get(attr_name) is original_fn:
+                setattr(mod, attr_name, wrapper_fn)
+                patches.append((mod, attr_name, original_fn))
+        except Exception:
+            pass
+    return patches
+
+
+def _patch_decorator_closures(targets: dict):
+    """Rebind closure cells of decorator wrappers around a target to the target's wrapper.
+
+    Covers references that never pass through a module global, e.g.
+    ``self.fn = torch.compiler.disable(fn)`` bound at backend init: the dynamo
+    ``_fn`` (and any ``functools.wraps`` decorator) calls *fn* through its closure.
+    *targets* maps ``id(original_fn) -> (original_fn, wrapper)``. Returns
+    ``(cell, None, original_fn)`` tuples for later restoration.
+    """
+    patches = []
+    for obj in gc.get_objects():
+        if not inspect.isfunction(obj) or not obj.__closure__:
+            continue
+        if getattr(obj, "_kernel_shape_wrapper", False):
+            continue
+        inner = getattr(obj, "_torchdynamo_orig_callable", None) or getattr(
+            obj, "__wrapped__", None
+        )
+        target = targets.get(id(inner)) if inner is not None else None
+        if target is None:
+            continue
+        original_fn, wrapper = target
+        for cell in obj.__closure__:
             try:
-                if mod_dict[attr_name] is original_fn:
-                    setattr(mod, attr_name, wrapper_fn)
-                    patches.append((mod, attr_name, original_fn))
-            except Exception:
+                if cell.cell_contents is original_fn:
+                    cell.cell_contents = wrapper
+                    patches.append((cell, None, original_fn))
+            except ValueError:  # empty cell
                 pass
     return patches
 
@@ -484,19 +567,22 @@ def _source_launches_kernel(fn: Callable) -> bool:
 def _is_likely_kernel_launcher(fn: Callable, sig: inspect.Signature) -> bool:
     """Decide whether *fn* likely launches a GPU kernel.
 
-    A Tensor annotation includes it; non-tensor-only annotations exclude it; no
-    annotations falls back to source pattern matching.
+    A Tensor annotation or hint includes it; annotations that are all non-tensor
+    exclude it; otherwise (some params unannotated, e.g. tensors left bare next
+    to ``flag: bool``) fall back to source pattern matching.
     """
-    has_any_annotation = False
+    if _tensor_param_hints(fn):
+        return True
+    all_annotated = True
     for param in sig.parameters.values():
         if param.annotation is inspect._empty:
+            all_annotated = False
             continue
-        has_any_annotation = True
         stype = _infer_schema_type(param)
         if stype is not None and "Tensor" in stype:
             return True
 
-    if has_any_annotation:
+    if all_annotated:
         return False
 
     return _source_launches_kernel(fn)
@@ -624,6 +710,123 @@ def _discover_kernel_entry_points() -> List[Tuple[str, str]]:
     return results
 
 
+def _plan_patches() -> (
+    Tuple[List[Tuple[Any, str, Callable, Callable, bool]], int, float]
+):
+    """Discover entry points and build (or reuse) their wrappers, without patching.
+
+    Returns ``(planned, n_discovered, discover_seconds)``; each planned entry is
+    ``(container, name, original_fn, wrapper, is_plain_function)``. Call with
+    ``_lock`` held and global torch state preserved.
+    """
+    global _discovered_entry_points
+    _wrapped_ids: set = set()  # function ids, to avoid double-wrapping
+    planned: List[Tuple[Any, str, Callable, Callable, bool]] = []
+    t_start = time.perf_counter()
+    if _discovered_entry_points is None:
+        _discovered_entry_points = _discover_kernel_entry_points()
+    all_entry_points = list(_KERNEL_ENTRY_POINTS) + _discovered_entry_points
+    t_discovered = time.perf_counter()
+
+    for module_path, attr_name in all_entry_points:
+        resolved = _resolve_target(module_path, attr_name)
+        if resolved is None:
+            continue
+
+        container, name, original_fn, is_method = resolved
+        is_plain_function = not is_method
+
+        # Already our own wrapper (a compat re-export resolved to it).
+        # Re-wrapping would nest annotations and double-count the call.
+        if getattr(original_fn, "_kernel_shape_wrapper", False):
+            logger.debug("Skipping already-wrapped %s.%s", module_path, attr_name)
+            continue
+
+        fn_id = id(original_fn)
+        if fn_id in _wrapped_ids:
+            logger.debug("Skipping duplicate %s.%s", module_path, attr_name)
+            continue
+        _wrapped_ids.add(fn_id)
+
+        qualified_name = f"{module_path}.{name}"
+
+        # Reuse a prior-cycle wrapper if the function is unchanged, so
+        # each op is defined once and leaked refs stay live.
+        wrapper = None
+        cached = _built_wrappers.get(qualified_name)
+        if cached is not None and cached[1] is original_fn:
+            wrapper = cached[0]
+
+        if wrapper is None:
+            try:
+                sig = inspect.signature(original_fn)
+            except (ValueError, TypeError):
+                logger.debug(
+                    "Cannot inspect signature of %s — skipping", qualified_name
+                )
+                continue
+
+            base = f"{module_path.split('.')[-1]}_{name}"
+            schema_info = _build_schema_from_sig(
+                sig, skip_self=is_method, hints=_tensor_param_hints(original_fn)
+            )
+
+            if schema_info is not None:
+                # Full tensor annotations → torch.library custom op
+                schema_str, t_names, nt_names = schema_info
+                op_name = _next_op_name(base)
+                wrapper = _register_op(
+                    op_name,
+                    schema_str,
+                    original_fn,
+                    t_names,
+                    nt_names,
+                    sig,
+                    skip_self=is_method,
+                )
+                if wrapper is not None:
+                    logger.debug(
+                        "Registered %s as custom op %s", qualified_name, op_name
+                    )
+
+            if wrapper is None:
+                # No annotations / registration failed → record_function
+                wrapper = _make_record_function_wrapper(qualified_name, original_fn)
+                logger.debug("Registered %s via record_function", qualified_name)
+
+            _built_wrappers[qualified_name] = (wrapper, original_fn)
+
+        planned.append((container, name, original_fn, wrapper, is_plain_function))
+
+    n_discovered = len(all_entry_points) - len(_KERNEL_ENTRY_POINTS)
+    return planned, n_discovered, t_discovered - t_start
+
+
+def prepare():
+    """Discover entry points and build their wrappers ahead of the first window.
+
+    Patches nothing. Call after the server has imported its modules and before it
+    serves: ``enable()`` then only rebinds references instead of stalling the
+    first profiler window on discovery.
+    """
+    with _lock:
+        if _enabled:
+            return
+        t_start = time.perf_counter()
+        with _preserve_global_torch_state():
+            planned, n_discovered, t_discover = _plan_patches()
+        logger.info(
+            "kernel_shape_profiler prepared: %d entry points (%d explicit + %d "
+            "auto-discovered), %d wrappers; %.1f s (discover %.1f)",
+            len(_KERNEL_ENTRY_POINTS) + n_discovered,
+            len(_KERNEL_ENTRY_POINTS),
+            n_discovered,
+            len(planned),
+            time.perf_counter() - t_start,
+            t_discover,
+        )
+
+
 def enable():
     """Patch registered kernel entry points to appear as cpu_op."""
     global _enabled
@@ -633,91 +836,19 @@ def enable():
 
         # _lib / _op_counter are process-persistent; only per-cycle patches rebuild.
         _patches.clear()
-        _wrapped_ids: set = set()  # function ids, to avoid double-wrapping
+        t_start = time.perf_counter()
 
         # Import-heavy region may mutate global torch defaults; restore on exit.
         with _preserve_global_torch_state():
-            all_entry_points = (
-                list(_KERNEL_ENTRY_POINTS) + _discover_kernel_entry_points()
-            )
+            planned, n_discovered, t_discover = _plan_patches()
+            t_discovered = t_start + t_discover
+            t_wrapped = time.perf_counter()
 
-            for module_path, attr_name in all_entry_points:
-                resolved = _resolve_target(module_path, attr_name)
-                if resolved is None:
-                    continue
-
-                container, name, original_fn, is_method = resolved
-                is_plain_function = not is_method
-
-                # Already our own wrapper (a compat re-export resolved to it).
-                # Re-wrapping would nest annotations and double-count the call.
-                if getattr(original_fn, "_kernel_shape_wrapper", False):
-                    logger.debug(
-                        "Skipping already-wrapped %s.%s", module_path, attr_name
-                    )
-                    continue
-
-                fn_id = id(original_fn)
-                if fn_id in _wrapped_ids:
-                    logger.debug("Skipping duplicate %s.%s", module_path, attr_name)
-                    continue
-                _wrapped_ids.add(fn_id)
-
-                qualified_name = f"{module_path}.{name}"
-
-                # Reuse a prior-cycle wrapper if the function is unchanged, so
-                # each op is defined once and leaked refs stay live.
-                wrapper = None
-                cached = _built_wrappers.get(qualified_name)
-                if cached is not None and cached[1] is original_fn:
-                    wrapper = cached[0]
-
-                if wrapper is None:
-                    try:
-                        sig = inspect.signature(original_fn)
-                    except (ValueError, TypeError):
-                        logger.debug(
-                            "Cannot inspect signature of %s — skipping",
-                            qualified_name,
-                        )
-                        continue
-
-                    base = f"{module_path.split('.')[-1]}_{name}"
-                    schema_info = _build_schema_from_sig(sig, skip_self=is_method)
-
-                    if schema_info is not None:
-                        # Full tensor annotations → torch.library custom op
-                        schema_str, t_names, nt_names = schema_info
-                        op_name = _next_op_name(base)
-                        wrapper = _register_op(
-                            op_name,
-                            schema_str,
-                            original_fn,
-                            t_names,
-                            nt_names,
-                            sig,
-                            skip_self=is_method,
-                        )
-                        if wrapper is not None:
-                            logger.debug(
-                                "Registered %s as custom op %s", qualified_name, op_name
-                            )
-
-                    if wrapper is None:
-                        # No annotations / registration failed → record_function
-                        wrapper = _make_record_function_wrapper(
-                            qualified_name,
-                            original_fn,
-                        )
-                        logger.debug(
-                            "Registered %s via record_function", qualified_name
-                        )
-
-                    _built_wrappers[qualified_name] = (wrapper, original_fn)
-
-                # --- Apply patches ---
+            # --- Apply patches ---
+            index = _index_module_references({id(p[2]) for p in planned if p[4]})
+            for container, name, original_fn, wrapper, is_plain_function in planned:
                 if is_plain_function:
-                    ref_patches = _patch_all_references(original_fn, wrapper)
+                    ref_patches = _patch_all_references(original_fn, wrapper, index)
                     _patches.extend(ref_patches)
                     if not ref_patches:
                         setattr(container, name, wrapper)
@@ -725,17 +856,28 @@ def enable():
                 else:
                     setattr(container, name, wrapper)
                     _patches.append((container, name, original_fn))
-
-            n_discovered = len(all_entry_points) - len(_KERNEL_ENTRY_POINTS)
+            n_module_refs = len(_patches)
+            _patches.extend(
+                _patch_decorator_closures(
+                    {id(p[2]): (p[2], p[3]) for p in planned if p[4]}
+                )
+            )
 
         _enabled = True
+        t_end = time.perf_counter()
         logger.info(
             "kernel_shape_profiler enabled: %d references patched across "
-            "%d entry points (%d explicit + %d auto-discovered)",
+            "%d entry points (%d explicit + %d auto-discovered), "
+            "%d of them decorator closures; %.1f s (discover %.1f, wrap %.1f, patch %.1f)",
             len(_patches),
             len(_KERNEL_ENTRY_POINTS) + n_discovered,
             len(_KERNEL_ENTRY_POINTS),
             n_discovered,
+            len(_patches) - n_module_refs,
+            t_end - t_start,
+            t_discovered - t_start,
+            t_wrapped - t_discovered,
+            t_end - t_wrapped,
         )
 
 
@@ -749,7 +891,10 @@ def disable():
         _enabled = False
         for container, name, original_fn in reversed(_patches):
             try:
-                setattr(container, name, original_fn)
+                if name is None:
+                    container.cell_contents = original_fn
+                else:
+                    setattr(container, name, original_fn)
             except Exception:
                 pass
         _patches.clear()
