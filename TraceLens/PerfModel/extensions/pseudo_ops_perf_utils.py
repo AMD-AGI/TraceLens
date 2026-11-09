@@ -13,6 +13,7 @@ from . import (
     moe_perf_model_extensions,
     attention_perf_model_extensions,
     perf_model_extensions,
+    primus_perf_model_extensions,
     rmsnorm_perf_model_extensions,
     custom_collectives_perf_model_extensions,
     gsplat_perf_model_extensions,
@@ -173,6 +174,16 @@ def get_pseudo_op_mappings():
         # projection/intersect kernels are matched by substring in torch_op_mapping.
         "_SphericalHarmonics": gsplat_perf_model_extensions.gsplat_spherical_harmonics,
         "_RasterizeToPixels": gsplat_perf_model_extensions.gsplat_rasterize_to_pixels,
+        ## Primus Turbo / Flux ops
+        "primus_turbo::gemm_fp4_impl": primus_perf_model_extensions.gemm_fp4_impl,
+        "primus_flux::a6w4_mm_qa": primus_perf_model_extensions.a6w4_mm_qa,
+        "primus_flux::a6w4_mm_qa_prequant_w": primus_perf_model_extensions.a6w4_mm_qa_prequant_w,
+        "primus_flux::a6w4_act_dual": primus_perf_model_extensions.a6w4_act_dual,
+        "primus_flux::quantize_mxfp4_h16_dual": primus_perf_model_extensions.quantize_mxfp4_h16_dual,
+        "primus_flux::quantize_mxfp4_h16_dual_bias_gate": primus_perf_model_extensions.quantize_mxfp4_h16_dual_bias_gate,
+        "primus_flux::quantize_mxfp4_h16_dual_bias_packed": primus_perf_model_extensions.quantize_mxfp4_h16_dual_bias_packed,
+        "primus_flux::quantize_mxfp4_h16_dual_bias_dgelu": primus_perf_model_extensions.quantize_mxfp4_h16_dual_bias_dgelu,
+        "primus_flux::quantize_mxfp4_h16_col": primus_perf_model_extensions.quantize_mxfp4_h16_col,
     }
 
     return pseudo_op_mappings
@@ -227,4 +238,10 @@ def get_pseudo_op_category_only_mappings():
         # DeepSeek-V4 fused all-gather (custom collective); one entry per world size/dtype template arg, add new variants as needed.
         "aiter::allgather_lastdim<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
         "aiter::allgather_lastdim<std::bfloat16_t, 4>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
+        # Primus Flux fused QKV + RMSNorm + RoPE (multi-kernel fused ops, classify only).
+        "primus_flux_region::qkv_norm_rope_double": "FusedRoPE",
+        "primus_flux_region::qkv_norm_rope_double_backward": "FusedRoPE",
+        "primus_flux_region::qkv_norm_rope_backward": "FusedRoPE",
+        "GeneratedBackwardFor_primus_flux_region_qkv_norm_rope_double_default": "FusedRoPE",
+        "primus_flux_region::qk_norm_rope_pair_v": "FusedRoPE",
     }
