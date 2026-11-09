@@ -91,7 +91,7 @@ def test_point_uses_projection_intensity_and_profile_time():
         [_kernel("aiter::mla_qseqlen1", 20.0, 40)],
     )
     assert warnings == []
-    point = next(item for item in points if item.series == "Verify attention")
+    point = next(item for item in points if item.series == "Decode attention")
     assert point.arithmetic_intensity == 4.0e9 / 2.0e8
     assert point.achieved_tflops == pytest.approx(achieved_tflops(4.0e9, 40, 40, 20.0))
     assert point.achieved_tflops == pytest.approx(200.0)
@@ -111,12 +111,12 @@ def test_mixed_capture_keeps_phases_apart_and_skips_end_to_end():
     points, warnings = build_points(regimes, kernels)
     by_series = {(point.series, point.phase): point for point in points}
     assert set(by_series) == {
-        ("Verify attention", "decode"),
+        ("Decode attention", "decode"),
         ("Prefill attention", "prefill"),
         ("Whole model", "decode"),
         ("Whole model", "prefill"),
     }
-    assert by_series["Verify attention", "decode"].time_us == 1.0e4
+    assert by_series["Decode attention", "decode"].time_us == 1.0e4
     assert by_series["Prefill attention", "prefill"].time_us == 5.0e4
     # Only the phase-tagged attention kernel is attributable. The unscoped MoE
     # kernel is not part of the whole-model point.
@@ -295,7 +295,7 @@ def test_profile_flops_replace_the_export_when_every_kernel_has_them():
     kernel["bytes"] = 1.0e8
     points, warnings = build_points([regime], [kernel])
     assert warnings == []
-    point = next(item for item in points if item.series == "Verify attention")
+    point = next(item for item in points if item.series == "Decode attention")
     assert point.cost_source == "profile"
     assert point.arithmetic_intensity == 80.0
     assert point.achieved_tflops == pytest.approx(8.0e9 / 20.0e-6 / 1e12)
@@ -397,8 +397,8 @@ def test_points_from_report_use_the_stamped_graph_launch_costs(tmp_path):
     points = {
         (item.series, item.concurrency): item for item in points_from_report(tmp_path)
     }
-    assert ("Verify attention", 1) not in points
-    attention = points[("Verify attention", 4)]
+    assert ("Decode attention", 1) not in points
+    attention = points[("Decode attention", 4)]
     assert attention.cost_source == "profile"
     assert attention.flops == pytest.approx(2.0e10)
     assert attention.arithmetic_intensity == pytest.approx(4.0)
@@ -482,7 +482,7 @@ def _point(series, intensity, achieved):
 
 def test_a_point_above_the_roof_is_flagged_and_explained():
     below = _point("Routed MoE", 7.8, 60.0)
-    within = _point("Verify attention", 7.8, 64.0)  # 2.6% over, in tolerance
+    within = _point("Decode attention", 7.8, 64.0)  # 2.6% over, in tolerance
     above = _point("Prefill attention", 7.8, 540.0)
     flagged, warnings = flag_points_above_roof([below, within, above], _ARCH)
     assert [point.above_roof for point in flagged] == [False, False, True]

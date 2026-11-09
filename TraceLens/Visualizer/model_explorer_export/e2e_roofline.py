@@ -74,7 +74,7 @@ class Series:
 
 DEFAULT_SERIES: tuple[Series, ...] = (
     Series("Prefill attention", "o", "prefill", ("Attention",), True),
-    Series("Verify attention", "o", "decode", ("Attention",), False),
+    Series("Decode attention", "o", "decode", ("Attention",), False),
     Series("Routed MoE", "s", None, ("MoE",), False),
     Series("Whole model", "P", None, None, False),
     Series("End to end", "D", None, None, False),
@@ -84,13 +84,13 @@ DEFAULT_SERIES: tuple[Series, ...] = (
 # Dims, either from a capture profile or from the model schedule. The plot
 # reads the FLOPs and bytes the perf model computed from those dims.
 PROFILE_SERIES: tuple[Series, ...] = (
-    Series("Verify attention", "o", "decode", ("Attention",), False),
+    Series("Decode attention", "o", "decode", ("Attention",), False),
     Series("Routed MoE", "s", None, ("MoE",), False),
     Series("GEMM", "^", None, ("GEMM",), False),
     Series("Whole model", "P", None, None, False),
 )
 _REPORT_CATEGORIES = {
-    "inferenceattention": "Verify attention",
+    "inferenceattention": "Decode attention",
     "moe_unfused": "Routed MoE",
     "gemm": "GEMM",
 }

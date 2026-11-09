@@ -11,7 +11,7 @@ See LICENSE for license information.
 ```
 
 `TraceLens_e2e_roofline_plot` draws one log-log roofline for a model regime.
-Each point is an operation (prefill attention, verify attention, routed MoE, or
+Each point is an operation (prefill attention, decode attention, routed MoE, or
 the whole forward) at one concurrency.
 
 - **X** is arithmetic intensity: FLOPs divided by compulsory HBM bytes. Both
