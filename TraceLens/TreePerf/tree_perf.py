@@ -293,6 +293,18 @@ class TreePerfAnalyzer:
         if detect_recompute:
             add_python_func = True
         self.add_python_func = add_python_func
+        # The trace records the compute-unit count and the per-CU LDS size.
+        # Perf models and Origami read both from the arch dict.
+        if isinstance(arch, dict):
+            recorded = {}
+            num_cus = TraceEventUtils.num_cus_from_trace(self.trace_metadata)
+            lds_capacity = TraceEventUtils.lds_capacity_from_trace(self.trace_metadata)
+            if num_cus:
+                recorded["num_cus"] = num_cus
+            if lds_capacity:
+                recorded["lds_capacity"] = lds_capacity
+            if recorded:
+                arch = {**arch, **recorded}
         self.arch = arch
         self.enable_origami_gemm = enable_origami_gemm
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
