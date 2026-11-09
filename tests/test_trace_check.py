@@ -88,21 +88,49 @@ class TestKernelPresence:
 
 
 class TestTraceFileSize:
-    def test_normal_size_passes(self, tmp_path):
+    def test_normal_size_no_finding(self, tmp_path):
         p = tmp_path / "trace.json"
         p.write_text('{"traceEvents": []}' + " " * 200_000)
-        report = trace_check.run_trace_checks([], filepath=str(p))
-        assert not any("Trace file is" in f.message for f in report.findings)
+        report = trace_check.run_pre_load_checks(str(p))
+        assert not report.findings
 
-    def test_small_file_warns(self, tmp_path):
+    def test_small_file_no_finding(self, tmp_path):
+        # Tiny files are no longer flagged here; emptiness is _check_kernels_present.
         p = tmp_path / "trace.json"
         p.write_text('{"traceEvents": []}')
-        report = trace_check.run_trace_checks([], filepath=str(p))
-        assert any("Trace file is" in f.message for f in report.findings)
+        report = trace_check.run_pre_load_checks(str(p))
+        assert not report.findings
+
+    def test_large_uncompressed_warns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_UNCOMPRESSED", 100)
+        p = tmp_path / "trace.json"
+        p.write_text(" " * 500)
+        report = trace_check.run_pre_load_checks(str(p))
+        assert any(
+            "consider splitting" in f.message and f.status == Status.WARN
+            for f in report.findings
+        )
+
+    def test_large_compressed_warns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_COMPRESSED", 100)
+        p = tmp_path / "trace.json.gz"
+        p.write_bytes(b"\x00" * 500)
+        report = trace_check.run_pre_load_checks(str(p))
+        msgs = [f.message for f in report.findings if f.status == Status.WARN]
+        assert any("consider splitting" in m and "compressed" in m for m in msgs)
+
+    def test_compressed_under_uncompressed_limit_no_finding(self, tmp_path, monkeypatch):
+        # A .json.gz is gated by the compressed limit, not the (larger) uncompressed one.
+        monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_COMPRESSED", 10_000)
+        monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_UNCOMPRESSED", 100)
+        p = tmp_path / "trace.json.gz"
+        p.write_bytes(b"\x00" * 500)
+        report = trace_check.run_pre_load_checks(str(p))
+        assert not report.findings
 
     def test_missing_file_no_finding(self, tmp_path):
-        report = trace_check.run_trace_checks([], filepath=str(tmp_path / "nope.json"))
-        assert not any("Trace file is" in f.message for f in report.findings)
+        report = trace_check.run_pre_load_checks(str(tmp_path / "nope.json"))
+        assert not report.findings
 
 
 class TestCpuOpShapes:

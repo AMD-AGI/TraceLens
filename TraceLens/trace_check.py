@@ -101,8 +101,8 @@ class TraceCheckReport:
 # ---------------------------------------------------------------------------
 # Constants and thresholds
 # ---------------------------------------------------------------------------
-_MIN_TRACE_BYTES = 100_000
-_MAX_TRACE_BYTES = 5_000_000_000
+_MAX_TRACE_BYTES_COMPRESSED = 300_000_000
+_MAX_TRACE_BYTES_UNCOMPRESSED = 4_500_000_000
 _MIN_CPU_OP_SHAPES = 10
 
 
@@ -192,29 +192,26 @@ def busy_idle_from_events(events: Sequence[dict]) -> Dict[str, float]:
 # Basic pre-report checks (always run)
 # ---------------------------------------------------------------------------
 def _check_trace_file_size(ctx) -> List[TraceCheck]:
+    """Flag traces too large to load cheaply."""
     filepath = ctx.get("filepath")
     if filepath is None:
         return []
-    findings = []
     try:
         size = os.path.getsize(filepath)
     except OSError:
         return []
-    if size < _MIN_TRACE_BYTES:
-        findings.append(
-            TraceCheck(
-                Status.WARN,
-                f"Trace file is {size:,} bytes — may be empty or warmup-only.",
-            )
-        )
-    if size > _MAX_TRACE_BYTES:
-        findings.append(
-            TraceCheck(
-                Status.WARN,
-                f"Trace file is {size / 1e9:.1f} GB — consider splitting.",
-            )
-        )
-    return findings
+    compressed = filepath.endswith(".gz") or filepath.endswith(".zip")
+    limit = (
+        _MAX_TRACE_BYTES_COMPRESSED if compressed else _MAX_TRACE_BYTES_UNCOMPRESSED
+    )
+    if size <= limit:
+        return []
+    suffix = " compressed" if compressed else ""
+    message = (
+        f"Trace file is {size / 1e9:.1f} GB{suffix} — processing may take a while; "
+        "consider splitting."
+    )
+    return [TraceCheck(Status.WARN, message)]
 
 
 def _check_kernels_present(ctx) -> List[TraceCheck]:
@@ -705,7 +702,8 @@ _accumulated_reports: List[TraceCheckReport] = []
 # framework: None = all, "pytorch" = PyTorch only, "jax" = JAX only.
 CHECK_REGISTRY = [
     # Pre-report, basic
-    (_check_trace_file_size, True, False, None),
+    # NB: _check_trace_file_size is NOT here — it runs pre-parse via
+    # run_pre_load_checks() so its warning lands before the expensive parse.
     (_check_kernels_present, True, False, "pytorch"),
     (_check_call_stack, True, False, None),
     (_check_graph_mode, True, False, None),
@@ -780,6 +778,17 @@ def run_trace_checks(
         findings.extend(check_findings)
 
     report = TraceCheckReport(findings=findings, ran_checks=ran_checks)
+    _accumulated_reports.append(report)
+    return report
+
+
+def run_pre_load_checks(filepath: Optional[str] = None) -> TraceCheckReport:
+    """Run checks that only need the file path, before the trace is parsed."""
+    name = _check_trace_file_size.__name__
+    findings = _check_trace_file_size({"filepath": filepath})
+    for f in findings:
+        f.check_name = name
+    report = TraceCheckReport(findings=findings, ran_checks=[name])
     _accumulated_reports.append(report)
     return report
 

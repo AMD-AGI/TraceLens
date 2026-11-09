@@ -954,12 +954,22 @@ def test_trace_missing_recursive_walk_oserror_swallowed(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_trace_size_too_small(tmp_path):
-    trace = write_text(tmp_path / "tiny.json.gz", "x" * 10)
+def test_trace_size_too_large(tmp_path, monkeypatch):
+    from TraceLens import trace_check
+
+    monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_COMPRESSED", 100)
+    trace = write_text(tmp_path / "big.json.gz", "x" * 500)
     run_dir = make_run_dir(tmp_path, cmd_prefix=trace)
     finding = check_trace_size(str(run_dir), None)
     assert finding is not None
-    assert "may be empty or warmup-only" in finding.failure_mode
+    assert "consider splitting" in finding.failure_mode
+
+
+def test_trace_size_small_returns_none(tmp_path):
+    # Tiny traces are no longer flagged by size; emptiness is a separate check.
+    trace = write_text(tmp_path / "tiny.json.gz", "x" * 10)
+    run_dir = make_run_dir(tmp_path, cmd_prefix=trace)
+    assert check_trace_size(str(run_dir), None) is None
 
 
 def test_trace_size_normal_returns_none(tmp_path):

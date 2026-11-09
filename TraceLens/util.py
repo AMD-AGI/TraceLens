@@ -473,15 +473,22 @@ class DataLoader:
         capture_trace_filepath=None,
         framework=None,
     ):
+        run_checks = not parse_bool_string(
+            os.environ.get("TRACELENS_SKIP_QUALITY_CHECK")
+        )
+        if run_checks:
+            from . import trace_check
+
+            # Pre-parse: flag oversized traces before paying the parse cost.
+            trace_check.run_pre_load_checks(filepath).log_findings()
+
         data = DataLoader.load_data(filepath, save_preprocessed=save_preprocessed)
         if isinstance(data, list):
             return data, {}
         metadata = {k: v for k, v in data.items() if k != "traceEvents"}
         events = data.get("traceEvents", [])
 
-        if not parse_bool_string(os.environ.get("TRACELENS_SKIP_QUALITY_CHECK")):
-            from . import trace_check
-
+        if run_checks:
             trace_check.run_trace_checks(
                 events,
                 capture_trace_filepath=capture_trace_filepath,

@@ -107,8 +107,6 @@ _TBS_TFLOPS_EXEMPT_SUBSTRINGS = ("collective", "custom")
 # Trace files larger than this (bytes) are skipped by detection checks: parsing
 # multi-GB traces in-process is too costly for a fast triage pass.
 _MAX_TRACE_BYTES = 5_000_000_000
-# Traces below this (bytes) are treated as empty / warmup-only.
-_MIN_TRACE_BYTES = 100_000
 # "Significant op" band for unified_perf_summary rows.
 _SIGNIFICANT_CUM_PCT_MAX = 90
 _SIGNIFICANT_PCT_MIN = 4

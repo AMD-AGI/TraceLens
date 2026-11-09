@@ -22,12 +22,15 @@ errors before any expensive tree building or performance modeling begins.
 
 ## When checks run
 
-Checks are organized into three stages:
+Checks are organized into four stages:
 
-- **Pre-report checks** run inside `DataLoader.load_trace_events()`, before
-  the call-stack tree is built. Every code path that loads a trace file runs
-  basic pre-report checks. Detailed pre-report checks run when
-  `TRACELENS_DETAILED_QUALITY_CHECKS=1` is set.
+- **Pre-load checks** runs inside `DataLoader.load_trace_events()` before the
+  trace is parsed. Useful for checks that ensure the trace can be properly parsed.
+
+- **Pre-report checks** run inside `DataLoader.load_trace_events()`, after the
+  trace is parsed but before the call-stack tree is built. Every code path that
+  loads a trace file runs basic pre-report checks. Detailed pre-report checks
+  run when `TRACELENS_DETAILED_QUALITY_CHECKS=1` is set.
 
 - **Post-tree checks** run inside `TreePerfAnalyzer.__init__()` and
   `JaxTreePerfAnalyzer.__init__()` after `build_tree()` completes. These checks
@@ -42,8 +45,8 @@ Checks are organized into three stages:
 
 | Check | Phase | Detailed | Framework | Level | Description |
 |-------|-------|----------|-----------|-------|-------------|
-| `_check_trace_file_size` | pre-report | no | all | warn | Flags trace files smaller than 100 KB (may be empty or warmup-only) or larger than 5 GB (consider splitting). |
-| `_check_kernels_present` | pre-report | no | all | error | Verifies at least one GPU event exists. Analysis cannot proceed without GPU work. |
+| `_check_trace_file_size` | pre-load | no | all | warn | Flags traces too large to load cheaply, measured before trace parsing. Compressed traces over 300 MB, or uncompressed traces over 4.5 GB are flagged. |
+| `_check_kernels_present` | pre-report | no | PyTorch | error | Verifies at least one GPU kernel event exists. Analysis cannot proceed without GPU work. |
 | `_check_call_stack` | pre-report | no | all | warn | Checks for python events indicating call-stack data was captured. Missing call stacks limit call-stack-based analysis and may affect cross-trace comparisons. |
 | `_check_graph_mode` | pre-report | no | all | warn | Detects `cudaGraphLaunch` or `hipGraphLaunch` events without a corresponding capture trace. Pass `--capture_folder` to the inference report generator for full graph-mode analysis. |
 | `_check_cpu_op_shapes_basic` | pre-report | no | PyTorch | warn | Checks whether CPU operations carry `Input Dims` in their args. Warns if fewer than 10 have shapes. Re-profile with `record_shapes=True`. |
