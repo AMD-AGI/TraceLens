@@ -2570,3 +2570,48 @@ def test_roofline_stops_at_the_grouped_expert_forward():
     assert one.children
     assert _moe_boundary_owns_routing("Experts") is False
     assert _moe_boundary_owns_routing("SparseMoeBlock") is True
+
+
+_FLASH_KERNEL_SOURCE = """
+from flash_attn import flash_attn_func
+import torch
+
+
+class Block(torch.nn.Module):
+    def __init__(self):
+        self.q_proj = torch.nn.Linear(8, 8)
+        self.k_proj = torch.nn.Linear(8, 8)
+        self.v_proj = torch.nn.Linear(8, 8)
+
+    def forward(self, hidden):
+        q = self.q_proj(hidden)
+        k = self.k_proj(hidden)
+        v = self.v_proj(hidden)
+        return flash_attn_func(q, k, v)
+"""
+
+
+def test_roofline_stops_at_a_kernel_that_has_a_perf_model():
+    """flash_attn_func is one collector row, so the roofline graph does not open it."""
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+    from TraceLens.ModelUtils.block_tree import build_block_node
+
+    analysis = analyze_source(_FLASH_KERNEL_SOURCE, all_tensor_ops=True)
+    roofline = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    kernel = next(
+        child for child in roofline.children if child.label == "flash_attn_func"
+    )
+    assert kernel.class_name == "AttentionOp" and not kernel.children
+
+    detailed = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    assert any(child.class_name == "KernelPipeline" for child in detailed.children)
