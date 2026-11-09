@@ -2548,8 +2548,25 @@ def _mla_attention_ops(
             flops = InferenceAttention.flops_func(
                 heads, width, width, attended, attended, 0
             )
+            # FLOPs scale with every (query, key) pair, but the queries of one
+            # request share one KV cache. HBM traffic is the union of the
+            # compressed slots they attend, read once, plus the chunk's own
+            # K/V that ``bytes_func`` already counts for ``c_sq``. Charging
+            # ``span`` per query would overstate prefill bytes by about the
+            # sequence length.
+            compressed = min(ceil(ctx / ratio), seq * (span - window))
             bytes_moved = InferenceAttention.bytes_func(
-                1, heads, 1, width, width, queries, attended, 0, 0, bpe, bpe
+                1,
+                heads,
+                1,
+                width,
+                width,
+                queries,
+                queries + batch * compressed,
+                0,
+                0,
+                bpe,
+                bpe,
             )
         ops.append(
             _analytical_op(

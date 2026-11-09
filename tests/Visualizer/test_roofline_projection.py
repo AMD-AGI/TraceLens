@@ -1683,6 +1683,49 @@ def test_mla_prefill_keeps_half_the_span(_reset_rt):
     )
 
 
+def test_mla_prefill_reads_the_kv_cache_once_per_request(_reset_rt):
+    # Every query of a request shares one KV cache, so prefill traffic is Q, the
+    # output, the chunk's K/V, and the compressed slots once. It must not grow
+    # with queries * span the way the FLOPs do.
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        InferenceAttention,
+    )
+
+    _RT.reset()
+    _RT.compress_ratios = (4,)
+    _RT.sliding_window = 128
+    _RT.index_topk = 1024
+    _RT.attn_heads = 8
+    _RT.attn_head_dim = 64
+    _RT.tp = 1
+    seq, heads, width, bpe = 4096, 8, 64, 2
+    ops = _mla_attention_ops({"B": 1, "S": seq}, "prefill", None)
+    compressed = min(ceil(seq / 4), 1024)
+    expected = (
+        seq * heads * width * 2  # Q read and output write
+        + seq * width * 2  # the chunk's own K and V
+        + compressed * width * 2  # compressed K and V slots, once
+    ) * bpe
+    assert ops[0].bytes == expected
+    # The per-query reading would be about seq * span, thousands of times more.
+    assert ops[0].bytes < (seq * (128 + compressed)) * width * 2 * bpe / 8
+
+
+def test_mla_prefill_bytes_do_not_depend_on_attended_pairs(_reset_rt):
+    _RT.reset()
+    _RT.compress_ratios = (128,)
+    _RT.sliding_window = 128
+    _RT.index_topk = 1024
+    _RT.attn_heads = 16
+    _RT.attn_head_dim = 512
+    _RT.tp = 1
+    short = _mla_attention_ops({"B": 1, "S": 2048}, "prefill", None)[0]
+    long = _mla_attention_ops({"B": 1, "S": 16384}, "prefill", None)[0]
+    # FLOPs grow with the attended pairs; bytes grow about linearly in tokens.
+    assert long.flops / short.flops > 8
+    assert long.bytes / short.bytes < 9
+
+
 def test_a_matmul_read_as_attention_keeps_its_own_cost(_reset_rt):
     _RT.reset()
     plain = _score_matmul()
