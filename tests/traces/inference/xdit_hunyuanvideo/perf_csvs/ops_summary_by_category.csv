@@ -34,15 +34,15 @@ elementwise,nn.Module: LlamaRotaryEmbedding,7,"['aten::copy_', 'nn.Module: Llama
 elementwise,nn.Module: CLIPAttention,12,"['aten::fill_', 'nn.Module: CLIPAttention_0', 'nn.Module: CLIPEncoderLayer_0', 'nn.Module: CLIPEncoder_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.0403251953125,0.001911459861341606,99.99277111923291
 elementwise,nn.Module: LlamaModel,9,"['aten::add', 'nn.Module: LlamaModel_0']",0.03744482421875,0.0017749270141029197,99.99454604624701
 other,NA,3,['aten::cat'],0.02466796875,0.0011692896156125486,99.99571533586263
-DataMovement,nn.Module: xFuserHunyuanVideoTransformer3DWrapper,4,"['aten::index', 'nn.Module: xFuserHunyuanVideoTransformer3DWrapper_0']",0.01353515625,0.0006415817130795694,99.99635691757571
+IndexedCopy,nn.Module: xFuserHunyuanVideoTransformer3DWrapper,4,"['aten::index', 'nn.Module: xFuserHunyuanVideoTransformer3DWrapper_0']",0.01353515625,0.0006415817130795694,99.99635691757571
 other,nn.Module: LlamaModel,6,"['aten::arange', 'nn.Module: LlamaModel_0']",0.01321240234375,0.0006262828129228019,99.99698320038863
-DataMovement,nn.Module: Embedding,3,"['aten::gather', 'nn.Module: Embedding_0', 'nn.Module: LlamaModel_0']",0.013056640625,0.000618899531304029,99.99760209991993
+IndexedCopy,nn.Module: Embedding,3,"['aten::gather', 'nn.Module: Embedding_0', 'nn.Module: LlamaModel_0']",0.013056640625,0.000618899531304029,99.99760209991993
 other,nn.Module: LlamaRotaryEmbedding,1,"['aten::cat', 'nn.Module: LlamaRotaryEmbedding_0', 'nn.Module: LlamaModel_0']",0.007490234375,0.0003550455800375395,99.99795714549997
 reduce,nn.Module: LlamaModel,1,"['aten::all', 'nn.Module: LlamaModel_0']",0.00696923828125,0.0003303497760023338,99.99828749527597
 GEMM,nn.Module: LlamaRotaryEmbedding,1,"['aten::bmm', 'nn.Module: LlamaRotaryEmbedding_0', 'nn.Module: LlamaModel_0']",0.00676904296875,0.00032086029179011796,99.99860835556777
 elementwise,nn.Module: CLIPTextEmbeddings,1,"['aten::add', 'nn.Module: CLIPTextEmbeddings_0', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.0059677734375,0.0002828792098578101,99.99889123477763
 reduce,nn.Module: CLIPTextTransformer,1,"['aten::argmax', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.00572802734375,0.00027151497388659554,99.99916274975152
 elementwise,nn.Module: CLIPTextTransformer,1,"['aten::copy_', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.0053271484375,0.0002525128603787194,99.9994152626119
-DataMovement,nn.Module: LlamaModel,1,"['aten::index', 'nn.Module: LlamaModel_0']",0.005287109375,0.0002506149635362762,99.99966587757544
-DataMovement,nn.Module: CLIPTextTransformer,1,"['aten::index', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.00520703125,0.0002468191698513899,99.99991269674528
+IndexedCopy,nn.Module: LlamaModel,1,"['aten::index', 'nn.Module: LlamaModel_0']",0.005287109375,0.0002506149635362762,99.99966587757544
+IndexedCopy,nn.Module: CLIPTextTransformer,1,"['aten::index', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.00520703125,0.0002468191698513899,99.99991269674528
 other,nn.Module: CLIPTextTransformer,1,"['aten::arange', 'nn.Module: CLIPTextTransformer_0', 'nn.Module: CLIPTextModel_0']",0.001841796875,8.730325475238584e-05,100.00000000000004
