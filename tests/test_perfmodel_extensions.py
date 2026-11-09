@@ -6754,6 +6754,6 @@ def test_fused_fp8_bmm_rope_cat_and_cache_mla():
     read_q = (8 * 12 * 192 + 12 * 8 * 64) * 2
     read_w = 8 * 512 * 192 * 1
     read_k = 12 * 1 * (512 + 64) * 2
-    write_q = 12 * 8 * (512 + 64) * 2
+    write_q = 12 * 8 * (512 + 64) * 1
     write_kv = 12 * 1 * (512 + 64) * 1
     assert model.bytes() == read_q + read_w + read_k + write_q + write_kv

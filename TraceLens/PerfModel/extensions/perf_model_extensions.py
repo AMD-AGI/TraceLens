@@ -1733,6 +1733,7 @@ class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla
          written to q_out[:, :, :N]
       2. RoPE on q_pe / k_rope, q_pe written to q_out[:, :, N:], and
          (k_nope || rotated k_rope) written into kv_cache at slot_mapping.
+    The two q_out slices are one buffer, written once.
 
     Expected Input Dims from trace:
         [0]  q_nope       = (QH, B, K)
@@ -1753,7 +1754,7 @@ class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla
     Roofline -- bytes moved:
         read  q_nope + q_pe + k_nope + k_rope : nelems * bpe_in
         read  w_k                             : QH * N * K * bpe_w
-        write q_out  (B, QH, N + D_pe)        : * bpe_in (q_out_dtype bf16)
+        write q_out  (B, QH, N + D_pe)        : * bpe_kv (KV-cache dtype, Input type[6])
         write kv rows (B_slot tokens written) : B_slot * KH * (N + D_pe) * bpe_kv
     """
 
@@ -1801,7 +1802,7 @@ class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla
         read_q = (QH * B * K + B * QH * D_pe) * bpe_in
         read_w = QH * N * K * bpe_w
         read_k = B_slot * KH * (D_lora + D_pe) * bpe_in
-        write_q = B * QH * (N + D_pe) * bpe_in
+        write_q = B * QH * (N + D_pe) * bpe_kv
         write_kv = B_slot * KH * (D_lora + D_pe) * bpe_kv
         return read_q + read_w + read_k + write_q + write_kv
 
