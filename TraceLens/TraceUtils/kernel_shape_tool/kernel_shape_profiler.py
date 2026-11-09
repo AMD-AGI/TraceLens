@@ -482,6 +482,28 @@ def _patch_all_references(original_fn: Callable, wrapper_fn: Callable, index: di
     return patches
 
 
+def _gc_objects_including_frozen() -> list:
+    """``gc.get_objects()``, including objects moved to the permanent generation.
+
+    SGLang freezes the heap after server warmup (``/freeze_gc``), which hides
+    every object from ``gc.get_objects()``. Unfreeze for the walk and freeze
+    again; collection stays off in between so the unfrozen heap isn't scanned.
+    """
+    if not gc.get_freeze_count():
+        return gc.get_objects()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        gc.unfreeze()
+        try:
+            return gc.get_objects()
+        finally:
+            gc.freeze()
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
 def _patch_decorator_closures(targets: dict):
     """Rebind closure cells of decorator wrappers around a target to the target's wrapper.
 
@@ -492,7 +514,7 @@ def _patch_decorator_closures(targets: dict):
     ``(cell, None, original_fn)`` tuples for later restoration.
     """
     patches = []
-    for obj in gc.get_objects():
+    for obj in _gc_objects_including_frozen():
         if not inspect.isfunction(obj) or not obj.__closure__:
             continue
         if getattr(obj, "_kernel_shape_wrapper", False):

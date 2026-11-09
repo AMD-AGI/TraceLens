@@ -14,6 +14,7 @@ runs in CPU CI (no GPU / sglang / aiter install required).
 """
 
 import functools
+import gc
 import inspect
 import sys
 import types
@@ -437,7 +438,8 @@ class TestPatchAllReferences:
 
 
 class TestPatchDecoratorClosures:
-    def test_rebinds_and_restores_wraps_closure(self, ksp, monkeypatch):
+    @staticmethod
+    def _held(ksp, monkeypatch):
         # ``self.fn = decorator(fn)`` keeps fn only in a closure cell, never in a
         # module global, so only the closure pass can reach it.
         name, mod = "fake_closure_mod", _make_kernel_module("fake_closure_mod")
@@ -452,7 +454,28 @@ class TestPatchDecoratorClosures:
 
             return inner
 
-        held = decorate(target)
+        return target, decorate(target)
+
+    def test_sees_closures_after_gc_freeze(self, ksp, monkeypatch):
+        # Servers freeze the heap after warmup, hiding it from gc.get_objects().
+        target, held = self._held(ksp, monkeypatch)
+        gc_was_enabled = gc.isenabled()
+        gc.freeze()
+        try:
+            assert not any(o is held for o in gc.get_objects())
+            ksp.enable()
+            assert getattr(
+                held.__closure__[0].cell_contents, "_kernel_shape_wrapper", False
+            )
+            assert gc.get_freeze_count() > 0
+            assert gc.isenabled() is gc_was_enabled
+            ksp.disable()
+            assert held.__closure__[0].cell_contents is target
+        finally:
+            gc.unfreeze()
+
+    def test_rebinds_and_restores_wraps_closure(self, ksp, monkeypatch):
+        target, held = self._held(ksp, monkeypatch)
         assert held.__closure__[0].cell_contents is target
 
         ksp.enable()
