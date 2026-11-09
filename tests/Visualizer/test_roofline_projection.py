@@ -1720,10 +1720,6 @@ def test_mla_prefill_reads_the_kv_cache_once_per_request(_reset_rt):
     # Every query of a request shares one KV cache, so prefill traffic is Q, the
     # output, the chunk's K/V, and the compressed slots once. It must not grow
     # with queries * span the way the FLOPs do.
-    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
-        InferenceAttention,
-    )
-
     _RT.reset()
     _RT.compress_ratios = (4,)
     _RT.sliding_window = 128
