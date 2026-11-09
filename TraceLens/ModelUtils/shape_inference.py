@@ -34,9 +34,8 @@ from TraceLens.ModelUtils.extract import (
 from TraceLens.ModelUtils.ast_analyze import (
     PHI_CLASS,
     PHI_LABEL,
-    _PARALLEL_GROUP_GETTER_NAMES,
-    _PARALLEL_RANK_FUNCS,
-    _PARALLEL_WORLD_SIZE_FUNCS,
+    _distributed_degree_value,
+    _parallel_on,
     analyze_source,
     base_submodule_attr,
     is_forward_operation,
@@ -9543,32 +9542,14 @@ def _optional_argument_guard(node: ast.IfExp) -> str | None:
     return None
 
 
-def _distributed_degree_dim(node: ast.AST) -> int | None:
-    """World size (1) or rank (0) for a distributed-parallelism accessor, else ``None``.
+def _distributed_degree_dim(node: ast.AST, config: dict[str, Any]) -> int | None:
+    """Size or rank of a distributed-parallelism accessor, else ``None``.
 
-    Same two call shapes ``_distributed_degree_value`` in ``ast_analyze.py``
-    resolves (see that function's docstring for why 1/0, not the real degree) --
-    duplicated here only because this module's expression resolver returns a
-    plain ``int`` where that one returns ``Any``; the recognized names
-    (``_PARALLEL_GROUP_GETTER_NAMES`` and friends) are the single, shared source.
+    The same accessor ``_distributed_degree_value`` resolves. With no degree
+    on the regime every size is 1 and every rank is 0. A recorded degree
+    (every process group, not only tensor parallel) supplies the size.
     """
-    if (
-        isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id in _PARALLEL_GROUP_GETTER_NAMES
-    ):
-        if node.attr.endswith("_size"):
-            return 1
-        if node.attr.endswith("_rank"):
-            return 0
-        return None
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        if node.func.id in _PARALLEL_WORLD_SIZE_FUNCS:
-            return 1
-        if node.func.id in _PARALLEL_RANK_FUNCS:
-            return 0
-    return None
+    return _distributed_degree_value(node, _parallel_on(config))
 
 
 def _is_real(value: Any) -> bool:
@@ -9640,7 +9621,7 @@ def _resolve_dim_expr(
     local_vars: dict[str, DimExpr],
     context: ShapeContext,
 ) -> DimExpr | None:
-    degree = _distributed_degree_dim(node)
+    degree = _distributed_degree_dim(node, config)
     if degree is not None:
         return degree
     if isinstance(node, ast.Constant) and isinstance(node.value, bool):

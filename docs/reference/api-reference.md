@@ -60,8 +60,7 @@ Inference-oriented variant of the PyTorch report.
 | `--profile_json_path` | required | Path to the trace. |
 | `--group_by_parent_module` | off | Group kernel-launcher summaries by parent `nn.Module`. |
 | `--capture_folder` | None | Path to the capture-trace folder. |
-| `--graph_model_config` | None | Hugging Face `config.json`. Schedules graph kernels onto model launches and fills their input shapes. |
-| `--graph_model_tp` | `1` | Tensor-parallel size of the traced rank, used with `--graph_model_config`. |
+| `--graph_model_config` | None | Hugging Face `config.json`. The trace's `tp` process group supplies the tensor-parallel degree. Schedules graph kernels onto model launches and fills their input shapes. |
 | `--include_overlap_info` | off | Add `*_kl_overlap` sheets when data exists. |
 
 Shares most options with `TraceLens_generate_perf_report_pytorch` (output
@@ -85,8 +84,7 @@ Generate one report per job from a YAML file. The same entry point is
 | `jobs[].trace_path` | yes | Trace to analyze. |
 | `jobs[].platform`, `jobs[].gpu_arch_json_path` | exactly one | Architecture name, or path to an architecture JSON file. |
 | `jobs[].capture_folder` | no | Graph-capture folder. `inference` only. |
-| `graph_model_config_path` | no | Top-level. Hugging Face `config.json` used to fill graph-kernel shapes. `inference` only. |
-| `graph_model_tp` | no | Top-level. Tensor-parallel size of the traced rank. `inference` only. Default `1`. |
+| `graph_model_config_path` | no | Top-level. Hugging Face `config.json` used to fill graph-kernel shapes. The trace's `tp` process group supplies the tensor-parallel degree. `inference` only. |
 | `jobs[].compare_to` | no | `trace_path` and, in `inference`, `capture_folder` of a trace to compare against. |
 | `jobs[].precomputed_diff_stats` | no | `diff_stats.csv` to use instead of TraceDiff. |
 | `jobs[].phase` | when `aggregation` is set | Phase label, for example `prefill` or `decode`. |

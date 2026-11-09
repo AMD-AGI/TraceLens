@@ -202,11 +202,10 @@ def test_graph_model_flags_are_accepted_for_inference(tmp_path):
             tmp_path,
             mode="inference",
             graph_model_config_path=config_json,
-            graph_model_tp=8,
         )
     )[0].kwargs
     assert kwargs["graph_model_config_path"] == config_json
-    assert kwargs["graph_model_tp"] == 8
+    assert "graph_model_tp" not in kwargs
 
 
 def test_graph_model_flags_rejected_for_default(tmp_path):

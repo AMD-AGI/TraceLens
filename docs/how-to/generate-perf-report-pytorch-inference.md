@@ -517,25 +517,26 @@ into the graph, so those kernels have no `Input Dims`, dtypes, or strides. The
 capture merge above restores that metadata from a capture profile. Without a
 capture profile, the inference report can derive it from the model.
 
-Pass the Hugging Face `config.json` of the served model and the tensor-parallel
-size of the traced rank:
+Pass the Hugging Face `config.json` of the served model. The tensor-parallel
+degree is the trace's `tp` process group (`distributedInfo.pg_config`, the
+group named `tp:device`):
 
 ```bash
 TraceLens_generate_perf_report_pytorch_inference \
     --profile_json_path /data/dsv4/rank0.json.gz \
-    --graph_model_config /data/dsv4/config.json \
-    --graph_model_tp 8
+    --graph_model_config /data/dsv4/config.json
 ```
 
-The same two settings are top-level keys of an inference run config
-(`graph_model_config_path` and `graph_model_tp`). See
+The same setting is the top-level `graph_model_config_path` of an inference
+run config. See
 [Generate performance reports from a YAML config](./generate-perf-report-from-config.md#inference-with-a-model-config).
 
 Each `hipGraphLaunch` or `cudaGraphLaunch` is matched to the `step[...]`
 annotation that contains it. That annotation supplies the batch size, the
-sequence length, and the cached length. The config and the tensor-parallel
-size build the per-rank model, and the DeepSeek-V4 schedule walks the forward
-in launch order: one attention block and one MoE block per layer, using
+sequence length, and the cached length. The config and the trace's
+tensor-parallel group build the per-rank model, and the DeepSeek-V4 schedule
+walks the forward in launch order: one attention block and one MoE block per
+layer, using
 `compress_ratios` and `num_hash_layers` from the checkpoint. Kernels are paired
 with that list in order. A matched kernel is reported as the op the schedule
 names, with that op's input shapes, dtypes, strides, and concrete scalars, which
@@ -568,8 +569,7 @@ relevant to serving traces:
 | ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
 | `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). |
-| `--graph_model_config PATH` | `None` | Hugging Face `config.json`. Schedules each graph kernel onto its model launch and fills input shapes. See [Shapes from the model config](#shapes-from-the-model-config). |
-| `--graph_model_tp N`       | `1`     | Tensor-parallel size of the traced rank. Used with `--graph_model_config`. |
+| `--graph_model_config PATH` | `None` | Hugging Face `config.json`. The trace's `tp` process group supplies the tensor-parallel degree. Schedules each graph kernel onto its model launch and fills input shapes. See [Shapes from the model config](#shapes-from-the-model-config). |
 | `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
 | `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
 | `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |
