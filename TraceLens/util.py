@@ -1291,6 +1291,11 @@ GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
 GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
 GRAPH_LAUNCH_NAMES = frozenset({"cudaGraphLaunch", "hipGraphLaunch"})
 
+# Tolerance (µs) for timestamp imprecision when comparing event times — e.g.
+# event-boundary "bleed" during tree building, or kernel-vs-computation time
+# coverage, where differences below this are profiler/floating-point noise.
+TIMESTAMP_TOLERANCE_US = 1.0
+
 
 class RocprofParser:
     """Parser for rocprofiler-sdk JSON format (rocprofv3)"""

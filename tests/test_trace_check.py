@@ -814,6 +814,24 @@ class TestKernelTimeCoverage:
         )
         assert any("unified_perf kernel time" in f.message for f in report.findings)
 
+    def test_within_tolerance_no_warning(self):
+        # Kernel time a hair below computation (floating-point noise) must not warn.
+        import pandas as pd
+
+        dfs = {
+            "gpu_timeline": self._make_timeline(comp_time_ms=100.0),
+            "ops_summary": pd.DataFrame(
+                {
+                    # 100 ms == 100_000 µs, 0.5 µs short (within TIMESTAMP_TOLERANCE_US)
+                    "total_direct_kernel_time_sum": [99_999.5],
+                }
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        assert not any("kernel time" in f.message for f in report.findings)
+
     def test_no_timeline_no_finding(self):
         report = trace_check.run_trace_checks(
             pre_report=False, dfs={}, framework="pytorch"

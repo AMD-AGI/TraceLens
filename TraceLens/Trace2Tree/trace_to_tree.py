@@ -11,7 +11,12 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from ..util import GRAPH_LAUNCH_NAMES, JaxProfileProcessor, TraceEventUtils
+from ..util import (
+    GRAPH_LAUNCH_NAMES,
+    TIMESTAMP_TOLERANCE_US,
+    JaxProfileProcessor,
+    TraceEventUtils,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +162,7 @@ class BaseTraceToTree(ABC):
             # Event bleed: the event starts inside the stack top but ends
             # after it. Small bleeds (< tolerance) pop the sibling; larger
             # ones discard the event.
-            bleed_tolerance_us = 1.0
+            bleed_tolerance_us = TIMESTAMP_TOLERANCE_US
             if stack and (
                 event[TraceEventUtils.TraceKeys.TimeEnd]
                 > stack[-1][TraceEventUtils.TraceKeys.TimeEnd] + bleed_tolerance_us

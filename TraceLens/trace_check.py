@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from .util import (
     GPU_KERNEL_CATEGORIES,
     GRAPH_LAUNCH_NAMES,
+    TIMESTAMP_TOLERANCE_US,
     TraceEventUtils,
     merge_intervals,
     parse_bool_string,
@@ -552,7 +553,10 @@ def _check_kernel_time_coverage(ctx) -> List[TraceCheck]:
         kl_us = _sum_time(
             kl, "total_direct_kernel_time_sum", "total_direct_kernel_time"
         )
-        if kl_us is not None and kl_us < computation_time_us:
+        if (
+            kl_us is not None
+            and kl_us < computation_time_us - TIMESTAMP_TOLERANCE_US
+        ):
             findings.append(
                 TraceCheck(
                     Status.WARN,
@@ -564,7 +568,10 @@ def _check_kernel_time_coverage(ctx) -> List[TraceCheck]:
     up = dfs.get("unified_perf_summary")
     if up is not None:
         up_us = _sum_time(up, "Kernel Time (µs)_sum", "Kernel Time (µs)")
-        if up_us is not None and up_us < computation_time_us:
+        if (
+            up_us is not None
+            and up_us < computation_time_us - TIMESTAMP_TOLERANCE_US
+        ):
             findings.append(
                 TraceCheck(
                     Status.WARN,
