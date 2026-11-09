@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import enum
 import json
+import logging
 import os
 import statistics
 import warnings
@@ -33,15 +34,17 @@ from .util import (
     GRAPH_LAUNCH_NAMES,
     TIMESTAMP_TOLERANCE_US,
     TraceEventUtils,
-    merge_intervals,
     parse_bool_string,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
 class Status(enum.Enum):
+    INFO = "info"
     WARN = "warn"
     ERROR = "error"
 
@@ -69,6 +72,8 @@ class TraceCheckReport:
                     UserWarning,
                     stacklevel=2,
                 )
+            elif f.status == Status.INFO:
+                logger.info("[trace_check] %s", f.message)
 
     def merge(self, other: "TraceCheckReport") -> None:
         self.findings.extend(other.findings)
@@ -116,9 +121,8 @@ class QualityThresholds:
     runtime_min_dur_us: float = 2.0
     runtime_max_flagged_frac: float = 0.10
 
-    # GPU busy / idle
+    # GPU idle (advisory red flag — see _check_gpu_idle)
     idle_pct_warn: float = 30.0
-    idle_pct_fail: float = 60.0
 
     # shape / metadata coverage
     shape_coverage_warn: float = 0.80
@@ -165,28 +169,6 @@ def coefficient_of_variation(values: Sequence[float]) -> float:
     if mean == 0:
         return 0.0
     return statistics.pstdev(values) / abs(mean)
-
-
-def busy_idle_from_events(events: Sequence[dict]) -> Dict[str, float]:
-    """Compute busy/idle/total time (us) from events with ``ts``/``dur``."""
-    intervals = [
-        (float(e["ts"]), float(e["ts"]) + float(e["dur"]))
-        for e in events
-        if e.get("ts") is not None and e.get("dur") is not None
-    ]
-    if not intervals:
-        return {"busy_time": 0.0, "idle_time": 0.0, "total_time": 0.0, "idle_pct": 0.0}
-    merged = merge_intervals(intervals)
-    total_time = merged[-1][1] - merged[0][0]
-    busy_time = sum(e - s for s, e in merged)
-    idle_time = max(0.0, total_time - busy_time)
-    idle_pct = (100.0 * idle_time / total_time) if total_time > 0 else 0.0
-    return {
-        "busy_time": busy_time,
-        "idle_time": idle_time,
-        "total_time": total_time,
-        "idle_pct": idle_pct,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -373,27 +355,35 @@ def _check_runtime_variability(ctx) -> List[TraceCheck]:
     return []
 
 
-def _check_gpu_busy_idle(ctx) -> List[TraceCheck]:
-    events, thr = ctx["events"], ctx["thr"]
-    gpu_events = [e for e in events if e.get("cat") in GPU_KERNEL_CATEGORIES]
-    if not gpu_events:
+def _check_gpu_idle(ctx) -> List[TraceCheck]:
+    """Flag high GPU idle using the report's own ``gpu_timeline`` numbers.
+
+    Reads the ``idle_time`` row the report already computed (via
+    ``GPUEventAnalyser.compute_metrics_dict``) rather than recomputing busy/idle,
+    so the number stays consistent with the report. High idle is reported at
+    INFO (a red flag, not a defect): it is expected for CPU-bound or
+    graph-replay workloads.
+    """
+    dfs, sheets, thr = ctx.get("dfs"), ctx.get("sheets"), ctx["thr"]
+    if not dfs or not sheets:
         return []
-    m = busy_idle_from_events(gpu_events)
-    idle_pct = m.get("idle_pct", 0.0)
-    if idle_pct >= thr.idle_pct_fail:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"GPU idle {idle_pct:.1f}% (>= {thr.idle_pct_fail}%).",
-                m,
-            )
-        ]
+    tl = dfs.get(sheets.get("timeline", ""))
+    cols = getattr(tl, "columns", [])
+    if tl is None or "type" not in cols or "percent" not in cols:
+        return []
+    # One "idle_time" row by default; --micro_idle_thresh_us splits it into
+    # "micro_idle_time" + "macro_idle_time", so sum whichever are present.
+    idle_rows = tl[tl["type"].isin(["idle_time", "micro_idle_time", "macro_idle_time"])]
+    if idle_rows.empty:
+        return []
+    idle_pct = float(idle_rows["percent"].sum())
     if idle_pct >= thr.idle_pct_warn:
         return [
             TraceCheck(
-                Status.WARN,
-                f"GPU idle {idle_pct:.1f}% (>= {thr.idle_pct_warn}%).",
-                m,
+                Status.INFO,
+                f"GPU idle {idle_pct:.1f}% — not necessarily a defect "
+                "(expected for CPU-bound or graph-replay workloads).",
+                {"idle_pct": idle_pct},
             )
         ]
     return []
@@ -719,13 +709,13 @@ CHECK_REGISTRY = [
     (_check_cpu_op_shapes_detailed, True, True, "pytorch"),
     (_check_cpu_gpu_ratio, True, True, "pytorch"),
     (_check_runtime_variability, True, True, None),
-    (_check_gpu_busy_idle, True, True, None),
     (_check_jax_metadata_richness, True, True, "jax"),
     # Post-report, basic
     (_check_kernels_dropped_correlation, False, False, None),
     (_check_kernel_time_coverage, False, False, None),
     (_check_kernel_count_alignment, False, False, None),
     # Post-report, detailed
+    (_check_gpu_idle, False, True, None),
     (_check_ops_have_shapes, False, True, None),
     (_check_high_idle_ops, False, True, None),
     (_check_attention_kernel_count, False, True, "jax"),

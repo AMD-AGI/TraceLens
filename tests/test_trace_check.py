@@ -342,22 +342,6 @@ class TestHelpers:
         cv = trace_check.coefficient_of_variation([1, 2, 3, 4, 5])
         assert 0.4 < cv < 0.6
 
-    def test_busy_idle_from_events_empty(self):
-        m = trace_check.busy_idle_from_events([])
-        assert m["busy_time"] == 0.0
-        assert m["idle_pct"] == 0.0
-
-    def test_busy_idle_from_events_no_idle(self):
-        events = [{"ts": 0, "dur": 100}, {"ts": 100, "dur": 100}]
-        m = trace_check.busy_idle_from_events(events)
-        assert m["idle_pct"] == 0.0
-
-    def test_busy_idle_from_events_with_gap(self):
-        events = [{"ts": 0, "dur": 10}, {"ts": 100, "dur": 10}]
-        m = trace_check.busy_idle_from_events(events)
-        assert m["idle_pct"] > 0
-
-
 # ---------------------------------------------------------------------------
 # Detailed pre-report checks
 # ---------------------------------------------------------------------------
@@ -370,10 +354,10 @@ class TestDetailedPreReport:
 
     def test_detailed_checks_run_when_enabled(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        events = [_kernel(0, dur=10), _kernel(1000000, dur=10)]
+        events = [_kernel(i * 100) for i in range(50)]
         report = trace_check.run_trace_checks(events, framework="pytorch")
-        # With only 2 kernels and a huge gap, gpu_busy_idle should fire
-        assert any("GPU idle" in f.message for f in report.findings)
+        # A detailed pre-report check now runs that is skipped by default.
+        assert "_check_runtime_variability" in report.ran_checks
 
     def test_cpu_op_shapes_detailed_low_coverage(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
@@ -668,25 +652,63 @@ class TestEdgeCases:
         report = trace_check.run_trace_checks(events, framework="pytorch")
         assert any("CV>=" in f.message for f in report.findings)
 
-    def test_gpu_busy_idle_warn_threshold(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        events = [_kernel(0, dur=10), _kernel(200, dur=10)]
-        report = trace_check.run_trace_checks(events, framework="pytorch")
-        idle_findings = [f for f in report.findings if "GPU idle" in f.message]
-        assert len(idle_findings) > 0
+    def _timeline(self, idle_pct):
+        import pandas as pd
 
-    def test_gpu_busy_idle_no_gpu_events(self, monkeypatch):
+        return pd.DataFrame(
+            {
+                "type": ["computation_time", "idle_time", "total_time"],
+                "time ms": [100.0 - idle_pct, idle_pct, 100.0],
+                "percent": [100.0 - idle_pct, idle_pct, 100.0],
+            }
+        )
+
+    def test_gpu_idle_high_is_info_not_warn(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        events = [_cpu_op(i * 100) for i in range(20)]
-        report = trace_check.run_trace_checks(events, framework="pytorch")
+        dfs = {"gpu_timeline": self._timeline(idle_pct=88.0)}
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
+        idle = [f for f in report.findings if "GPU idle" in f.message]
+        assert len(idle) == 1
+        # Red flag, not a defect: INFO level, never WARN/ERROR.
+        assert idle[0].status == Status.INFO
+
+    def test_gpu_idle_low_no_finding(self, monkeypatch):
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        dfs = {"gpu_timeline": self._timeline(idle_pct=5.0)}
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs=dfs, framework="pytorch"
+        )
         assert not any("GPU idle" in f.message for f in report.findings)
 
-    def test_gpu_busy_idle_moderate_idle(self, monkeypatch):
+    def test_gpu_idle_no_timeline_no_finding(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        # 50% idle — between warn (30%) and fail (60%)
-        events = [_kernel(0, dur=50), _kernel(100, dur=50)]
-        report = trace_check.run_trace_checks(events, framework="pytorch")
-        assert any("GPU idle" in f.message for f in report.findings)
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs={}, framework="pytorch"
+        )
+        assert not any("GPU idle" in f.message for f in report.findings)
+
+    def test_gpu_idle_micro_macro_split_summed(self, monkeypatch):
+        # --micro_idle_thresh_us splits idle into micro/macro rows (no idle_time
+        # row); the check must sum them. 50 + 40 = 90% >= 30% warn threshold.
+        import pandas as pd
+
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        tl = pd.DataFrame(
+            {
+                "type": ["computation_time", "micro_idle_time", "macro_idle_time"],
+                "time ms": [10.0, 50.0, 40.0],
+                "percent": [10.0, 50.0, 40.0],
+            }
+        )
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs={"gpu_timeline": tl}, framework="pytorch"
+        )
+        idle = [f for f in report.findings if "GPU idle" in f.message]
+        assert len(idle) == 1
+        assert idle[0].status == Status.INFO
+        assert "90.0%" in idle[0].message
 
     def test_cpu_op_shapes_detailed_warn_threshold(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
