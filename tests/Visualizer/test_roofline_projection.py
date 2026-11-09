@@ -43,6 +43,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _engine_head_cost,
     _introspect_weight_bpe,
     _finish_op,
+    _formula_quant_rows,
     _graph_contains_draft,
     _mla_attention_ops,
     _moe_boundary_owns_routing,
@@ -593,6 +594,24 @@ def test_moe_cost_uses_introspected_weight_bpe():
         _RT.reset()
     # Weight reads dominate the GEMM, so a smaller weight dtype cuts total bytes.
     assert bytes_fp4 < bytes_bf16
+
+
+def test_routed_experts_get_no_weight_dequant_row():
+    # A grouped expert GEMM reads packed MXFP4 weights itself, so it emits no
+    # separate dequant pass even when the weight dtype is fp4.
+    dims = {"B": 1, "S": 10, "H": 4096}
+    _RT.reset()
+    try:
+        _RT.weight_bpe = 0.53125
+        _RT.moe_top_k = 2
+        _RT.moe_intermediate = 1024
+        _RT.moe_num_experts = 8
+        rows = _formula_quant_rows(
+            "decoder/mlp/experts", "decoder", 1, "MoE", "moe", dims, 2, "bfloat16", None
+        )
+    finally:
+        _RT.reset()
+    assert rows == []
 
 
 def test_moe_cost_grouped_gemm_scales_weight_bytes_by_experts_touched():

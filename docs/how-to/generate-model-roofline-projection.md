@@ -184,8 +184,10 @@ is the whole key/value length. A warm cache keeps the unmasked FLOP count.
 
 `quantization_config` sets the weight traffic: fp4 / MXFP4 at 4 bits plus the
 block scale, fp8 / int8 at one byte, int4 / NF4 at half a byte. A weight-only
-scheme adds a weight-dequant row beside the GEMM. An fp8 matrix also quantizes
-the activation. Modules named in `modules_to_not_convert`, `ignore`, or
+scheme adds a weight-dequant row beside the GEMM. The exception is a routed
+expert GEMM: a grouped MoE kernel reads the packed weights directly, so its
+weight traffic is the packed width alone and it gets no dequant row. An fp8
+matrix also quantizes the activation. Modules named in `modules_to_not_convert`, `ignore`, or
 `exclude_layers` stay at the activation dtype, which is how an LM head listed
 there avoids the quantized weight width. A published fp4 or fp8 matrix peak is
 used only for a GEMM or MoE row, and only when the selected GPU lists that

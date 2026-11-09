@@ -3388,23 +3388,19 @@ def _formula_quant_rows(
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
 ) -> list[RooflineOp]:
-    """Quant rows for a formula-costed GEMM or MoE that is not an nn.Linear leaf."""
+    """Quant rows for a formula-costed GEMM that is not an nn.Linear leaf."""
+    if category == "MoE":
+        # A grouped expert GEMM reads its packed (e.g. MXFP4) weights directly,
+        # as the aiter/cktile and Triton MoE kernels do. No separate dequant pass
+        # runs beside it, so the expert weight bytes come from _moe_cost alone.
+        return []
     try:
         tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
         hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
     except (KeyError, DimResolutionError):
         return []
     matrices: list[tuple[int, int, int]] = []
-    if category == "MoE" and _RT.moe_top_k and _RT.moe_intermediate:
-        intermediate = _shard(_RT.moe_intermediate, _RT.tp)
-        active = _shard(tokens * _RT.moe_top_k, _RT.ep)
-        experts = _shard(_RT.moe_num_experts, _RT.ep) if _RT.moe_num_experts else 0
-        groups = min(experts, active) if experts else 1
-        matrices = [
-            (active, groups * 2 * intermediate, hidden),
-            (active, groups * hidden, intermediate),
-        ]
-    elif category == "GEMM" and role in ("ffn", "moe") and _RT.dense_intermediate:
+    if category == "GEMM" and role in ("ffn", "moe") and _RT.dense_intermediate:
         intermediate = _shard(_RT.dense_intermediate, _RT.tp)
         matrices = [
             (tokens, 2 * intermediate, hidden),
