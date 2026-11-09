@@ -43,6 +43,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _engine_head_cost,
     _introspect_weight_bpe,
     _finish_op,
+    _experts_touched,
     _formula_quant_rows,
     _graph_contains_draft,
     _mla_attention_ops,
@@ -630,6 +631,19 @@ def test_moe_cost_grouped_gemm_scales_weight_bytes_by_experts_touched():
     assert flops_g == flops_g1
     # Reading G=20 expert weight matrices moves far more than a single one.
     assert bytes_g > bytes_g1
+
+
+def test_experts_touched_is_the_expected_distinct_experts():
+    # 256 routed rows over 128 experts leave 128 * (127/128) ** 256 unselected.
+    assert _experts_touched(128, 256) == pytest.approx(110.9, abs=0.1)
+    # A few rows reach about one expert each; many rows reach them all.
+    assert _experts_touched(256, 1) == pytest.approx(1.0)
+    assert _experts_touched(256, 20) == pytest.approx(19.25, abs=0.05)
+    assert _experts_touched(128, 1_000_000) == pytest.approx(128.0)
+    assert _experts_touched(128, 0) == 0.0
+    # Never more than the rows or the experts there are.
+    for experts, rows in ((128, 256), (8, 100), (64, 10)):
+        assert _experts_touched(experts, rows) <= min(experts, rows)
 
 
 def test_moe_cost_adds_dispatch_combine_allreduce_only_when_ep():

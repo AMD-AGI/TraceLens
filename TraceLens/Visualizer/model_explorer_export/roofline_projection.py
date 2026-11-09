@@ -71,9 +71,10 @@ Known approximations, stated once here rather than scattered in comments:
     ``num_experts`` passes -- the router picks a subset per token, so costing
     every expert for every token would overstate FLOPs by
     ``num_experts / experts_per_tok``. The expert GEMMs use :class:`GroupedGemm`
-    over ``G = min(num_experts, active_tokens)`` distinct weight matrices, so the
-    weight-byte term reflects the experts actually streamed (``G`` falls back to
-    1, the prior single-weight cost, when ``num_experts`` is unknown). Tensor
+    over ``G`` distinct weight matrices, the experts the routed rows are expected
+    to reach (``num_experts * (1 - (1 - 1/num_experts) ** active_tokens)``), so
+    the weight-byte term reflects the experts actually streamed (``G`` falls back
+    to 1, the prior single-weight cost, when ``num_experts`` is unknown). Tensor
     parallel column-shards each expert's intermediate width; expert parallel
     gives one GPU ``1/EP`` of the routed rows and adds the dispatch/combine
     all-to-all as FLOPs-free data movement (:class:`MoEComm`). The router's
@@ -3305,6 +3306,20 @@ def _mtp_stack_ops(
     return ops
 
 
+def _experts_touched(experts: int, routed_rows: int) -> float:
+    """Expected distinct experts that ``routed_rows`` rows reach.
+
+    A row picks an expert uniformly, so an expert is missed with probability
+    ``(1 - 1/experts) ** routed_rows``. A few rows reach about one expert each;
+    many rows reach them all. Charging every expert whenever ``routed_rows``
+    exceeds the expert count would read weights no row selected: 256 rows over
+    128 experts reach about 111, not 128.
+    """
+    if experts <= 0 or routed_rows <= 0:
+        return 0.0
+    return experts * (1.0 - (1.0 - 1.0 / experts) ** routed_rows)
+
+
 def _moe_cost(
     dims: dict[str, Any],
     top_k: int | None,
@@ -3321,9 +3336,9 @@ def _moe_cost(
     declared, which is the wrong width for the routed experts this costs.
 
     The expert GEMMs are costed with :class:`GroupedGemm` over
-    ``G = min(num_experts, active_tokens)`` distinct expert weight matrices --
-    the weights actually streamed from HBM for this token count -- rather than a
-    single shared weight. FLOPs are unchanged (only the selected token-expert
+    ``G`` distinct expert weight matrices -- the experts ``active_tokens`` routed
+    rows are expected to reach under uniform routing, see
+    :func:`_experts_touched` -- rather than a single shared weight. FLOPs are unchanged (only the selected token-expert
     pairs compute); the weight-byte term now scales with the experts touched, so
     the memory-bound/compute-bound crossover tracks the real prefill-vs-decode
     behaviour instead of understating decode weight traffic by ~``G``x. When
@@ -3349,7 +3364,7 @@ def _moe_cost(
     intermediate_size = _shard(intermediate_size, _RT.tp)
     active_tokens = _shard(tokens * top_k, _RT.ep)
     experts_here = _shard(_RT.moe_num_experts, _RT.ep) if _RT.moe_num_experts else 0
-    groups = min(experts_here, active_tokens) if experts_here else 1
+    groups = _experts_touched(experts_here, active_tokens) if experts_here else 1
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
     # gate_up_proj: [active_tokens, hidden] x per-expert [hidden, 2*intermediate].
     gate_up_flops = GroupedGemm.flops_func(active_tokens, hidden, 2 * intermediate_size)

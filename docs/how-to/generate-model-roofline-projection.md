@@ -197,8 +197,10 @@ peak. Attention stays at the activation dtype.
 
 MoE routing is `experts_per_tok` grouped-GEMM passes per token (the gate-up and
 down projections of the selected experts), never one pass per expert. The
-weight traffic uses `G = min(experts on this GPU, active tokens on this GPU)`
-distinct expert matrices. Tensor parallel column-shards each expert's
+weight traffic uses `G` distinct expert matrices: the experts the routed rows
+reach on this GPU, `E * (1 - (1 - 1/E) ** rows)` for `E` local experts. A few
+rows reach about one expert each and many rows reach them all, so 256 rows over
+128 experts read about 111 expert matrices, not 128. Tensor parallel column-shards each expert's
 intermediate width. Expert parallel gives one GPU the floor of the routed rows
 and adds the dispatch and combine all-to-all as data movement. The router GEMM,
 its softmax, the combine, and a shared expert are separate rows when the graph
