@@ -82,7 +82,7 @@ Environment variables:
 | `REPORT_DIR` | `<RESULTS_ROOT>/../reports` | Where reports and reproducers are written |
 | `SUITE_NAME` | `eval` | Suite label used in reports (e.g. `unit`, `e2e`) |
 | `TEST_IDS` | (empty = all) | Space-separated trace IDs to run (filter) |
-| `SKIP_GENERATE_REF` | (empty) | Set to `1` to skip golden reference generation |
+| `SKIP_GENERATE_REF` | (empty) | Set to `1` to skip golden reference generation and reuse references already generated locally |
 | `SKIP_POST_PROCESSING` | (empty) | Set to `1` to skip report generation after the eval loop |
 
 Example (subset of traces, 3 repeats, 5 parallel):
@@ -201,10 +201,9 @@ agent --model claude-opus-4-8-thinking-medium --print --force --trust \
 
 ### 1. Create the test case directory
 
-Each test case lives under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/<unit_tests_standalone|unit_tests_comparative|e2e_tests_standalone|e2e_tests_comparative>/<test_id>/` and must contain:
+Each test case lives under `TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/analysis_tests/<unit_tests_standalone|unit_tests_comparative|e2e_tests_standalone|e2e_tests_comparative>/<test_id>/` and contains only the profiling trace file(s).
 
-- The profiling trace JSON file.
-- `analysis_output_ref/` -- a reference analysis output to compare against (used by quality evals). Should include `analysis.md` and `perf_report_csvs/`. Generate this with `generate_ref.sh`.
+The reference output the quality evals compare against (`analysis_output_ref/`, with `analysis.md` and `perf_report_csvs/`) is not shipped. `generate_ref.sh` creates it locally, and `run_repeatability_parallel.sh` runs that step automatically.
 
 ### 2. Add a row to `analysis_tests/combined_traces_standalone.csv` (or `combined_traces_comparative.csv`)
 
