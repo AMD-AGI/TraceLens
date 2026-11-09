@@ -16,6 +16,7 @@ including ``$TL_EXTENSION``).
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 import sys
@@ -67,6 +68,23 @@ DEFAULT_SERIES: tuple[Series, ...] = (
     Series("Whole model", "P", None, None, False),
     Series("End to end", "D", None, None, False),
 )
+
+# Perf-report categories written after graph launches have been given Input
+# Dims, either from a capture profile or from the model schedule. The plot
+# reads the FLOPs and bytes the perf model computed from those dims.
+PROFILE_SERIES: tuple[Series, ...] = (
+    Series("Verify attention", "o", "decode", ("Attention",), False),
+    Series("Routed MoE", "s", None, ("MoE",), False),
+    Series("GEMM", "^", None, ("GEMM",), False),
+    Series("Whole model", "P", None, None, False),
+)
+_REPORT_CATEGORIES = {
+    "inferenceattention": "Verify attention",
+    "moe_unfused": "Routed MoE",
+    "gemm": "GEMM",
+}
+# A leading dimension above this is a sequence or a weight, not a batch bucket.
+_MAX_BATCH = 16
 
 
 @dataclass(frozen=True)
@@ -725,6 +743,88 @@ def _fmt_number(value: float) -> str:
     return f"{value:,.1f}"
 
 
+def _batch_dim(raw: str) -> int | None:
+    """The batch a stamped ``Input Dims`` record belongs to.
+
+    Graph-launch rows take the batch from the first tensor. A leading
+    dimension past the capture buckets is a sequence or a weight, not a batch.
+    """
+    try:
+        dims = ast.literal_eval(raw) if raw else ()
+    except (SyntaxError, ValueError):
+        return None
+    if not dims or not isinstance(dims[0], (list, tuple)) or not dims[0]:
+        return None
+    first = dims[0][0]
+    if isinstance(first, int) and 0 < first <= _MAX_BATCH:
+        return first
+    return None
+
+
+def points_from_report(directory: Path) -> list[RooflinePoint]:
+    """Points from a perf report whose graph launches carry Input Dims.
+
+    The report generator fills those dims from a capture profile or from the
+    model schedule (the exporter's kernel shapes, or the config schedule when
+    the exporter does not state them). The perf model then writes ``GFLOPS``
+    and ``FLOPS/Byte``. This reads those columns. A row without them is a
+    launch the fill did not cover, and it is left out.
+    """
+    totals: dict[tuple[str, int], list[float]] = {}
+
+    def add(key: tuple[str, int], flops: float, nbytes: float, time_us: float) -> None:
+        slot = totals.setdefault(key, [0.0, 0.0, 0.0])
+        slot[0] += flops
+        slot[1] += nbytes
+        slot[2] += time_us
+
+    for path in sorted(directory.glob("*_ops.csv")):
+        label = _REPORT_CATEGORIES.get(path.name.removesuffix("_ops.csv"))
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            column = _time_column(reader.fieldnames)
+            if column is None:
+                continue
+            for row in reader:
+                count_raw = row.get("operation_count") or ""
+                count = int(float(count_raw)) if count_raw else 0
+                cost = _profile_cost(row.get("GFLOPS"), row.get("FLOPS/Byte"), count)
+                time_raw = row.get(column) or ""
+                if cost is None or not time_raw:
+                    continue
+                batch = _batch_dim(row.get("Input Dims") or "")
+                if batch is None:
+                    continue
+                flops, nbytes = cost
+                time_us = float(time_raw)
+                if label is not None:
+                    add((label, batch), flops, nbytes, time_us)
+                add(("Whole model", batch), flops, nbytes, time_us)
+    peak: dict[str, float] = {}
+    for (label, _batch), (flops, _nbytes, _time_us) in totals.items():
+        peak[label] = max(peak.get(label, 0.0), flops)
+    points = []
+    for (label, batch), (flops, nbytes, time_us) in sorted(totals.items()):
+        # A bucket under 1% of its series is a capture size the replay barely
+        # ran. It is not a point on the diagram.
+        if flops < 0.01 * peak[label] or nbytes <= 0 or time_us <= 0:
+            continue
+        points.append(
+            RooflinePoint(
+                series=label,
+                phase="decode",
+                concurrency=batch,
+                arithmetic_intensity=flops / nbytes,
+                achieved_tflops=flops / (time_us * 1e-6) / 1e12,
+                flops=flops,
+                bytes=nbytes,
+                time_us=time_us,
+                cost_source="profile",
+            )
+        )
+    return points
+
+
 def plot_e2e_roofline(
     points: list[RooflinePoint],
     arch: dict[str, Any],
@@ -732,6 +832,7 @@ def plot_e2e_roofline(
     *,
     title: str,
     output_path: Path,
+    series: tuple[Series, ...] = DEFAULT_SERIES,
 ):
     """Draw the log-log roofline and write it to ``output_path``."""
     import matplotlib.pyplot as plt
@@ -823,7 +924,7 @@ def plot_e2e_roofline(
     by_series: dict[str, list[RooflinePoint]] = {}
     for point in points:
         by_series.setdefault(point.series, []).append(point)
-    series_by_label = {spec.label: spec for spec in DEFAULT_SERIES}
+    series_by_label = {spec.label: spec for spec in series}
     for label, group in by_series.items():
         spec = series_by_label.get(label)
         marker = spec.marker if spec else "o"
@@ -859,7 +960,7 @@ def plot_e2e_roofline(
                 )
 
     handles, labels = ax.get_legend_handles_labels()
-    for spec in DEFAULT_SERIES:
+    for spec in series:
         if spec.label not in by_series:
             continue
         handles.append(
@@ -988,6 +1089,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory of perf-report *_ops.csv files",
     )
     parser.add_argument(
+        "--profile-costs",
+        action="store_true",
+        help=(
+            "Read FLOPs and bytes from the perf report. Use this after the "
+            "report generator has filled graph-launch Input Dims from a "
+            "capture profile or from the model schedule. No projection is "
+            "read."
+        ),
+    )
+    parser.add_argument(
         "--profile-json",
         type=Path,
         help="JSON list of {name, time_us, count} kernel records",
@@ -1041,23 +1152,31 @@ def main(argv: list[str] | None = None) -> int:
         else:
             raise ValueError("pass --gpu-arch-name or --gpu-arch-json-path")
         regimes: list[Regime] = []
-        if args.augmentation is not None:
-            payload = json.loads(args.augmentation.read_text(encoding="utf-8"))
-            regimes.extend(regimes_from_augmentation(payload))
-        regimes.extend(_projection_regime(entry) for entry in args.projection)
-        if not regimes:
-            raise ValueError("pass --augmentation or at least one --projection")
-        if args.profile_json is not None:
-            kernels = load_profile_json(args.profile_json)
-        elif args.profile_dir is not None:
-            kernels = load_profile_kernels(args.profile_dir)
+        series = DEFAULT_SERIES
+        if args.profile_costs:
+            if args.profile_dir is None:
+                raise ValueError("--profile-costs needs --profile-dir")
+            points = points_from_report(args.profile_dir)
+            warnings = []
+            series = PROFILE_SERIES
         else:
-            raise ValueError("pass --profile-dir or --profile-json")
-        includes = _parse_keyed_flag(args.kernels, value_is_float=False)
-        overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
-        points, warnings = build_points(
-            regimes, kernels, includes=includes, time_overrides_us=overrides
-        )
+            if args.augmentation is not None:
+                payload = json.loads(args.augmentation.read_text(encoding="utf-8"))
+                regimes.extend(regimes_from_augmentation(payload))
+            regimes.extend(_projection_regime(entry) for entry in args.projection)
+            if not regimes:
+                raise ValueError("pass --augmentation or at least one --projection")
+            if args.profile_json is not None:
+                kernels = load_profile_json(args.profile_json)
+            elif args.profile_dir is not None:
+                kernels = load_profile_kernels(args.profile_dir)
+            else:
+                raise ValueError("pass --profile-dir or --profile-json")
+            includes = _parse_keyed_flag(args.kernels, value_is_float=False)
+            overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
+            points, warnings = build_points(
+                regimes, kernels, includes=includes, time_overrides_us=overrides
+            )
         points, roof_warnings = flag_points_above_roof(points, arch)
         warnings.extend(roof_warnings)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -1068,7 +1187,9 @@ def main(argv: list[str] | None = None) -> int:
     if not points:
         print("e2e_roofline: no points to plot", file=sys.stderr)
         return 1
-    plot_e2e_roofline(points, arch, regimes, title=args.title, output_path=args.output)
+    plot_e2e_roofline(
+        points, arch, regimes, title=args.title, output_path=args.output, series=series
+    )
     for point in points:
         print(
             f"{point.series} phase={point.phase} concurrency={point.concurrency} "

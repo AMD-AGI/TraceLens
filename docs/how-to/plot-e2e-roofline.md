@@ -67,6 +67,32 @@ TraceLens_e2e_roofline_plot \
 arch directory (`MI300X`, `MI325X`) come from `$TL_EXTENSION`.
 `--gpu-arch-json-path` names a spec file directly.
 
+## From a report with graph-launch shapes
+
+A graph replay records device kernels and not the CPU ops that were captured
+into the graph, so those kernels have no `Input Dims`. The inference report
+fills them before it costs the kernel. A capture folder supplies the recorded
+call. Without one, `--graph_model_config` builds the per-rank model and the
+schedule walks the forward. When the pinned engine checkout exports a kernel
+together with the tensors it is called with, those shapes replace the schedule
+for that launch. The perf model then writes `GFLOPS` and `FLOPS/Byte`.
+
+Plot that report directly. No projection is read:
+
+```bash
+TraceLens_e2e_roofline_plot \
+    --profile-costs \
+    --gpu-arch-name MI355X \
+    --profile-dir <report>/category_data \
+    --title "decode" \
+    --output roofline.png
+```
+
+Attention, routed MoE, and GEMM are the report categories `inferenceattention`,
+`moe_unfused`, and `gemm`. Whole model is every costed row in the same batch
+bucket. The batch is the leading dimension of the stamped `Input Dims`. A row
+the fill did not cover has empty `GFLOPS` and is left out.
+
 ## What the profile contributes
 
 Y uses the `Kernel Time (µs)_sum` column of the perf-report `*_ops.csv` files.

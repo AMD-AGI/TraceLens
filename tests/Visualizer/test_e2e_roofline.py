@@ -23,6 +23,7 @@ from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     build_points,
     flag_points_above_roof,
     load_profile_kernels,
+    points_from_report,
     main,
     plot_e2e_roofline,
     regimes_from_augmentation,
@@ -373,6 +374,37 @@ def test_whole_model_include_adds_unscoped_kernels_without_dropping_tagged():
     }
     assert whole["decode"] == 150.0
     assert whole["prefill"] == 80.0
+
+
+def test_points_from_report_use_the_stamped_graph_launch_costs(tmp_path):
+    (tmp_path / "inferenceattention_ops.csv").write_text(
+        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
+        'aiter::mla_decode_v4_asm,10,100,2.0,4.0,"((4, 16, 512),)"\n'
+        'aiter::mla_decode_v4_asm,1,1,0.001,4.0,"((1, 16, 512),)"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "gemm_ops.csv").write_text(
+        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
+        'aiter::gemm_a8w8,10,200,8.0,16.0,"((4, 7168), (2048, 7168))"\n',
+        encoding="utf-8",
+    )
+    # A launch the fill did not cover contributes nothing.
+    (tmp_path / "other_ops.csv").write_text(
+        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
+        "hipGraphLaunch->mfma_moe1,61,1000,,,\n",
+        encoding="utf-8",
+    )
+    points = {
+        (item.series, item.concurrency): item for item in points_from_report(tmp_path)
+    }
+    assert ("Verify attention", 1) not in points
+    attention = points[("Verify attention", 4)]
+    assert attention.cost_source == "profile"
+    assert attention.flops == pytest.approx(2.0e10)
+    assert attention.arithmetic_intensity == pytest.approx(4.0)
+    whole = points[("Whole model", 4)]
+    assert whole.flops == pytest.approx(1.0e11)
+    assert whole.time_us == pytest.approx(300.0)
 
 
 def test_profile_csv_reads_flops_and_bytes(tmp_path):
