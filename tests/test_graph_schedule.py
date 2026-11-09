@@ -146,6 +146,12 @@ def test_schedule_follows_compress_ratio_and_the_hash_layers():
     assert "c4" in by_layer[2] and "hash_topk" in by_layer[2]
     assert "topk" in by_layer[3] and "hash_topk" not in by_layer[3]
     assert by_layer[60][-1] == "mhc_post"
+    # The split-K reduce and the stage-2 reduction are kernels of the call
+    # before them, so the collector keeps one row.
+    for launch, previous in zip(launches[1:], launches):
+        if launch.same_call:
+            assert previous.op_name == launch.op_name
+            assert launch.key in {"gemm_red", "moe_red", "cta_info"}
 
     wq_b = next(
         launch for launch in launches if launch.layer == 1 and launch.key == "ck_gemm"
@@ -946,15 +952,17 @@ def test_a_dropped_tuned_row_gives_way_to_the_atomic_flydsl_fallback():
 
 
 def test_kernels_of_one_stopped_op_share_its_row():
-    """The collector keeps a reduce, a schedule pair, and index casts on the parent."""
-    from TraceLens.TreePerf.graph_schedule import (
-        Launch,
-        group_stopped_ops,
-        report_row_name,
-    )
+    """The collector keeps a reduce and index casts on the call that launched them."""
+    from TraceLens.TreePerf.graph_schedule import Launch, group_stopped_ops
 
     gemm = Launch("aiter::gemm_a8w8_blockscale_bpreshuffle", "gemm_a8w8", ((4,),), 0)
-    reduce = Launch("aiter::gemm_a8w8_blockscale_bpreshuffle", "gemm_red", ((4,),), 0)
+    reduce = Launch(
+        "aiter::gemm_a8w8_blockscale_bpreshuffle",
+        "gemm_red",
+        ((4,),),
+        0,
+        same_call=True,
+    )
     cast = Launch(
         "aten::copy_",
         "copy",
@@ -971,7 +979,9 @@ def test_kernels_of_one_stopped_op_share_its_row():
         ("int", "int", "Scalar"),
     )
     stage2 = Launch("pseudo_op::moe_flydsl_stage2", "moe2", ((4,),), 1)
-    reduction = Launch("pseudo_op::moe_flydsl_stage2", "moe_red", ((4,),), 1)
+    reduction = Launch(
+        "pseudo_op::moe_flydsl_stage2", "moe_red", ((4,),), 1, same_call=True
+    )
     assigned = [gemm, reduce, cast, index, plain, stage2, reduction]
     assert group_stopped_ops(assigned) == [
         (0, [0, 1]),
@@ -979,14 +989,10 @@ def test_kernels_of_one_stopped_op_share_its_row():
         (4, [4]),
         (5, [5, 6]),
     ]
-    assert report_row_name(gemm, "gemm_kernel") == gemm.op_name
-    assert report_row_name(index, "index_kernel") == "aten::index"
-    quant = Launch("aiter::dynamic_per_group_scaled_quant", "quant", ((4, 8),), 0)
-    assert report_row_name(quant, "ignored") == "aiter::dynamic_per_token_scaled_quant"
-    stage = Launch("aiter::mla_decode_stage2", "attn_asm", ((4,),), 0)
-    assert report_row_name(stage, "_fwd_kernel_stage2_asm") == (
-        "sglang_profiler::runtime_decode_fp8_2buff->_fwd_kernel_stage2_asm (Synthetic Op)"
-    )
+    # The row is the call the schedule named. A second kernel of that call
+    # does not invent a different name.
+    assert assigned[0].op_name == assigned[1].op_name
+    assert assigned[5].op_name == assigned[6].op_name
 
 
 def test_a_scan_with_a_state_kernel_and_a_gemm_with_a_split_reduction_align():
@@ -1001,6 +1007,27 @@ def test_a_scan_with_a_state_kernel_and_a_gemm_with_a_split_reduction_align():
         "Cijk_Alik_Bljk_BSS_PostGSU",
     ]
     assert align_kernels(names, [scan, mm]) == [scan, scan, mm, mm]
+
+
+def test_a_stage2_reduction_stays_on_the_call_when_the_dispatch_omits_it():
+    """An atomic tuned row lists no reduction launch. The kernel still belongs
+    to the stage-2 call when the graph runs it."""
+    from TraceLens.TreePerf.graph_schedule import (
+        Launch,
+        align_kernels,
+        group_stopped_ops,
+    )
+
+    stage2 = Launch("pseudo_op::moe_flydsl_stage2", "moe2", ((4,),), 1)
+    later = Launch("aiter::cross_device_reduce", "allreduce", ((4, 8),), 1)
+    names = [
+        "mfma_moe2_afp8_wfp4_bf16_cshuffle_t32x128x128",
+        "moe_reduction_kernel_0",
+        "void aiter::cross_device_reduce_1stage<std::bfloat16_t>",
+    ]
+    assigned = align_kernels(names, [stage2, later])
+    assert assigned == [stage2, stage2, later]
+    assert group_stopped_ops(assigned) == [(0, [0, 1]), (2, [2])]
 
 
 def test_the_prefill_graph_ends_with_the_norm_and_both_output_copies():

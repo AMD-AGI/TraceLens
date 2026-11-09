@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import ast
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from TraceLens.TraceUtils.utils.annotation_utils import parse_annotation
 
@@ -116,6 +116,10 @@ class Launch:
     concrete: tuple[str, ...] = ()
     # Stride of each argument. Empty means the tensor is contiguous.
     input_strides: tuple[tuple[int, ...], ...] = ()
+    # This kernel is launched by the same CPU call as the previous launch.
+    # A split-K reduce and a schedule's second kernel are that case: the
+    # collector keeps them on the call, not as a second op.
+    same_call: bool = False
 
 
 def graph_model_from_config(config: dict, tp: int) -> GraphModel:
@@ -387,52 +391,6 @@ def align_kernels(
     return assigned
 
 
-# A kernel the collector keeps on the CPU op launched just before it.
-# The split-K reduce is part of the GEMM, the MoE reduction is part of
-# stage 2, and the decode schedule's two kernels are one profiler op.
-_FOLLOWED_BY = {
-    "gemm_a8w8": "gemm_red",
-    "moe2": "moe_red",
-    "sched_prep": "cta_info",
-}
-
-# The name ``collect_unified_perf_events`` stops on. The schedule's op name
-# is the perf-model identity. The replay report names the row the way a
-# capture merge names it: the CPU op with a perf model, or the synthetic
-# ``parent->kernel`` row when the collector does not stop. ``{kernel}`` is
-# the device kernel's own name.
-_COLLECTOR_ROW = {
-    "quant": "aiter::dynamic_per_token_scaled_quant",
-    "wo_quant": "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8",
-    "mx_sort": "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded",
-    "attn_asm": "sglang_profiler::runtime_decode_fp8_2buff->{kernel} (Synthetic Op)",
-    "topk_main": "sglang_profiler::topk_topk_transform_paged_v2",
-    "rope": "sglang_profiler::deepseek_v4_rope_apply_rotary_emb_triton",
-    "moe_sort": "aiter::fused_moe_->{kernel} (Synthetic Op)",
-    "qk_rope": "aiter::_fused_qk_norm_rope_group_quant_kernel",
-    "c4": "sglang_profiler::compress_compress_forward",
-    "c128": "sglang_profiler::compress_compress_forward",
-    "shared": "sglang_profiler::topk__post_process_topk_ids",
-    "flashmla": "sglang_profiler::compress_compress_norm_rope_store",
-    "rms_quant": "hipModuleLaunchKernel->{kernel} (Synthetic Op)",
-    "indexer": "sglang_profiler::flydsl_flydsl_pa_mqa_logits_fp4",
-    "rope_had": "aiter::_rope_rotate_activation_fp4quant",
-    "norm_rope_had": "aiter::rmsnorm_rope_rotate_activation_fp4quant_kvcache",
-    "fill_tail": "sglang_profiler::runtime_fill_compress_tail",
-    "hc_head": "sglang_profiler::mhc_head_fused_hc_head",
-    "init_meta": (
-        "sglang_profiler::metadata_kernel__init_compressed_attn_metadata_triton"
-    ),
-    "sched_prep": "sglang_profiler::fp4_indexer_schedule_hip_build_decode_schedule",
-    "cta_info": "sglang_profiler::fp4_indexer_schedule_hip_build_decode_schedule",
-    "hash_topk": "sglang_profiler::triton_hash_topk_hash_topk_triton",
-    "allgather": "sglang::reg_all_gather_into_tensor",
-    "plan": "sglang_profiler::compressor_v2_create_paged_compressor_data",
-    "pad_pt": "sglang_profiler::fp4_indexer_schedule_hip_pad_page_table",
-    "paged_idx": "sglang_profiler::paged_decode_indices_write_v4_paged_decode_indices",
-}
-
-
 def _index_cast(launch: Launch | None) -> bool:
     """An int64 ``aten::copy_`` the index op launches to cast its indices."""
     return (
@@ -441,18 +399,6 @@ def _index_cast(launch: Launch | None) -> bool:
         and bool(launch.input_types)
         and launch.input_types[0] == "long int"
     )
-
-
-def report_row_name(launch: Launch, kernel_name: str) -> str:
-    """The unified-table name for ``launch``.
-
-    This is the CPU op the collector stops on. A kernel the collector emits
-    as a synthetic row uses that kernel's name in the ``->`` suffix.
-    """
-    template = _COLLECTOR_ROW.get(launch.key)
-    if template is None:
-        return launch.op_name
-    return template.replace("{kernel}", kernel_name)
 
 
 def group_stopped_ops(
@@ -478,7 +424,12 @@ def group_stopped_ops(
         launch = assigned[index]
         if previous is None or launch is None:
             continue
-        if _FOLLOWED_BY.get(previous.key) == launch.key:
+        # ``same_call`` is the schedule's second launch of one CPU call.
+        # ``launch is previous`` is a kernel the call launches that the
+        # schedule did not list on its own (the scan's state kernel, a
+        # split-K epilogue, the stage-2 reduction of an atomic dispatch
+        # that still emitted one).
+        if launch.same_call or launch is previous:
             owner[index] = owner[index - 1]
     groups: list[tuple[int, list[int]]] = []
     current: int | None = None
@@ -497,16 +448,22 @@ def group_stopped_ops(
 
 
 def _follows(name: str, launch: Launch, previous: Launch | None) -> bool:
-    """A kernel that finishes the GEMM launched just before it.
+    """A second kernel of the launch just before it.
 
-    A long-K Tensile GEMM splits K across workgroups (GSU) and a second kernel
-    reduces the partial sums into the output. A long scan runs a
-    state-initialisation kernel ahead of the scan kernel itself.
+    A long-K Tensile GEMM splits K across workgroups and a PostGSU kernel
+    reduces the partials. A long scan runs a state kernel ahead of the scan.
+    A stage-2 MoE call reduces its partials in ``moe_reduction`` when the
+    dispatch did not accumulate them itself.
     """
     if previous is not launch:
         return False
     if launch.key in ("tensile", "gate"):
         return "PostGSU" in name
+    if launch.key == "moe2":
+        # The stage-2 call reduces its partials in a second kernel when the
+        # dispatch does not accumulate them itself. An atomic tuned row omits
+        # that launch; a graph that still runs the kernel keeps it on the call.
+        return "moe_reduction" in name
     return launch.key == "t_scan" and "rocprim" in name
 
 
@@ -682,9 +639,19 @@ def _launch(
     types: tuple[str, ...] | None = None,
     concrete: tuple[str, ...] = (),
     strides: tuple[tuple[int, ...], ...] = (),
+    same_call: bool = False,
 ) -> Launch:
     chosen = _DTYPES.get(key, ()) if types is None else types
-    return Launch(op_name, key, shapes, layer, chosen[: len(shapes)], concrete, strides)
+    return Launch(
+        op_name,
+        key,
+        shapes,
+        layer,
+        chosen[: len(shapes)],
+        concrete,
+        strides,
+        same_call,
+    )
 
 
 # FlyDSL packs two FP4 values into one stored element and scales every 32 of
@@ -1902,7 +1869,15 @@ def _prefill_moe(model, layer, t, h, inter, experts, routed) -> list[Launch]:
         ]
     )
     if packed and _stage2_reduces(model, t):
-        block.append(_launch("pseudo_op::moe_flydsl_stage2", "moe_red", scaled, layer))
+        block.append(
+            _launch(
+                "pseudo_op::moe_flydsl_stage2",
+                "moe_red",
+                scaled,
+                layer,
+                same_call=True,
+            )
+        )
     block.extend(
         [
             _launch("aiter::cross_device_reduce", "allreduce", ((t, h),), layer),
@@ -2389,7 +2364,13 @@ def _indexer_write_metadata(model: GraphModel, pools: _Pools, t: int) -> list[La
     )
     launches += [
         _launch("sglang::build_decode_schedule", "sched_prep", schedule, None),
-        _launch("sglang::build_decode_schedule", "cta_info", schedule, None),
+        _launch(
+            "sglang::build_decode_schedule",
+            "cta_info",
+            schedule,
+            None,
+            same_call=True,
+        ),
     ]
     return launches
 
@@ -2514,7 +2495,13 @@ def _attention_block(
             _launch("aiter::gemm_a8w8_blockscale_bpreshuffle", "gemm_a8w8", wq_a, layer)
         )
         block.append(
-            _launch("aiter::gemm_a8w8_blockscale_bpreshuffle", "gemm_red", wq_a, layer)
+            _launch(
+                "aiter::gemm_a8w8_blockscale_bpreshuffle",
+                "gemm_red",
+                wq_a,
+                layer,
+                same_call=True,
+            )
         )
     block.append(
         _launch("aiter::fused_rms_fp8_quant", "rms_quant", ((t, q_lora),), layer)
@@ -2837,7 +2824,15 @@ def _moe_block(model, layer, t, h, inter, experts, routed, last: bool) -> list[L
     if packed and _stage2_reduces(model, t):
         # The reduction is launched by the same stage-2 call, so it is recorded
         # with that call's tensors.
-        block.append(_launch("pseudo_op::moe_flydsl_stage2", "moe_red", scaled, layer))
+        block.append(
+            _launch(
+                "pseudo_op::moe_flydsl_stage2",
+                "moe_red",
+                scaled,
+                layer,
+                same_call=True,
+            )
+        )
     block.append(_launch("aiter::cross_device_reduce", "allreduce", ((t, h),), layer))
     if last:
         block.append(
@@ -2920,15 +2915,7 @@ def _with_token_count(launch: Launch, tokens: int) -> Launch:
         ((tokens,) + shape[1:]) if shape and shape[0] == 0 else shape
         for shape in launch.input_shapes
     )
-    return Launch(
-        launch.op_name,
-        launch.key,
-        shapes,
-        launch.layer,
-        launch.input_types,
-        launch.concrete,
-        launch.input_strides,
-    )
+    return replace(launch, input_shapes=shapes)
 
 
 def covering_annotation(events: list[dict], launch: dict) -> str | None:

@@ -33,7 +33,6 @@ from .graph_schedule import (
     launch_arguments,
     launches_from_architecture,
     num_cus_from_trace,
-    report_row_name,
     schedule_deepseek_v4,
 )
 from ..PerfModel.torch_op_mapping import (
@@ -1944,10 +1943,9 @@ class TreePerfAnalyzer:
             )
             if launch is not None:
                 # The kernels are this launch of the model forward. The row is
-                # the op the collector keeps, with the dims, dtypes and strides
-                # a captured call of it would carry. Copy args so the launch
-                # event keeps its own.
-                synthetic_op["name"] = report_row_name(launch, kernel.get("name", ""))
+                # that call: the collector stops on the op, and the schedule
+                # already named it. Copy args so the launch event keeps its own.
+                synthetic_op["name"] = launch.op_name
                 synthetic_op["args"] = dict(cpu_op.get("args") or {})
                 synthetic_op["args"].update(launch_arguments(launch))
                 annotation = self._annotation_for(cpu_op)
