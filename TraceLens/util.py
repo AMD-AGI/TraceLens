@@ -129,6 +129,15 @@ def get_filename(filepath: str) -> str:
     return filepath
 
 
+_RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
+
+
+def extract_rank(path) -> Optional[int]:
+    """Return the rank number embedded in a trace path (``rank_3``, ``rank-3``), or None."""
+    match = _RANK_RE.search(str(path).replace("\\", "/"))
+    return int(match.group(1)) if match else None
+
+
 def _load_xplane_converter():
     """Load the optional JAX xprof converter."""
     try:
@@ -1030,6 +1039,46 @@ class TraceEventUtils:
 
         # Convert defaultdicts to regular dicts for return
         return ({pid: dict(tid_dict) for pid, tid_dict in metadata.items()}, rest)
+
+    @staticmethod
+    def _agreed_device_int(metadata: dict | None, field: str) -> int | None:
+        """One ``deviceProperties`` integer when every visible GPU agrees.
+
+        A missing field, an empty device list, or a node whose GPUs disagree
+        returns ``None``.
+        """
+        if not metadata:
+            return None
+        devices = metadata.get("deviceProperties")
+        if not isinstance(devices, list) or not devices:
+            return None
+        values = set()
+        for device in devices:
+            if not isinstance(device, dict) or field not in device:
+                return None
+            values.add(int(device[field]))
+        if len(values) != 1:
+            return None
+        value = values.pop()
+        return value if value > 0 else None
+
+    @staticmethod
+    def num_cus_from_trace(metadata: dict | None) -> int | None:
+        """Compute units from ``deviceProperties``.
+
+        ``numSms`` is the compute-unit count
+        """
+        return TraceEventUtils._agreed_device_int(metadata, "numSms")
+
+    @staticmethod
+    def lds_capacity_from_trace(metadata: dict | None) -> int | None:
+        """Per-CU LDS capacity in bytes.
+
+        ``maxSharedMemoryPerMultiProcessor`` is the shared memory capacity
+        """
+        return TraceEventUtils._agreed_device_int(
+            metadata, "maxSharedMemoryPerMultiProcessor"
+        )
 
     @staticmethod
     def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:

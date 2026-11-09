@@ -11,18 +11,14 @@ Computes metrics for Triton kernels and outputs JSON for subagent processing.
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     get_peak_specs,
     run_category_analysis,
 )
 
 
-def classify_triton_operation(op_name: str, row) -> dict:
+def classify_triton_operation(op_name: str, _row) -> dict:
     """Classify Triton kernel by inductor prefix."""
     op_lower = op_name.lower()
     if op_lower.startswith("triton_poi_"):

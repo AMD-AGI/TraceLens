@@ -79,12 +79,12 @@ def rules():
 # ---------------------------------------------------------------------------
 
 
-def test_classify_row_kernel_fusion_by_eval_index(rules):
+def test_classify_row_appendix_by_eval_index(rules):
     base, standalone, cause, fix = post.classify_row(
-        {"eval_index": "workflow_eval_13"}, rules
+        {"eval_index": "workflow_eval_12"}, rules
     )
-    assert base == "Kernel Fusion"
-    assert standalone == "Kernel Fusion Opportunities"
+    assert base == "Others"
+    assert standalone == "Appendix"
 
 
 def test_classify_row_reasoning_and_compute_by_eval_index(rules):
@@ -370,7 +370,7 @@ def _comparative_row(output_dir, diff_cell):
         f"| Computation | 80.0% | 70.0% | {diff_cell} |\n"
     )
     rows = workflow._check_exec_summary_comparative(str(output_dir), exec_section)
-    return next(r for r in rows if r["index"] == "workflow_eval_10_compute_pct")
+    return next(r for r in rows if r["index"] == "workflow_eval_9_compute_pct")
 
 
 def test_exec_summary_comparative_difference_arithmetic_pass(tmp_path):
@@ -392,7 +392,7 @@ def test_exec_summary_comparative_missing_difference_column_fails(tmp_path):
         "| Computation | 80.0% | 70.0% |\n"
     )
     rows = workflow._check_exec_summary_comparative(str(tmp_path), exec_section)
-    row = next(r for r in rows if r["index"] == "workflow_eval_10_compute_pct")
+    row = next(r for r in rows if r["index"] == "workflow_eval_9_compute_pct")
     assert row["result"] == "FAIL"
     assert "Difference column missing" in row["details"]
 
@@ -405,7 +405,7 @@ def test_exec_summary_comparative_row_not_found_fails(tmp_path):
     )
     rows = workflow._check_exec_summary_comparative(str(tmp_path), exec_section)
     # idle_pct row is absent from the table -> row-not-found FAIL.
-    idle = next(r for r in rows if r["index"] == "workflow_eval_10_idle_pct")
+    idle = next(r for r in rows if r["index"] == "workflow_eval_9_idle_pct")
     assert idle["result"] == "FAIL"
     assert "Row not found" in idle["details"]
 
@@ -850,19 +850,6 @@ def test_extract_section_returns_body_until_next_header():
     assert workflow._extract_section(content, "## Missing") is None
 
 
-def test_rebase_path_markers_and_passthrough():
-    assert (
-        workflow._rebase_path("/orig/run/category_data/x.json", "/new")
-        == "/new/category_data/x.json"
-    )
-    assert (
-        workflow._rebase_path("/orig/metadata/model_info.json", "/new")
-        == "/new/metadata/model_info.json"
-    )
-    # No known marker -> returned unchanged.
-    assert workflow._rebase_path("/somewhere/else.txt", "/new") == "/somewhere/else.txt"
-
-
 def test_marker_attrs_from_inner():
     attrs = workflow._marker_attrs_from_inner(
         "kind=p_item category=compute low=1 mid=2 high=3"
@@ -932,7 +919,7 @@ def test_check_report_template_all_headers_and_table(tmp_path):
     out = _write_report(tmp_path, text)
     rows = workflow._check_report_template(out)
     assert all(r["result"] == "PASS" for r in rows)
-    table_row = next(r for r in rows if r["index"] == "workflow_eval_9_metrics_table")
+    table_row = next(r for r in rows if r["index"] == "workflow_eval_8_metrics_table")
     assert table_row["result"] == "PASS"
 
 
@@ -940,9 +927,9 @@ def test_check_report_template_missing_header_and_table(tmp_path):
     out = _write_report(tmp_path, "## Executive Summary\nno table here\n")
     rows = workflow._check_report_template(out)
     by_index = {r["index"]: r for r in rows}
-    assert by_index["workflow_eval_9_compute"]["result"] == "FAIL"
-    assert by_index["workflow_eval_9_metrics_table"]["result"] == "FAIL"
-    assert by_index["workflow_eval_9_executive_summary"]["result"] == "PASS"
+    assert by_index["workflow_eval_8_compute"]["result"] == "FAIL"
+    assert by_index["workflow_eval_8_metrics_table"]["result"] == "FAIL"
+    assert by_index["workflow_eval_8_executive_summary"]["result"] == "PASS"
 
 
 def test_check_marker_top_ops_complete(tmp_path):
@@ -1590,27 +1577,24 @@ def test_quality_csv_alignment_string_column_numpy_normalized(tmp_path):
 def _valid_output_dir(tmp_path, comparison_scope="standalone"):
     """Build a fully-populated analysis output_dir that passes most checks."""
     out = tmp_path / "out"
-    for d in ("metadata", "category_data", "system_findings", "category_findings"):
+    for d in ("cache", "category_data", "system_findings", "category_findings"):
         (out / d).mkdir(parents=True)
 
     manifest = {
         "gpu_utilization": {"idle_time_percent": 5},
-        "categories": [
-            {
-                "name": "gemm",
-                "tier": "compute_kernel",
-                "metadata_file": "category_data/gemm_metrics.json",
-                "tree_data_file": "category_data/gemm_tree.json",
-            }
-        ],
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 1000.0},
+            "memory_gb": 192,
+        },
+        "categories": [{"name": "gemm", "tier": "compute_kernel"}],
     }
     (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
     (out / "category_data" / "gemm_metrics.json").write_text(
         json.dumps({"impact_estimates": []})
     )
-    (out / "category_data" / "gemm_tree.json").write_text("{}")
     (out / "category_findings" / "gemm_findings.md").write_text("# findings\n")
-    (out / "metadata" / "model_info.json").write_text(
+    (out / "cache" / "model_info.json").write_text(
         json.dumps(
             {
                 "model": "TestNet",
@@ -1665,12 +1649,20 @@ def _valid_output_dir(tmp_path, comparison_scope="standalone"):
 def test_workflow_check_directories_and_metadata(tmp_path):
     out = _valid_output_dir(tmp_path)
     assert workflow._check_directories(out) == ("PASS", "")
-    assert workflow._check_metadata_files(out) == ("PASS", "")
-    assert workflow._check_tree_data_files(out) == ("PASS", "")
+    assert workflow._check_platform_specs(out) == ("PASS", "")
     assert workflow._check_model_info(out) == ("PASS", "")
     assert workflow._check_findings_exist(out) == ("PASS", "")
     assert workflow._check_findings_placement(out) == ("PASS", "")
     assert workflow._check_unified_perf_report(out, "standalone") == ("PASS", "")
+
+
+def test_workflow_check_platform_specs_missing_keys(tmp_path):
+    cat_dir = tmp_path / "category_data"
+    cat_dir.mkdir()
+    (cat_dir / "category_manifest.json").write_text('{"platform_specs": {}}')
+    result, details = workflow._check_platform_specs(str(tmp_path))
+    assert result == "FAIL"
+    assert "peak_mem_bw_tbs" in details
 
 
 def test_workflow_check_directories_missing(tmp_path):
@@ -1683,8 +1675,8 @@ def test_workflow_check_directories_missing(tmp_path):
 
 def test_workflow_check_model_info_missing_keys(tmp_path):
     out = tmp_path / "out"
-    (out / "metadata").mkdir(parents=True)
-    (out / "metadata" / "model_info.json").write_text(json.dumps({"model": "X"}))
+    (out / "cache").mkdir(parents=True)
+    (out / "cache" / "model_info.json").write_text(json.dumps({"model": "X"}))
     result, details = workflow._check_model_info(str(out))
     assert result == "FAIL"
     assert "Missing keys" in details
@@ -1706,7 +1698,6 @@ def test_workflow_run_standalone_end_to_end(tmp_path):
     assert "workflow_eval_1" in indices
     assert "marker_eval_1" in indices
     assert results.is_file()
-    # The eight registry evals should all pass on a valid tree.
     assert next(r for r in rows if r["index"] == "workflow_eval_1")["result"] == "PASS"
 
 
@@ -1730,7 +1721,7 @@ def test_workflow_check_issue_template(tmp_path):
     rows = workflow._check_issue_template(out)
     # Compute P1 has Insight/Action/Impact -> PASS.
     assert any(
-        r["index"] == "workflow_eval_11_compute_P1" and r["result"] == "PASS"
+        r["index"] == "workflow_eval_10_compute_P1" and r["result"] == "PASS"
         for r in rows
     )
 
@@ -1738,7 +1729,7 @@ def test_workflow_check_issue_template(tmp_path):
 def test_workflow_check_exec_summary_standalone(tmp_path):
     out = _valid_output_dir(tmp_path)
     rows = workflow._check_exec_summary(out, "standalone")
-    compute = next(r for r in rows if r["index"] == "workflow_eval_10_compute_pct")
+    compute = next(r for r in rows if r["index"] == "workflow_eval_9_compute_pct")
     assert compute["result"] == "PASS"
 
 

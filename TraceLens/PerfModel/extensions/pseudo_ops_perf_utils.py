@@ -56,6 +56,7 @@ def get_pseudo_op_mappings():
         "sglang_profiler::moe_sorting_small__run_small_sort": moe_perf_model_extensions.SglangMoeSortingSmall,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
+        "vllm::rocm_aiter_sparse_attn_indexer": attention_perf_model_extensions.rocm_aiter_sparse_attn_indexer,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         # Prefer the annotation-aware inference extension when annotations are
         # present; it falls back to the core SDPA model for plain training rows.

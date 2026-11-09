@@ -191,7 +191,7 @@ def test_augment_picks_dominant_unmodeled_kernel_per_category(tmp_path):
     assert attn["achieved"]["ceiling"] == "memory bandwidth"
     assert kernels["fused_moe_kernel.kd"]["roofline_category"] == "MoE"
     # The JSON sidecar is written and report_notes reads it back keyed by kernel.
-    assert (tmp_path / "metadata" / "roofline_augmentation.json").is_file()
+    assert (tmp_path / "cache" / "roofline_augmentation.json").is_file()
     notes = report_notes(tmp_path)
     assert set(notes) == {"_inkling_rel_attention_kernel.kd", "fused_moe_kernel.kd"}
     assert "Analytical roofline" in notes["_inkling_rel_attention_kernel.kd"]
