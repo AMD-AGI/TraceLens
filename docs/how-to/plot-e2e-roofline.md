@@ -21,10 +21,10 @@ the whole forward) at one concurrency.
   kernels ran in the profile.
 - **Roofs** come from the GPU arch spec. The diagonal is `mem_bw_gbps`. The
   horizontals are the bfloat16, fp8, and fp4 matrix peaks, drawn when the spec
-  lists them.   Past the bfloat16 ridge the diagonal uses the linestyle of the
+  lists them. Past the bfloat16 ridge the diagonal uses the linestyle of the
   fastest peak that still applies: dash-dot for fp8, dashed for fp4. Each
-  peak also has a light line at 75% and at 50% of that peak, from where it
-  meets the bandwidth roof. A regime
+  peak also has a light copy of that roof at 75% and at 50%: the diagonal and
+  the horizontal are both scaled by that fraction, so the ridge stays put. A regime
   whose modeled FLOPs use more than one of those peaks also gets an
   end-to-end blend roof, the FLOP-weighted harmonic mean of the peaks.
 

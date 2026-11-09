@@ -52,7 +52,8 @@ _HARDWARE_ROOFS = (
     ("matrix_fp8", "fp8", "-.", "0.35"),
     ("matrix_fp4", "fp4", "--", "0.45"),
 )
-# Fractions of each compute peak, drawn as a light line in that peak's style.
+# Each compute roof is also drawn at these fractions: the bandwidth diagonal
+# and the horizontal, both scaled, so the ridge stays at the same intensity.
 _PEAK_FRACTIONS = (0.75, 0.5)
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
 _ABOVE_ROOF_COLOR = "#D62728"
@@ -910,27 +911,45 @@ def plot_e2e_roofline(
                 f"ridge {_fmt_number(ridge)} FLOP/byte"
             ),
         )
-    labeled_fraction: set[float] = set()
-    for _key, _label, peak, linestyle, _color in hardware:
-        for fraction in _PEAK_FRACTIONS:
-            level = fraction * peak
-            start = level / bandwidth
-            if start >= x_hi:
+    # A lower peak with the same bandwidth would only move the knee left
+    # along the roof already drawn. Scale the diagonal with the peak so each
+    # fraction has its own slope, in the same linestyle as the full roof.
+    for fraction in _PEAK_FRACTIONS:
+        scaled = fraction * bandwidth
+        fraction_label = f"{fraction * 100:.0f}% of peak"
+        if lowest_ridge > x_lo:
+            ax.plot(
+                [x_lo, lowest_ridge],
+                [scaled * x_lo, scaled * lowest_ridge],
+                color="0.82",
+                linewidth=0.7,
+                zorder=1,
+                label=fraction_label,
+            )
+        previous = lowest_ridge
+        for _key, _label, peak, linestyle, _color in ordered[1:]:
+            ridge = peak / bandwidth
+            if ridge <= previous:
                 continue
             ax.plot(
-                [max(start, x_lo), x_hi],
-                [level, level],
+                [previous, ridge],
+                [scaled * previous, scaled * ridge],
                 color="0.82",
                 linestyle=linestyle,
                 linewidth=0.7,
                 zorder=1,
-                label=(
-                    f"{fraction * 100:.0f}% of peak"
-                    if fraction not in labeled_fraction
-                    else None
-                ),
             )
-            labeled_fraction.add(fraction)
+            previous = ridge
+        for _key, _label, peak, linestyle, _color in hardware:
+            ridge = ridge_flops_per_byte(peak, bandwidth)
+            ax.plot(
+                [max(ridge, x_lo), x_hi],
+                [fraction * peak, fraction * peak],
+                color="0.82",
+                linestyle=linestyle,
+                linewidth=0.7,
+                zorder=1,
+            )
 
     seen_blend: set[int] = set()
     for regime in regimes:
