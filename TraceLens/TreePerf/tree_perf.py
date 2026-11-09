@@ -174,17 +174,114 @@ def event_process_thread_names(tree, event):
     }
 
 
-_AR_1STAGE_TP_RE = re.compile(r"allreduce_fusion_kernel_1stage<[^,]+,\s*[^,]+,\s*(\d+)")
+# World size (= TP group size) encoded as an integer template param on aiter's
+# tensor-parallel collective kernels: the fused 1-stage all-reduce plus the
+# all-gather / reduce-scatter boundary collectives, matched in both demangled
+# (``<dtype, ngpus>``) and Itanium-mangled (``I<dtype>Li<ngpus>E``) name forms.
+_TP_WORLD_SIZE_RES = (
+    re.compile(r"allreduce_fusion_kernel_1stage<[^,]+,\s*[^,]+,\s*(\d+)"),
+    re.compile(r"(?:allgather_vec|reduce_scatter_split_first_dim)<[^,>]+,\s*(\d+)"),
+    re.compile(r"(?:allgather_vec|reduce_scatter_split_first_dim)\w*?Li(\d+)E"),
+)
 
 
-def _detect_tp_world_size(events):
-    """Scan events for an allreduce_fusion_kernel_1stage Synthetic Op and
-    return its world_size template param (= TP), or None."""
-    for e in events:
-        m = _AR_1STAGE_TP_RE.search(e.get("name", ""))
+def _detect_tp_world_size(event):
+    """TP world size from an aiter TP collective (fused all-reduce, all-gather,
+    or reduce-scatter) kernel name on this event, or None if it is not one."""
+    name = event.get("name", "")
+    for rgx in _TP_WORLD_SIZE_RES:
+        m = rgx.search(name)
         if m:
             return int(m.group(1))
     return None
+
+
+def _detect_kv_cache_dtype(event):
+    """KV-cache storage dtype from a cache-write op on this event, or None if it
+    is not one. ``sglang::store_cache`` / ``reshape_and_cache`` both take the
+    K/V data tensors first, so the first arg's dtype is the cache dtype."""
+    name = event.get("name", "")
+    if "store_cache" not in name and "reshape_and_cache" not in name:
+        return None
+    types = (event.get("args") or {}).get("Input type") or []
+    return types[0] if types else None
+
+
+def _store_cache_kv_width(event):
+    """``sglang::store_cache`` K tensor is 2-D ``[tokens, H_KV*head_dim]`` -- the
+    KV-cache width is the second dim."""
+    dims = (event.get("args") or {}).get("Input Dims") or []
+    if dims and len(dims[0]) == 2 and isinstance(dims[0][1], int):
+        return dims[0][1]
+    return None
+
+
+def _reshape_and_cache_kv_width(event):
+    """``reshape_and_cache`` K tensor is 3-D ``[tokens, H_KV, head_dim]`` -- the
+    KV-cache width is ``H_KV * head_dim``."""
+    dims = (event.get("args") or {}).get("Input Dims") or []
+    if dims and len(dims[0]) == 3:
+        _, h_kv, head_dim = dims[0]
+        if isinstance(h_kv, int) and isinstance(head_dim, int):
+            return h_kv * head_dim
+    return None
+
+
+def _detect_kv_cache_width(event):
+    """KV-cache width (= H_KV * head_dim) from a cache-write op's K tensor, or
+    None. Each op stores K in its own layout, so extract per op."""
+    name = event.get("name", "")
+    if "store_cache" in name:
+        return _store_cache_kv_width(event)
+    if "reshape_and_cache" in name:
+        return _reshape_and_cache_kv_width(event)
+    return None
+
+
+# Global run/arch facts gathered from the event stream for perf models: an
+# ``arch`` key -> a per-event detector returning its value or None. Each value
+# is a global run property, so the first event that yields one wins. Add an
+# entry here to gather another fact in the same single pass.
+_ARCH_DETECTORS = {
+    "tp_world_size": _detect_tp_world_size,
+    "kv_cache_dtype": _detect_kv_cache_dtype,
+    "kv_cache_width": _detect_kv_cache_width,
+}
+
+
+def _detect_model_hidden(events):
+    """Model hidden width (= TOTAL query heads * head_dim) as the widest RMSNorm
+    in the trace. The residual-stream norm runs at the full hidden; narrower
+    norms (e.g. the MoE-reduced expert hidden) are smaller, so the max wins.
+    Returns None if no RMSNorm is found."""
+    best = None
+    for e in events:
+        name = e.get("name", "")
+        if "rms_norm" not in name and "rmsnorm" not in name:
+            continue
+        dims = (e.get("args") or {}).get("Input Dims") or []
+        if dims and dims[0] and len(dims[0]) >= 2 and isinstance(dims[0][-1], int):
+            width = dims[0][-1]
+            if best is None or width > best:
+                best = width
+    return best
+
+
+def _detect_run_arch(events):
+    """Single pass over ``events`` gathering the global run/arch facts in
+    ``_ARCH_DETECTORS`` (TP world size, KV-cache dtype, ...). Returns a dict of
+    the facts found; the scan stops early once every detector has a value."""
+    found = {}
+    for e in events:
+        for key, detect in _ARCH_DETECTORS.items():
+            if key in found:
+                continue
+            value = detect(e)
+            if value is not None:
+                found[key] = value
+        if len(found) == len(_ARCH_DETECTORS):
+            break
+    return found
 
 
 def _propagate_annotation_to_synthetic_ops(tree, events):
@@ -193,8 +290,10 @@ def _propagate_annotation_to_synthetic_ops(tree, events):
 
     Synthetic Ops are generated during ``collect_unified_perf_events``
     which runs after the tree's ``apply_annotation``, so they miss the
-    annotation pass.  This back-fills them using the same timestamp
-    containment logic.
+    annotation pass.  This back-fills them using timestamp containment,
+    picking the innermost enclosing annotation so a coarse outer wrapper
+    (e.g. ``scheduler.run_batch``) does not shadow the per-step iteration
+    annotation (``step[...]``) that carries the token aggregates.
     """
     annotation_events = sorted(
         (e for e in tree.events if "user_annotation" in (e.get("cat") or "")),
@@ -206,10 +305,14 @@ def _propagate_annotation_to_synthetic_ops(tree, events):
         if "annotation" in e:
             continue
         ts, dur = e.get("ts", 0), e.get("dur", 0)
+        innermost = None
         for ann in annotation_events:
-            if ann["ts"] <= ts and (ts + dur) < ann["ts"] + ann["dur"]:
-                e["annotation"] = ann.get("name")
+            if ann["ts"] > ts:
                 break
+            if (ts + dur) < ann["ts"] + ann["dur"]:
+                innermost = ann
+        if innermost is not None:
+            e["annotation"] = innermost.get("name")
 
 
 class TreePerfAnalyzer:
@@ -2000,11 +2103,15 @@ class TreePerfAnalyzer:
         if events is None:
             events = self.collect_unified_perf_events(include_nccl=include_nccl)
 
-        tp = _detect_tp_world_size(events)
-        if tp is not None:
+        arch_facts = _detect_run_arch(events)
+        model_hidden = _detect_model_hidden(events)
+        if model_hidden is not None:
+            arch_facts["model_hidden"] = model_hidden
+        if arch_facts:
             if self.arch is None:
                 self.arch = {}
-            self.arch.setdefault("tp_world_size", tp)
+            for key, value in arch_facts.items():
+                self.arch.setdefault(key, value)
 
         _propagate_annotation_to_synthetic_ops(self.tree, events)
 

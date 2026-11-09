@@ -16,7 +16,10 @@ from TraceLens.PerfModel.utils import (
     name2bpe,
     torch_dtype_map,
 )
-from TraceLens.TraceUtils.utils.annotation_utils import add_logical_batch_size
+from TraceLens.TraceUtils.utils.annotation_utils import (
+    IterationAnnotation,
+    add_logical_batch_size,
+)
 
 DTYPE_TO_BYTES = {
     "Float8_e4m3fn": 1,
@@ -1273,6 +1276,127 @@ class moe_opus_stage1_a8w4(UnfusedMoE_Up):
         if out_scale:
             total += M * topk * out_scale[-1] * scale_bpe
         return total
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
+    """
+    Performance model for mfma_moe1_silu_mul_afp4_wfp4_fp4_... (Synthetic Op).
+
+    Reference implementation:
+        sglang/srt/rocm_muse_spark/mxfp4_moe.py (run_a4w4) ->
+        aiter/ops/flydsl/moe_kernels.py (flydsl_moe_stage1)
+
+    Muse-Spark MXFP4 MoE stage-1: the grouped gate+up projection fused with the
+    SwiGLU (``silu_mul``) activation, over the top-k routed experts. afp4/wfp4 =
+    fp4 activations x fp4 weights with MX (e8m0) block scales; bf16 output.
+
+    Appears as an orphan Synthetic Op with no Input Dims, so ``num_tokens`` comes
+    from the enclosing ``step[...]`` iteration annotation and the rest are
+    Muse-Spark architecture constants:
+
+        256 routed experts, top_k 8, expert input K = 4096, moe_intermediate
+        N = 4096 (gate+up = 2N = 8192 -> SwiGLU -> N = 4096).
+
+    The experts contract a 4096-wide input -- half the 8192 model hidden --
+    which is corroborated by the fp4 activation / MX-scale / weight shapes, the
+    confirmed ``moe_intermediate_size = 4096``, and the 816B-total / 42B-active
+    parameter budget (K=4096 -> 256 experts x 60 layers x ~50M ~= 768B).
+
+    Expert parallelism: the launch is per rank and processes only the experts
+    local to it -- ``grid.x`` = local experts (e.g. 32 of 256 at EP=8) -- so it
+    covers ``local_experts / NUM_EXPERTS`` of the ``M * top_k`` routed
+    token-expert rows (uniform-routing estimate). Reading ``grid.x`` per event
+    keeps this correct across EP configs; without it the FLOPs would be ``EP x``
+    too high (and exceed the FP4 roofline).
+
+    Roofline -- FLOPs (inherited from UnfusedMoE_Up.flops_func, gated):
+        2 * local_rows * K * N * 2    where local_rows = M * top_k * grid.x / NUM_EXPERTS
+
+    Roofline -- bytes (inherited from UnfusedMoE_Up.bytes_func): fp4 activations
+    and fp4 expert weights (``grid.x`` local experts), bf16 output, plus the
+    e8m0 MX scales (one byte per MX_BLOCK fp4 values on activations and weights).
+    """
+
+    category = "MoE_unfused"
+    bwd_category = None
+
+    NUM_EXPERTS = 256
+    TOPK = 8
+    HIDDEN_DIM = 4096  # expert input (half the 8192 model hidden)
+    INTER_DIM = 4096  # moe_intermediate_size
+    MX_BLOCK = 32  # one e8m0 scale per 32 fp4 values
+    INPUT_BPE = 0.5  # fp4 activation
+    WEIGHT_BPE = 0.5  # fp4 weight
+    OUTPUT_BPE = 2  # bf16 gate_up / intermediate output
+    SCALE_BPE = 1  # e8m0 MX scale
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @classmethod
+    def get_param_details(cls, event):
+        try:
+            stats = IterationAnnotation(str(event.get("annotation"))).chunk_stats()
+            num_tokens = stats["c_sq"] + stats["g_sq"]
+            local_experts = int(((event.get("args") or {}).get("grid") or [])[0])
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        if num_tokens <= 0 or not 0 < local_experts <= cls.NUM_EXPERTS:
+            return {"_no_perf": True}
+        # EP-sharded per-rank launch: grid.x = experts local to this rank, so it
+        # processes local_experts/NUM_EXPERTS of the M*top_k routed token-expert
+        # rows. Fold routing into the row count (one expert read per row).
+        local_rows = num_tokens * cls.TOPK * local_experts // cls.NUM_EXPERTS
+        return {
+            "num_tokens": local_rows,
+            "hidden_dim": cls.HIDDEN_DIM,
+            "inter_dim": cls.INTER_DIM,
+            "num_experts": local_experts,
+            "topk": 1,
+            "gated": True,
+        }
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return self.flops_func(
+            p["num_tokens"], p["hidden_dim"], p["inter_dim"], p["topk"], p["gated"]
+        )
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        total = self.bytes_func(
+            p["num_tokens"],
+            p["hidden_dim"],
+            p["inter_dim"],
+            p["num_experts"],
+            p["topk"],
+            p["gated"],
+            self.INPUT_BPE,
+            self.WEIGHT_BPE,
+            self.OUTPUT_BPE,
+        )
+        if total is None:
+            return None
+        # e8m0 MX scales: one byte per MX_BLOCK fp4 values on activations + weights.
+        M, K, N = p["num_tokens"], p["hidden_dim"], p["inter_dim"]
+        E, topk = p["num_experts"], p["topk"]
+        e_active = E * (1 - ((E - topk) / E) ** M)
+        scale_elems = (M * K + e_active * 2 * K * N) / self.MX_BLOCK
+        return total + scale_elems * self.SCALE_BPE
 
     def get_compute_precision(self):
         if self.param_details.get("_no_perf"):
