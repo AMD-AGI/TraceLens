@@ -20,9 +20,11 @@ the whole forward) at one concurrency.
 - **Y** is achieved TFLOP/s: those FLOPs divided by the time the matching
   kernels ran in the profile.
 - **Roofs** come from the GPU arch spec. The diagonal is `mem_bw_gbps`. The
-  horizontals are the bfloat16 and fp4 matrix peaks. A regime whose modeled
-  FLOPs use more than one of those peaks also gets an end-to-end blend roof,
-  the FLOP-weighted harmonic mean of the peaks.
+  horizontals are the bfloat16, fp8, and fp4 matrix peaks, drawn when the spec
+  lists them. Past the bfloat16 ridge the diagonal uses the linestyle of the
+  fastest peak that still applies: dash-dot for fp8, dashed for fp4. A regime
+  whose modeled FLOPs use more than one of those peaks also gets an
+  end-to-end blend roof, the FLOP-weighted harmonic mean of the peaks.
 
 A projection alone puts every point on a roof. A profile of a GPU-graph replay
 has kernel time and no `Input Dims`, so those kernels have no `GFLOPS`. The

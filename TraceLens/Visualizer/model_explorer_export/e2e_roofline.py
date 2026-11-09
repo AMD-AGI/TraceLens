@@ -44,8 +44,14 @@ _COMM_MARKERS = (
     "nccl",
     "rccl",
 )
-# The two compute roofs the plot always draws when the arch lists them.
-_HARDWARE_ROOFS = (("matrix_bf16", "bfloat16"), ("matrix_fp4", "fp4"))
+# Compute roofs the plot draws when the arch lists them, lowest peak first.
+# The linestyle is also used for the part of the bandwidth diagonal that only
+# that peak still governs.
+_HARDWARE_ROOFS = (
+    ("matrix_bf16", "bfloat16", "-", "0.25"),
+    ("matrix_fp8", "fp8", "-.", "0.35"),
+    ("matrix_fp4", "fp4", "--", "0.45"),
+)
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
 _ABOVE_ROOF_COLOR = "#D62728"
 
@@ -442,7 +448,7 @@ def roof_tflops(arithmetic_intensity: float, arch: dict[str, Any]) -> float | No
     arch lists no peak.
     """
     peaks = arch.get("max_achievable_tflops") or {}
-    values = [float(peaks[key]) for key, _label in _HARDWARE_ROOFS if peaks.get(key)]
+    values = [float(peaks[key]) for key, *_rest in _HARDWARE_ROOFS if peaks.get(key)]
     if not values:
         return None
     return min(bandwidth_tb_s(arch) * arithmetic_intensity, max(values))
@@ -840,16 +846,16 @@ def plot_e2e_roofline(
     bandwidth = bandwidth_tb_s(arch)
     peaks = arch.get("max_achievable_tflops") or {}
     hardware = [
-        (key, label, float(peaks[key]))
-        for key, label in _HARDWARE_ROOFS
+        (key, label, float(peaks[key]), linestyle, color)
+        for key, label, linestyle, color in _HARDWARE_ROOFS
         if peaks.get(key)
     ]
     if not hardware:
-        raise ValueError("arch spec has no bfloat16 or fp4 matrix peak")
+        raise ValueError("arch spec has no bfloat16, fp8, or fp4 matrix peak")
 
     intensities = [point.arithmetic_intensity for point in points] or [1.0]
     rates = [point.achieved_tflops for point in points] or [1.0]
-    peak_values = [peak for _key, _label, peak in hardware]
+    peak_values = [peak for _key, _label, peak, _style, _color in hardware]
     x_lo = min(intensities) / 5.0
     x_hi = max(
         max(intensities) * 5.0, max(peak / bandwidth for peak in peak_values) * 5.0
@@ -864,37 +870,38 @@ def plot_e2e_roofline(
     ax.set_ylim(y_lo, y_hi)
     ax.grid(True, which="both", linestyle="--", linewidth=0.4, color="0.85")
 
-    # The bandwidth diagonal is shared by every peak below the bf16 ridge. Above
-    # that ridge only the fp4 peak governs, so that stretch is drawn dashed like
-    # the fp4 roof it belongs to.
-    top_ridge = max(peak_values) / bandwidth
-    bf16_peak = next((peak for key, _l, peak in hardware if key == "matrix_bf16"), None)
-    split = None
-    if bf16_peak is not None and bf16_peak / bandwidth < top_ridge:
-        split = bf16_peak / bandwidth
-    solid_end = split if split is not None else top_ridge
+    # Below the lowest ridge every peak shares the bandwidth diagonal, drawn
+    # solid. Each faster peak then owns the diagonal up to its own ridge, in
+    # that peak's linestyle: dash-dot for fp8, dashed for fp4.
+    ordered = sorted(hardware, key=lambda item: item[2])
+    lowest_ridge = ordered[0][2] / bandwidth
     ax.plot(
-        [x_lo, solid_end],
-        [bandwidth * x_lo, bandwidth * solid_end],
+        [x_lo, lowest_ridge],
+        [bandwidth * x_lo, bandwidth * lowest_ridge],
         color="0.45",
         linewidth=1.6,
         label=f"Bandwidth roof, {_fmt_number(bandwidth)} TB/s",
     )
-    if split is not None:
+    previous = lowest_ridge
+    for _key, _label, peak, linestyle, color in ordered[1:]:
+        ridge = peak / bandwidth
+        if ridge <= previous:
+            continue
         ax.plot(
-            [split, top_ridge],
-            [bandwidth * split, bandwidth * top_ridge],
-            color="0.45",
-            linestyle="--",
+            [previous, ridge],
+            [bandwidth * previous, bandwidth * ridge],
+            color=color,
+            linestyle=linestyle,
             linewidth=1.6,
         )
-    for key, label, peak in hardware:
+        previous = ridge
+    for _key, label, peak, linestyle, color in hardware:
         ridge = ridge_flops_per_byte(peak, bandwidth)
         ax.plot(
             [ridge, x_hi],
             [peak, peak],
-            color="0.25" if key == "matrix_bf16" else "0.45",
-            linestyle="-" if key == "matrix_bf16" else "--",
+            color=color,
+            linestyle=linestyle,
             linewidth=1.3,
             label=(
                 f"{label} roof, {_fmt_number(peak)} TFLOP/s, "
