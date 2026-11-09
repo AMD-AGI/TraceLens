@@ -530,6 +530,48 @@ def resolve_perf_model_class(name):
     return None
 
 
+# Wrappers a modeling file puts around the callable the trace records.
+# ``flash_attn_func`` and ``_flash_attn_forward`` are the same kernel.
+_CALL_SUFFIXES = ("_function", "_func", "_forward", "_fwd", "_impl", "_kernel")
+
+
+def _call_stem(name: str) -> str:
+    stem = name.rsplit(".", 1)[-1].rsplit("::", 1)[-1].lstrip("_")
+    for suffix in _CALL_SUFFIXES:
+        if stem.endswith(suffix) and len(stem) - len(suffix) >= 3:
+            return stem[: -len(suffix)].rstrip("_")
+    return stem
+
+
+def source_call_has_perf_model(name: str) -> bool:
+    """True when a modeling-source kernel is an op the collector stops on.
+
+    ``collect_unified_perf_events`` stops on the cpu_op whose trace name has a
+    perf model and keeps that op's kernels on one row. A source call is that
+    op when its name is the trace name, or the same callable recorded after
+    ``::``. ``aten::`` primitives stay out of this check: the graph already
+    keeps those as leaves, and a helper that happens to be named ``add`` is
+    not that primitive.
+    """
+    if not isinstance(name, str) or not name or name.startswith("@"):
+        return False
+    tail = name.rsplit(".", 1)[-1]
+    for candidate in (name, tail):
+        if candidate.startswith("aten::"):
+            continue
+        if op_to_perf_model_class_map.get(candidate) is not None:
+            return True
+    stem = _call_stem(tail)
+    if len(stem) < 3:
+        return False
+    for key in op_to_perf_model_class_map:
+        if key.startswith("aten::"):
+            continue
+        if _call_stem(key) == stem:
+            return True
+    return False
+
+
 def _match_triton_compiled(name):
     if name.startswith(("triton_poi_", "triton_red_", "triton_per_")):
         from TraceLens.PerfModel.triton_compiled_perf_model import (

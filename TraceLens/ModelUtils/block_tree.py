@@ -1026,6 +1026,27 @@ def _ops_feeding_only_discarded_slots(
     return discarded_upstream - live
 
 
+def _roofline_kernel_is_modeled(
+    basic_ops: BasicOpFilter, details: list[str] | None
+) -> bool:
+    """True when roofline expansion should stop on this kernel call.
+
+    The perf collector stops on the cpu_op that has a perf model and keeps
+    every kernel of that op on one row. Opening the call would draw the ops
+    inside the kernel, which is past that stop.
+    """
+    if not basic_ops.stops_at_grouped_moe:
+        return False
+    name = kernel_step_label(list(details or [])) or kernel_name_from_step_details(
+        list(details or [])
+    )
+    if not name or name == DISPATCHED_KERNEL:
+        return False
+    from TraceLens.PerfModel.torch_op_mapping import source_call_has_perf_model
+
+    return source_call_has_perf_model(name)
+
+
 def _expanded_free_function_node(
     call_attr: str,
     cls: ClassStructure,
@@ -1035,6 +1056,7 @@ def _expanded_free_function_node(
     label: str,
     fallback_class_name: str,
     fallback_param_inputs: list[str] | None,
+    stop_at_modeled: bool = False,
 ) -> BlockNode:
     """Render a traced free-function call, expanded into its body when known.
 
@@ -1059,6 +1081,25 @@ def _expanded_free_function_node(
     fn_return_slots, fn_return_order, fn_primary_return = (
         method_returns if method_returns else ({}, [], None)
     )
+    # A kernel with a perf model is the row the collector keeps. Its body is
+    # the same work, drawn a second time, so the roofline stop leaves the call
+    # as the one leaf.
+    source_name = _synthetic_call_function_name(call_attr) or call_attr
+    if stop_at_modeled and source_name:
+        from TraceLens.PerfModel.torch_op_mapping import source_call_has_perf_model
+
+        if source_call_has_perf_model(source_name):
+            return _leaf_node(
+                attr_name=call_attr,
+                class_name=fallback_class_name,
+                forward_order=child_order,
+                details=list(child_details),
+                label=source_name,
+                basic=False,
+                output_names=output_names,
+                param_inputs=fallback_param_inputs,
+                runs_on_host=runs_on_host,
+            )
     fn_primary_output_step = (
         fn_return_slots.get(fn_primary_return)
         if fn_primary_return and fn_return_slots
@@ -1537,6 +1578,7 @@ def _kernel_pipeline_block_nodes(
     details: list[str],
     attention_inputs: dict[str, list[str]] | None = None,
     parent_class_name: str | None = None,
+    stop_at_modeled_kernels: bool = False,
 ) -> tuple[BlockNode, BlockNode | None]:
     """Expand a multi-input kernel attention step into pipeline and output sibling nodes."""
     from TraceLens.ModelUtils.kernel_pipeline import (
@@ -1545,7 +1587,9 @@ def _kernel_pipeline_block_nodes(
     )
 
     kernel = kernel_name_from_step_details(details) or "kernel"
-    pipeline_steps, output_steps = introspect_kernel_pipeline(details)
+    pipeline_steps, output_steps = introspect_kernel_pipeline(
+        details, stop_at_modeled_kernels=stop_at_modeled_kernels
+    )
     inputs = dict(attention_inputs or {})
     tensor_ports = kernel_kwarg_ports(details)
     ordered_labels = tensor_input_label_order(details, inputs)
@@ -2447,11 +2491,14 @@ def build_block_node(
 
     if attr_name == SYNTHETIC_ATTENTION:
         step_details = list(details or [])
-        if is_kernel_pipeline_step(step_details):
+        if is_kernel_pipeline_step(step_details) and not _roofline_kernel_is_modeled(
+            basic_ops, step_details
+        ):
             pipeline_node, _output_node = _kernel_pipeline_block_nodes(
                 forward_order=forward_order,
                 details=step_details,
                 parent_class_name=class_name,
+                stop_at_modeled_kernels=basic_ops.stops_at_grouped_moe,
             )
             return pipeline_node
         return _leaf_node(
@@ -2614,6 +2661,7 @@ def build_block_node(
             if (
                 call_attr in cls.multi_op_methods
                 and kernel_name_from_step_details(child_details) == DISPATCHED_KERNEL
+                and not _roofline_kernel_is_modeled(basic_ops, child_details)
             ):
                 # The implementation the model dispatched to is a Python
                 # function like any other: expand its body and let the ops it
@@ -2632,15 +2680,19 @@ def build_block_node(
                     fallback_param_inputs=list(
                         cls.forward_step_boundary_params.get(call_attr, ())
                     ),
+                    stop_at_modeled=basic_ops.stops_at_grouped_moe,
                 )
                 child_nodes.append(expanded)
                 continue
-            if is_kernel_pipeline_step(child_details, cls.attention_inputs):
+            if is_kernel_pipeline_step(
+                child_details, cls.attention_inputs
+            ) and not _roofline_kernel_is_modeled(basic_ops, child_details):
                 pipeline_node, output_node = _kernel_pipeline_block_nodes(
                     forward_order=child_order,
                     details=child_details,
                     attention_inputs=cls.attention_inputs,
                     parent_class_name=class_name,
+                    stop_at_modeled_kernels=basic_ops.stops_at_grouped_moe,
                 )
                 child_nodes.append(pipeline_node)
                 if output_node is not None:
@@ -2747,6 +2799,7 @@ def build_block_node(
                 fallback_param_inputs=list(
                     cls.forward_step_boundary_params.get(call_attr, ())
                 ),
+                stop_at_modeled=basic_ops.stops_at_grouped_moe,
             )
             child_nodes.append(expanded)
             continue
@@ -2760,6 +2813,7 @@ def build_block_node(
                 label=function_display_label(call_attr),
                 fallback_class_name="FunctionOp",
                 fallback_param_inputs=None,
+                stop_at_modeled=basic_ops.stops_at_grouped_moe,
             )
             child_nodes.append(expanded)
             continue
@@ -3045,6 +3099,7 @@ def build_block_node(
                                 label=name,
                                 fallback_class_name="MethodOp",
                                 fallback_param_inputs=None,
+                                stop_at_modeled=basic_ops.stops_at_grouped_moe,
                             )
                         )
                 # A method with no tensor op of its own at all (``forward_core``

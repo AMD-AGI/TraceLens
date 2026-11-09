@@ -115,9 +115,10 @@ def add_roofline_op_boundary_argument(
         action=argparse.BooleanOptionalAction,
         default=default,
         help=(
-            "Stop expanding a module once it matches an op with a TraceLens.PerfModel "
-            "formula (Linear, Conv, RMSNorm/LayerNorm/GroupNorm/BatchNorm/InstanceNorm, "
-            "Softmax), instead of continuing into its internal primitive steps "
+            "Stop expanding at an op with a TraceLens.PerfModel formula: a Linear, "
+            "Conv, norm, or Softmax, a grouped-expert forward, and a kernel call "
+            "that names a perf-model op. That kernel is the row the perf collector "
+            "keeps, so its body is not opened "
             f"(default: {'on' if default else 'off'})."
         ),
     )

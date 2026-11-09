@@ -17,6 +17,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
     op_to_perf_model_class_map,
     register_op_categories,
     registered_op_for_kernel,
+    source_call_has_perf_model,
 )
 
 
@@ -201,6 +202,25 @@ def test_sheet_category_to_op_names_keeps_legacy_sheet_view():
     assert "aten::convolution_backward" in sheet_category_to_op_names["CONV"]
     assert "FlashAttnFuncBackward" not in sheet_category_to_op_names["SDPA"]
     assert "TokenPermuteMaskMap" not in sheet_category_to_op_names["MoE_comm"]
+
+
+@pytest.mark.parametrize(
+    "name,modeled",
+    [
+        ("flash_attn_func", True),
+        ("_flash_attn_forward", True),
+        ("moe_sorting_fwd", True),
+        ("aiter::rms_norm", True),
+        ("FlashAttnFunc", True),
+        ("chunk_kda", False),
+        ("add", False),
+        ("aten::add", False),
+        ("", False),
+    ],
+)
+def test_source_call_has_perf_model_matches_the_collector_stop(name, modeled):
+    """A source kernel stops where the collector stops."""
+    assert source_call_has_perf_model(name) is modeled
 
 
 def test_register_op_category_extension_updates_registry_only():

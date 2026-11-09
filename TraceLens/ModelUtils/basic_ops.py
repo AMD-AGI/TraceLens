@@ -170,7 +170,9 @@ class BasicOpFilter:
         op; expanding further (into the mean/rsqrt/mul chain behind an RMSNorm, say)
         only adds primitives the projection has no better formula for anyway.
         A routed-expert forward is the same stop: GroupedGemm costs the loop, so
-        the loop is not opened into one GEMM per expert.
+        the loop is not opened into one GEMM per expert. A kernel call that names
+        a perf-model op is that stop too: the collector keeps the call as one row,
+        so the call is not opened into the ops inside the kernel.
         """
         patterns = list(DEFAULT_BASIC_OP_PATTERNS)
         for pattern in ROOFLINE_LEAF_PATTERNS:

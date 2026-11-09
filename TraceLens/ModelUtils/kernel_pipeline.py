@@ -1444,8 +1444,16 @@ def introspect_kernel_op_substeps(
     owning_module: str,
     *,
     parent_attr: str,
+    stop_at_modeled_kernels: bool = False,
 ) -> tuple[KernelPipelineStep, ...]:
     """Expand one kernel call into inline sub-operations discovered from its AST."""
+    if stop_at_modeled_kernels:
+        # This stage is the cpu_op the collector stops on. The Triton body is
+        # that same op, not a second row.
+        from TraceLens.PerfModel.torch_op_mapping import source_call_has_perf_model
+
+        if source_call_has_perf_model(call_name):
+            return ()
     if not _should_expand_kernel_op(call_name):
         return ()
 
@@ -1497,6 +1505,8 @@ def _attach_kernel_op_expansions(
     steps: list[KernelPipelineStep],
     imports: dict[str, _ImportTarget],
     owning_module: str,
+    *,
+    stop_at_modeled_kernels: bool = False,
 ) -> list[KernelPipelineStep]:
     """Attach AST-derived sub-operation trees to expandable pipeline steps."""
     expanded: list[KernelPipelineStep] = []
@@ -1506,6 +1516,7 @@ def _attach_kernel_op_expansions(
             imports,
             owning_module,
             parent_attr=step.attr_name,
+            stop_at_modeled_kernels=stop_at_modeled_kernels,
         )
         if children:
             expanded.append(
@@ -1530,6 +1541,8 @@ def _attach_kernel_op_expansions(
 
 def introspect_kernel_pipeline(
     details: list[str],
+    *,
+    stop_at_modeled_kernels: bool = False,
 ) -> tuple[list[KernelPipelineStep], list[KernelPipelineStep]]:
     """Return ``(pipeline_steps, output_steps)`` from modeling call details and kernel code."""
     flags = parse_kernel_call_flags(details)
@@ -1599,10 +1612,16 @@ def introspect_kernel_pipeline(
                 )
                 owning_module = resolved[2]
         pipeline_steps = _attach_kernel_op_expansions(
-            pipeline_steps, merged_imports, owning_module
+            pipeline_steps,
+            merged_imports,
+            owning_module,
+            stop_at_modeled_kernels=stop_at_modeled_kernels,
         )
         output_steps = _attach_kernel_op_expansions(
-            output_steps, merged_imports, owning_module
+            output_steps,
+            merged_imports,
+            owning_module,
+            stop_at_modeled_kernels=stop_at_modeled_kernels,
         )
 
     return pipeline_steps, output_steps
