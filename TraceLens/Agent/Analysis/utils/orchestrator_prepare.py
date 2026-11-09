@@ -92,11 +92,11 @@ CATEGORY_SKILL_MAP = {
     "gaussiansplat": "generic-op-analyzer",
     "ssm_fwd": "generic-op-analyzer",
     "ssm_bwd": "generic-op-analyzer",
+    "indexedcopy": "generic-op-analyzer",
     "customcollective": "generic-op-analyzer",
     "record_param_comms": "generic-op-analyzer",
     "moe_comm_fwd": "generic-op-analyzer",
     "moe_comm_bwd": "generic-op-analyzer",
-    "datamovement": "generic-op-analyzer",
 }
 
 
