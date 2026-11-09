@@ -28,10 +28,12 @@ from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from .graph_schedule import (
     align_kernels,
     covering_annotation,
+    group_stopped_ops,
     invocation_from_annotation,
     launch_arguments,
     launches_from_architecture,
     num_cus_from_trace,
+    report_row_name,
     schedule_deepseek_v4,
 )
 from ..PerfModel.torch_op_mapping import (
@@ -1894,8 +1896,12 @@ class TreePerfAnalyzer:
         _GPU = frozenset(c.value for c in TraceEventUtils.GpuEventCategories)
 
         def _emit_synthetic_kernels(prefix_name, kernels, cpu_op):
-            """Emit one row per kernel. A graph launch with a model schedule
-            pairs each kernel with the launch at that position."""
+            """Emit one row per CPU op the collector would keep.
+
+            A graph launch with a model schedule pairs each kernel with the
+            launch at that position, then folds the kernels that belong to
+            one stopped op onto that op's row.
+            """
             ordered = sorted(kernels, key=_by_time_then_uid)
             launches = (
                 self._launches_for(cpu_op) if self.graph_model is not None else None
@@ -1905,34 +1911,45 @@ class TreePerfAnalyzer:
                 if launches
                 else [None] * len(ordered)
             )
-            for kernel, launch in zip(ordered, assigned):
-                _create_synthetic_op(prefix_name, kernel, cpu_op, launch)
+            for owner_index, members in group_stopped_ops(assigned):
+                owned = [ordered[index] for index in members]
+                _create_synthetic_op(
+                    prefix_name, owned, cpu_op, assigned[owner_index]
+                )
 
-        def _create_synthetic_op(prefix_name, kernel, cpu_op, launch=None):
-            """Append one row owning `kernel`, inheriting shape args from
-            `cpu_op` (the enclosing cpu_op, or the launcher when there is no
-            cpu_op on the path). A kernel that identifies a registered op is
-            named as that op; otherwise the row is
-            '<prefix_name>-><kernel> (Synthetic Op)'."""
+        def _create_synthetic_op(prefix_name, kernels, cpu_op, launch=None):
+            """Append one row owning `kernels`.
+
+            The row inherits shape args from `cpu_op` (the enclosing cpu_op,
+            or the launcher when there is no cpu_op on the path). A scheduled
+            launch names the row as the CPU op the collector stops on, and
+            every kernel of that op stays on the row. An unmatched kernel
+            that identifies a registered op is named as that op; otherwise
+            the row is '<prefix_name>-><kernel> (Synthetic Op)'."""
             nonlocal next_uid
-            if not include_nccl and TraceEventUtils.is_communication_string(
-                kernel.get("name", "")
-            ):
+            kept = [
+                kernel
+                for kernel in kernels
+                if include_nccl
+                or not TraceEventUtils.is_communication_string(kernel.get("name", ""))
+            ]
+            if not kept:
                 return
+            kernel = kept[0]
             synthetic_op = dict(cpu_op)
             synthetic_op["UID"] = next_uid
             next_uid += 1
-            # Name the row as the registered op the kernel identifies, which is
-            # the CPU op a capture merge would have reparented this kernel onto.
-            # An unmatched kernel stays a synthetic launch row.
+            # Name the row as the CPU op a capture merge would have stopped
+            # on. An unmatched kernel stays a synthetic launch row.
             registered = registered_op_for_kernel(
                 kernel.get("name", ""), OP_CATEGORY_REGISTRY
             )
             if launch is not None:
-                # The kernel is this launch of the model forward. The row is
-                # that op, with the dims, dtypes and strides a captured call
-                # of it would carry. Copy args so the launch event keeps its own.
-                synthetic_op["name"] = launch.op_name
+                # The kernels are this launch of the model forward. The row is
+                # the op the collector keeps, with the dims, dtypes and strides
+                # a captured call of it would carry. Copy args so the launch
+                # event keeps its own.
+                synthetic_op["name"] = report_row_name(launch, kernel.get("name", ""))
                 synthetic_op["args"] = dict(cpu_op.get("args") or {})
                 synthetic_op["args"].update(launch_arguments(launch))
                 annotation = self._annotation_for(cpu_op)
@@ -1942,21 +1959,23 @@ class TreePerfAnalyzer:
                 synthetic_op["name"] = registered
             else:
                 synthetic_op["name"] = f"{prefix_name}->{kernel['name']} (Synthetic Op)"
-            synthetic_op["gpu_events"] = [kernel["UID"]]
-            # The copy shares the launch's kernel list. This row owns one
-            # kernel, the same way a capture merge attaches one replay kernel
-            # to one CPU op. Categorizing from the launch's first kernel would
-            # label every kernel in the graph with that first kernel's category.
+            synthetic_op["gpu_events"] = [item["UID"] for item in kept]
+            # The copy shares the launch's kernel list. This row owns the
+            # kernels of one stopped op, the same way a capture merge keeps
+            # them on that CPU op. Categorizing from the launch's first kernel
+            # would label every kernel in the graph with that first kernel's
+            # category.
             synthetic_op.pop("op category", None)
-            # The row's subtree is its own kernel. Perf-modeled rows time their
+            # The row's subtree is its kernels. Perf-modeled rows time their
             # subtree, so an empty children list reads as zero kernel time.
-            synthetic_op["children"] = [kernel["UID"]]
+            synthetic_op["children"] = [item["UID"] for item in kept]
             synthetic_op["kernel_details"] = [
                 {
-                    "name": kernel.get("name", ""),
-                    "dur": kernel.get("dur"),
-                    "stream": (kernel.get("args") or {}).get("stream"),
+                    "name": item.get("name", ""),
+                    "dur": item.get("dur"),
+                    "stream": (item.get("args") or {}).get("stream"),
                 }
+                for item in kept
             ]
             # Seed an empty base; build_df's per-kernel suffix walk reconstructs
             # the full root->kernel chain (the fresh UID never matches, so it

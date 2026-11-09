@@ -945,6 +945,50 @@ def test_a_dropped_tuned_row_gives_way_to_the_atomic_flydsl_fallback():
     assert _moe_dispatch(model, 16384) == (64, "flydsl_moe2_atomic")
 
 
+def test_kernels_of_one_stopped_op_share_its_row():
+    """The collector keeps a reduce, a schedule pair, and index casts on the parent."""
+    from TraceLens.TreePerf.graph_schedule import (
+        Launch,
+        group_stopped_ops,
+        report_row_name,
+    )
+
+    gemm = Launch("aiter::gemm_a8w8_blockscale_bpreshuffle", "gemm_a8w8", ((4,),), 0)
+    reduce = Launch("aiter::gemm_a8w8_blockscale_bpreshuffle", "gemm_red", ((4,),), 0)
+    cast = Launch(
+        "aten::copy_",
+        "copy",
+        ((4, 128), (4, 128), ()),
+        None,
+        ("long int", "int", "Scalar"),
+    )
+    index = Launch("aten::index", "t_index", ((8, 16), ()), None)
+    plain = Launch(
+        "aten::copy_",
+        "copy",
+        ((4, 128), (4, 128), ()),
+        None,
+        ("int", "int", "Scalar"),
+    )
+    stage2 = Launch("pseudo_op::moe_flydsl_stage2", "moe2", ((4,),), 1)
+    reduction = Launch("pseudo_op::moe_flydsl_stage2", "moe_red", ((4,),), 1)
+    assigned = [gemm, reduce, cast, index, plain, stage2, reduction]
+    assert group_stopped_ops(assigned) == [
+        (0, [0, 1]),
+        (3, [2, 3]),
+        (4, [4]),
+        (5, [5, 6]),
+    ]
+    assert report_row_name(gemm, "gemm_kernel") == gemm.op_name
+    assert report_row_name(index, "index_kernel") == "aten::index"
+    quant = Launch("aiter::dynamic_per_group_scaled_quant", "quant", ((4, 8),), 0)
+    assert report_row_name(quant, "ignored") == "aiter::dynamic_per_token_scaled_quant"
+    stage = Launch("aiter::mla_decode_stage2", "attn_asm", ((4,),), 0)
+    assert report_row_name(stage, "_fwd_kernel_stage2_asm") == (
+        "sglang_profiler::runtime_decode_fp8_2buff->_fwd_kernel_stage2_asm (Synthetic Op)"
+    )
+
+
 def test_a_scan_with_a_state_kernel_and_a_gemm_with_a_split_reduction_align():
     from TraceLens.TreePerf.graph_schedule import Launch, align_kernels
 

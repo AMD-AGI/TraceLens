@@ -387,6 +387,115 @@ def align_kernels(
     return assigned
 
 
+# A kernel the collector keeps on the CPU op launched just before it.
+# The split-K reduce is part of the GEMM, the MoE reduction is part of
+# stage 2, and the decode schedule's two kernels are one profiler op.
+_FOLLOWED_BY = {
+    "gemm_a8w8": "gemm_red",
+    "moe2": "moe_red",
+    "sched_prep": "cta_info",
+}
+
+# The name ``collect_unified_perf_events`` stops on. The schedule's op name
+# is the perf-model identity. The replay report names the row the way a
+# capture merge names it: the CPU op with a perf model, or the synthetic
+# ``parent->kernel`` row when the collector does not stop. ``{kernel}`` is
+# the device kernel's own name.
+_COLLECTOR_ROW = {
+    "quant": "aiter::dynamic_per_token_scaled_quant",
+    "wo_quant": "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8",
+    "mx_sort": "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded",
+    "attn_asm": "sglang_profiler::runtime_decode_fp8_2buff->{kernel} (Synthetic Op)",
+    "topk_main": "sglang_profiler::topk_topk_transform_paged_v2",
+    "rope": "sglang_profiler::deepseek_v4_rope_apply_rotary_emb_triton",
+    "moe_sort": "aiter::fused_moe_->{kernel} (Synthetic Op)",
+    "qk_rope": "aiter::_fused_qk_norm_rope_group_quant_kernel",
+    "c4": "sglang_profiler::compress_compress_forward",
+    "c128": "sglang_profiler::compress_compress_forward",
+    "shared": "sglang_profiler::topk__post_process_topk_ids",
+    "flashmla": "sglang_profiler::compress_compress_norm_rope_store",
+    "rms_quant": "hipModuleLaunchKernel->{kernel} (Synthetic Op)",
+    "indexer": "sglang_profiler::flydsl_flydsl_pa_mqa_logits_fp4",
+    "rope_had": "aiter::_rope_rotate_activation_fp4quant",
+    "norm_rope_had": "aiter::rmsnorm_rope_rotate_activation_fp4quant_kvcache",
+    "fill_tail": "sglang_profiler::runtime_fill_compress_tail",
+    "hc_head": "sglang_profiler::mhc_head_fused_hc_head",
+    "init_meta": (
+        "sglang_profiler::metadata_kernel__init_compressed_attn_metadata_triton"
+    ),
+    "sched_prep": "sglang_profiler::fp4_indexer_schedule_hip_build_decode_schedule",
+    "cta_info": "sglang_profiler::fp4_indexer_schedule_hip_build_decode_schedule",
+    "hash_topk": "sglang_profiler::triton_hash_topk_hash_topk_triton",
+    "allgather": "sglang::reg_all_gather_into_tensor",
+    "plan": "sglang_profiler::compressor_v2_create_paged_compressor_data",
+    "pad_pt": "sglang_profiler::fp4_indexer_schedule_hip_pad_page_table",
+    "paged_idx": "sglang_profiler::paged_decode_indices_write_v4_paged_decode_indices",
+}
+
+
+def _index_cast(launch: Launch | None) -> bool:
+    """An int64 ``aten::copy_`` the index op launches to cast its indices."""
+    return (
+        launch is not None
+        and launch.key == "copy"
+        and bool(launch.input_types)
+        and launch.input_types[0] == "long int"
+    )
+
+
+def report_row_name(launch: Launch, kernel_name: str) -> str:
+    """The unified-table name for ``launch``.
+
+    This is the CPU op the collector stops on. A kernel the collector emits
+    as a synthetic row uses that kernel's name in the ``->`` suffix.
+    """
+    template = _COLLECTOR_ROW.get(launch.key)
+    if template is None:
+        return launch.op_name
+    return template.replace("{kernel}", kernel_name)
+
+
+def group_stopped_ops(
+    assigned: list[Launch | None],
+) -> list[tuple[int, list[int]]]:
+    """Group kernels the collector keeps on one CPU op.
+
+    Each entry is ``(owner, members)``. The owner is the launch whose name
+    and argument shapes the row carries. Members are indexes into
+    ``assigned``, in launch order.
+    """
+    count = len(assigned)
+    owner = list(range(count))
+    for index, launch in enumerate(assigned):
+        if launch is None or launch.key != "t_index":
+            continue
+        cursor = index - 1
+        while cursor >= 0 and _index_cast(assigned[cursor]) and owner[cursor] == cursor:
+            owner[cursor] = index
+            cursor -= 1
+    for index in range(1, count):
+        previous = assigned[index - 1]
+        launch = assigned[index]
+        if previous is None or launch is None:
+            continue
+        if _FOLLOWED_BY.get(previous.key) == launch.key:
+            owner[index] = owner[index - 1]
+    groups: list[tuple[int, list[int]]] = []
+    current: int | None = None
+    members: list[int] = []
+    for index in range(count):
+        if current is None or owner[index] != current:
+            if members:
+                groups.append((current, members))
+            current = owner[index]
+            members = [index]
+        else:
+            members.append(index)
+    if members and current is not None:
+        groups.append((current, members))
+    return groups
+
+
 def _follows(name: str, launch: Launch, previous: Launch | None) -> bool:
     """A kernel that finishes the GEMM launched just before it.
 
