@@ -864,14 +864,30 @@ def plot_e2e_roofline(
     ax.set_ylim(y_lo, y_hi)
     ax.grid(True, which="both", linestyle="--", linewidth=0.4, color="0.85")
 
-    xs_line = [x_lo, max(peak_values) / bandwidth]
+    # The bandwidth diagonal is shared by every peak below the bf16 ridge. Above
+    # that ridge only the fp4 peak governs, so that stretch is drawn dashed like
+    # the fp4 roof it belongs to.
+    top_ridge = max(peak_values) / bandwidth
+    bf16_peak = next((peak for key, _l, peak in hardware if key == "matrix_bf16"), None)
+    split = None
+    if bf16_peak is not None and bf16_peak / bandwidth < top_ridge:
+        split = bf16_peak / bandwidth
+    solid_end = split if split is not None else top_ridge
     ax.plot(
-        xs_line,
-        [bandwidth * x for x in xs_line],
+        [x_lo, solid_end],
+        [bandwidth * x_lo, bandwidth * solid_end],
         color="0.45",
         linewidth=1.6,
         label=f"Bandwidth roof, {_fmt_number(bandwidth)} TB/s",
     )
+    if split is not None:
+        ax.plot(
+            [split, top_ridge],
+            [bandwidth * split, bandwidth * top_ridge],
+            color="0.45",
+            linestyle="--",
+            linewidth=1.6,
+        )
     for key, label, peak in hardware:
         ridge = ridge_flops_per_byte(peak, bandwidth)
         ax.plot(
