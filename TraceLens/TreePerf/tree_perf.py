@@ -1913,9 +1913,7 @@ class TreePerfAnalyzer:
             )
             for owner_index, members in group_stopped_ops(assigned):
                 owned = [ordered[index] for index in members]
-                _create_synthetic_op(
-                    prefix_name, owned, cpu_op, assigned[owner_index]
-                )
+                _create_synthetic_op(prefix_name, owned, cpu_op, assigned[owner_index])
 
         def _create_synthetic_op(prefix_name, kernels, cpu_op, launch=None):
             """Append one row owning `kernels`.
