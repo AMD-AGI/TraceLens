@@ -52,6 +52,8 @@ _HARDWARE_ROOFS = (
     ("matrix_fp8", "fp8", "-.", "0.35"),
     ("matrix_fp4", "fp4", "--", "0.45"),
 )
+# Fractions of each compute peak, drawn as a light line in that peak's style.
+_PEAK_FRACTIONS = (0.75, 0.5)
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
 _ABOVE_ROOF_COLOR = "#D62728"
 
@@ -908,6 +910,27 @@ def plot_e2e_roofline(
                 f"ridge {_fmt_number(ridge)} FLOP/byte"
             ),
         )
+    labeled_fraction: set[float] = set()
+    for _key, _label, peak, linestyle, _color in hardware:
+        for fraction in _PEAK_FRACTIONS:
+            level = fraction * peak
+            start = level / bandwidth
+            if start >= x_hi:
+                continue
+            ax.plot(
+                [max(start, x_lo), x_hi],
+                [level, level],
+                color="0.82",
+                linestyle=linestyle,
+                linewidth=0.7,
+                zorder=1,
+                label=(
+                    f"{fraction * 100:.0f}% of peak"
+                    if fraction not in labeled_fraction
+                    else None
+                ),
+            )
+            labeled_fraction.add(fraction)
 
     seen_blend: set[int] = set()
     for regime in regimes:
