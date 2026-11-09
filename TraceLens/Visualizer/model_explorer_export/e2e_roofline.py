@@ -54,7 +54,9 @@ _HARDWARE_ROOFS = (
 )
 # Each compute roof is also drawn at these fractions: the bandwidth diagonal
 # and the horizontal, both scaled, so the ridge stays at the same intensity.
-_PEAK_FRACTIONS = (0.75, 0.5)
+# Each fraction has a gray between the full roofs (darkest, 0.45 and below)
+# and the paler gridlines, so 75% reads darker than 50%.
+_PEAK_FRACTIONS = ((0.75, "0.62"), (0.5, "0.86"))
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
 _ABOVE_ROOF_COLOR = "#D62728"
 
@@ -914,14 +916,14 @@ def plot_e2e_roofline(
     # A lower peak with the same bandwidth would only move the knee left
     # along the roof already drawn. Scale the diagonal with the peak so each
     # fraction has its own slope, in the same linestyle as the full roof.
-    for fraction in _PEAK_FRACTIONS:
+    for fraction, gray in _PEAK_FRACTIONS:
         scaled = fraction * bandwidth
         fraction_label = f"{fraction * 100:.0f}% of peak"
         if lowest_ridge > x_lo:
             ax.plot(
                 [x_lo, lowest_ridge],
                 [scaled * x_lo, scaled * lowest_ridge],
-                color="0.82",
+                color=gray,
                 linewidth=0.7,
                 zorder=1,
                 label=fraction_label,
@@ -934,7 +936,7 @@ def plot_e2e_roofline(
             ax.plot(
                 [previous, ridge],
                 [scaled * previous, scaled * ridge],
-                color="0.82",
+                color=gray,
                 linestyle=linestyle,
                 linewidth=0.7,
                 zorder=1,
@@ -945,7 +947,7 @@ def plot_e2e_roofline(
             ax.plot(
                 [max(ridge, x_lo), x_hi],
                 [fraction * peak, fraction * peak],
-                color="0.82",
+                color=gray,
                 linestyle=linestyle,
                 linewidth=0.7,
                 zorder=1,
