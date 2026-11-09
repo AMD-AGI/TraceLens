@@ -6989,6 +6989,42 @@ class TestSyntheticOpPerfModels:
         facts = _detect_run_arch([{"name": self.AR_NAME}, fp8])
         assert facts == {"tp_world_size": 4, "kv_cache_dtype": "unsigned char"}
 
+    def test_detect_kv_cache_width(self):
+        from TraceLens.TreePerf.tree_perf import _detect_kv_cache_width
+
+        # store_cache: 2-D [tokens, H_KV*head_dim]
+        store = {
+            "name": "sglang::store_cache",
+            "args": {"Input Dims": [[16384, 128], [16384, 128], [42928, 128]]},
+        }
+        # reshape_and_cache: 3-D [tokens, H_KV, head_dim]
+        mqa = {
+            "name": "reshape_and_cache_flash",
+            "args": {"Input Dims": [[16384, 1, 128], [16384, 1, 128]]},
+        }
+        gqa = {"name": "reshape_and_cache", "args": {"Input Dims": [[2048, 8, 128]]}}
+        assert _detect_kv_cache_width(store) == 128  # 2-D second dim
+        assert _detect_kv_cache_width(mqa) == 128  # 3-D: 1 * 128
+        assert _detect_kv_cache_width(gqa) == 1024  # 3-D: 8 * 128
+        assert _detect_kv_cache_width({"name": "store_cache", "args": {}}) is None
+        assert (
+            _detect_kv_cache_width(
+                {"name": "aten::mm", "args": {"Input Dims": [[2, 2]]}}
+            )
+            is None
+        )
+
+    def test_detect_model_hidden(self):
+        from TraceLens.TreePerf.tree_perf import _detect_model_hidden
+
+        events = [
+            {"name": "aiter::rmsnorm", "args": {"Input Dims": [[2048, 4096]]}},
+            {"name": "aten::_fused_rms_norm", "args": {"Input Dims": [[16384, 8192]]}},
+            {"name": "aten::mm", "args": {"Input Dims": [[8, 999999]]}},  # ignored
+        ]
+        assert _detect_model_hidden(events) == 8192  # widest RMSNorm wins
+        assert _detect_model_hidden([{"name": "aten::mm", "args": {}}]) is None
+
     def test_propagate_annotation(self):
         from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops
 

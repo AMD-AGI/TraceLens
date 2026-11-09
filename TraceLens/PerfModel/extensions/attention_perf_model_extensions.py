@@ -1439,22 +1439,36 @@ class muse_extend_synthetic(InferenceAttention):
     Expected annotation:
         step[EXTEND bs=.. c_sq=.. c_sqsq=.. c_sqsk=.. c_sk=..]
 
-    Architecture (Muse-Spark-Open-816B-A42B, derived from trace side-channels):
-        hidden 8192 = 64 query heads x 128 head_dim; MQA with 1 KV head.
-        Per rank H_Q = 64 / TP (RoPE moves (H_Q + H_KV) * head_dim per token;
-        sglang::store_cache writes H_KV * head_dim = 128 fp8 bytes per token).
+    Geometry (derived from trace side-channels, not hardcoded):
+        The FLOPs/bytes depend only on two products -- the per-rank query width
+        ``H_Q*head_dim`` and the KV width ``H_KV*head_dim`` -- and both are read
+        from the trace:
+            H_Q*head_dim = model_hidden / TP   (widest RMSNorm, divided by TP)
+            H_KV*head_dim = KV-cache width     (sglang::store_cache K tensor)
+        ``HEAD_DIM`` is only a nominal splitter: it factors those widths into
+        (heads, head_dim) for honest ``param_details`` and the base formulas, but
+        the roofline numbers depend solely on the derived widths, so a variant
+        with a different head count / KV-head count is handled correctly. MQA
+        KV cache; not MLA.
+
+    Appears as an orphan Synthetic Op with no Input Dims; the token aggregates
+    come from the enclosing ``step[EXTEND ...]`` iteration annotation (context
+    terms only; generation terms are zero).
+
+    Expected annotation:
+        step[EXTEND bs=.. c_sq=.. c_sqsq=.. c_sqsk=.. c_sk=..]
 
     Roofline -- FLOPs (inherited from InferenceAttention.flops_func):
         H_Q * (d_h_qk + d_h_v) * (2 * c_sqsk - c_sqsq)
 
     Roofline -- bytes moved (inherited from InferenceAttention.bytes_func):
-        Q / output / current-chunk K,V in bf16; cached K,V in fp8 KV cache.
+        Q / output / current-chunk K,V in bf16; cached K,V in the KV-cache dtype.
 
     Notes:
-        H_Q needs the TP world size and the byte cost needs the KV-cache dtype;
-        both are gathered from the event stream by ``_detect_run_arch`` into
-        ``arch`` (TP from an aiter collective, KV dtype from the cache-write op).
-        If either is undetectable the model returns no perf estimate rather than
+        TP, KV-cache dtype, KV-cache width, and model hidden are all gathered
+        from the event stream into ``arch`` (see tree_perf). If any is
+        undetectable -- or ``HEAD_DIM`` does not divide the derived widths (an
+        unexpected variant) -- the model returns no perf estimate rather than
         guess. SWA layers are modeled as full causal (upper bound for windowed
         layers, exact for full layers).
     """
@@ -1462,9 +1476,7 @@ class muse_extend_synthetic(InferenceAttention):
     category = "InferenceAttention"
     bwd_category = None
 
-    TOTAL_Q_HEADS = 64
-    HEAD_DIM = 128
-    H_KV = 1
+    HEAD_DIM = 128  # nominal splitter only; does not affect FLOPs/bytes
 
     def __init__(self, event, arch=None):
         self.event = event
@@ -1483,22 +1495,27 @@ class muse_extend_synthetic(InferenceAttention):
         try:
             annotation = str(event.get("annotation"))
             stats = InferenceAttention._parse_chunk_stats(annotation)
-            # H_Q needs TP; the byte cost needs the KV-cache dtype. Both are
-            # detected from the trace by _detect_run_arch; if either is unknown
-            # the model emits no estimate rather than guess.
-            tp = (arch or {}).get("tp_world_size")
-            dtype_KV = (arch or {}).get("kv_cache_dtype")
-            if not tp or not dtype_KV:
+            arch = arch or {}
+            tp = arch.get("tp_world_size")
+            dtype_KV = arch.get("kv_cache_dtype")
+            model_hidden = arch.get("model_hidden")
+            kv_width = arch.get("kv_cache_width")
+            if not tp or not dtype_KV or not model_hidden or not kv_width:
                 return InferenceAttention.no_perf_param_details()
-            H_Q = max(1, cls.TOTAL_Q_HEADS // tp)
+            # FLOPs/bytes need the per-rank Q width (H_Q*head_dim) and the KV
+            # width (H_KV*head_dim); HEAD_DIM only splits them back into heads.
+            q_width = model_hidden // tp
+            d = cls.HEAD_DIM
+            if q_width % d or kv_width % d:
+                return InferenceAttention.no_perf_param_details()
             return {
                 "B": 1,
                 "N_Q": stats["c_sq"],
-                "H_Q": H_Q,
+                "H_Q": q_width // d,
                 "N_KV": stats["c_sk"],
-                "H_KV": cls.H_KV,
-                "d_h_qk": cls.HEAD_DIM,
-                "d_h_v": cls.HEAD_DIM,
+                "H_KV": kv_width // d,
+                "d_h_qk": d,
+                "d_h_v": d,
                 "dropout": 0.0,
                 "causal": True,
                 "flash_impl": True,
