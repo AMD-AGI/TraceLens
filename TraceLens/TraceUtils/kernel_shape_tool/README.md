@@ -54,7 +54,7 @@ takes several seconds on a large server. On SGLang it runs once per scheduler
 process, at the end of scheduler init (from `Scheduler.get_init_info()`, just
 before the scheduler reports ready), so it adds to startup instead of stalling
 the first profiler window. Each window's `enable()` then only rebinds
-references (about 0.1 s). On other servers, or if the hook can't be installed,
+references (well under a second). On other servers, or if the hook can't be installed,
 the first `enable()` runs discovery itself; the result is cached for later
 windows either way. `kernel_shape_profiler.prepare()` is the same step for
 callers that want to trigger it themselves.
