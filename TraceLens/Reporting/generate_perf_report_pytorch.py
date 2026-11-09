@@ -23,6 +23,8 @@ from TraceLens import (
     TraceDiff,
     TreePerfAnalyzer,
 )
+from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
+from TraceLens.IdleTimeAnalyser.classify import find_gpu_pid
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -1046,8 +1048,6 @@ def generate_perf_report_pytorch(
 
     # Built-in idle time analysis
     if enable_idle_analysis:
-        from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
-
         idle_thresholds = IdleThresholds()
         if idle_launch_latency_us is not None:
             idle_thresholds = IdleThresholds(launch_latency_us=idle_launch_latency_us)
@@ -1062,8 +1062,6 @@ def generate_perf_report_pytorch(
         print(f"Added idle time analysis sheets: {list(idle_dfs.keys())}")
 
         if enable_augmented_trace:
-            from TraceLens.IdleTimeAnalyser.classify import find_gpu_pid
-
             raw_data = DataLoader.load_data(profile_json_path)
             gpu_pid = find_gpu_pid(raw_data["traceEvents"])
             aug_events = idle_analyser.get_augmented_events(gpu_pid)
