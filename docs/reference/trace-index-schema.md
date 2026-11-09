@@ -109,6 +109,13 @@ The following table lists the columns in `unified_perf_rows`.
 | `has_perf_model` | INTEGER | `1` when the row has a perf model, else `0`. |
 | `overlap_pct` | REAL | Overlap percentage from the report. |
 | `gpu_kernel_pct` | REAL | Operation share from the report's `Percentage (%)` column. |
+| `pct_roofline_max` | REAL | Maximum `Pct Roofline` across instances of this op. |
+| `pct_roofline_mean` | REAL | Mean `Pct Roofline` across instances of this op. |
+| `pct_roofline_median` | REAL | Median `Pct Roofline` across instances of this op. |
+| `pct_roofline_min` | REAL | Minimum `Pct Roofline` across instances of this op. |
+| `pct_roofline_std` | REAL | Standard deviation of `Pct Roofline`. |
+| `roofline_bound` | TEXT | `COMPUTE_BOUND` or `MEMORY_BOUND` from the report's `Roofline Bound` column. |
+| `roofline_time_us` | REAL | Theoretical roofline time in microseconds (`Roofline Time (µs)_first`). |
 | `perf_params_json` | TEXT | Parsed `perf_params` as JSON. |
 | `kernel_details_json` | TEXT | Parsed `kernel_details_summary` as JSON. |
 | `raw_row_json` | TEXT | Full source CSV row as JSON. |
