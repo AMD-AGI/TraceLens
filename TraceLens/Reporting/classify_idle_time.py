@@ -20,15 +20,12 @@ To add the same sheets to the main perf report, use
 """
 
 import argparse
-import gzip
-import json
 from pathlib import Path
 
 import pandas as pd
 
-from TraceLens import DataLoader, TreePerfAnalyzer
+from TraceLens import TreePerfAnalyzer
 from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
-from TraceLens.IdleTimeAnalyser.classify import find_gpu_pid
 from TraceLens.IdleTimeAnalyser.report import build_idle_dataframes, write_idle_excel
 
 
@@ -76,7 +73,7 @@ def _print_summary(df_overview):
         )
 
 
-def main(argv=None):
+def _build_parser():
     parser = argparse.ArgumentParser(
         description="Classify GPU idle time intervals in a PyTorch trace"
     )
@@ -108,8 +105,11 @@ def main(argv=None):
         default=None,
         help="Output path for augmented trace (default: <input>_idle_classified.json.gz)",
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def main(argv=None):
+    args = _build_parser().parse_args(argv)
     trace_path = args.trace
     output_path = args.output or _default_output_path(trace_path)
 
@@ -134,19 +134,9 @@ def main(argv=None):
     write_idle_excel(dfs, excel_path)
     print(f"\nWrote Excel report: {excel_path}")
 
-    print("Loading raw trace for augmentation...")
-    raw_data = DataLoader.load_data(trace_path)
-    gpu_pid = find_gpu_pid(raw_data["traceEvents"])
-    print(f"GPU pid: {gpu_pid}")
-
-    annotation_events = analyser.get_augmented_events(gpu_pid)
-    raw_data["traceEvents"].extend(annotation_events)
-
-    print(f"Added {len(annotation_events)} annotation events to trace.")
     print(f"Writing augmented trace to: {output_path}")
-    with gzip.open(output_path, "wt") as f:
-        json.dump(raw_data, f)
-
+    n_events = analyser.write_augmented_trace(trace_path, output_path)
+    print(f"Added {n_events} annotation events to trace.")
     print("Done.")
 
 

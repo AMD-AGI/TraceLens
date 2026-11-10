@@ -9,7 +9,8 @@ idle_intervals (each gap). ``group_id`` links idle_groups rows to their idle_int
 """
 
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
+from typing import Optional
 
 from .classify import PARTS, IdleThresholds, full_label, strip_addresses
 
@@ -188,141 +189,197 @@ def build_idle_dataframes(
     ``threshold``. Macro, label, sub-label and drain rows carry one ``*_ms`` column per
     part, so each row shows what its gaps were made of.
     """
+    th = thresholds or IdleThresholds()
+    totals = _IdleTotals(classified, gpu_busy_time_us)
+    df_groups, group_of = _groups_df(totals)
+    return {
+        "idle_overview": _overview_df(totals, th),
+        "idle_groups": df_groups,
+        "idle_intervals": _intervals_df(totals.macro, group_of, include_call_stack),
+    }
+
+
+@dataclass
+class _IdleTotals:
+    """Macro and noise gaps with the totals that every sheet's percentages use."""
+
+    classified: list
+    busy_us: Optional[float]
+    macro: list = field(init=False)
+    noise: list = field(init=False)
+    noise_us: float = field(init=False)
+    all_idle_us: float = field(init=False)
+    span_us: Optional[float] = field(init=False)
+
+    def __post_init__(self):
+        self.macro = [r for r in self.classified if not r["label_noise"]]
+        self.noise = [r for r in self.classified if r["label_noise"]]
+        macro_us = sum(r["duration"] for r in self.macro)
+        self.noise_us = sum(r["duration"] for r in self.noise)
+        self.all_idle_us = macro_us + self.noise_us
+        self.span_us = (
+            self.busy_us + self.all_idle_us if self.busy_us is not None else None
+        )
+
+    def pct(self, us):
+        return 100.0 * us / self.all_idle_us if self.all_idle_us else 0.0
+
+    def pct_trace(self, us):
+        return 100.0 * us / self.span_us if self.span_us else None
+
+
+def _by_duration(d):
+    return sorted(d.items(), key=lambda x: -sum(r["duration"] for r in x[1]))
+
+
+def _ms_where(items, cond):
+    return sum(r["duration"] for r in items if cond(r)) / 1e3
+
+
+def _part_ms(items):
+    return {
+        col: sum(r[p] for r in items) / 1e3 for p, col in zip(PARTS, PART_MS_COLUMNS)
+    }
+
+
+def _matrix_row(totals, section, name, items):
+    """Overview row: size, drain split and parts of a set of gaps."""
+    us = sum(r["duration"] for r in items)
+    return {
+        "section": section,
+        "row": name,
+        "gaps": len(items),
+        "total_ms": us / 1e3,
+        "pct_of_idle": totals.pct(us),
+        "pct_of_trace": totals.pct_trace(us),
+        "sync_drain_ms": _ms_where(items, lambda r: r["drain_type"] == "sync_drain"),
+        "starved_ms": _ms_where(items, lambda r: r["drain_type"] == "starved"),
+        "stream_switch_ms": _ms_where(items, lambda r: r["stream_switch"]),
+        **_part_ms(items),
+    }
+
+
+def _total_rows(totals, th):
+    rows = []
+    if totals.span_us:
+        rows.append(
+            {
+                "section": "total",
+                "row": "gpu_utilization_pct",
+                "pct_of_trace": 100.0 * totals.busy_us / totals.span_us,
+            }
+        )
+    for row, us, n in (
+        ("ALL idle", totals.all_idle_us, len(totals.classified)),
+        (f"noise (< {th.noise_us:g} us)", totals.noise_us, len(totals.noise)),
+    ):
+        rows.append(
+            {
+                "section": "total",
+                "row": row,
+                "gaps": n,
+                "total_ms": us / 1e3,
+                "pct_of_idle": totals.pct(us),
+                "pct_of_trace": totals.pct_trace(us),
+            }
+        )
+    macro_name = f"macro (>= {th.noise_us:g} us)"
+    rows.append(_matrix_row(totals, "total", macro_name, totals.macro))
+    return rows
+
+
+def _breakdown_rows(totals):
+    """Label rows, each followed by its sub-label rows, then drain rows."""
+    by_label, by_sub, by_drain = defaultdict(list), defaultdict(list), {}
+    for r in totals.macro:
+        by_label[r["label"]].append(r)
+        if r["sub_label"]:
+            by_sub[full_label(r)].append(r)
+        by_drain.setdefault(drain_row_name(r), []).append(r)
+    rows = []
+    for name, items in _by_duration(by_label):
+        rows.append(_matrix_row(totals, "label", name, items))
+        rows += [
+            _matrix_row(totals, "sub_label", sub, sub_items)
+            for sub, sub_items in _by_duration(by_sub)
+            if sub.startswith(name + "/")
+        ]
+    for name, items in _by_duration(by_drain):
+        row = _matrix_row(totals, "drain", name, items)
+        if name != "starved":
+            row["sync_gain_ms"] = sum(r["sync_gain_us"] or 0.0 for r in items) / 1e3
+        rows.append(row)
+    return rows
+
+
+def _overview_df(totals, th):
     import pandas as pd
 
-    th = thresholds or IdleThresholds()
-    macro = [r for r in classified if not r["label_noise"]]
-    noise = [r for r in classified if r["label_noise"]]
-    macro_us = sum(r["duration"] for r in macro)
-    noise_us = sum(r["duration"] for r in noise)
-    all_idle_us = macro_us + noise_us
-    span_us = gpu_busy_time_us + all_idle_us if gpu_busy_time_us is not None else None
+    rows = []
+    if totals.classified:
+        rows = _total_rows(totals, th) + _breakdown_rows(totals)
+        rows += [
+            {"section": "threshold", "row": f"{name} = {value}"}
+            for name, value in asdict(th).items()
+        ]
+    df = pd.DataFrame(rows, columns=OVERVIEW_COLUMNS)
+    df["gaps"] = df["gaps"].astype("Int64")
+    return df
 
-    def pct(us):
-        return 100.0 * us / all_idle_us if all_idle_us else 0.0
 
-    def pct_trace(us):
-        return 100.0 * us / span_us if span_us else None
+def _group_row(totals, gid, label, drain, key, items, top_keys):
+    group_us = sum(r["duration"] for r in items)
+    top, _, sub = label.partition("/")
+    top_runtime, runtime_us = _top_with_time(_runtime_of(r) for r in items)
+    if runtime_us < TOP_RUNTIME_MIN_PCT / 100.0 * group_us:
+        top_runtime = None
+    return {
+        "group_id": gid,
+        "label": top,
+        "sub_label": sub or None,
+        "drain_type": drain,
+        "covering_op": key,
+        "top_runtime": top_runtime,
+        "top_launch": _top_by_time(
+            (r["following_launch_name"], r["duration"]) for r in items
+        ),
+        "top_next_gpu_op": _top_by_time(
+            (r["following_gpu_event"], r["duration"]) for r in items
+        ),
+        **_duration_stats(items),
+        "pct_of_idle": totals.pct(group_us),
+        "cumulative_pct": None,
+        "worst_idle_id": max(items, key=lambda r: r["duration"]).get("idle_id"),
+        "folded_top_ops": top_keys,
+        **_part_ms(items),
+    }
 
-    def by_duration(d):
-        return sorted(d.items(), key=lambda x: -sum(r["duration"] for r in x[1]))
 
-    # --- idle_overview ---
-    overview = []
-    if classified:
-        if span_us:
-            overview.append(
-                {
-                    "section": "total",
-                    "row": "gpu_utilization_pct",
-                    "pct_of_trace": 100.0 * gpu_busy_time_us / span_us,
-                }
-            )
-        for row, us, n in (
-            ("ALL idle", all_idle_us, len(classified)),
-            (f"noise (< {th.noise_us:g} us)", noise_us, len(noise)),
-        ):
-            overview.append(
-                {
-                    "section": "total",
-                    "row": row,
-                    "gaps": n,
-                    "total_ms": us / 1e3,
-                    "pct_of_idle": pct(us),
-                    "pct_of_trace": pct_trace(us),
-                }
-            )
+def _groups_df(totals):
+    """idle_groups, and a map from each macro gap (by id) to its group_id."""
+    import pandas as pd
 
-        def ms_where(items, cond):
-            return sum(r["duration"] for r in items if cond(r)) / 1e3
-
-        def matrix_row(section, name, items):
-            us = sum(r["duration"] for r in items)
-            row = {
-                "section": section,
-                "row": name,
-                "gaps": len(items),
-                "total_ms": us / 1e3,
-                "pct_of_idle": pct(us),
-                "pct_of_trace": pct_trace(us),
-                "sync_drain_ms": ms_where(
-                    items, lambda r: r["drain_type"] == "sync_drain"
-                ),
-                "starved_ms": ms_where(items, lambda r: r["drain_type"] == "starved"),
-                "stream_switch_ms": ms_where(items, lambda r: r["stream_switch"]),
-            }
-            for p, col in zip(PARTS, PART_MS_COLUMNS):
-                row[col] = sum(r[p] for r in items) / 1e3
-            return row
-
-        overview.append(matrix_row("total", f"macro (>= {th.noise_us:g} us)", macro))
-        by_label, by_sub, by_drain = defaultdict(list), defaultdict(list), {}
-        for r in macro:
-            by_label[r["label"]].append(r)
-            if r["sub_label"]:
-                by_sub[full_label(r)].append(r)
-            by_drain.setdefault(drain_row_name(r), []).append(r)
-        for name, items in by_duration(by_label):
-            overview.append(matrix_row("label", name, items))
-            for sub, sub_items in by_duration(by_sub):
-                if sub.startswith(name + "/"):
-                    overview.append(matrix_row("sub_label", sub, sub_items))
-        for name, items in by_duration(by_drain):
-            row = matrix_row("drain", name, items)
-            if name != "starved":
-                row["sync_gain_ms"] = sum(r["sync_gain_us"] or 0.0 for r in items) / 1e3
-            overview.append(row)
-        for name, value in asdict(th).items():
-            overview.append({"section": "threshold", "row": f"{name} = {value}"})
-    df_overview = pd.DataFrame(overview, columns=OVERVIEW_COLUMNS)
-    df_overview["gaps"] = df_overview["gaps"].astype("Int64")
-
-    # --- idle_groups ---
     groups = defaultdict(list)
-    for r in macro:
+    for r in totals.macro:
         groups[(full_label(r), r["drain_type"], group_key(r))].append(r)
-    group_rows, group_of = [], {}
+    rows, group_of = [], {}
     cumulative = 0.0
     for gid, ((label, drain, key), items, top_keys) in enumerate(
-        _fold_groups(groups, pct)
+        _fold_groups(groups, totals.pct)
     ):
-        stats = _duration_stats(items)
-        group_us = sum(r["duration"] for r in items)
-        group_pct = pct(group_us)
-        cumulative += group_pct
-        top, _, sub = label.partition("/")
-        top_runtime, runtime_us = _top_with_time(_runtime_of(r) for r in items)
-        if runtime_us < TOP_RUNTIME_MIN_PCT / 100.0 * group_us:
-            top_runtime = None
-        row = {
-            "group_id": gid,
-            "label": top,
-            "sub_label": sub or None,
-            "drain_type": drain,
-            "covering_op": key,
-            "top_runtime": top_runtime,
-            "top_launch": _top_by_time(
-                (r["following_launch_name"], r["duration"]) for r in items
-            ),
-            "top_next_gpu_op": _top_by_time(
-                (r["following_gpu_event"], r["duration"]) for r in items
-            ),
-            **stats,
-            "pct_of_idle": group_pct,
-            "cumulative_pct": cumulative,
-            "worst_idle_id": max(items, key=lambda r: r["duration"]).get("idle_id"),
-            "folded_top_ops": top_keys,
-        }
-        for p, col in zip(PARTS, PART_MS_COLUMNS):
-            row[col] = sum(r[p] for r in items) / 1e3
-        group_rows.append(row)
-        for r in items:
-            group_of[id(r)] = gid
-    df_groups = pd.DataFrame(group_rows)
+        row = _group_row(totals, gid, label, drain, key, items, top_keys)
+        cumulative += row["pct_of_idle"]
+        row["cumulative_pct"] = cumulative
+        rows.append(row)
+        group_of.update((id(r), gid) for r in items)
+    return pd.DataFrame(rows), group_of
 
-    # --- idle_intervals ---
+
+def _intervals_df(macro, group_of, include_call_stack):
+    import pandas as pd
+
     columns = INTERVAL_COLUMNS + (CALL_STACK_COLUMNS if include_call_stack else [])
-    interval_rows = []
+    rows = []
     for r in sorted(macro, key=lambda r: -r["duration"]):
         row = {c: r.get(c) for c in columns}
         row.update(
@@ -331,14 +388,8 @@ def build_idle_dataframes(
             end_us=r["end"],
             duration_us=r["duration"],
         )
-        interval_rows.append(row)
-    df_intervals = pd.DataFrame(interval_rows, columns=columns)
-
-    return {
-        "idle_overview": df_overview,
-        "idle_groups": df_groups,
-        "idle_intervals": df_intervals,
-    }
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def write_idle_excel(dict_dfs, output_path):

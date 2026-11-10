@@ -4,14 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import gzip
+import json
 from dataclasses import replace
 
 from TraceLens.TreePerf.gpu_event_analyser import GPUEventAnalyser
+from TraceLens.util import DataLoader
 
 from .classify import (
     IdleThresholds,
     assign_idle_ids,
     classify_idle_intervals,
+    find_gpu_pid,
     gpu_busy_time_us,
     make_annotation_events,
 )
@@ -89,3 +93,15 @@ class IdleTimeAnalyser:
     def get_augmented_events(self, gpu_pid):
         """Return Chrome trace annotation events for Perfetto visualization."""
         return make_annotation_events(self.classify(), gpu_pid)
+
+    def write_augmented_trace(self, trace_path, output_path):
+        """Write the trace at trace_path plus the annotation events to output_path (gzip).
+
+        Returns the number of annotation events added.
+        """
+        raw_data = DataLoader.load_data(trace_path)
+        events = self.get_augmented_events(find_gpu_pid(raw_data["traceEvents"]))
+        raw_data["traceEvents"].extend(events)
+        with gzip.open(output_path, "wt") as f:
+            json.dump(raw_data, f)
+        return len(events)

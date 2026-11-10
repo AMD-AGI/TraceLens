@@ -293,6 +293,16 @@ def exclusive_split(
     names = defaultdict(float)
     if w1 <= w0:
         return parts, names, None
+    window = _window_events(thread_index, thread_key, w0, w1)
+    candidates, events = _clipped_candidates(window, w0, w1, exclude_uid)
+    best = _sweep_exclusive(candidates, events, w0, w1, parts, names)
+    if return_event or best is None:
+        return parts, names, best
+    return parts, names, best.get("name", "?")
+
+
+def _window_events(thread_index, thread_key, w0, w1):
+    """Events on one thread open at w0 or starting in [w0, w1)."""
     evs, starts, parent = thread_index.get(thread_key, ([], [], []))
     lo = bisect.bisect_left(starts, w0)
     hi = bisect.bisect_left(starts, w1)
@@ -302,28 +312,50 @@ def exclusive_split(
         if _t_end(evs[j]) > w0:
             enclosing.append(evs[j])
         j = parent[j]
+    return enclosing + evs[lo:hi]
+
+
+def _part_of(event):
+    cat = event.get("cat")
+    if cat in RUNTIME_CATS:
+        return "cpu_runtime_us"
+    if cat == "user_annotation":
+        return "cpu_untraced_us"
+    return "cpu_op_us"
+
+
+def _clipped_candidates(window, w0, w1, exclude_uid):
+    """Events clipped to [w0, w1), sorted for the sweep, and the events they index."""
     candidates, events = [], []
-    for e in enclosing + evs[lo:hi]:
+    for e in window:
         if exclude_uid is not None and e.get("UID") == exclude_uid:
             continue
         s, en = max(e["ts"], w0), min(_t_end(e), w1)
         if en <= s:
             continue
-        cat = e.get("cat")
-        if cat in RUNTIME_CATS:
-            part = "cpu_runtime_us"
-        elif cat == "user_annotation":
-            part = "cpu_untraced_us"
-        else:
-            part = "cpu_op_us"
         # Same clipped start: outer (later clipped end, then longer) first so children
         # stack on top of their parents.
         candidates.append(
-            (s, -en, -(_t_end(e) - e["ts"]), part, e.get("name", "?"), len(events))
+            (
+                s,
+                -en,
+                -(_t_end(e) - e["ts"]),
+                _part_of(e),
+                e.get("name", "?"),
+                len(events),
+            )
         )
         events.append(e)
     candidates.sort()
+    return candidates, events
 
+
+def _sweep_exclusive(candidates, events, w0, w1, parts, names):
+    """Credit each instant of [w0, w1) to the innermost open event in parts and names.
+
+    Returns the covering CPU op: the deepest spanning at least half the window, else the
+    one with the most time in it, else None.
+    """
     stack = []  # [end, part, name]
     cur = w0
 
@@ -358,10 +390,7 @@ def exclusive_split(
         credit(stack[-1][0])
         stack.pop()
     credit(w1)
-    best = covering or largest
-    if return_event or best is None:
-        return parts, names, best
-    return parts, names, best.get("name", "?")
+    return covering or largest
 
 
 def _top_name(names, part):
@@ -504,13 +533,9 @@ def classify_idle_intervals(
         return []
 
     gaps = extract_idle_intervals(gpu_events)
-    runtime = build_sorted_cpu_events(tree)
-    rt_index = OverlapIndex(runtime)
+    rt_index = OverlapIndex(build_sorted_cpu_events(tree))
     thread_index = build_thread_index(tree)
-    gpu_sorted = build_gpu_kernel_map(tree)
-    gpu_starts = [e["ts"] for e in gpu_sorted]
-    gpu_by_end = sorted(gpu_sorted, key=_t_end)
-    gpu_ends = [_t_end(e) for e in gpu_by_end]
+    timeline = _GpuTimeline(build_gpu_kernel_map(tree))
 
     # Pass 1: bounding events and launch for every macro gap.
     results, pending = [], []
@@ -520,81 +545,104 @@ def classify_idle_intervals(
         if rec["duration"] < th.noise_us:
             rec["label_noise"] = True
             continue
-
-        i = bisect.bisect_right(gpu_ends, gap_start + 0.5) - 1
-        preceding = (
-            gpu_by_end[i] if i >= 0 and abs(gpu_ends[i] - gap_start) < 2.0 else None
-        )
-        j = bisect.bisect_left(gpu_starts, gap_end - 0.001)
-        following = None
-        for k in range(max(0, j - 1), min(len(gpu_sorted), j + 3)):
-            if abs(gpu_sorted[k]["ts"] - gap_end) < 1.0:
-                following = gpu_sorted[k]
-                break
+        i, preceding, following = timeline.bounding_events(gap_start, gap_end)
         launch = (
             find_launch_for_kernel(tree, following) if following is not None else None
         )
-
-        if preceding is not None:
-            rec["preceding_gpu_event"] = preceding.get("name")
-            rec["preceding_stream"] = stream_of(preceding)
-            rec["preceding_gpu_uid"] = preceding.get("UID")
-        if following is not None:
-            rec["following_gpu_event"] = following.get("name")
-            rec["following_stream"] = stream_of(following)
-            rec["following_gpu_uid"] = following.get("UID")
-        if preceding is not None and following is not None:
-            rec["stream_switch"] = rec["preceding_stream"] != rec["following_stream"]
-        if launch is not None:
-            launch_end = _t_end(launch)
-            rec["following_launch_name"] = launch.get("name")
-            rec["following_launch_uid"] = launch.get("UID")
-            rec["launch_parent_op"] = find_launch_parent_op(tree, launch)
-            rec["launch_tid"] = launch.get("tid")
-            rec["launch_to_start_us"] = gap_end - launch_end
-            rec["launch_lead_us"] = gap_start - launch_end
-        _find_sync_drain(
-            rec,
-            rt_index,
-            gap_start,
-            launch,
-            gpu_by_end,
-            i if preceding is not None else -1,
-            th,
-        )
+        _set_bounds(rec, preceding, following)
+        _set_launch(rec, tree, launch)
+        _find_sync_drain(rec, rt_index, gap_start, launch, timeline.by_end, i, th)
         pending.append((rec, launch))
 
-    limit = th.launch_latency_us
-    if th.launch_latency_rel is not None:
-        during = [
-            r["launch_to_start_us"]
-            for r, launch in pending
-            if launch is not None and r["start"] <= _t_end(launch) <= r["end"]
-        ]
-        if during:
-            limit = max(limit, th.launch_latency_rel * statistics.median(during))
-
     # Pass 2: parts and labels.
+    limit = _launch_limit(pending, th)
     for rec, launch in pending:
         _measure_and_label(rec, launch, limit, th, thread_index, rt_index)
-        if not include_call_stack:
-            continue
-        if rec["covering_op_uid"] is not None:
-            rec["covering_call_stack_full"] = call_stack_full(
-                tree, tree.events_by_uid.get(rec["covering_op_uid"])
-            )
-        if rec["sync_event_uid"] is not None:
-            # Lazy import: the perf report module is heavy and imports this package.
-            from TraceLens.Reporting.generate_perf_report_pytorch import (
-                _find_entry_point,
-            )
-
-            stack = call_stack_full(tree, tree.events_by_uid.get(rec["sync_event_uid"]))
-            rec["sync_call_stack_full"] = stack
-            rec["sync_entry_point"] = _find_entry_point(stack, rec["sync_event_name"])[
-                "entry_point"
-            ]
+        if include_call_stack:
+            _attach_call_stacks(rec, tree)
     return results
+
+
+class _GpuTimeline:
+    """GPU ops sorted by start and by end, for finding the ops bounding a gap."""
+
+    def __init__(self, gpu_sorted):
+        self.by_start = gpu_sorted
+        self.starts = [e["ts"] for e in gpu_sorted]
+        self.by_end = sorted(gpu_sorted, key=_t_end)
+        self.ends = [_t_end(e) for e in self.by_end]
+
+    def bounding_events(self, gap_start, gap_end):
+        """(index of the preceding op in by_end or -1, preceding op, following op)."""
+        i = bisect.bisect_right(self.ends, gap_start + 0.5) - 1
+        preceding = None
+        if i >= 0 and abs(self.ends[i] - gap_start) < 2.0:
+            preceding = self.by_end[i]
+        j = bisect.bisect_left(self.starts, gap_end - 0.001)
+        following = None
+        for k in range(max(0, j - 1), min(len(self.by_start), j + 3)):
+            if abs(self.by_start[k]["ts"] - gap_end) < 1.0:
+                following = self.by_start[k]
+                break
+        return (i if preceding is not None else -1), preceding, following
+
+
+def _set_bounds(rec, preceding, following):
+    if preceding is not None:
+        rec["preceding_gpu_event"] = preceding.get("name")
+        rec["preceding_stream"] = stream_of(preceding)
+        rec["preceding_gpu_uid"] = preceding.get("UID")
+    if following is not None:
+        rec["following_gpu_event"] = following.get("name")
+        rec["following_stream"] = stream_of(following)
+        rec["following_gpu_uid"] = following.get("UID")
+    if preceding is not None and following is not None:
+        rec["stream_switch"] = rec["preceding_stream"] != rec["following_stream"]
+
+
+def _set_launch(rec, tree, launch):
+    if launch is None:
+        return
+    launch_end = _t_end(launch)
+    rec["following_launch_name"] = launch.get("name")
+    rec["following_launch_uid"] = launch.get("UID")
+    rec["launch_parent_op"] = find_launch_parent_op(tree, launch)
+    rec["launch_tid"] = launch.get("tid")
+    rec["launch_to_start_us"] = rec["end"] - launch_end
+    rec["launch_lead_us"] = rec["start"] - launch_end
+
+
+def _launch_limit(pending, th):
+    """Launch return -> GPU op start above which a gap counts as a GPU wait."""
+    limit = th.launch_latency_us
+    if th.launch_latency_rel is None:
+        return limit
+    during = [
+        r["launch_to_start_us"]
+        for r, launch in pending
+        if launch is not None and r["start"] <= _t_end(launch) <= r["end"]
+    ]
+    if during:
+        limit = max(limit, th.launch_latency_rel * statistics.median(during))
+    return limit
+
+
+def _attach_call_stacks(rec, tree):
+    if rec["covering_op_uid"] is not None:
+        rec["covering_call_stack_full"] = call_stack_full(
+            tree, tree.events_by_uid.get(rec["covering_op_uid"])
+        )
+    if rec["sync_event_uid"] is not None:
+        # Lazy import: the perf report module is heavy and imports this package.
+        from TraceLens.Reporting.generate_perf_report_pytorch import (
+            _find_entry_point,
+        )
+
+        stack = call_stack_full(tree, tree.events_by_uid.get(rec["sync_event_uid"]))
+        rec["sync_call_stack_full"] = stack
+        rec["sync_entry_point"] = _find_entry_point(stack, rec["sync_event_name"])[
+            "entry_point"
+        ]
 
 
 def _measure_and_label(rec, launch, limit, th, thread_index, rt_index):
@@ -606,15 +654,7 @@ def _measure_and_label(rec, launch, limit, th, thread_index, rt_index):
         return
 
     thread = (launch.get("pid"), launch.get("tid"))
-    other = defaultdict(float)
-    for rt in rt_index.query(gs, ge):
-        if (rt.get("pid"), rt.get("tid")) != thread:
-            other[rt.get("name", "?")] += min(_t_end(rt), ge) - max(rt["ts"], gs)
-    if other:
-        top = max(other, key=other.get)
-        rec["other_thread_top_runtime"] = top
-        rec["other_thread_runtime_us"] = other[top]
-
+    _set_other_thread(rec, rt_index, thread)
     _, _, covering = exclusive_split(thread_index, thread, gs, ge, return_event=True)
     if covering is not None:
         rec["covering_op"] = strip_addresses(covering.get("name", "?"))
@@ -626,17 +666,7 @@ def _measure_and_label(rec, launch, limit, th, thread_index, rt_index):
 
     launch_end = _t_end(launch)
     if launch_end + limit <= gs:
-        rec.update(
-            case="queued",
-            label="UNEXPLAINED_GPU_WAIT",
-            sub_label="queued",
-            gpu_wait_us=d,
-        )
-        rec["detail"] = (
-            f"next op launched {rec['launch_lead_us']:.1f}us before the gap; CPU was not "
-            "the bottleneck; cause is below the application (runtime, driver, firmware, "
-            "hardware) or profiler overhead"
-        )
+        _label_queued(rec)
         return
 
     rec["case"] = "unqueued"
@@ -655,7 +685,39 @@ def _measure_and_label(rec, launch, limit, th, thread_index, rt_index):
     rec["submit_latency_us"] = ge - late_end
     rec["top_op"] = strip_addresses(_top_name(names, "cpu_op_us"))
     rec["top_runtime"] = _top_name(names, "cpu_runtime_us")
+    rec["label"], rec["sub_label"] = _unqueued_label(rec, th, limit)
+    rec["detail"] = _fmt_parts(rec)
 
+
+def _set_other_thread(rec, rt_index, thread):
+    """The runtime call with the most time in the gap on a thread other than ``thread``."""
+    gs, ge = rec["start"], rec["end"]
+    other = defaultdict(float)
+    for rt in rt_index.query(gs, ge):
+        if (rt.get("pid"), rt.get("tid")) != thread:
+            other[rt.get("name", "?")] += min(_t_end(rt), ge) - max(rt["ts"], gs)
+    if other:
+        top = max(other, key=other.get)
+        rec["other_thread_top_runtime"] = top
+        rec["other_thread_runtime_us"] = other[top]
+
+
+def _label_queued(rec):
+    rec.update(
+        case="queued",
+        label="UNEXPLAINED_GPU_WAIT",
+        sub_label="queued",
+        gpu_wait_us=rec["duration"],
+    )
+    rec["detail"] = (
+        f"next op launched {rec['launch_lead_us']:.1f}us before the gap; CPU was not "
+        "the bottleneck; cause is below the application (runtime, driver, firmware, "
+        "hardware) or profiler overhead"
+    )
+
+
+def _unqueued_label(rec, th, limit):
+    """(label, sub_label) of an unqueued gap: its largest part, with two overrides."""
     groups = {
         "CPU_OP_DOMINATED": rec["cpu_op_us"],
         "RUNTIME_DOMINATED": rec["cpu_runtime_us"],
@@ -663,19 +725,17 @@ def _measure_and_label(rec, launch, limit, th, thread_index, rt_index):
         "LAUNCH": rec["launch_call_us"] + rec["submit_latency_us"],
     }
     label = max(groups, key=groups.get)
-    sub = None
+    other_us = rec["other_thread_runtime_us"] or 0.0
     if (
         label != "RUNTIME_DOMINATED"
-        and (rec["other_thread_runtime_us"] or 0.0) > th.other_thread_frac * d
+        and other_us > th.other_thread_frac * rec["duration"]
     ):
-        label, sub = "RUNTIME_DOMINATED", "other_thread"
-    elif label == "LAUNCH":
-        if rec["launch_to_start_us"] > limit:
-            label, sub = "UNEXPLAINED_GPU_WAIT", "unqueued"
-        else:
-            label = "LAUNCH_DOMINATED"
-    rec["label"], rec["sub_label"] = label, sub
-    rec["detail"] = _fmt_parts(rec)
+        return "RUNTIME_DOMINATED", "other_thread"
+    if label != "LAUNCH":
+        return label, None
+    if rec["launch_to_start_us"] > limit:
+        return "UNEXPLAINED_GPU_WAIT", "unqueued"
+    return "LAUNCH_DOMINATED", None
 
 
 # ---------------------------------------------------------------------------
@@ -700,15 +760,17 @@ def full_label(rec):
     return rec["label"] + (f"/{rec['sub_label']}" if rec.get("sub_label") else "")
 
 
+ANNOTATION_TRACKS = (
+    (9000, "Idle: Noise/Macro"),
+    (9001, "Idle: Drain Type"),
+    (9002, "Idle: Label"),
+)
+
+
 def make_annotation_events(classified, gpu_pid):
     """Chrome trace events for three annotation tracks on the GPU process."""
-    tracks = (
-        (9000, "Idle: Noise/Macro"),
-        (9001, "Idle: Drain Type"),
-        (9002, "Idle: Label"),
-    )
     events = []
-    for tid, name in tracks:
+    for tid, name in ANNOTATION_TRACKS:
         events.append(
             {
                 "ph": "M",
@@ -727,61 +789,50 @@ def make_annotation_events(classified, gpu_pid):
                 "args": {"sort_index": tid},
             }
         )
-
-    def slice_(tid, name, rec, args):
-        return {
-            "ph": "X",
-            "cat": "idle_classification",
-            "name": name,
-            "pid": gpu_pid,
-            "tid": tid,
-            "ts": rec["start"],
-            "dur": rec["duration"],
-            "args": {"idle_id": rec["idle_id"], **args},
-        }
-
     for rec in classified:
-        idle_id = rec["idle_id"]
-        if rec["label_noise"]:
-            events.append(
-                slice_(9000, "noise", rec, {"duration_us": f"{rec['duration']:.2f}"})
-            )
-            continue
-        events.append(
-            slice_(
-                9000, f"idle#{idle_id}", rec, {"duration_us": f"{rec['duration']:.2f}"}
-            )
-        )
-        if rec["drain_type"] == "sync_drain":
-            drain = f"idle#{idle_id} sync_drain: {rec['sync_event_name']}"
-        else:
-            drain = f"idle#{idle_id} starved"
-        events.append(
-            slice_(
-                9001,
-                drain,
-                rec,
-                {
-                    "drain_type": rec["drain_type"],
-                    "sync_event_name": rec["sync_event_name"] or "none",
-                },
-            )
-        )
-        events.append(
-            slice_(
-                9002,
-                f"idle#{idle_id} {full_label(rec)}",
-                rec,
-                {
-                    "label": rec["label"],
-                    "sub_label": rec["sub_label"] or "",
-                    "case": rec["case"],
-                    "detail": rec["detail"] or "",
-                    **{p: round(rec[p], 2) for p in PARTS},
-                },
-            )
-        )
+        events += _gap_slices(rec, gpu_pid)
     return events
+
+
+def _slice(gpu_pid, tid, name, rec, args):
+    return {
+        "ph": "X",
+        "cat": "idle_classification",
+        "name": name,
+        "pid": gpu_pid,
+        "tid": tid,
+        "ts": rec["start"],
+        "dur": rec["duration"],
+        "args": {"idle_id": rec["idle_id"], **args},
+    }
+
+
+def _gap_slices(rec, gpu_pid):
+    """One slice per track for a macro gap; one on the first track for noise."""
+    idle_id = rec["idle_id"]
+    duration = {"duration_us": f"{rec['duration']:.2f}"}
+    if rec["label_noise"]:
+        return [_slice(gpu_pid, 9000, "noise", rec, duration)]
+    if rec["drain_type"] == "sync_drain":
+        drain = f"idle#{idle_id} sync_drain: {rec['sync_event_name']}"
+    else:
+        drain = f"idle#{idle_id} starved"
+    drain_args = {
+        "drain_type": rec["drain_type"],
+        "sync_event_name": rec["sync_event_name"] or "none",
+    }
+    label_args = {
+        "label": rec["label"],
+        "sub_label": rec["sub_label"] or "",
+        "case": rec["case"],
+        "detail": rec["detail"] or "",
+        **{p: round(rec[p], 2) for p in PARTS},
+    }
+    return [
+        _slice(gpu_pid, 9000, f"idle#{idle_id}", rec, duration),
+        _slice(gpu_pid, 9001, drain, rec, drain_args),
+        _slice(gpu_pid, 9002, f"idle#{idle_id} {full_label(rec)}", rec, label_args),
+    ]
 
 
 def find_gpu_pid(events):

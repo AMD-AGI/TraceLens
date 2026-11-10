@@ -6,9 +6,7 @@
 
 import argparse
 import ast
-import gzip
 import importlib.util
-import json
 import os
 import re
 import warnings
@@ -17,14 +15,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from TraceLens import (
-    DataLoader,
-    NcclAnalyser,
-    TraceDiff,
-    TreePerfAnalyzer,
-)
+from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
 from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
-from TraceLens.IdleTimeAnalyser.classify import find_gpu_pid
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -420,6 +412,36 @@ def add_truncated_kernel_details(
 
     # Return a new DataFrame with the desired column order
     return df[cols]
+
+
+def _idle_analysis_sheets(
+    tree,
+    profile_json_path,
+    enable_idle_analysis,
+    micro_idle_thresh_us,
+    include_call_stack,
+    enable_augmented_trace,
+    idle_launch_latency_us,
+):
+    """Idle sheets for the report, and the augmented trace if asked; {} when disabled."""
+    if not enable_idle_analysis:
+        return {}
+    thresholds = IdleThresholds()
+    if idle_launch_latency_us is not None:
+        thresholds = IdleThresholds(launch_latency_us=idle_launch_latency_us)
+    analyser = IdleTimeAnalyser(
+        tree,
+        thresholds,
+        micro_thresh_us=micro_idle_thresh_us,
+        include_call_stack=include_call_stack,
+    )
+    idle_dfs = analyser.get_dataframes()
+    print(f"Added idle time analysis sheets: {list(idle_dfs.keys())}")
+    if enable_augmented_trace:
+        aug_path = profile_json_path.rsplit(".json", 1)[0] + "_idle_augmented.json.gz"
+        analyser.write_augmented_trace(profile_json_path, aug_path)
+        print(f"Wrote augmented trace for Perfetto: {aug_path}")
+    return idle_dfs
 
 
 def generate_perf_report_pytorch(
@@ -1046,32 +1068,17 @@ def generate_perf_report_pytorch(
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
 
-    # Built-in idle time analysis
-    if enable_idle_analysis:
-        idle_thresholds = IdleThresholds()
-        if idle_launch_latency_us is not None:
-            idle_thresholds = IdleThresholds(launch_latency_us=idle_launch_latency_us)
-        idle_analyser = IdleTimeAnalyser(
+    dict_name2df.update(
+        _idle_analysis_sheets(
             perf_analyzer.tree,
-            idle_thresholds,
-            micro_thresh_us=micro_idle_thresh_us,
-            include_call_stack=include_call_stack,
+            profile_json_path,
+            enable_idle_analysis,
+            micro_idle_thresh_us,
+            include_call_stack,
+            enable_augmented_trace,
+            idle_launch_latency_us,
         )
-        idle_dfs = idle_analyser.get_dataframes()
-        dict_name2df.update(idle_dfs)
-        print(f"Added idle time analysis sheets: {list(idle_dfs.keys())}")
-
-        if enable_augmented_trace:
-            raw_data = DataLoader.load_data(profile_json_path)
-            gpu_pid = find_gpu_pid(raw_data["traceEvents"])
-            aug_events = idle_analyser.get_augmented_events(gpu_pid)
-            raw_data["traceEvents"].extend(aug_events)
-
-            base_path = profile_json_path.rsplit(".json", 1)[0]
-            aug_path = base_path + "_idle_augmented.json.gz"
-            with gzip.open(aug_path, "wt") as f:
-                json.dump(raw_data, f)
-            print(f"Wrote augmented trace for Perfetto: {aug_path}")
+    )
 
     # Get additional DataFrames from extension if available
     if extension_file:
@@ -1100,6 +1107,30 @@ def generate_perf_report_pytorch(
     )
 
     return dict_name2df
+
+
+def _add_idle_cli_args(parser):
+    parser.add_argument(
+        "--enable_idle_analysis",
+        action="store_true",
+        default=False,
+        help="Add GPU idle time classification sheets (idle_overview, idle_groups, "
+        "idle_intervals) to the report.",
+    )
+    parser.add_argument(
+        "--enable_augmented_trace",
+        action="store_true",
+        default=False,
+        help="Write an augmented trace JSON with idle time annotations for visual "
+        "analysis in Perfetto. Requires --enable_idle_analysis.",
+    )
+    parser.add_argument(
+        "--idle_launch_latency_us",
+        type=float,
+        default=None,
+        help="Idle analysis: normal launch return -> GPU op start in microseconds "
+        "(default 15). An op launched more than this before a gap counts as queued.",
+    )
 
 
 def main():
@@ -1285,27 +1316,7 @@ def main():
         "sync_entry_point, sync_call_stack_full and covering_call_stack_full to "
         "idle_intervals.",
     )
-    parser.add_argument(
-        "--enable_idle_analysis",
-        action="store_true",
-        default=False,
-        help="Add GPU idle time classification sheets (idle_overview, idle_groups, "
-        "idle_intervals) to the report.",
-    )
-    parser.add_argument(
-        "--enable_augmented_trace",
-        action="store_true",
-        default=False,
-        help="Write an augmented trace JSON with idle time annotations for visual "
-        "analysis in Perfetto. Requires --enable_idle_analysis.",
-    )
-    parser.add_argument(
-        "--idle_launch_latency_us",
-        type=float,
-        default=None,
-        help="Idle analysis: normal launch return -> GPU op start in microseconds "
-        "(default 15). An op launched more than this before a gap counts as queued.",
-    )
+    _add_idle_cli_args(parser)
 
     args = parser.parse_args()
     if args.comparison_json_path and args.precomputed_diff_stats:
