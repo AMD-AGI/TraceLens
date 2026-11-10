@@ -11,12 +11,11 @@ Computes metrics for reduce operations and outputs JSON for subagent processing.
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import get_peak_mem_bw_tbs, run_category_analysis
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    PEAK_MEM_BW_KEY,
+    run_category_analysis,
+)
 
 
 def detect_softmax(op_name: str) -> bool:
@@ -29,15 +28,19 @@ def extract_category_specific(ops_df, metadata) -> dict:
     softmax_count = sum(1 for name in ops_df["name"] if detect_softmax(str(name)))
 
     return {
-        "softmax_count": int(softmax_count),
-        "peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata),
+        "softmax_count": softmax_count,
+        PEAK_MEM_BW_KEY: metadata[PEAK_MEM_BW_KEY],
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze reduce operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
-
+    parser.add_argument(
+        "--category",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
+    )
     parser.add_argument(
         "--comparison_scope",
         choices=("standalone", "comparative"),
@@ -50,7 +53,7 @@ def main():
     args = parser.parse_args()
 
     run_category_analysis(
-        category="reduce",
+        category=args.category,
         output_dir=args.output_dir,
         config={"extra_fields": ["Input Dims", "Input type"]},
         extract_fn=extract_category_specific,
