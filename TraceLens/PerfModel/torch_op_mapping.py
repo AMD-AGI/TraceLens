@@ -66,8 +66,6 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
-    # DeepSeek-V4 KV compress kernels: only plan rows at a compression boundary do
-    # work and that count is device-side, so classify only.
     (
         re.compile(
             r".*->(fused_compress_attn|hca_compress_forward)_\w+ \(Synthetic Op\)"
