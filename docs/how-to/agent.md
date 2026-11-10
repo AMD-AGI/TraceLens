@@ -205,7 +205,7 @@ The high-level steps are:
 1. Query user inputs, or read a run YAML (environment setup is always asked).
 2. Generate the performance reports with one call on the completed run config.
 3. Check trace quality, with a fallback for graph-under-recorded traces.
-4. Prepare category data (GPU utilization, top operations, tree data, multi-kernel
+4. Prepare category data (GPU utilization, top operations, multi-kernel
    data, category filtering) and extract fusion candidates.
 5. Run system-level analysis (CPU/idle, multi-kernel, and kernel fusion) in
    parallel.

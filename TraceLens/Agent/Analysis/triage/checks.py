@@ -22,11 +22,12 @@ import json
 import math
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
 
 from TraceLens.TraceUtils import trace_check
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    IDLE_PCT_THRESHOLD,
     focus_job_utilization,
 )
 from TraceLens.util import DataLoader
@@ -54,7 +55,7 @@ class Finding:
     failure_mode: str
     evidence: str
     remedy: str
-    implied_by: List[str] = field(default_factory=list)
+    implied_by: list[str] = field(default_factory=list)
 
     def diag_line(self):
         suffix = (
@@ -85,14 +86,12 @@ class CheckSpec:
     sublabel: str
     name: str
     category: str
-    fn: Callable[[str, Optional[str]], Optional[FindingDraft]]
-    implies_failures: List[str] = field(default_factory=list)
+    fn: Callable[[str, str | None], FindingDraft | None]
+    implies_failures: list[str] = field(default_factory=list)
     detailed_only: bool = False
 
     def build_tag(self) -> str:
-        if self.sublabel:
-            return f"DIAG:{self.category}:{self.sublabel}_{self.name}"
-        return f"DIAG:{self.category}:{self.name}"
+        return f"DIAG:{self.category}:{self.sublabel}_{self.name}"
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +99,9 @@ class CheckSpec:
 # ---------------------------------------------------------------------------
 
 _PATH_REMAPS_ENV = "TRACELENS_PATH_REMAPS"
-_PATH_REMAPS_CACHE = None
 _SDK_PREFIX_RE = re.compile(r"^\[claude-sdk\]\s*")
 _TBS_TFLOPS_EXEMPT_SUBSTRINGS = ("collective", "custom")
+_MAIN_TRACE_PATTERNS = ("*TP-0*.json*", "*rank0*.json*")
 
 # Trace files larger than this (bytes) are skipped by detection checks: parsing
 # multi-GB traces in-process is too costly for a fast triage pass.
@@ -114,14 +113,13 @@ _SIGNIFICANT_PCT_MIN = 4
 _RUNTIME_INSTABILITY_CV = 0.25
 # kernel/cpu_op ratio below which a split trace is flagged as missing GPU kernels.
 _SPLIT_LOW_KERNEL_RATIO = 0.1
-# GPU idle percentage above which idle time is flagged.
-_HIGH_IDLE_PCT = 15
 # Minimum cpu_op events carrying input shapes before a capture is deemed OK.
 _MIN_CPU_OP_SHAPES = 10
 # Zero-byte file count above which disk exhaustion is suspected.
 _MAX_ZERO_BYTE_FILES = 3
 
 
+@functools.cache
 def _path_remaps():
     """Return the list of ``(old_prefix, new_prefix)`` remaps from the environment.
 
@@ -131,22 +129,17 @@ def _path_remaps():
 
         TRACELENS_PATH_REMAPS=/old_root/=/new_root/,/legacy/=/current/
     """
-    global _PATH_REMAPS_CACHE
-    if _PATH_REMAPS_CACHE is not None:
-        return _PATH_REMAPS_CACHE
-
     raw = os.environ.get(_PATH_REMAPS_ENV, "")
     pairs = []
     for chunk in raw.split(","):
-        chunk = chunk.strip()
-        if not chunk or "=" not in chunk:
+        pair = chunk.strip()
+        if not pair or "=" not in pair:
             continue
-        old, _, new = chunk.partition("=")
+        old, _, new = pair.partition("=")
         old = old.strip()
         new = new.strip()
         if old:
             pairs.append((old, new))
-    _PATH_REMAPS_CACHE = pairs
     return pairs
 
 
@@ -223,7 +216,7 @@ def resolve_main_trace_path(run_dir):
     """Resolve the main rank-0 trace file for a run."""
     trace_input = _trace_input_dir(run_dir)
     if trace_input:
-        for pattern in ("*TP-0*.json*", "*rank0*.json*"):
+        for pattern in _MAIN_TRACE_PATTERNS:
             matches = sorted(glob.glob(os.path.join(trace_input, pattern)))
             if matches:
                 return matches[0]
@@ -232,7 +225,7 @@ def resolve_main_trace_path(run_dir):
     for search_root in (os.path.join(run_dir, "trace_split"), run_dir):
         if not os.path.isdir(search_root):
             continue
-        for pattern in ("*TP-0*.json*", "*rank0*.json*"):
+        for pattern in _MAIN_TRACE_PATTERNS:
             matches = sorted(
                 glob.glob(os.path.join(search_root, "**", pattern), recursive=True)
             )
@@ -247,6 +240,11 @@ def resolve_capture_folder(run_dir):
     if not trace_input:
         return None
     return _resolve_path(os.path.join(trace_input, "capture_traces"), os.path.isdir)
+
+
+def _ancestor(path, levels):
+    """Return ``path`` ``levels`` directories up, clamped at the filesystem root."""
+    return os.path.normpath(os.path.join(path, *([".."] * levels)))
 
 
 def stream_lines(stream_file):
@@ -276,8 +274,12 @@ def stream_find(stream_file, pattern):
     return None
 
 
+def _manifest_path(run_dir):
+    return os.path.join(run_dir, "category_data", "category_manifest.json")
+
+
 def _load_manifest(run_dir):
-    path = os.path.join(run_dir, "category_data", "category_manifest.json")
+    path = _manifest_path(run_dir)
     if not os.path.isfile(path):
         return None
     with open(path) as f:
@@ -412,7 +414,7 @@ def _violator_evidence(label, rows, name_field="name", limit=3):
 
 
 def check_trace_missing(run_dir, _stream_file):
-    # Step 1: trace path from cmd_prefix / category_manifest
+    # Trace path from cmd_prefix / category_manifest
     trace_path = resolve_trace_path(run_dir)
     if trace_path:
         if os.path.exists(trace_path):
@@ -423,13 +425,14 @@ def check_trace_missing(run_dir, _stream_file):
             "Check profiling setting in workload, or if trace path passed in correctly",
         )
 
+    search_root = _ancestor(run_dir, 6)
+
     # Helper: list any *json.gz traces sitting 6 levels above the run_dir.
     def _nearby_traces():
-        nearby_root = os.path.normpath(os.path.join(run_dir, *([".."] * 6)))
-        if not os.path.isdir(nearby_root):
+        if not os.path.isdir(search_root):
             return []
         try:
-            return sorted(glob.glob(os.path.join(nearby_root, "*.json.gz")))[:10]
+            return sorted(glob.glob(os.path.join(search_root, "*.json.gz")))[:10]
         except OSError:
             return []
 
@@ -443,22 +446,22 @@ def check_trace_missing(run_dir, _stream_file):
     # Used only when no trace can be resolved at all, to help operators locate
     # the trace artefact wherever it actually landed.
     def _recursive_traces(limit=50):
-        nearby_root = os.path.normpath(os.path.join(run_dir, *([".."] * 6)))
-        if not os.path.isdir(nearby_root):
+        if not os.path.isdir(search_root):
             return None, []
         found = []
         try:
-            for dirpath, _, filenames in os.walk(nearby_root, followlinks=False):
+            for dirpath, _, filenames in os.walk(search_root, followlinks=False):
                 for name in filenames:
                     if name.endswith(".json.gz"):
                         found.append(os.path.join(dirpath, name))
                         if len(found) >= limit:
-                            return nearby_root, sorted(found)
+                            return search_root, sorted(found)
         except OSError:
+            # Unreadable subtree: report what was found so far.
             pass
-        return nearby_root, sorted(found)
+        return search_root, sorted(found)
 
-    # Step 2: trace_split exists with *.gz files but orchestrator never recorded a trace path
+    # trace_split exists with *.gz files but orchestrator never recorded a trace path
     split_dir = resolve_split_trace_dir(run_dir)
     if split_dir:
         gz_files = glob.glob(os.path.join(split_dir, "*.gz"))
@@ -472,7 +475,7 @@ def check_trace_missing(run_dir, _stream_file):
                 "Verify orchestrator wiring writes --profile_json_path / category_manifest.trace_path",
             )
 
-    # Step 3: main rank-0 trace from trace_input_manifest
+    # Main rank-0 trace from trace_input_manifest
     main_trace = resolve_main_trace_path(run_dir)
     if main_trace:
         return FindingDraft(
@@ -555,7 +558,7 @@ def check_capture_missing(run_dir, _stream_file):
 
 def check_high_idle(run_dir, _stream_file):
     # Idle computation lives in trace_check._check_gpu_idle; feed it the
-    # gpu_timeline sheet (or the manifest fallback) and keep triage's 15%.
+    # gpu_timeline sheet (or the manifest fallback) and keep triage's threshold.
     import pandas as pd
 
     timeline_csv = os.path.join(run_dir, "perf_report_csvs", "gpu_timeline.csv")
@@ -577,7 +580,7 @@ def check_high_idle(run_dir, _stream_file):
     if df is None:
         return None
 
-    thr = trace_check.QualityThresholds(idle_pct_warn=_HIGH_IDLE_PCT)
+    thr = trace_check.QualityThresholds(idle_pct_warn=IDLE_PCT_THRESHOLD)
     findings = trace_check._check_gpu_idle(
         {
             "dfs": {"gpu_timeline": df},
@@ -589,7 +592,7 @@ def check_high_idle(run_dir, _stream_file):
         return None
     idle_pct = findings[0].metrics["idle_pct"]
     return FindingDraft(
-        "High idle time (> 15% GPU idle)",
+        f"High idle time (> {IDLE_PCT_THRESHOLD}% GPU idle)",
         f"GPU idle time is {idle_pct:.1f}% ({source})",
         "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
     )
@@ -608,17 +611,16 @@ def check_corrupt_json(run_dir, _stream_file):
         # orjson.JSONDecodeError subclasses ValueError; DataLoader also raises a
         # bare ValueError for an unknown/unloadable file type. Both mean the trace
         # is not parseable, so report corrupt rather than crash.
-        return FindingDraft(
-            "Trace file is corrupted/invalid JSON",
-            f"{type(e).__name__}: {str(e)[:150]}",
-            "Re-collect the trace; verify .json.gz files are not truncated",
-        )
+        evidence = f"{type(e).__name__}: {str(e)[:150]}"
     except OSError as e:
-        return FindingDraft(
-            "Trace file is corrupted/invalid JSON",
-            f"OSError reading trace: {str(e)[:150]}",
-            "Re-collect the trace; verify .json.gz files are not truncated",
-        )
+        evidence = f"OSError reading trace: {str(e)[:150]}"
+    else:
+        return None
+    return FindingDraft(
+        "Trace file is corrupted/invalid JSON",
+        evidence,
+        "Re-collect the trace; verify .json.gz files are not truncated",
+    )
 
 
 def check_missing_cpu_op_shapes(run_dir, _stream_file):
@@ -640,7 +642,7 @@ def check_inference_annotation_missing(run_dir, _stream_file):
     main_path = resolve_main_trace_path(run_dir)
     if not main_path or not os.path.exists(main_path):
         return FindingDraft(
-            "Main inference trace missing ",
+            "Main inference trace missing",
             f"No trace found at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )
@@ -653,7 +655,7 @@ def check_inference_annotation_missing(run_dir, _stream_file):
         # bare ValueError("Unknown file type") that check_corrupt_json guards against
         # (arbitrary resolved path) cannot arise here.
         return FindingDraft(
-            f"Main inference trace corrupted/invalid JSON at path: {main_path}",
+            "Main inference trace corrupted/invalid JSON",
             f"JSONDecodeError reading trace at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )
@@ -832,9 +834,8 @@ def check_step1_fail(run_dir, stream_file):
 
 
 def check_step2_5_fail(run_dir, stream_file):
-    manifest_path = os.path.join(run_dir, "category_data", "category_manifest.json")
     if os.path.isdir(os.path.join(run_dir, "perf_report_csvs")) and not os.path.isfile(
-        manifest_path
+        _manifest_path(run_dir)
     ):
         return FindingDraft(
             "Orchestrator preparation fails (Steps 2-5)",
@@ -854,7 +855,7 @@ def check_step2_5_fail(run_dir, stream_file):
 
 
 def check_output_incomplete(run_dir, _stream_file):
-    expected = ["metadata", "category_data", "system_findings", "category_findings"]
+    expected = ["category_data", "system_findings", "category_findings"]
     missing = [d for d in expected if not os.path.isdir(os.path.join(run_dir, d))]
     if missing:
         return FindingDraft(
@@ -879,7 +880,7 @@ def check_prefix_fail(_run_dir, stream_file):
 
 
 # ---------------------------------------------------------------------------
-# TraceLens agent workflow checks (continued — report)
+# TraceLens agent workflow checks (continued: report)
 # ---------------------------------------------------------------------------
 
 
@@ -903,7 +904,7 @@ def check_report_too_small(run_dir, _stream_file):
 
 
 # ---------------------------------------------------------------------------
-# TraceLens agent workflow checks (continued — subagent) / infra
+# TraceLens agent workflow checks (continued: subagent) / infra
 # ---------------------------------------------------------------------------
 
 
@@ -912,28 +913,27 @@ def check_resource_exhausted(_run_dir, stream_file):
         stripped = line.strip()
         try:
             record = json.loads(stripped)
+        except ValueError:
+            record = None
+        if isinstance(record, dict):
             rtype = record.get("type", "")
             if rtype == "error" and "RESOURCE_EXHAUSTED" in json.dumps(record):
-                return FindingDraft(
-                    "Context length exceeded (RESOURCE_EXHAUSTED)",
-                    "RESOURCE_EXHAUSTED error event in agent stream",
-                    "Reduce trace size before analysis",
-                )
-            if rtype == "system" and "RESOURCE_EXHAUSTED" in str(
+                evidence = "RESOURCE_EXHAUSTED error event in agent stream"
+            elif rtype == "system" and "RESOURCE_EXHAUSTED" in str(
                 record.get("error", "")
             ):
-                return FindingDraft(
-                    "Context length exceeded (RESOURCE_EXHAUSTED)",
-                    "RESOURCE_EXHAUSTED system error in agent stream",
-                    "Reduce trace size before analysis",
-                )
-        except (json.JSONDecodeError, ValueError):
-            if re.search(r"resource_exhausted", stripped, re.IGNORECASE):
-                return FindingDraft(
-                    "Context length exceeded (RESOURCE_EXHAUSTED)",
-                    f"resource_exhausted in stream: {stripped[:150]}",
-                    "Reduce trace size before analysis",
-                )
+                evidence = "RESOURCE_EXHAUSTED system error in agent stream"
+            else:
+                continue
+        elif re.search(r"resource_exhausted", stripped, re.IGNORECASE):
+            evidence = f"resource_exhausted in stream: {stripped[:150]}"
+        else:
+            continue
+        return FindingDraft(
+            "Context length exceeded (RESOURCE_EXHAUSTED)",
+            evidence,
+            "Reduce trace size before analysis",
+        )
     return None
 
 
@@ -952,10 +952,13 @@ def check_subagent_budget(run_dir, _stream_file):
         name = cat.get("name", "")
         if not name:
             continue
-        if name == "cpu_idle" and idle_pct is not None and idle_pct <= _HIGH_IDLE_PCT:
+        if (
+            name == "cpu_idle"
+            and idle_pct is not None
+            and idle_pct <= IDLE_PCT_THRESHOLD
+        ):
             continue
-        tier = cat.get("tier", "compute_kernel")
-        target_dir = system_dir if tier == "system" else findings_dir
+        target_dir = system_dir if cat.get("tier") == "system" else findings_dir
         if not os.path.isfile(os.path.join(target_dir, f"{name}_findings.md")):
             missing.append(name)
 
@@ -1020,7 +1023,12 @@ def check_disk_full(run_dir, stream_file):
     for dirpath, _dirnames, filenames in os.walk(run_dir):
         for fname in filenames:
             fpath = os.path.join(dirpath, fname)
-            if os.path.getsize(fpath) == 0 and not fname.startswith("."):
+            try:
+                size = os.path.getsize(fpath)
+            except OSError:
+                # Dangling symlink: nothing to measure.
+                continue
+            if size == 0 and not fname.startswith("."):
                 zero_byte.append(os.path.relpath(fpath, run_dir))
     if len(zero_byte) > _MAX_ZERO_BYTE_FILES:
         return FindingDraft(
@@ -1081,7 +1089,7 @@ def check_kernel_candidates_missing(run_dir_or_session_dir, _stream_file=None):
     if os.path.isfile(os.path.join(path, "session_breakdown.json")):
         session_dir = path
     else:
-        session_dir = os.path.normpath(os.path.join(path, *([".."] * 5)))
+        session_dir = _ancestor(path, 5)
 
     sbd_path = os.path.join(session_dir, "session_breakdown.json")
     if not os.path.isfile(sbd_path):

@@ -1,0 +1,41 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+name: Code metrics
+
+on:
+  pull_request:
+    branches:
+      - main
+      - staging_agent
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  code-metrics:
+    if: github.head_ref != 'main' && github.head_ref != 'staging_agent'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: pip install radon==6.0.1 complexipy==8.0.1 ruff==0.16.1  # Same versions locally
+
+    - name: Check code metrics
+      continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'waive-code-complexity') }}
+      run: |
+        set -o pipefail
+        python scripts/check_code_metrics.py --base origin/${{ github.base_ref }} | tee -a "$GITHUB_STEP_SUMMARY"
