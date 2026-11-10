@@ -150,6 +150,7 @@ from TraceLens.PerfModel.utils import (
     add_simulation_time_columns,
     name2bpe,
     parse_bool,
+    scalar_type_bpe,
     torch_dtype_map,
 )
 from TraceLens.PerfModel import origami_helper, sdpa_tile
@@ -2070,6 +2071,13 @@ class TestUtilsCoverage:
     )
     def test_name2bpe_extended(self, name, bpe):
         assert name2bpe(name) == bpe
+
+    @pytest.mark.parametrize("name", ["", "   ", "c10::"])
+    def test_name2bpe_blank_is_not_a_dtype(self, name):
+        assert name2bpe(name) is None
+
+    def test_scalar_type_bpe_rejects_a_missing_ordinal(self):
+        assert scalar_type_bpe(None) is None
 
     def test_dtype_maps_extended(self):
         assert torch_dtype_map("c10::float8_e4m3fn") == "fp8"
@@ -6223,6 +6231,55 @@ class TestMoeExtensionsPush95Coverage:
         if hasattr(model, "bytes_bwd"):
             with pytest.raises(NotImplementedError):
                 model.bytes_bwd()
+
+    def test_unknown_dtypes_use_the_default_byte_widths(self):
+        # An unrecognized dtype keeps the previous default width: 2 bytes for
+        # an activation or output, 1 byte for a weight, and 1 byte for a
+        # block-scale activation. These fixtures already use those widths.
+        unfused_up = {
+            "args": {
+                "Input Dims": [[32, 4096], [8, 14336, 512], [32, 2, 7168]],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+        unfused_down = {
+            "args": {
+                "Input Dims": [[32, 2, 7168], [8, 4096, 896], [32, 4096]],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+        cases = [
+            (moe_ext.moe_aiter_fused_1stage, self.MOE_FUSED),
+            (moe_ext.moe_aiter_fused_blockscale, self.MOE_BLOCKSCALE),
+            (moe_ext.moe_aiter_unfused_up, unfused_up),
+            (moe_ext.moe_aiter_unfused_down, unfused_down),
+            (moe_ext.moe_aiter_ck_stage1, self.CK1),
+            (moe_ext.moe_aiter_ck_stage2, self.CK2),
+            (moe_ext.moe_flydsl_stage1, self.FLY),
+            (moe_ext.moe_flydsl_stage2, self.FLY),
+            (moe_ext.moe_triton_invoke_grouped_gemm, self.GROUPED),
+            (moe_ext.moe_gptq_awq_up, self.GPTQ),
+            (moe_ext.moe_gptq_awq_down, self.GPTQ),
+        ]
+        for cls, event in cases:
+            unknown = {
+                "args": {
+                    **event["args"],
+                    "Input type": ["not-a-dtype"] * len(event["args"]["Input type"]),
+                }
+            }
+            known_bytes = cls(event).bytes()
+            unknown_bytes = cls(unknown).bytes()
+            assert known_bytes > 0
+            assert unknown_bytes == known_bytes, cls.__name__
 
 
 class TestPerfModelFinalCoverage:
