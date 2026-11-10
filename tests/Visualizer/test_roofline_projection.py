@@ -38,6 +38,7 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _embedding_lookup_cost,
     _expert_loop_multiplier,
     _is_leaf_computation,
+    _is_padding_mask_body,
     _parse_conv_details,
     _engine_boundary_cost,
     _engine_head_cost,
@@ -598,6 +599,22 @@ def test_moe_cost_uses_introspected_weight_bpe():
     assert bytes_fp4 < bytes_bf16
 
 
+def test_fp8_kv_cache_halves_only_the_key_and_value_bytes():
+    # Q and the output stay bf16. An fp8 cache stores K and V at one byte,
+    # so a long decode moves about half the bytes a bf16 cache would.
+    from TraceLens.PerfModel.perf_model import SDPA
+
+    bf16 = SDPA.bytes_func(1, 1, 24, 327554, 4, 256, 256, False, 2)
+    fp8 = SDPA.bytes_func(
+        1, 1, 24, 327554, 4, 256, 256, False, 2, kv_bytes_per_element=1
+    )
+    q_and_out = 2 * (1 * 1 * 24 * 256) * 2
+    kv = 2 * (1 * 327554 * 4 * 256)
+    assert bf16 == q_and_out + kv * 2
+    assert fp8 == q_and_out + kv * 1
+    assert fp8 < bf16 / 2 * 1.01
+
+
 def test_gated_delta_cost_ignores_the_kv_cache():
     # Qwen3.5's linear layers are a recurrent delta rule. One layer, one token,
     # 48 value heads of 128: 48 * 7 * 128 * 128 = 5,505,024 FLOPs, whether the
@@ -656,7 +673,10 @@ def test_gated_delta_cost_ignores_the_kv_cache():
         None,
         role="attention",
     )
-    assert packed.total_flops == pytest.approx(48 * 64 * 5_505_024)
+    # The chunked prefill kernel is not the recurrent update, and it has no
+    # performance model of its own.
+    assert packed.modeled is False
+    assert packed.flops is None
 
 
 def test_fp8_matrix_quantizes_the_activation_and_not_the_weight():
@@ -672,6 +692,55 @@ def test_fp8_matrix_quantizes_the_activation_and_not_the_weight():
         _RT.reset()
     names = [row.computation for row in rows]
     assert names == ["act_quant"]
+    # One activation in, one packed activation out.
+    assert rows[0].bytes == 8 * 16 * 2 + 8 * 16 * 1
+
+
+def test_swiglu_down_proj_quant_reads_both_branches():
+    _RT.reset()
+    try:
+        _RT.weight_bpe = 1
+        rows = _quant_matrix_rows(
+            "decoder/mlp/down_proj:down_proj:0",
+            "decoder",
+            1,
+            [(8, 32, 16)],
+            2.0,
+            "bfloat16",
+            None,
+        )
+    finally:
+        _RT.reset()
+    # gate and up, then the packed write the down GEMM reads.
+    assert rows[0].bytes == 2 * (8 * 16) * 2 + (8 * 16) * 1
+
+
+def test_padding_mask_body_is_recognized():
+    assert _is_padding_mask_body(
+        "decoder/linear_attn/@fn_l555_apply_mask_to_padding_states:@op_l242_multiply:1"
+    )
+    assert not _is_padding_mask_body("decoder/mlp/down_proj:down_proj:0")
+
+
+def test_causal_conv1d_label_is_the_short_conv(_reset_rt):
+    _RT.reset()
+    _RT.sconv_kernel = 4
+    op = _project_op(
+        "decoder/linear_attn/causal_conv1d",
+        "decoder",
+        "Causal Conv1D",
+        "CausalConv1d",
+        "",
+        "[B, S, 10240] bfloat16",
+        [],
+        {"B": 1, "S": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled and op.category == "Conv1d"
+    assert op.flops == 2 * 8 * 10240 * 4
 
 
 def test_routed_experts_get_no_weight_dequant_row():
@@ -2586,6 +2655,68 @@ def _find_block(node, class_name):
         if found is not None:
             return found
     return None
+
+
+_NORM_STOP_SOURCE = """
+import torch
+import torch.nn as nn
+
+
+class QwenRMSNorm(nn.Module):
+    def __init__(self, dim):
+        self.weight = nn.Parameter(torch.empty(dim))
+        self.eps = 1e-6
+
+    def forward(self, x):
+        variance = x.float().pow(2).mean(-1, keepdim=True)
+        return (x * torch.rsqrt(variance + self.eps) * self.weight).type_as(x)
+
+
+class RMSNormGated(nn.Module):
+    def forward(self, hidden_states, gate):
+        hidden_states = hidden_states.float()
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + 1e-6)
+        return hidden_states * torch.nn.functional.silu(gate)
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.input_layernorm = QwenRMSNorm(8)
+        self.norm = RMSNormGated()
+
+    def forward(self, x, gate):
+        return self.norm(self.input_layernorm(x), gate)
+"""
+
+
+def test_roofline_stops_on_a_norm_subclass_instead_of_its_eager_body():
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+    from TraceLens.ModelUtils.block_tree import build_block_node
+
+    analysis = analyze_source(_NORM_STOP_SOURCE, all_tensor_ops=True)
+    roofline = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    norms = {child.attr_name: child for child in roofline.children}
+    assert set(norms) >= {"input_layernorm", "norm"}
+    assert norms["input_layernorm"].class_name == "QwenRMSNorm"
+    assert not norms["input_layernorm"].children
+    assert norms["norm"].class_name == "RMSNormGated"
+    assert not norms["norm"].children
+
+    detailed = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    opened = {child.attr_name: child for child in detailed.children}
+    assert opened["input_layernorm"].children
 
 
 def test_roofline_stops_at_the_grouped_expert_forward():

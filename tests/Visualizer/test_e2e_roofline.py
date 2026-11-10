@@ -16,6 +16,7 @@ import pytest
 matplotlib.use("Agg")
 
 from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
+    DEFAULT_SERIES,
     Regime,
     achieved_tflops,
     bandwidth_tb_s,
@@ -27,6 +28,7 @@ from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     main,
     plot_e2e_roofline,
     regimes_from_augmentation,
+    report_kernel_category,
     roof_tflops,
     ridge_flops_per_byte,
 )
@@ -203,6 +205,113 @@ def test_whole_model_is_omitted_when_it_is_the_same_forward_as_end_to_end():
     assert any("matches End to end" in warning for warning in warnings)
 
 
+def test_a_kernel_is_counted_by_its_computation_not_its_launcher():
+    conv = (
+        "prefill/vllm::qwen_gdn_attention_core->_causal_conv1d_fwd_kernel.kd "
+        "(Synthetic Op)"
+    )
+    chunk_state = (
+        "prefill/vllm::qwen_gdn_attention_core->chunk_gdn_fwd_h_flydsl_opt.kd "
+        "(Synthetic Op)"
+    )
+    chunk_output = (
+        "prefill/vllm::qwen_gdn_attention_core->chunk_fwd_kernel_o_opt_vk.kd "
+        "(Synthetic Op)"
+    )
+    prepare = (
+        "prefill/vllm::qwen_gdn_attention_core->gdn_prepare_kernel.kd "
+        "(Synthetic Op)"
+    )
+    post_conv = (
+        "prefill/vllm::qwen_gdn_attention_core->_fused_post_conv_kernel.kd "
+        "(Synthetic Op)"
+    )
+    recurrent = (
+        "decode/hipGraphLaunch->fused_rearrange_sigmoid_gated_delta_rule_"
+        "update_kernel.kd (Synthetic Op)"
+    )
+    launched_gemm = (
+        "prefill/vllm::qwen_gdn_attention_core->aiter::gemm_a8w8_blockscale_ck "
+        "(Synthetic Op)"
+    )
+    assert report_kernel_category(conv) == "CONV_fwd"
+    assert report_kernel_category(recurrent) == "Attention"
+    # The chunked kernels have no performance model. The launcher name must
+    # not lend them the recurrent update's category.
+    assert report_kernel_category(chunk_state) is None
+    assert report_kernel_category(chunk_output) is None
+    assert report_kernel_category(prepare) is None
+    assert report_kernel_category(post_conv) is None
+    assert report_kernel_category(launched_gemm) == "GEMM"
+
+
+def test_a_fused_group_quant_kernel_joins_group_quant():
+    # The act-mul quant is the SwiGLU epilogue. The registry leaves the device
+    # name as other, which dropped its time and put GroupQuant above the roof.
+    assert (
+        report_kernel_category("prefill/vllm::rocm_aiter_act_mul_and_fp8_group_quant")
+        == "GroupQuant"
+    )
+    assert (
+        report_kernel_category(
+            "decode/hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_kernel"
+            "IDF16b (Synthetic Op)"
+        )
+        == "GroupQuant"
+    )
+    # A norm fused with the quant stays a norm, matching the registered op.
+    assert (
+        report_kernel_category(
+            "prefill/vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant"
+        )
+        == "RMSNorm"
+    )
+    assert (
+        report_kernel_category(
+            "decode/hipGraphLaunch->_fused_rms_fp8_group_quant_kernel_BLOCK "
+            "(Synthetic Op)"
+        )
+        == "RMSNorm"
+    )
+
+
+def test_series_markers_do_not_repeat():
+    # Prefill and decode attention are one family, so they share the circle.
+    # Every other series has a shape of its own.
+    markers = [spec.marker for spec in DEFAULT_SERIES]
+    assert markers.count("o") == 2
+    rest = [marker for marker in markers if marker != "o"]
+    assert len(rest) == len(set(rest))
+
+
+def test_perf_report_categories_are_series_and_unknown_is_not():
+    labels = {spec.label for spec in DEFAULT_SERIES}
+    assert {"GEMM", "RMSNorm", "elementwise", "GroupQuant"} <= labels
+    assert not any(label.lower() in {"unknown", "other", "others"} for label in labels)
+    regime = Regime(
+        "prefill",
+        1,
+        (
+            _op("GEMM", 3.0e9, 1.0e9, instances=4),
+            _op("RMSNorm", 1.0e6, 2.0e8, instances=4),
+        ),
+    )
+    points, _warnings = build_points(
+        [regime],
+        [
+            _kernel("prefill/aiter::gemm_a8w8_blockscale", 100.0, 4),
+            _kernel(
+                "prefill/vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant", 50.0, 4
+            ),
+            _kernel("prefill/not_a_known_kernel", 80.0, 4),
+        ],
+    )
+    by_series = {point.series for point in points}
+    assert {"GEMM", "RMSNorm"} <= by_series
+    assert "other" not in by_series
+    assert "unknown" not in by_series
+
+
 def test_time_override_is_one_forward():
     regime = Regime(
         "decode",
@@ -217,7 +326,8 @@ def test_time_override_is_one_forward():
         [_kernel("aiter::mla_qseqlen1", 20.0, 40)],
         time_overrides_us={("decode", "End to end"): 1.0e3},
     )
-    assert warnings == []
+    # The regime projects a GEMM and the profile has no GEMM kernel.
+    assert warnings == ["GEMM decode: no profile time"]
     end_to_end = next(point for point in points if point.series == "End to end")
     # 10e9 FLOPs in 1000 µs. The per-launch cost is not used.
     assert end_to_end.achieved_tflops == pytest.approx(10.0e9 / 1.0e-3 / 1e12)
@@ -416,6 +526,17 @@ def test_points_from_report_use_the_stamped_graph_launch_costs(tmp_path):
         'aiter::gemm_a8w8,10,200,8.0,16.0,"((4, 7168), (2048, 7168))"\n',
         encoding="utf-8",
     )
+    (tmp_path / "rmsnorm_ops.csv").write_text(
+        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
+        'vllm::rmsnorm,4,40,1.0,2.0,"((4, 5120),)"\n',
+        encoding="utf-8",
+    )
+    # The unclassified bucket is not a series, even when the row has a cost.
+    (tmp_path / "unknown_ops.csv").write_text(
+        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
+        'hipGraphLaunch->mystery,4,40,1.0,2.0,"((4, 5120),)"\n',
+        encoding="utf-8",
+    )
     # A launch the fill did not cover contributes nothing.
     (tmp_path / "other_ops.csv").write_text(
         "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
@@ -426,13 +547,19 @@ def test_points_from_report_use_the_stamped_graph_launch_costs(tmp_path):
         (item.series, item.concurrency): item for item in points_from_report(tmp_path)
     }
     assert ("Decode attention", 1) not in points
+    assert ("unknown", 4) not in points
+    assert ("Unknown", 4) not in points
+    norm = points[("RMSNorm", 4)]
+    assert norm.flops == pytest.approx(4.0e9)
     attention = points[("Decode attention", 4)]
     assert attention.cost_source == "profile"
     assert attention.flops == pytest.approx(2.0e10)
     assert attention.arithmetic_intensity == pytest.approx(4.0)
     whole = points[("Whole model", 4)]
-    assert whole.flops == pytest.approx(1.0e11)
-    assert whole.time_us == pytest.approx(300.0)
+    # Attention, GEMM, RMSNorm, and the unclassified row. Unknown is not its
+    # own series, and its cost still belongs to the whole forward.
+    assert whole.flops == pytest.approx(1.08e11)
+    assert whole.time_us == pytest.approx(380.0)
 
 
 def test_profile_csv_reads_flops_and_bytes(tmp_path):

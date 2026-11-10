@@ -19,12 +19,19 @@ import argparse
 import ast
 import csv
 import json
+import re
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms, load_arch
+from TraceLens.PerfModel.torch_op_mapping import (
+    OP_CATEGORY_PATTERNS,
+    OP_CATEGORY_REGISTRY,
+    categorize_torch_op,
+    synthetic_kernel_name,
+)
 from TraceLens.Visualizer.model_explorer_export.roofline_augment import classify_kernel
 
 # Constants
@@ -58,7 +65,6 @@ _HARDWARE_ROOFS = (
 # and the paler gridlines, so each lower fraction is paler than the one above.
 _PEAK_FRACTIONS = ((0.75, "0.62"), (0.5, "0.86"), (0.25, "0.92"), (0.1, "0.96"))
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
-_ABOVE_ROOF_COLOR = "#D62728"
 
 
 @dataclass(frozen=True)
@@ -66,16 +72,101 @@ class Series:
     """One marker family. ``categories`` None is the whole modeled forward."""
 
     label: str
-    marker: str
+    marker: str | tuple[int, int, int]
     phase: str | None
     categories: tuple[str, ...] | None
     open_marker: bool = False
+
+
+# The perf report's catch-all. It is not a series: a kernel that landed here
+# has no category to draw.
+_UNCLASSIFIED = frozenset({"unknown", "other", "others"})
+def _extra_markers() -> tuple[tuple[int, int, int], ...]:
+    """Stars Matplotlib does not already name.
+
+    A ``(sides, style, angle)`` marker is filled, so a hollow prefill point can
+    still be drawn. Point counts and rotations are far enough apart that two
+    stars do not read as the same glyph. Three-point stars are omitted: they
+    read as triangles.
+    """
+    return tuple(
+        (sides, 1, angle)
+        for sides in (5, 7, 9, 11)
+        for angle in (45, 60)
+    )
+
+
+# One shape per report category, in ``GEMM`` then alphabetical order. The
+# circle, square, plus, and diamond are reserved for attention, routed MoE,
+# whole model, and end to end. The categories this profile draws land on
+# ``^``, ``<``, ``X``, ``*``, and ``v``, which stay distinct at legend size.
+_CATEGORY_MARKERS = (
+    "^",  # GEMM
+    (4, 1, 0),
+    "<",  # CONV_fwd. A six-point star reads as the RMSNorm star.
+    (8, 1, 0),
+    (10, 1, 0),
+    (4, 1, 15),
+    (6, 1, 15),
+    (8, 1, 15),
+    "X",  # GroupQuant
+    (10, 1, 15),
+    (4, 1, 30),
+    (6, 1, 30),
+    (8, 1, 30),
+    (10, 1, 30),
+    (6, 1, 0),
+    ">",
+    (6, 1, 8),
+    (8, 1, 8),
+    (10, 1, 8),
+    "*",  # RMSNorm
+    (4, 1, 8),
+    (6, 1, 22),
+    (8, 1, 22),
+    (10, 1, 22),
+    (4, 1, 22),
+    (6, 1, 38),
+    "v",  # elementwise
+    *_extra_markers(),
+)
+
+
+def report_categories() -> tuple[str, ...]:
+    """Perf-report op categories, excluding the unclassified bucket.
+
+    The names are the ones ``categorize_torch_op`` writes into a perf report.
+    ``unknown`` / ``other`` is the bucket a kernel falls into when no rule
+    matches, and it is not a series.
+    """
+    names = set(OP_CATEGORY_REGISTRY.values())
+    names.update(category for _pattern, category in OP_CATEGORY_PATTERNS)
+    names.update({"elementwise", "reduce", "multi_tensor_apply"})
+    return tuple(
+        sorted(name for name in names if name.lower() not in _UNCLASSIFIED)
+    )
+
+
+def _category_series(names: tuple[str, ...]) -> tuple[Series, ...]:
+    """One series per perf-report category. GEMM leads; the rest follow."""
+    ordered = [name for name in names if name == "GEMM"]
+    ordered.extend(name for name in names if name != "GEMM")
+    if len(ordered) > len(_CATEGORY_MARKERS):
+        raise RuntimeError(
+            f"{len(ordered)} report categories and "
+            f"{len(_CATEGORY_MARKERS)} distinct markers"
+        )
+    return tuple(
+        Series(name, _CATEGORY_MARKERS[index], None, (name,))
+        for index, name in enumerate(ordered)
+    )
 
 
 DEFAULT_SERIES: tuple[Series, ...] = (
     Series("Prefill attention", "o", "prefill", ("Attention",), True),
     Series("Decode attention", "o", "decode", ("Attention",), False),
     Series("Routed MoE", "s", None, ("MoE",), False),
+    *_category_series(report_categories()),
     Series("Whole model", "P", None, None, False),
     Series("End to end", "D", None, None, False),
 )
@@ -86,7 +177,7 @@ DEFAULT_SERIES: tuple[Series, ...] = (
 PROFILE_SERIES: tuple[Series, ...] = (
     Series("Decode attention", "o", "decode", ("Attention",), False),
     Series("Routed MoE", "s", None, ("MoE",), False),
-    Series("GEMM", "^", None, ("GEMM",), False),
+    *_category_series(report_categories()),
     Series("Whole model", "P", None, None, False),
 )
 _REPORT_CATEGORIES = {
@@ -308,7 +399,7 @@ def regime_from_projection(path: Path, phase: str, concurrency: int) -> Regime:
             continue
         ops.append(
             {
-                "category": row.get("category"),
+                "category": _projection_series_category(row),
                 "total_flops": row.get("total_flops") or 0.0,
                 "total_bytes": row.get("total_bytes") or 0.0,
                 "compute_spec": row.get("compute_spec"),
@@ -360,6 +451,97 @@ def flop_shares(ops: tuple[dict[str, Any], ...]) -> dict[str, float]:
     return shares
 
 
+# A graph launch names the device kernel, not the registered op. These still
+# implement a group quant. A norm fused with that quant stays a norm: the
+# prefill op ``rocm_aiter_rmsnorm_with_add_fp8_group_quant`` is already RMSNorm.
+_GROUP_QUANT_KERNEL = re.compile(
+    r"group_quant|per_token_scaled_quant|per_group_scaled_quant", re.IGNORECASE
+)
+_RMS_KERNEL = re.compile(r"rms_?norm|fused_rms", re.IGNORECASE)
+# Computations the op registry does not name. The pattern is the device
+# kernel's own math, never the Python function that launched it. A kernel is
+# listed here only when a performance model prices that kernel: the causal
+# conv model, the recurrent gated-delta update, and a split-K GEMM. The
+# chunked delta kernels and the prepare kernel have no model.
+_COMPUTATION_CATEGORY = (
+    (re.compile(r"causal_conv1d", re.IGNORECASE), "CONV_fwd"),
+    (
+        re.compile(
+            r"fused_recurrent_gated_delta_rule|gated_delta_rule_update",
+            re.IGNORECASE,
+        ),
+        "Attention",
+    ),
+    (re.compile(r"wvsplitk", re.IGNORECASE), "GEMM"),
+)
+
+
+def _kernel_computation(name: str) -> str:
+    """The device kernel. Text before ``->`` is a launcher or a display name."""
+    kernel = synthetic_kernel_name(name)
+    if kernel:
+        return kernel
+    arrow = name.rfind("->")
+    if arrow >= 0:
+        tail = name[arrow + 2 :].strip()
+        if tail:
+            return tail
+    return name
+
+
+def report_kernel_category(name: str) -> str | None:
+    """Category of the computation the kernel ran.
+
+    A launcher or Python display name is not a computation: ``qwen_gdn_attention_core``
+    launches a conv, the chunked delta kernels, and a prepare kernel, and only
+    the kernel symbol says which. The recurrent update is Attention because
+    that is the kernel ``gdn_attention_core`` models. Attention, MoE, and GEMM
+    still use the kernel-name match, then the perf report's own category.
+    ``unknown`` and ``other`` match no series unless the kernel symbol itself
+    names a group quant or one of the computations above.
+    """
+    computation = _kernel_computation(name)
+    legacy = classify_kernel(computation)
+    if legacy:
+        return legacy
+    report = categorize_torch_op({"name": computation})
+    if report and report.lower() not in _UNCLASSIFIED:
+        return report
+    if _RMS_KERNEL.search(computation) and _GROUP_QUANT_KERNEL.search(computation):
+        return "RMSNorm"
+    if _GROUP_QUANT_KERNEL.search(computation):
+        return "GroupQuant"
+    for pattern, category in _COMPUTATION_CATEGORY:
+        if pattern.search(computation):
+            return category
+    return None
+
+
+def _projection_series_category(row: dict[str, Any]) -> str:
+    """Map a projection row onto the perf-report category that series use.
+
+    Attention and MoE keep the names the existing series match. A norm, a
+    quant, and the remaining elementwise ops take the report's labels.
+    """
+    category = str(row.get("category") or "")
+    computation = str(row.get("computation") or "").lower()
+    if category in {"Attention", "MoE", "GEMM"}:
+        return category
+    if category.startswith("Normalization"):
+        return "RMSNorm"
+    if category == "Reduce":
+        return "reduce"
+    if category == "Conv1d":
+        return "CONV_fwd"
+    if category == "IndexedCopy":
+        return "IndexedCopy"
+    if category in {"UnaryElementwise", "BinaryElementwise"}:
+        if "quant" in computation:
+            return "GroupQuant"
+        return "elementwise"
+    return category
+
+
 def _matches(
     kernel: dict[str, Any],
     *,
@@ -371,7 +553,7 @@ def _matches(
     name = kernel["name"]
     if is_communication(name):
         return False
-    if categories is not None and classify_kernel(name) not in categories:
+    if categories is not None and report_kernel_category(name) not in categories:
         return False
     if includes and not any(token in name for token in includes):
         return False
@@ -575,7 +757,7 @@ def _series_work(
     grouped: dict[str, list[dict[str, Any]]] = {cat: [] for cat in by_cat}
     extra: list[dict[str, Any]] = []
     for kernel in matched:
-        cat = classify_kernel(kernel["name"])
+        cat = report_kernel_category(kernel["name"])
         if cat in grouped:
             grouped[cat].append(kernel)
         elif _has_profile_cost(kernel):
@@ -624,7 +806,7 @@ def _accounted_kernels(
     known = {str(op.get("category")) for op in _bucket_ops(ops, categories)}
     kept = []
     for kernel in matched:
-        cat = classify_kernel(kernel["name"])
+        cat = report_kernel_category(kernel["name"])
         if _has_profile_cost(kernel) and (
             cat is None or cat in known or categories is None
         ):
@@ -831,8 +1013,16 @@ def points_from_report(directory: Path) -> list[RooflinePoint]:
         slot[1] += nbytes
         slot[2] += time_us
 
+    by_lower = {name.lower(): name for name in report_categories()}
     for path in sorted(directory.glob("*_ops.csv")):
-        label = _REPORT_CATEGORIES.get(path.name.removesuffix("_ops.csv"))
+        stem = path.name.removesuffix("_ops.csv")
+        # ``unknown`` is the unclassified bucket and is not drawn. A stem the
+        # report named explicitly keeps that name; the three historical files
+        # keep the labels the plot already used.
+        if stem.lower() in _UNCLASSIFIED:
+            label = None
+        else:
+            label = _REPORT_CATEGORIES.get(stem) or by_lower.get(stem.lower(), stem)
         with path.open(newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             column = _time_column(reader.fieldnames)
@@ -1050,11 +1240,9 @@ def plot_e2e_roofline(
                 # point drawn underneath it at the same place, such as Whole
                 # model's plus, which otherwise shows through its center.
                 facecolors="white" if hollow else color,
-                # A point above the roof is a modeling or matching error, not a
-                # measurement, so it is outlined in red instead of drawn plain.
-                edgecolors=_ABOVE_ROOF_COLOR if point.above_roof else color,
-                linewidths=2.6 if point.above_roof else 1.6,
-                zorder=4 if point.above_roof else 3,
+                edgecolors=color,
+                linewidths=1.6,
+                zorder=3,
             )
 
     handles, labels = ax.get_legend_handles_labels()
@@ -1101,20 +1289,6 @@ def plot_e2e_roofline(
                 )
             )
             labels.append(f"{family}, {phase}")
-    if any(point.above_roof for point in points):
-        handles.append(
-            plt.Line2D(
-                [],
-                [],
-                marker="o",
-                linestyle="None",
-                markerfacecolor="none",
-                markeredgecolor=_ABOVE_ROOF_COLOR,
-                markeredgewidth=2.2,
-                markersize=8,
-            )
-        )
-        labels.append("Above the roof: FLOPs, bytes, or kernels do not match")
     # A single concurrency is the only color on the plot, so naming it adds nothing.
     for concurrency in concurrencies if len(concurrencies) > 1 else ():
         handles.append(
