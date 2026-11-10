@@ -5,15 +5,16 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Fail a change that adds complexity to the production modules it touches.
+"""Fail a change that adds much complexity to the production modules it touches.
 
 Every function in a changed module under ``TraceLens/`` or ``scripts/`` is measured
 at the head and at the merge base: cyclomatic complexity (radon), cognitive complexity
 (complexipy), nested block depth (ruff PLR1702) and lines of code in its body.
-A function over a limit fails when the base did not have it over, or had it lower, so
-the backlog at the base never fails a change. A module that grows past its limit
-fails; growth of one already past it is listed only. A broad ``except`` (ruff BLE001)
-fails on the lines the change adds.
+A function over a limit fails when the base had it under, or when it grows by more
+than 10% (rounded up) of its base value. A touched function over a limit within that
+growth, and a changed module over its limit, are listed for a separate cleanup;
+untouched functions are ignored. A broad ``except`` (ruff BLE001) fails on the lines
+the change adds.
 
 Usage:
     pip install radon==6.0.1 complexipy==8.0.1 ruff==0.16.1
@@ -26,6 +27,7 @@ import argparse
 import ast
 import io
 import json
+import math
 import re
 import subprocess
 import sys
@@ -41,6 +43,8 @@ LIMITS = {
     "function lines": 60,
     "module lines": 1200,
 }
+GROWTH = 0.1  # share of its base value a function already over a limit may add
+OPEN_ROWS = 10  # a longer cleanup list is collapsed in the report
 SOURCE_ROOTS = ("TraceLens", "scripts")
 MODULE = "<module>"
 ADDED_LINE_RULE = "BLE001"
@@ -94,20 +98,23 @@ def changed_modules(since: str, head: str) -> dict[str, str | None]:
     return modules
 
 
-def added_lines(since: str, head: str) -> dict[str, set[int]]:
-    """Line numbers at ``head`` that the change adds, per file."""
+def changed_lines(
+    since: str, head: str
+) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
+    """Lines at ``head`` the change adds, and those plus the line before each deletion."""
     added: dict[str, set[int]] = {}
+    touched: dict[str, set[int]] = {}
     path = ""
-    for line in run(
-        ["git", "diff", "-U0", "-M", since, head, "--", *SOURCE_ROOTS]
-    ).split("\n"):
+    diff = ["git", "diff", "-U0", "-M", "--diff-filter=AMR", since, head]
+    for line in run([*diff, "--", *SOURCE_ROOTS]).split("\n"):
         if line.startswith("+++ b/"):
             path = line[len("+++ b/") :]
         elif match := _HUNK.match(line):
             start = int(match[1])
             count = 1 if match[2] is None else int(match[2])
             added.setdefault(path, set()).update(range(start, start + count))
-    return added
+            touched.setdefault(path, set()).update(range(start, start + max(count, 1)))
+    return added, touched
 
 
 def export(ref: str, paths: list[str], root: Path) -> None:
@@ -162,6 +169,18 @@ def owner(defs: list[Def], line: int) -> str:
     return max(enclosing)[1] if enclosing else MODULE
 
 
+def touched_units(
+    root: Path, paths: list[str], touched: dict[str, set[int]]
+) -> set[tuple[str, str]]:
+    """(path, function) for each function in ``paths`` holding a touched line."""
+    return {
+        (path, fn.name)
+        for path in paths
+        for fn in walk_defs(ast.parse((root / path).read_text(encoding="utf-8")))
+        if any(fn.start <= row <= fn.end for row in touched.get(path, ()))
+    }
+
+
 def relative(root: Path, filename: str) -> str:
     return Path(filename).resolve().relative_to(root.resolve()).as_posix()
 
@@ -211,19 +230,27 @@ def measure(root: Path, paths: list[str]) -> dict[tuple[str, str, str], int]:
     return {key: v for key, v in values.items() if v > LIMITS[key[0]]}
 
 
-def compare(head: dict, base: dict) -> tuple[list[Finding], list[Finding]]:
-    """Units new or worse than at the base: (failing, listed only)."""
-    failing, listed = [], []
+def compare(
+    head: dict[tuple[str, str, str], int],
+    base: dict[tuple[str, str, str], int],
+    touched: set[tuple[str, str]],
+) -> tuple[list[Finding], list[Finding]]:
+    """Units over a limit: (failing, listed for cleanup)."""
+    failing, cleanup = [], []
     for (metric, path, unit), value in sorted(head.items()):
         before = base.get((metric, path, unit))
-        if before is None or value > before:
-            finding = Finding(metric, path, unit, before, value)
-            grown = metric == "module lines" and before is not None
-            (listed if grown else failing).append(finding)
-    return failing, listed
+        finding = Finding(metric, path, unit, before, value)
+        grown = before is None or value > before + math.ceil(before * GROWTH)
+        if metric != "module lines" and grown:
+            failing.append(finding)
+        elif metric == "module lines" or (path, unit) in touched:
+            cleanup.append(finding)
+    return failing, cleanup
 
 
-def added_line_findings(root: Path, paths: list[str], added: dict) -> list[str]:
+def added_line_findings(
+    root: Path, paths: list[str], added: dict[str, set[int]]
+) -> list[str]:
     """Report rows for the ``ADDED_LINE_RULE`` diagnostics on added lines."""
     flagged = []
     for row in ruff(root, paths, ADDED_LINE_RULE) if paths else []:
@@ -233,26 +260,51 @@ def added_line_findings(root: Path, paths: list[str], added: dict) -> list[str]:
     return flagged
 
 
-def render(failing: list[Finding], listed: list[Finding], flagged: list[str]) -> str:
-    verdict = "FAILED" if failing or flagged else "PASSED"
-    out = [f"## Code metrics: {verdict}\n"]
-    for title, findings in (("New or worse", failing), ("Listed only", listed)):
-        if findings:
-            out += [f"### {title}\n", "| Unit | Metric | Base | Now | Limit |"]
-            out += ["|---|---|--:|--:|--:|"]
-            out += [
+def table(findings: list[Finding]) -> str:
+    return "\n".join(
+        [
+            "| Unit | Metric | Base | Now | Limit |",
+            "|---|---|--:|--:|--:|",
+            *(
                 f"| `{f.path}` `{f.unit}` | {f.metric} | {f.base or '-'} | {f.head} "
                 f"| {LIMITS[f.metric]} |"
                 for f in findings
-            ]
-    if flagged:
-        out += ["### Added lines\n", "| Where | Rule |", "|---|---|", *flagged]
-    if verdict == "FAILED":
-        out += [
-            "\nSplit the unit until it is under the limit or no worse than the base;"
-            f" the `{WAIVER_LABEL}` label waives this, with a reason in the PR."
+            ),
         ]
-    return "\n".join(out)
+    )
+
+
+def render(failing: list[Finding], cleanup: list[Finding], flagged: list[str]) -> str:
+    """The markdown report, one blank line between its blocks."""
+    verdict = "FAILED" if failing or flagged else "PASSED"
+    out = [f"## Code metrics: {verdict}"]
+    if failing:
+        out += ["### Failing", table(failing)]
+    if flagged:
+        out += [
+            "### Added lines",
+            "\n".join(["| Where | Rule |", "|---|---|", *flagged]),
+        ]
+    if verdict == "FAILED":
+        out.append(
+            "Split each failing unit until it is under the limit or within"
+            f" {GROWTH:.0%} of the base;"
+            f" the `{WAIVER_LABEL}` label waives this, with a reason in the PR."
+        )
+    if cleanup:
+        rows = table(cleanup)
+        if len(cleanup) > OPEN_ROWS:
+            rows = f"<details><summary>{len(cleanup)} units</summary>\n\n{rows}\n\n</details>"
+        out += [
+            "### Pre-Existing Failures on Files that Require Cleanup",
+            f"Already over a limit and grown by no more than {GROWTH:.0%}, or modules"
+            f" over {LIMITS['module lines']} lines. They do not fail this change;"
+            " please split them when you can, in a follow-up.",
+            rows,
+        ]
+    if any(f.base is None for f in failing + cleanup):
+        out.append("Base `-`: new, or under the limit before this change.")
+    return "\n\n".join(out)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -272,10 +324,11 @@ def main(argv: list[str] | None = None) -> int:
             (metric, to_head[path], unit): value
             for (metric, path, unit), value in measure(base_root, list(to_head)).items()
         }
-        added = added_lines(since, args.head)
+        added, touched = changed_lines(since, args.head)
         flagged = added_line_findings(head_root, list(modules), added)
-    failing, listed = compare(head, base)
-    print(render(failing, listed, flagged))
+        units = touched_units(head_root, list(modules), touched)
+    failing, cleanup = compare(head, base, units)
+    print(render(failing, cleanup, flagged))
     return 1 if failing or flagged else 0
 
 
