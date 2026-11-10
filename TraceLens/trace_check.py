@@ -349,7 +349,7 @@ def _check_runtime_variability(ctx) -> List[TraceCheck]:
                 Status.WARN,
                 f"{failed_count}/{eligible} kernel groups exceed CV>={thr.runtime_cv_fail} "
                 f"(worst={worst_cv:.2f} '{worst_name}').",
-                {"eligible_groups": eligible, "worst_cv": round(worst_cv, 3)},
+                metrics={"eligible_groups": eligible, "worst_cv": round(worst_cv, 3)},
             )
         ]
     return []
@@ -383,7 +383,7 @@ def _check_gpu_idle(ctx) -> List[TraceCheck]:
                 Status.INFO,
                 f"GPU idle {idle_pct:.1f}% — not necessarily a defect "
                 "(expected for CPU-bound or graph-replay workloads).",
-                {"idle_pct": idle_pct},
+                metrics={"idle_pct": idle_pct},
             )
         ]
     return []
@@ -613,14 +613,44 @@ def _check_kernel_count_alignment(ctx) -> List[TraceCheck]:
         if df_counts is None:
             continue
         df_total = sum(df_counts.values())
-        if df_total != tree_total:
-            findings.append(
-                TraceCheck(
-                    Status.WARN,
-                    f"{label} kernel count ({df_total}) does not match "
-                    f"tree kernel count ({tree_total}).",
-                )
+        if df_total == tree_total:
+            continue
+
+        # Per-kernel contributions to the difference (diff = tree - report;
+        # positive means kernels present in the tree but missing from the report).
+        mismatches = []
+        for name in sorted(set(tree_counts) | set(df_counts)):
+            t = tree_counts.get(name, 0)
+            d = df_counts.get(name, 0)
+            if t != d:
+                mismatches.append((name, t, d))
+
+        entries = [
+            f"{(name[:80] + '...') if len(name) > 80 else name} "
+            f"(tree={t}, {label}={d}, diff={t - d})"
+            for name, t, d in mismatches
+        ]
+        lines = [
+            "; ".join(entries[i : i + 2]) for i in range(0, len(entries), 2)
+        ]
+        detail = "\n  ".join(lines)
+
+        findings.append(
+            TraceCheck(
+                Status.WARN,
+                f"{label} kernel count ({df_total}) does not match "
+                f"tree kernel count ({tree_total}).\n"
+                f"Per-kernel mismatches ({len(mismatches)}):\n  {detail}",
+                metrics={
+                    "tree_total": tree_total,
+                    "df_total": df_total,
+                    "mismatches": [
+                        {"name": name, "tree": t, "report": d, "diff": t - d}
+                        for name, t, d in mismatches
+                    ],
+                },
             )
+        )
     return findings
 
 
@@ -649,6 +679,49 @@ def _attention_observed(dfs: Dict, sheet_names: Sequence[str]) -> Dict[str, Any]
         unique += int(len(df))
         launches += int(df["name_count"].fillna(0).astype(int).sum())
     return {"launches": launches, "unique_kernels": unique, "sheets": found}
+
+
+def _check_runtime_instability(ctx) -> List[TraceCheck]:
+    """Per-op kernel-time instability (std/mean) from the ``unified_perf_summary`` sheet.
+
+    Not in CHECK_REGISTRY — invoked on demand (e.g. by the agent triage
+    ``check_runtime_instability``) so the computation lives in one place. The CV
+    threshold comes from ``thr.runtime_cv_warn`` so callers keep their own limit.
+    """
+    dfs, thr = ctx.get("dfs"), ctx["thr"]
+    if not dfs:
+        return []
+    df = dfs.get("unified_perf_summary")
+    cols = getattr(df, "columns", [])
+    if (
+        df is None
+        or "Kernel Time (µs)_mean" not in cols
+        or "Kernel Time (µs)_std" not in cols
+    ):
+        return []
+    unstable = []  # (cv, name)
+    for _, row in df.iterrows():
+        try:
+            mean = float(row["Kernel Time (µs)_mean"])
+            std = float(row["Kernel Time (µs)_std"])
+        except (TypeError, ValueError):
+            continue
+        if mean != mean or std != std or mean <= 0:  # NaN or non-positive mean
+            continue
+        if std / mean > thr.runtime_cv_warn:
+            unstable.append((std / mean, str(row.get("name", "") or "")))
+    if not unstable:
+        return []
+    unstable.sort(key=lambda x: x[0], reverse=True)
+    examples = ", ".join(n[:60] for _, n in unstable[:3])
+    return [
+        TraceCheck(
+            Status.WARN,
+            f"{len(unstable)} ops have kernel-time std/mean > {thr.runtime_cv_warn} "
+            f"(e.g. {examples}).",
+            metrics={"unstable_count": len(unstable), "examples": examples},
+        )
+    ]
 
 
 def _check_attention_kernel_count(ctx) -> List[TraceCheck]:

@@ -40,7 +40,6 @@ from TraceLens.Agent.Analysis.triage.checks import (
     _apply_path_remaps,
     _first_load_capture_event_set,
     _load_events,
-    _load_gpu_timeline,
     _load_manifest,
     _load_trace_json,
     _load_unified_perf_summary,
@@ -132,7 +131,7 @@ _TRIAGE_CSV_COLUMNS = [
     "Implied By",
 ]
 
-# checks._load_gpu_timeline reads "type" and "percent".
+# check_high_idle reads the "type" and "percent" columns of gpu_timeline.csv.
 _GPU_TIMELINE_FIELDS = ("type", "percent")
 
 
@@ -239,7 +238,7 @@ def write_perf_csv(path, rows):
 def write_gpu_timeline(path, rows):
     """Write ``perf_report_csvs/gpu_timeline.csv`` from dict rows.
 
-    ``checks._load_gpu_timeline`` reads the ``type`` and ``percent`` columns.
+    ``check_high_idle`` reads the ``type`` and ``percent`` columns.
     """
     return _write_dict_rows(path, rows, default_fields=_GPU_TIMELINE_FIELDS)
 
@@ -510,29 +509,6 @@ def test_significant_rows_boundary():
     ]
     kept = {r["name"] for r in _significant_rows(rows)}
     assert kept == {"on_boundary", "well_inside"}
-
-
-# ---------------------------------------------------------------------------
-# _load_gpu_timeline
-# ---------------------------------------------------------------------------
-
-
-def test_load_gpu_timeline_skips_unparseable(tmp_path):
-    csv_dir = tmp_path / "perf_report_csvs"
-    csv_dir.mkdir()
-    (csv_dir / "gpu_timeline.csv").write_text(
-        "type,percent\n"
-        "idle_time,20.5\n"
-        "compute,50\n"
-        "broken,notanumber\n"
-        ",30\n"  # blank type -> skipped
-    )
-    timeline = _load_gpu_timeline(str(tmp_path))
-    assert timeline == {"idle_time": 20.5, "compute": 50.0}
-
-
-def test_load_gpu_timeline_missing_file(tmp_path):
-    assert _load_gpu_timeline(str(tmp_path)) is None
 
 
 # ---------------------------------------------------------------------------

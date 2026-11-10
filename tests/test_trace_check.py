@@ -710,6 +710,41 @@ class TestEdgeCases:
         assert idle[0].status == Status.INFO
         assert "90.0%" in idle[0].message
 
+    def test_runtime_instability_from_summary(self):
+        # CV 0.5 > 0.25 threshold → finding with count + example in metrics.
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {
+                "name": ["gemm", "stable"],
+                "Kernel Time (µs)_mean": [100.0, 100.0],
+                "Kernel Time (µs)_std": [50.0, 1.0],
+            }
+        )
+        thr = trace_check.QualityThresholds(runtime_cv_warn=0.25)
+        findings = trace_check._check_runtime_instability(
+            {"dfs": {"unified_perf_summary": df}, "thr": thr}
+        )
+        assert len(findings) == 1
+        assert findings[0].metrics["unstable_count"] == 1
+        assert "gemm" in findings[0].metrics["examples"]
+
+    def test_runtime_instability_stable_no_finding(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {
+                "name": ["stable"],
+                "Kernel Time (µs)_mean": [100.0],
+                "Kernel Time (µs)_std": [1.0],
+            }
+        )
+        thr = trace_check.QualityThresholds(runtime_cv_warn=0.25)
+        findings = trace_check._check_runtime_instability(
+            {"dfs": {"unified_perf_summary": df}, "thr": thr}
+        )
+        assert findings == []
+
     def test_cpu_op_shapes_detailed_warn_threshold(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         # 60% coverage — between warn (80%) and fail (40%)
@@ -937,6 +972,28 @@ class TestKernelCountAlignment:
             pre_report=False, tree=tree, dfs=dfs, framework="pytorch"
         )
         assert any("kernel count" in f.message for f in report.findings)
+
+    def test_mismatch_reports_contributing_kernels(self):
+        import pandas as pd
+
+        # tree: gemm x2, relu x1; report: gemm x1 (relu missing entirely).
+        tree = self._make_tree_with_kernels(["gemm", "gemm", "relu"])
+        dfs = {
+            "ops_summary": pd.DataFrame(
+                {"kernel_details": [[{"name": "gemm", "count": 1}]]}
+            ),
+        }
+        report = trace_check.run_trace_checks(
+            pre_report=False, tree=tree, dfs=dfs, framework="pytorch"
+        )
+        f = next(f for f in report.findings if "kernel count" in f.message)
+        # Per-kernel contributors appear in the message...
+        assert "gemm" in f.message and "relu" in f.message
+        assert "diff=1" in f.message
+        # ...and structured detail is in metrics.
+        by_name = {m["name"]: m for m in f.metrics["mismatches"]}
+        assert by_name["gemm"] == {"name": "gemm", "tree": 2, "report": 1, "diff": 1}
+        assert by_name["relu"] == {"name": "relu", "tree": 1, "report": 0, "diff": 1}
 
     def test_nccl_kernels_excluded_from_tree_count(self):
         import pandas as pd

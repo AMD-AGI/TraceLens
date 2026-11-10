@@ -338,28 +338,6 @@ def _load_unified_perf_summary(run_dir):
         return None
 
 
-def _load_gpu_timeline(run_dir):
-    """Parse ``perf_report_csvs/gpu_timeline.csv`` into ``{type: percent}``.
-
-    Returns ``None`` if the file is missing or unreadable.
-    """
-    path = os.path.join(run_dir, "perf_report_csvs", "gpu_timeline.csv")
-    if not os.path.isfile(path):
-        return None
-    out = {}
-    try:
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                t = (row.get("type") or "").strip()
-                pct = _parse_float(row.get("percent"))
-                if not t or pct is None:
-                    continue
-                out[t] = pct
-    except (OSError, csv.Error):
-        return None
-    return out
-
-
 def _significant_rows(rows):
     """Filter unified_perf_summary rows to "significant ops".
 
@@ -575,27 +553,46 @@ def check_capture_missing(run_dir, _stream_file):
 # ---------------------------------------------------------------------------
 
 
-def check_high_idle(run_dir, stream_file):
-    timeline = _load_gpu_timeline(run_dir)
-    idle = None
-    source = None
-    if timeline is not None and "idle_time" in timeline:
-        idle = timeline["idle_time"]
-        source = "perf_report_csvs/gpu_timeline.csv"
-    else:
-        manifest = _load_manifest(run_dir)
-        if manifest:
-            idle = manifest.get("gpu_utilization", {}).get("idle_time_percent")
-            if idle is not None:
-                source = "category_manifest.json gpu_utilization.idle_time_percent"
+def check_high_idle(run_dir, _stream_file):
+    # Idle computation lives in trace_check._check_gpu_idle; feed it the
+    # gpu_timeline sheet (or the manifest fallback) and keep triage's 15%.
+    import pandas as pd
 
-    if idle is not None and idle > _HIGH_IDLE_PCT:
-        return FindingDraft(
-            "High idle time (> 15% GPU idle)",
-            f"GPU idle time is {idle:.1f}% ({source})",
-            "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
-        )
-    return None
+    timeline_csv = os.path.join(run_dir, "perf_report_csvs", "gpu_timeline.csv")
+    source = None
+    df = None
+    if os.path.isfile(timeline_csv):
+        try:
+            df = pd.read_csv(timeline_csv)
+            source = "perf_report_csvs/gpu_timeline.csv"
+        except (OSError, ValueError):
+            df = None
+    if df is None:
+        # No sheet on disk — fall back to the manifest's single idle number.
+        manifest = _load_manifest(run_dir)
+        idle = (manifest or {}).get("gpu_utilization", {}).get("idle_time_percent")
+        if idle is not None:
+            source = "category_manifest.json gpu_utilization.idle_time_percent"
+            df = pd.DataFrame({"type": ["idle_time"], "percent": [idle]})
+    if df is None:
+        return None
+
+    thr = trace_check.QualityThresholds(idle_pct_warn=_HIGH_IDLE_PCT)
+    findings = trace_check._check_gpu_idle(
+        {
+            "dfs": {"gpu_timeline": df},
+            "sheets": trace_check._SHEETS["pytorch"],
+            "thr": thr,
+        }
+    )
+    if not findings:
+        return None
+    idle_pct = findings[0].metrics["idle_pct"]
+    return FindingDraft(
+        "High idle time (> 15% GPU idle)",
+        f"GPU idle time is {idle_pct:.1f}% ({source})",
+        "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
+    )
 
 
 def check_corrupt_json(run_dir, _stream_file):
@@ -779,26 +776,24 @@ def check_split_low_gpu_kernels(run_dir, _stream_file):
 
 
 def check_runtime_instability(run_dir, _stream_file):
+    # CV computation lives in trace_check._check_runtime_instability; keep
+    # triage's 0.25 threshold and rebuild the evidence from its metrics.
+    import pandas as pd
+
     rows = _load_unified_perf_summary(run_dir)
     if not rows:
         return None
-    unstable = []
-    for row in rows:
-        mean = _parse_float(row.get("Kernel Time (µs)_mean"))
-        std = _parse_float(row.get("Kernel Time (µs)_std"))
-        if not mean or std is None or mean <= 0:
-            continue
-        cv = std / mean
-        if cv > _RUNTIME_INSTABILITY_CV:
-            unstable.append((cv, row))
-    if not unstable:
+    thr = trace_check.QualityThresholds(runtime_cv_warn=_RUNTIME_INSTABILITY_CV)
+    findings = trace_check._check_runtime_instability(
+        {"dfs": {"unified_perf_summary": pd.DataFrame(rows)}, "thr": thr}
+    )
+    if not findings:
         return None
-    unstable.sort(key=lambda x: x[0], reverse=True)
-    top = [r for _, r in unstable[:3]]
-    names = ", ".join((r.get("name") or "")[:60] for r in top)
+    m = findings[0].metrics
     return FindingDraft(
         "Run-time instability across iterations / per cpu_op",
-        f"{len(unstable)} ops have Kernel Time std/mean > 0.25 (e.g. {names})",
+        f"{m['unstable_count']} ops have Kernel Time std/mean > "
+        f"{_RUNTIME_INSTABILITY_CV} (e.g. {m['examples']})",
         "Likely a profiler or system issue; verify if the variance is expected",
     )
 
