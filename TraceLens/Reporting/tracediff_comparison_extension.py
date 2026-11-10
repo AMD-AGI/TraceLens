@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional, Set
 import numpy as np
 import pandas as pd
 
+from TraceLens.TreePerf.tree_perf import kernel_identity
+
 _KERNEL_TIME_COL_FOR_SPEEDUP_DELTA = "Kernel Time (µs)_sum"
 
 _GROUPING_COLS = [
@@ -168,10 +170,19 @@ def _build_uid_to_row_idx(
         return {}
 
     # Build group_key → row index from unified_perf_summary.
+    # Kernel identity is part of the summary group key. Two launches of one
+    # op that run different kernels are different rows, and each uid has to
+    # land on the row that names its kernel.
     present_grouping = [c for c in _GROUPING_COLS if c in unified_perf_summary.columns]
+    use_identity = (
+        "kernel_details_summary" in unified_perf_summary.columns
+        and "kernel_details" in df_unified_perf.columns
+    )
     group_key_to_row_idx: Dict[tuple, Any] = {}
     for idx, row in unified_perf_summary.iterrows():
         key = tuple(str(row.get(c, "")) for c in present_grouping)
+        if use_identity:
+            key = key + (kernel_identity(row.get("kernel_details_summary")),)
         group_key_to_row_idx[key] = idx
 
     # Build gpu_op_uid → row index via df_unified_perf grouping key.
@@ -179,6 +190,8 @@ def _build_uid_to_row_idx(
     uid_to_row_idx: Dict[Any, Any] = {}
     for _, row in df_unified_perf.iterrows():
         key = tuple(str(row.get(c, "")) for c in present_pre)
+        if use_identity:
+            key = key + (kernel_identity(row.get("kernel_details")),)
         summary_idx = group_key_to_row_idx.get(key)
         if summary_idx is None:
             continue

@@ -328,6 +328,33 @@ def test_every_process_group_is_a_degree():
     assert any(shape == local_q for launch in decode for shape in launch.input_shapes)
 
 
+def test_schedule_names_the_ops_the_profiler_records():
+    launches = schedule_deepseek_v4(
+        _pro(), Invocation(batch_size=4, seq_len=1, past_len=0, tokens=4)
+    )
+    names = {launch.op_name for launch in launches}
+    assert "sglang_profiler::topk_topk_transform_paged_v2" in names
+    assert "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8" in names
+    assert "aiter::dynamic_per_token_scaled_quant" in names
+    assert "sglang::reg_all_gather_into_tensor" in names
+    assert "sglang::topk" not in names
+    assert "aiter::dynamic_per_group_scaled_quant" not in names
+    assert "aiter::reg_all_gather" not in names
+
+
+def test_gfx_comes_from_the_product_when_the_arch_omits_compute_units():
+    from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+        _graph_model_on_device,
+    )
+
+    model = _graph_model_on_device(_pro(), {"name": "MI355X"})
+    assert model.gfx_arch == "gfx950"
+    assert model.num_cus == 0
+    placed = replace(model, num_cus=256)
+    assert mhc_pre_split(4, 4 * 7168, placed.num_cus, placed.gfx_arch)[0] == 112
+    assert mhc_fused_split(4, 7168, placed.num_cus, placed.gfx_arch) == 112
+
+
 def test_compute_units_come_from_the_trace_device_block():
     devices = [{"name": "AMD Instinct MI355X", "numSms": 256}] * 8
     assert num_cus_from_trace({"deviceProperties": devices}) == 256
@@ -512,7 +539,15 @@ def test_graph_launch_rows_take_the_invocation_shapes():
     elementwise = [
         event for event in collected if "elementwise_kernel" in event["name"]
     ]
-    assert elementwise
+    assert len(elementwise) == 1
+    # A kernel the schedule does not claim is the same synthetic row a capture
+    # report emits for a launch it could not reparent.
+    assert elementwise[0]["name"] == (
+        "hipGraphLaunch->void at::native::elementwise_kernel<8>() (Synthetic Op)"
+    )
+    assert [k["name"] for k in elementwise[0]["kernel_details"]] == [
+        "void at::native::elementwise_kernel<8>()"
+    ]
     assert "Input Dims" not in (elementwise[0].get("args") or {})
 
 
@@ -712,7 +747,31 @@ def test_moe_sorting_pads_every_expert_to_the_tile_the_cu_search_picks():
         (12341,),
     )
     moe_sort = next(item for item in decode if item.key == "moe_sort")
-    assert moe_sort.input_shapes[-2:] == ((295680, 224), (2759680, 16))
+    # The small-sort kernel reads (tokens, topk) ids, the padded slots, and
+    # the block-id length. It does not read the packed GEMM signature.
+    slots = 4 * 7 + 385 * 32 - 7
+    assert moe_sort.input_shapes == (
+        (4, 7),
+        (4, 7),
+        (slots,),
+        (slots,),
+        ((slots + 32 - 1) // 32,),
+        (2,),
+        (0, 7168),
+    )
+    from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+        SglangMoeSortingSmall,
+    )
+
+    modeled = SglangMoeSortingSmall(
+        {
+            "args": {
+                "Input Dims": [list(shape) for shape in moe_sort.input_shapes],
+                "Input type": ["int", "float", "int", "float", "int", "int", "bf16"],
+            }
+        }
+    )
+    assert modeled.flops() is not None
     # A large batch makes the search prefer the 128-row tile.
     wide = _decode_launches(device, tokens=2048, layer=3)
     wide_sort = next(item for item in wide if item.key == "mx_sort")
@@ -1006,7 +1065,8 @@ def test_the_logits_gather_copy_needs_more_than_one_token():
     assert tail_copies(4) == [(4, 8, 16160), (4, 129280)]
     launches = _decode_launches(_pro(), tokens=4)
     gather = next(item for item in launches if item.key == "allgather")
-    assert gather.input_shapes == ((32, 16160), (4, 16160))
+    assert gather.input_shapes == ((32, 16160), (4, 16160), ())
+    assert gather.input_types[:2] == ("c10::BFloat16", "c10::BFloat16")
 
 
 def test_a_dropped_tuned_row_gives_way_to_the_atomic_flydsl_fallback():

@@ -17,6 +17,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
     op_to_perf_model_class_map,
     register_op_categories,
     registered_op_for_kernel,
+    resolve_perf_model_class,
     source_call_has_perf_model,
 )
 
@@ -104,6 +105,22 @@ def test_kernel_name_fallback(kernel_name, expected):
             "mHC",
         ),
         ("hipGraphLaunch->aiter::mhc_post (Synthetic Op)", "mHC"),
+        (
+            "aiter::fused_moe_->_moe_sorting_small_kernel (Synthetic Op)",
+            "MoE_aux",
+        ),
+        (
+            "hipGraphLaunch->_wo_a_quant_mxfp8_kernel (Synthetic Op)",
+            "GroupQuant",
+        ),
+        (
+            "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8",
+            "GroupQuant",
+        ),
+        (
+            "hipGraphLaunch->void sglang::topk_main_kernel<false, 2> (Synthetic Op)",
+            "InferenceAttention",
+        ),
         (
             "hipGraphLaunch->void at::native::elementwise_kernel<8, 4>() (Synthetic Op)",
             "elementwise",
@@ -232,3 +249,11 @@ def test_register_op_category_extension_updates_registry_only():
     )
 
     assert registry["MyCategoryOnlyBackward"] == "SDPA_bwd"
+
+
+def test_a_shared_kernel_symbol_does_not_replace_the_op():
+    """add_rmsnorm_quant_kernel implements both calls. The op name selects the model."""
+    rmsnorm = resolve_perf_model_class("aiter::rmsnorm")
+    added = resolve_perf_model_class("aiter::add_rmsnorm")
+    assert rmsnorm is not None and added is not None
+    assert rmsnorm is not added

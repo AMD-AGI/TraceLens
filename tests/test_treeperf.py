@@ -2366,6 +2366,51 @@ class TestTreePerfFinalCoverage:
         )
         assert isinstance(summarized, pd.DataFrame)
 
+    def test_summary_keeps_each_device_kernel(self):
+        """Two launches of one op that run different kernels stay two rows.
+
+        Grouping on the op name and its shapes used to publish the first
+        kernel's name for every launch, so the kernel that ran was missing.
+        """
+        same = {
+            "name": "sglang::flash_c4",
+            "op category": "attention",
+            "Input Dims": ((4, 128),),
+            "Input type": ("float",),
+        }
+        df = pd.DataFrame(
+            [
+                {
+                    **same,
+                    "UID": 1,
+                    "Kernel Time (µs)": 10.0,
+                    "kernel_details": [{"name": "flash_c4_prefill<128>", "dur": 10}],
+                },
+                {
+                    **same,
+                    "UID": 2,
+                    "Kernel Time (µs)": 4.0,
+                    "kernel_details": [{"name": "flash_c4_prefill<512>", "dur": 4}],
+                },
+                {
+                    **same,
+                    "UID": 3,
+                    "Kernel Time (µs)": 11.0,
+                    "kernel_details": [{"name": "flash_c4_prefill<128>", "dur": 11}],
+                },
+            ]
+        )
+        summary = TreePerfAnalyzer.summarize_df_unified_perf_table(
+            df, include_pct=False
+        )
+        named = {
+            row["kernel_details_summary"][0]["name"]: row
+            for _, row in summary.iterrows()
+        }
+        assert set(named) == {"flash_c4_prefill<128>", "flash_c4_prefill<512>"}
+        assert named["flash_c4_prefill<128>"]["operation_count"] == 2
+        assert named["flash_c4_prefill<512>"]["operation_count"] == 1
+
     def test_build_df_perf_metrics_unknown_op(self):
         events = _mk_pytorch_trace()
         events[0]["name"] = "aten::unknown_custom_op"

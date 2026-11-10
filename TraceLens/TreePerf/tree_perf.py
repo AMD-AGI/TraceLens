@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import ast
 import copy
 import inspect
 import json
@@ -80,6 +81,27 @@ UNIQUE_ARGS_GROUPING_COLS = (
 )
 # Prefix of the perf-model parameter columns that roofline sheets group by.
 PERF_PARAM_PREFIX = "param: "
+
+
+def kernel_identity(details) -> str:
+    """Device-kernel names on one row, in launch order.
+
+    Two launches of the same op can run different kernels. A summary grouped
+    only on the op and its shapes keeps the first kernel's name and drops the
+    one that ran. The identity is part of the group key so each kernel stays
+    on its own row.
+    """
+    if isinstance(details, str):
+        # unified_perf_summary round-trips kernel lists through text.
+        try:
+            details = ast.literal_eval(details)
+        except (ValueError, SyntaxError):
+            return ""
+    if not isinstance(details, list):
+        return ""
+    return "\n".join(
+        str(item.get("name", "")) for item in details if isinstance(item, dict)
+    )
 
 
 def _by_time_then_uid(event):
@@ -541,6 +563,8 @@ class TreePerfAnalyzer:
         return self.GPUEventAnalyser(kernels).compute_metrics()["busy_time"]
 
     def _build_perf_model(self, event, perf_model_class=None):
+        # The class is the op name. A captured CPU op and a scheduled launch
+        # both carry that name, and a shared device symbol does not replace it.
         if perf_model_class is None:
             perf_model_class = resolve_perf_model_class(event["name"])
         return perf_model_class(
@@ -1499,6 +1523,10 @@ class TreePerfAnalyzer:
             str_col_name = f"{col}_str_repr_for_grouping"
             df_filtered[str_col_name] = df_filtered[col].apply(str)
             str_col_names.append(str_col_name)
+        if "kernel_details" in df_filtered.columns:
+            identity = "_kernel_identity_str_repr_for_grouping"
+            df_filtered[identity] = df_filtered["kernel_details"].map(kernel_identity)
+            str_col_names.append(identity)
         if not str_col_names:
             raise ValueError("No valid columns found to group by.")
 
@@ -2443,6 +2471,10 @@ class TreePerfAnalyzer:
             str_col_name = f"{col}_str_repr_for_grouping"
             df_temp[str_col_name] = df_temp[col].apply(str)
             str_col_names.append(str_col_name)
+        if "kernel_details" in df_temp.columns:
+            identity = "_kernel_identity_str_repr_for_grouping"
+            df_temp[identity] = df_temp["kernel_details"].map(kernel_identity)
+            str_col_names.append(identity)
 
         if not str_col_names:
             raise ValueError("No valid grouping columns found.")
