@@ -12,6 +12,8 @@ from TraceLens.TreePerf.tree_perf import (
     PERF_PARAM_PREFIX,
     UNIQUE_ARGS_GROUPING_COLS,
     TreePerfAnalyzer,
+    _CALL_STACK_GROUP_KEY,
+    call_stack_identity,
 )
 
 
@@ -106,6 +108,34 @@ def test_summary_merges_launches_with_no_call_stack():
     )
     assert len(summary) == 1
     assert summary["operation_count"].iloc[0] == 2
+
+
+def test_call_stack_identity_skips_entries_that_are_not_stacks():
+    assert call_stack_identity(None) == ""
+    assert call_stack_identity("prefill_cuda_graph_runner") == ""
+    assert (
+        call_stack_identity(
+            ["prefill_cuda_graph_runner", {"name": "k", "call_stack": ["decode"]}]
+        )
+        == "decode"
+    )
+
+
+def test_overlapping_summary_drops_the_call_stack_group_key():
+    df = _rows()
+    df["kernel_details"] = [
+        _kernel(["prefill_cuda_graph_runner"]),
+        _kernel(["decode_cuda_graph_runner"]),
+    ]
+    df["overlapping_kernel_names"] = ["k", "k"]
+    summary = TreePerfAnalyzer.summarize_df_unified_perf_table(
+        df,
+        agg_metrics=["mean"],
+        include_pct=False,
+        include_overlapping_kernels=True,
+    )
+    assert _CALL_STACK_GROUP_KEY not in summary.columns
+    assert len(summary) == 2
 
 
 def test_unique_args_keeps_kernel_call_stacks_in_the_group_key():

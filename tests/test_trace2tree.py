@@ -40,7 +40,11 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     update_subtree_uids_and_timestamps,
     verify_subtree_events,
 )
-from TraceLens.Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
+from TraceLens.Trace2Tree.trace_to_tree import (
+    JaxTraceToTree,
+    TraceToTree,
+    covering_user_annotation,
+)
 from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
     apply_pseudo_op_extensions,
 )
@@ -867,6 +871,25 @@ class TestTraceToTreeExtended:
         tree.apply_annotation(name_filters=["aiter::mla_decode_v4_asm"])
         op = next(e for e in tree.events if e["name"] == "aiter::mla_decode_v4_asm")
         assert tree.events[op["UID"]]["annotation"] == step
+
+    def test_covering_annotation_ignores_ranges_that_do_not_apply(self):
+        # A launch with no timestamp, an annotation with no timestamp, and a
+        # launch that sits outside every range each leave the stamp unset.
+        assert covering_user_annotation({"dur": 10}, []) == "NA"
+        assert (
+            covering_user_annotation(
+                {"ts": 50, "dur": 10},
+                [{"name": "step[DECODE bs=1 g_sq=1 g_sk=1 g_sqsq=1 g_sqsk=1]"}],
+            )
+            == "NA"
+        )
+        assert (
+            covering_user_annotation(
+                {"ts": 50, "dur": 10},
+                [{"name": "phase_a", "ts": 0, "dur": 20}],
+            )
+            == "NA"
+        )
 
     def test_link_fwd_bwd_and_subtree_bwd_events(self):
         events = [
