@@ -15,7 +15,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer, trace_check
+from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
+from TraceLens.TraceUtils import trace_check
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,

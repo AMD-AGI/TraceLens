@@ -29,7 +29,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from .util import (
+from ...util import (
     GPU_KERNEL_CATEGORIES,
     GRAPH_LAUNCH_NAMES,
     TIMESTAMP_TOLERANCE_US,

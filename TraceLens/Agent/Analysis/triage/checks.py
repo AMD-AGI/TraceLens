@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from TraceLens import trace_check
+from TraceLens.TraceUtils import trace_check
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     focus_job_utilization,
 )
