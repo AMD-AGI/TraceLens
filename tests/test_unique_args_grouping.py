@@ -15,6 +15,13 @@ from TraceLens.TreePerf.tree_perf import (
 )
 
 
+def _kernel(stack):
+    details = {"name": "index_elementwise_kernel", "dur": 1.0}
+    if stack is not None:
+        details["call_stack"] = stack
+    return [details]
+
+
 def _rows():
     return pd.DataFrame(
         {
@@ -57,3 +64,59 @@ def test_shared_grouping_columns_collapse_matching_rows():
     )
     out = TreePerfAnalyzer.summarize_df_perf_metrics(perf, agg_metrics=["mean"])
     assert out[f"{PERF_PARAM_PREFIX}M"].iloc[0] == "32"
+
+
+def test_summary_keeps_launches_from_different_runners_apart():
+    # A decode replay of a captured op shares the prefill launch's arguments.
+    # The row used to keep the first stack, so the decode launches were
+    # labeled prefill_cuda_graph_runner.
+    df = _rows()
+    df["kernel_details"] = [
+        _kernel(["prefill_cuda_graph_runner", "aten::index"]),
+        _kernel(["decode_cuda_graph_runner", "aten::index"]),
+    ]
+    summary = TreePerfAnalyzer.summarize_df_unified_perf_table(
+        df, agg_metrics=["mean"], include_pct=False, include_call_stack=True
+    )
+    assert len(summary) == 2
+    assert summary["operation_count"].sum() == 2
+    assert summary["total_duration_us"].sum() == 4.0
+    stacks = " ".join(summary["call_stack_full"].astype(str))
+    assert "prefill_cuda_graph_runner" in stacks
+    assert "decode_cuda_graph_runner" in stacks
+
+
+def test_summary_merges_launches_that_share_a_call_stack():
+    df = _rows()
+    stack = ["decode_cuda_graph_runner", "aten::index"]
+    df["kernel_details"] = [_kernel(stack), _kernel(stack)]
+    summary = TreePerfAnalyzer.summarize_df_unified_perf_table(
+        df, agg_metrics=["mean"], include_pct=False, include_call_stack=True
+    )
+    assert len(summary) == 1
+    assert summary["operation_count"].iloc[0] == 2
+    assert "decode_cuda_graph_runner" in summary["call_stack_full"].iloc[0]
+
+
+def test_summary_merges_launches_with_no_call_stack():
+    df = _rows()
+    df["kernel_details"] = [_kernel(None), _kernel(None)]
+    summary = TreePerfAnalyzer.summarize_df_unified_perf_table(
+        df, agg_metrics=["mean"], include_pct=False
+    )
+    assert len(summary) == 1
+    assert summary["operation_count"].iloc[0] == 2
+
+
+def test_unique_args_keeps_kernel_call_stacks_in_the_group_key():
+    df = _rows()
+    df["kernel_details"] = [
+        _kernel(["prefill_cuda_graph_runner"]),
+        _kernel(["decode_cuda_graph_runner"]),
+    ]
+    df["total_direct_kernel_time"] = [1.0, 2.0]
+    unique = TreePerfAnalyzer.get_df_kernel_launchers_unique_args(
+        df, agg_metrics=["mean"]
+    )
+    assert len(unique) == 2
+    assert set(unique["operation_count"]) == {1}

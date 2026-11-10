@@ -829,6 +829,45 @@ class TestTraceToTreeExtended:
         tree.apply_annotation(name_filters=["gpu_op"])
         assert tree.events[gpu_op_evt["UID"]]["annotation"] == "phase_a"
 
+    def test_apply_annotation_prefers_the_step_inside_run_batch(self):
+        # The graph launch fills the step. run_batch starts earlier and
+        # contains the launch too. The step is the one with the sq/sk record.
+        step = "step[DECODE bs=3 g_sq=3 g_sk=86591 g_sqsq=3 g_sqsk=86591]"
+        events = [
+            _mk_event(
+                "user_annotation",
+                "scheduler.run_batch",
+                ts=0,
+                dur=1000,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+            _mk_event(
+                "user_annotation",
+                "step[DECODE bs=1 g_sq=1 g_sk=51424 g_sqsq=1 g_sqsk=51424]",
+                ts=0,
+                dur=800,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+            _mk_event("user_annotation", step, ts=400, dur=100, pid=1, tid=1, args={}),
+            _mk_event(
+                "cpu_op",
+                "aiter::mla_decode_v4_asm",
+                ts=400,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+        ]
+        tree = _build_tree(events)
+        tree.apply_annotation(name_filters=["aiter::mla_decode_v4_asm"])
+        op = next(e for e in tree.events if e["name"] == "aiter::mla_decode_v4_asm")
+        assert tree.events[op["UID"]]["annotation"] == step
+
     def test_link_fwd_bwd_and_subtree_bwd_events(self):
         events = [
             _mk_event(
