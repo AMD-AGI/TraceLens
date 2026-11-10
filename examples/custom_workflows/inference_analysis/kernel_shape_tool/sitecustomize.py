@@ -6,8 +6,8 @@ CPython imports a top-level module named ``sitecustomize`` automatically at
 interpreter startup for every process, as long as its directory is on
 ``sys.path`` (i.e. on ``PYTHONPATH``). This shim uses that hook to:
 
-  1. install the Triton / FlyDSL JIT hooks from ``jit_shape_tracer`` as soon as
-     those libraries are imported, and
+  1. install the Triton / FlyDSL / tvm-ffi / aiter cpp_itfs hooks from
+     ``jit_shape_tracer`` as soon as those libraries are imported, and
   2. drive ``enable()`` / ``disable()`` from the torch-profiler window, so
      shape annotation costs nothing outside a profiling run.
 
@@ -20,13 +20,12 @@ nothing observable -- every hook short-circuits, so it is safe to leave the
 directory on ``PYTHONPATH`` permanently.
 
 torch is usually not imported yet when ``sitecustomize`` runs, so patches are
-registered as *pending* and applied by an ``__import__`` hook the moment the
-target module appears in ``sys.modules``. All hooks are idempotent (guarded by a
+registered as *pending* and applied by a ``sys.meta_path`` finder the moment
+the target module finishes importing. All hooks are idempotent (guarded by a
 sentinel attribute) and crash-proof (wrapped in ``try/except``) so they can
 never break the workload.
 """
 
-import builtins
 import os
 import sys
 import threading
@@ -105,6 +104,25 @@ def _install_jit_hooks() -> bool:
         return bool(_get_tracer().install_hooks())
     except Exception:
         return False
+
+
+def _installer(fn_name: str):
+    """Pending patch for one tracer hook, so it is retried until that hook lands.
+
+    These must go in before the first kernel is loaded: tvm-ffi modules and
+    aiter's run_lib cache the functions they hand out, so a late hook would
+    miss every kernel resolved before it.
+    """
+
+    def install() -> bool:
+        if "torch" not in sys.modules:
+            return False
+        try:
+            return bool(getattr(_get_tracer(), fn_name)())
+        except Exception:
+            return False
+
+    return install
 
 
 # ---------------------------------------------------------------------------
@@ -239,44 +257,110 @@ _PENDING_PATCHES = {
     "triton.runtime.jit": _install_jit_hooks,
     "triton.runtime.autotuner": _install_jit_hooks,
     "flydsl.compiler.jit_function": _install_jit_hooks,
+    "triton.compiler.compiler": _installer("install_triton_compiled_hooks"),
+    "tvm_ffi.module": _installer("install_tvm_ffi_hooks"),
+    "csrc.cpp_itfs.utils": _installer("install_aiter_cpp_itfs_hooks"),
+    "aiter.jit.core": _installer("install_aiter_compile_ops_hooks"),
+    "aiter.ops.flydsl.kernels.tensor_shim": _installer("install_aiter_flydsl_hooks"),
 }
 
 
+_tls = threading.local()
+
+
 def _try_pending() -> None:
-    for mod_name in list(_PENDING_PATCHES.keys()):
-        if mod_name in sys.modules:
-            fn = _PENDING_PATCHES.get(mod_name)
-            if fn is None:
-                continue
-            try:
-                if fn():
-                    _PENDING_PATCHES.pop(mod_name, None)
-            except Exception:
-                _PENDING_PATCHES.pop(mod_name, None)
-
-
-def _install_import_hook() -> None:
-    if getattr(sys, "_tracelens_shape_import_hook", False):
+    if getattr(_tls, "in_hook", False):
         return
-    sys._tracelens_shape_import_hook = True
+    _tls.in_hook = True
+    try:
+        for mod_name in list(_PENDING_PATCHES.keys()):
+            if mod_name in sys.modules:
+                fn = _PENDING_PATCHES.get(mod_name)
+                if fn is None:
+                    continue
+                try:
+                    if fn():
+                        _PENDING_PATCHES.pop(mod_name, None)
+                except Exception:
+                    _PENDING_PATCHES.pop(mod_name, None)
+    finally:
+        _tls.in_hook = False
+    if not _PENDING_PATCHES:
+        _remove_finder()
 
-    orig_import = builtins.__import__
-    tls = threading.local()
 
-    def _wrapped(name, globals=None, locals=None, fromlist=(), level=0):
-        module = orig_import(name, globals, locals, fromlist, level)
-        if not _PENDING_PATCHES:
-            return module
-        if getattr(tls, "in_hook", False):
-            return module
-        tls.in_hook = True
+class _PatchOnLoad:
+    """Loader wrapper that applies pending patches once its module has run."""
+
+    def __init__(self, loader):
+        self._loader = loader
+
+    def create_module(self, spec):
+        return self._loader.create_module(spec)
+
+    def exec_module(self, module):
         try:
-            _try_pending()
+            self._loader.exec_module(module)
         finally:
-            tls.in_hook = False
-        return module
+            # Hand the module back its real loader; only the post-load
+            # callback needed this wrapper.
+            if getattr(module, "__loader__", None) is self:
+                module.__loader__ = self._loader
+            spec = getattr(module, "__spec__", None)
+            if spec is not None and spec.loader is self:
+                spec.loader = self._loader
+        _try_pending()
 
-    builtins.__import__ = _wrapped
+    def __getattr__(self, name):
+        return getattr(self._loader, name)
+
+
+class _PostImportFinder:
+    """``sys.meta_path`` finder that observes the first import of watched modules.
+
+    Python only consults ``sys.meta_path`` for modules not yet in
+    ``sys.modules``, so -- unlike a ``builtins.__import__`` wrapper -- this
+    costs nothing for the ``import`` statements a server executes on its hot
+    paths, and adds no frames to a ``with_stack`` profiler trace. Watched:
+    every pending patch target, plus ``torch``, which most patches need fully
+    loaded before they can apply.
+    """
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname not in _PENDING_PATCHES and fullname != "torch":
+            return None
+        for finder in sys.meta_path:
+            if finder is self:
+                continue
+            find = getattr(finder, "find_spec", None)
+            if find is None:
+                continue
+            spec = find(fullname, path, target)
+            if spec is not None:
+                break
+        else:
+            return None
+        if spec.loader is not None and hasattr(spec.loader, "exec_module"):
+            spec.loader = _PatchOnLoad(spec.loader)
+        return spec
+
+    def invalidate_caches(self):
+        pass
+
+
+_finder = _PostImportFinder()
+
+
+def _install_finder() -> None:
+    if _finder not in sys.meta_path:
+        sys.meta_path.insert(0, _finder)
+
+
+def _remove_finder() -> None:
+    try:
+        sys.meta_path.remove(_finder)
+    except ValueError:
+        pass
 
 
 def _bootstrap() -> None:
@@ -288,7 +372,7 @@ def _bootstrap() -> None:
     sys._tracelens_shape_bootstrapped = True
     _try_pending()
     if _PENDING_PATCHES:
-        _install_import_hook()
+        _install_finder()
 
 
 _bootstrap()

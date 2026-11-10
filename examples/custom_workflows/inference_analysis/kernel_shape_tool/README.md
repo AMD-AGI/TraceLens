@@ -1,7 +1,8 @@
 # kernel_shape_tool
 
-Annotate **tensor shapes and dtypes of Triton / FlyDSL kernels** into PyTorch
-profiler traces **without patching the inference server**.
+Annotate **tensor shapes and dtypes of JIT-compiled kernels** (Triton, FlyDSL,
+tvm-ffi / SGLang `load_jit`, aiter `cpp_itfs`) into PyTorch profiler traces
+**without patching the inference server**.
 
 This is a drop-in, non-invasive replacement for the
 `sglang_roofline_patches/sglang_0_5_18/` patch set (and the equivalent
@@ -16,22 +17,34 @@ through the PyTorch dispatcher — aten ops and every `torch.ops.*` custom op
 (aiter, FlashInfer, sgl-kernel, DeepGEMM wrappers, …) are recorded with
 `Input Dims` / `Input type` for free.
 
-Triton and FlyDSL kernels are the exception. They are launched straight from
-Python onto the stream, bypassing the dispatcher entirely, so they appear in the
-trace as bare GPU kernels with no operand information, which makes them
-impossible to roofline.
+JIT-compiled kernels are the exception. They are launched straight from Python
+onto the stream, bypassing the dispatcher entirely, so they appear in the trace
+as bare GPU kernels with no operand information, which makes them impossible to
+roofline.
 
 This tool closes exactly that gap: it hooks the JIT launch entry points and, for
 each launch, calls a no-op dispatcher op named after the kernel with one `Tensor`
 parameter per operand. The profiler records that op like any other, so the
 kernel's shapes, strides and dtypes land in the trace.
 
+| Launch path | Hooked at | Example kernels |
+|-------------|-----------|-----------------|
+| Triton | `JITFunction.run`, `Autotuner.run`, `Heuristics.run` | aiter / SGLang Triton GEMMs, `create_flashinfer_kv_indices_triton` |
+| FlyDSL | `JitFunction.__call__` | aiter FlyDSL kernels |
+| tvm-ffi (SGLang `load_jit`) | `tvm_ffi.Module.__getattr__` | `clamp_position` |
+| aiter `csrc.cpp_itfs` | `run_lib` (ctypes entry points), `run_hsaco` | `paged_attention_ragged` (`paged_attention_ll4mi_*`) |
+
+aiter's `compile_ops` needs no hook: it registers each op as a
+`torch.ops.aiter.*` dispatcher op, so those kernels are already shaped natively.
+A `cpp_itfs` entry point is called with raw ctypes pointers, so its operands are
+read from the calling Python wrapper's tensor arguments instead.
+
 ## Files
 
 | File | Role |
 |------|------|
-| `jit_shape_tracer.py` | The core. Hooks Triton / FlyDSL JIT launches and registers each launch's operands as dispatcher ops — `kernel_shapes::<kernel>` and `launcher_shapes::<calling function>`. Knows nothing about any serving framework. |
-| `sitecustomize.py` | Auto-loaded shim. Installs the JIT hooks when Triton / FlyDSL are imported, and drives `enable()` / `disable()` from the torch-profiler window. Gated by an env var. |
+| `jit_shape_tracer.py` | The core. Hooks Triton / FlyDSL / tvm-ffi / aiter `cpp_itfs` launches and registers each launch's operands as dispatcher ops — `kernel_shapes::<kernel>` and `launcher_shapes::<calling function>`. Knows nothing about any serving framework. |
+| `sitecustomize.py` | Auto-loaded shim. Installs each hook when its library is imported, and drives `enable()` / `disable()` from the torch-profiler window. Gated by an env var. |
 
 ## Activation
 
@@ -118,12 +131,17 @@ generators and `torch` internals are never swapped and keep a leaf
 
 ## Design
 
-- **No framework knowledge.** Hooks are installed on Triton's and FlyDSL's own
-  classes (`JITFunction.run`, `Autotuner.run`, `Heuristics.run`,
-  `JitFunction.__call__`), so every launch is observed regardless of who calls
-  it. There is no registry of kernel entry points, no `sys.modules` scanning, no
-  source-code heuristics, and no awareness of SGLang / vLLM / any stack. Adding
-  support for a new server is a no-op; supporting a new JIT is one function.
+- **No framework knowledge.** Hooks are installed on the JIT libraries' own
+  classes and loaders (`JITFunction.run`, `Autotuner.run`, `Heuristics.run`,
+  `JitFunction.__call__`, `tvm_ffi.Module.__getattr__`, aiter's `run_lib` /
+  `run_hsaco`), so every launch is observed regardless of who calls it. There is
+  no registry of kernel entry points, no `sys.modules` scanning, no source-code
+  heuristics, and no awareness of SGLang / vLLM / any stack. Adding support for
+  a new server is a no-op; supporting a new JIT is one function.
+- **Hook before the first kernel loads.** tvm-ffi modules and aiter's `run_lib`
+  cache the functions they hand out, so those two hooks are installed the moment
+  `tvm_ffi.module` / `csrc.cpp_itfs.utils` is imported, not when the profiler
+  starts.
 - **Install once, gate with a flag.** Hooks are installed permanently the first
   time the JIT modules appear and short-circuit on a boolean. `enable()` /
   `disable()` flip that boolean and swap promoted launchers' code in and out,
@@ -132,9 +150,15 @@ generators and `torch` internals are never swapped and keep a leaf
   internally; a thread-local depth counter records each launch once, at the
   outermost hook where the caller's real arguments are still visible.
 - **Deferred patching.** `torch` is usually not imported when `sitecustomize`
-  runs, so patches are registered as *pending* and applied by an `__import__`
-  hook the moment the target module appears. All patches are idempotent and
-  wrapped in `try/except`, so they can never break the workload.
+  runs, so patches are registered as *pending* and applied by a `sys.meta_path`
+  finder the moment the target module finishes importing. The finder is only
+  consulted on a module's first import, so the `import` statements a server
+  runs on its hot paths cost nothing and add no frames to a `with_stack` trace.
+  All patches are idempotent and wrapped in `try/except`, so they can never
+  break the workload.
+- **Few Python calls per launch.** With `with_stack`, every Python call made
+  inside a profiler window is a trace event, so the per-launch path (tensor
+  collection, the outermost-launch check) uses flat loops and no helper frames.
 - **Lazy core import.** `jit_shape_tracer` (and thus `torch`) is only imported
   once a hook needs it and `torch` is already loaded, so the shim adds no
   measurable startup cost and never drags torch into a process that avoids it.
@@ -155,8 +179,8 @@ everything that still launches from Python.
 
 ### Annotating a non-JIT launcher
 
-For a launcher that is neither Triton nor FlyDSL (a hand-written HIP extension,
-a CuTe kernel, …), one call is enough — no need to teach the tool about it:
+For a launch path that is not hooked (a hand-written HIP extension, a CuTe
+kernel, …), one call is enough — no need to teach the tool about it:
 
 ```python
 import jit_shape_tracer

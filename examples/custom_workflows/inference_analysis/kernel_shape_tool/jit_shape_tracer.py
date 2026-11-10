@@ -8,23 +8,34 @@ that goes through the PyTorch dispatcher: aten ops and every ``torch.ops.*``
 custom op (aiter, FlashInfer, sgl-kernel, DeepGEMM wrappers, ...) are recorded
 with ``Input Dims`` / ``Input type`` for free.
 
-Triton and FlyDSL kernels are the exception. They are launched straight from
-Python onto the stream, bypassing the dispatcher entirely, so they show up in
-the trace as bare GPU kernels with no operand information -- which makes them
-impossible to roofline.
+JIT-compiled kernels are the exception. They are launched straight from Python
+onto the stream, bypassing the dispatcher entirely, so they show up in the
+trace as bare GPU kernels with no operand information -- which makes them
+impossible to roofline. Four launch paths are hooked:
+
+* Triton (``JITFunction`` / ``Autotuner`` / ``Heuristics``.run)
+* FlyDSL (``JitFunction.__call__``)
+* tvm-ffi modules (``Module.__getattr__``), which back SGLang's ``load_jit``
+  C++ kernels such as ``clamp_position``
+* aiter's ``csrc.cpp_itfs`` (``run_lib`` / ``run_hsaco``), which back its
+  ctypes kernels such as ``paged_attention_ragged``
 
 This module closes exactly that gap, and nothing else. It hooks the JIT launch
 entry points and, for every launch, calls a no-op dispatcher op named after the
-kernel whose single argument is the list of tensors being launched on. The
-profiler then records that op like any other, so the kernel's operand shapes and
-dtypes land in the trace.
+kernel with one tensor parameter per operand. The profiler then records that op
+like any other, so the kernel's operand shapes and dtypes land in the trace.
 
 Design
 ------
-* **No framework knowledge.** The hooks are installed on Triton's and FlyDSL's
-  own classes, so every launch is observed regardless of who calls it. There is
-  no registry of entry points, no module scanning, no source-code heuristics,
-  and no awareness of SGLang / vLLM / any serving stack.
+* **No framework knowledge.** The hooks are installed on the JIT libraries' own
+  classes and loaders, so every launch is observed regardless of who calls it.
+  There is no registry of entry points, no module scanning, no source-code
+  heuristics, and no awareness of SGLang / vLLM / any serving stack. (aiter's
+  ``compile_ops`` needs no hook: it registers its ops as ``torch.ops.aiter.*``,
+  so they are already shaped natively.)
+* **Pointer-only launches use the launcher's tensors.** A ctypes entry point
+  receives raw pointers, so its operands are read from the calling wrapper's
+  tensor arguments instead.
 * **Install once, gate with a flag.** Hooks are installed permanently the first
   time the JIT modules appear, and short-circuit on a boolean. ``enable()`` /
   ``disable()`` flip that boolean; the only thing they swap is the code of
@@ -55,7 +66,8 @@ Design
 
 Namespaces
 ----------
-``kernel_shapes::<kernel>``    named after the Triton/FlyDSL kernel
+``kernel_shapes::<kernel>``    named after the kernel (Triton/FlyDSL kernel,
+                               tvm-ffi export, cpp_itfs entry point)
 ``launcher_shapes::<caller>``  named after the Python function that launched it
 
 Both carry the same operands, so pick one granularity when summing FLOPs.
@@ -64,8 +76,8 @@ Public API
 ----------
 ``install_hooks()``          install whatever JIT hooks are available now
 ``enable()`` / ``disable()`` start / stop recording (driven by the profiler)
-``mark_launch(name, args)``  annotate a launch by hand, for launchers that are
-                             neither Triton nor FlyDSL
+``mark_launch(name, args)``  annotate a launch by hand, for launch paths that
+                             are not hooked
 """
 
 from __future__ import annotations
@@ -74,10 +86,10 @@ import functools
 import inspect
 import logging
 import os
+import re
 import sys
 import threading
 import types
-from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 import torch
@@ -130,7 +142,16 @@ _BREAK_RANK = os.environ.get("TRACELENS_SHAPE_BREAK_RANK", "").strip()
 # Module prefixes that belong to the JIT machinery itself. A frame in one of
 # these is never "the launcher" -- notably Triton's own KernelInterface
 # __getitem__ lambda sits between the caller and .run().
-_JIT_MODULES = ("triton", "flydsl")
+_JIT_MODULES = ("triton", "flydsl", "tvm_ffi")
+
+# Individual modules that are launch machinery inside an otherwise ordinary
+# package: aiter's HsacoKernel.__getitem__ closure sits between the caller and
+# run_hsaco(), but the cpp_itfs wrappers next to it are real launchers.
+_JIT_HELPER_MODULES = ("csrc.cpp_itfs.utils", "aiter.ops.flydsl.kernels.tensor_shim")
+
+# aiter names compiled cpp_itfs entry points <md_name>_<md5 of the template
+# args>; the hash only makes op names unreadable.
+_HASH_SUFFIX = re.compile(r"_[0-9a-f]{32}$")
 
 # Launchers from these packages are annotated but never promoted: their
 # functions are too central (inductor, dynamo) to swap safely.
@@ -348,25 +369,49 @@ def _record_launch(
 def _collect_tensors(args: Sequence[Any], kwargs: Dict[str, Any]) -> List[torch.Tensor]:
     """Tensors reachable from a launch's arguments, in call order.
 
-    Recurses one level into lists/tuples (kernels that take tensor lists) and
-    ignores everything else -- grids, constexprs, num_warps, streams.
+    Looks up to two levels into lists/tuples (kernels that take tensor lists)
+    and ignores everything else -- grids, constexprs, num_warps, streams.
+
+    Written as flat loops on purpose: this runs on every launch inside a
+    profiler window, and with ``with_stack`` every Python call it makes becomes
+    a trace event.
     """
     found: List[torch.Tensor] = []
+    seq = (list, tuple)
+    for values in (args, kwargs.values()):
+        for value in values:
+            if isinstance(value, torch.Tensor):
+                found.append(value)
+            elif isinstance(value, seq):
+                for item in value:
+                    if isinstance(item, torch.Tensor):
+                        found.append(item)
+                    elif isinstance(item, seq):
+                        for inner in item:
+                            if isinstance(inner, torch.Tensor):
+                                found.append(inner)
+    return found[:_MAX_TENSORS]
 
-    def walk(value: Any, depth: int) -> None:
-        if len(found) >= _MAX_TENSORS:
-            return
-        if isinstance(value, torch.Tensor):
-            found.append(value)
-        elif depth < 2 and isinstance(value, (list, tuple)):
-            for item in value:
-                walk(item, depth + 1)
 
-    for value in args:
-        walk(value, 0)
-    for value in kwargs.values():
-        walk(value, 0)
-    return found
+def _frame_tensors(frame) -> List[torch.Tensor]:
+    """Tensors among the parameters of the function running in ``frame``.
+
+    Used when the launch itself only sees raw pointers (a ctypes call): the
+    launcher's own tensor arguments are the closest record of its operands.
+    """
+    code = frame.f_code
+    flags = code.co_flags
+    count = code.co_argcount + code.co_kwonlyargcount
+    count += bool(flags & inspect.CO_VARARGS)
+    names = code.co_varnames[:count]
+    local_vars = frame.f_locals
+    values = [local_vars[n] for n in names if n in local_vars]
+    kwargs: Dict[str, Any] = {}
+    if flags & inspect.CO_VARKEYWORDS:
+        extra = local_vars.get(code.co_varnames[count])
+        if isinstance(extra, dict):
+            kwargs = extra
+    return _collect_tensors(values, kwargs)
 
 
 def _name_of(*candidates: Any) -> Optional[str]:
@@ -404,7 +449,7 @@ def _calling_launcher():
     while frame is not None and depth < 20:
         module = frame.f_globals.get("__name__") or ""
         root = module.split(".", 1)[0]
-        if root not in _JIT_MODULES and module != __name__:
+        if root not in _JIT_MODULES and module != __name__ and module not in _JIT_HELPER_MODULES:
             if not frame.f_code.co_name.startswith("<"):
                 return frame
         frame = frame.f_back
@@ -616,19 +661,58 @@ def _call_launcher(key: int, args: tuple, kwargs: dict) -> Any:
     return box["result"]
 
 
-@contextmanager
-def _outermost_launch():
-    """Yield True only for the outermost hooked launch on this thread.
+def _trace_launch(
+    hook_id: str,
+    name: str,
+    tensors: Optional[List[torch.Tensor]],
+    launch: Callable[[], Any],
+) -> Any:
+    """Annotate one launch and perform it with ``launch()``.
 
-    ``Autotuner.run`` -> ``JITFunction.run`` would otherwise record the same
-    launch twice, with the inner call seeing fewer of the caller's arguments.
+    ``tensors=None`` means the launch boundary sees no tensors (a ctypes call
+    takes raw pointers); the calling launcher's own tensor arguments are
+    recorded instead.
+
+    Only the outermost hooked launch on a thread is recorded: ``Autotuner.run``
+    -> ``JITFunction.run`` would otherwise record the same launch twice, with
+    the inner call seeing fewer of the caller's arguments. The depth counter is
+    a plain try/finally rather than a context manager, which would add its own
+    frames to every launch under ``with_stack``.
     """
-    depth = getattr(_tls, "depth", 0)
-    _tls.depth = depth + 1
+    if getattr(_tls, "depth", 0):
+        return launch()
+    _tls.depth = 1
     try:
-        yield depth == 0
+        frame = _calling_launcher() if _LAUNCHER_OPS_ON or tensors is None else None
+        if tensors is None:
+            tensors = _frame_tensors(frame) if frame is not None else []
+            if not tensors:
+                return launch()
+        launcher = None
+        if frame is not None and _LAUNCHER_OPS_ON:
+            # A promoted launcher is annotated by its own enclosing op, so
+            # only the kernel-level op is emitted here. That includes the
+            # rest of the call that promotes it: a leaf op there would
+            # record kernel operands under the launcher's name.
+            if frame.f_code not in _promoted:
+                launcher_name = _launcher_name(frame.f_code)
+                if not _maybe_promote(frame, launcher_name):
+                    launcher = launcher_name
+        frame = None
+        if hook_id in _break_hooks and _break_rank_matches():
+            # Inspect: hook_id, name, launcher, tensors; `up` for the hooked
+            # call's args, kwargs and self.
+            breakpoint()
+        if not _SPANS_ON:
+            _record_launch(name, launcher, tensors)
+            return launch()
+        # The span makes the association exact: the GPU kernel is launched
+        # inside it, so it nests under the annotation in the trace.
+        with torch.profiler.record_function(SPAN_PREFIX + name):
+            _record_launch(name, launcher, tensors)
+            return launch()
     finally:
-        _tls.depth = depth
+        _tls.depth = 0
 
 
 # ---------------------------------------------------------------------------
@@ -660,35 +744,7 @@ def _wrap_launch(
             name = name_of(self) or fallback_name
         except Exception:  # pragma: no cover - never break the workload
             return original(self, *args, **kwargs)
-
-        with _outermost_launch() as outermost:
-            if not outermost:
-                return original(self, *args, **kwargs)
-            # Keep this call in this frame: _calling_launcher() walks out from
-            # here to find the caller.
-            frame = _calling_launcher() if _LAUNCHER_OPS_ON else None
-            launcher = None
-            if frame is not None:
-                # A promoted launcher is annotated by its own enclosing op, so
-                # only the kernel-level op is emitted here. That includes the
-                # rest of the call that promotes it: a leaf op there would
-                # record kernel operands under the launcher's name.
-                if frame.f_code not in _promoted:
-                    name = _launcher_name(frame.f_code)
-                    if not _maybe_promote(frame, name):
-                        launcher = name
-                frame = None
-            if hook_id in _break_hooks and _break_rank_matches():
-                # Inspect: hook_id, name, launcher, tensors, args, kwargs, self.
-                breakpoint()
-            if not _SPANS_ON:
-                _record_launch(name, launcher, tensors)
-                return original(self, *args, **kwargs)
-            # The span makes the association exact: the GPU kernel is launched
-            # inside it, so it nests under the annotation in the trace.
-            with torch.profiler.record_function(SPAN_PREFIX + name):
-                _record_launch(name, launcher, tensors)
-                return original(self, *args, **kwargs)
+        return _trace_launch(hook_id, name, tensors, lambda: original(self, *args, **kwargs))
 
     setattr(cls, method, traced)
     setattr(cls, sentinel, True)
@@ -754,6 +810,275 @@ def install_flydsl_hooks() -> bool:
     return _wrap_launch(cls, "__call__", _name_of, "flydsl_kernel", "flydsl.jit")
 
 
+class _TracedForeignCall:
+    """A compiled-kernel entry point (tvm-ffi or ctypes) that annotates its calls.
+
+    Attribute reads and writes go to the wrapped function, so callers that set
+    ``argtypes`` / ``restype`` or read metadata keep working.
+    """
+
+    __slots__ = ("_func", "_name", "_hook_id", "_pointer_args")
+
+    def __init__(self, func: Any, name: str, hook_id: str, pointer_args: bool) -> None:
+        object.__setattr__(self, "_func", func)
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_hook_id", hook_id)
+        # True when the call takes raw pointers, so operands come from the caller.
+        object.__setattr__(self, "_pointer_args", pointer_args)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        func = self._func
+        if not _enabled:
+            return func(*args, **kwargs)
+        try:
+            tensors = None if self._pointer_args else _collect_tensors(args, kwargs)
+        except Exception:  # pragma: no cover - never break the workload
+            return func(*args, **kwargs)
+        if tensors is not None and not tensors:
+            return func(*args, **kwargs)
+        return _trace_launch(self._hook_id, self._name, tensors, lambda: func(*args, **kwargs))
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self._func, attr)
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        setattr(self._func, attr, value)
+
+    def __repr__(self) -> str:
+        return f"<traced {self._func!r}>"
+
+
+def install_tvm_ffi_hooks() -> bool:
+    """Hook tvm-ffi modules, which back SGLang's ``load_jit`` kernels.
+
+    ``load_jit`` returns a ``tvm_ffi.Module`` and callers launch through its
+    attributes (``module.clamp_position(dst, seq_lens)``). ``Module.__getattr__``
+    resolves and caches each function, so wrapping what it returns covers every
+    module loaded after the hook, with no knowledge of SGLang. False if tvm-ffi
+    is not imported yet.
+    """
+    mod = sys.modules.get("tvm_ffi.module")
+    cls = getattr(mod, "Module", None) if mod is not None else None
+    if not isinstance(cls, type):
+        return False
+    if getattr(cls, "_jit_shape_traced_getattr", False):
+        return True
+    original = getattr(cls, "__getattr__", None)
+    if original is None:
+        return False
+
+    @functools.wraps(original)
+    def __getattr__(self, name):
+        func = original(self, name)
+        if name.startswith("__") or not callable(func):
+            return func
+        traced = _TracedForeignCall(func, name, "tvm_ffi", pointer_args=False)
+        try:
+            self.__dict__[name] = traced
+        except Exception:  # pragma: no cover - read-only instance dict
+            pass
+        return traced
+
+    cls.__getattr__ = __getattr__
+    cls._jit_shape_traced_getattr = True
+    _installed["tvm_ffi"] = f"{cls.__module__}.{cls.__qualname__}.__getattr__"
+    if _should_break("tvm_ffi"):
+        _break_hooks.add("tvm_ffi")
+    return True
+
+
+def install_aiter_cpp_itfs_hooks() -> bool:
+    """Hook aiter's ``csrc.cpp_itfs`` launch paths (paged attention, asm MLA, ...).
+
+    ``compile_template_op`` builds a shared library and hands out its entry
+    point through ``run_lib``; the wrappers then call it with ctypes pointers,
+    so the operands are taken from the calling wrapper's tensor arguments.
+    ``run_hsaco`` launches precompiled code objects and does receive tensors.
+    Both are looked up as module globals at call time, so rebinding them here
+    covers every caller. False until both are defined.
+    """
+    mod = sys.modules.get("csrc.cpp_itfs.utils")
+    if mod is None:
+        return False
+    run_lib = getattr(mod, "run_lib", None)
+    run_hsaco = getattr(mod, "run_hsaco", None)
+
+    if callable(run_lib) and not getattr(run_lib, "_jit_shape_traced", False):
+        wrapped: Dict[tuple, _TracedForeignCall] = {}
+
+        def traced_run_lib(func_name, folder=None):
+            func = run_lib(func_name, folder)
+            key = (func_name, folder)
+            entry = wrapped.get(key)
+            if entry is None or entry._func is not func:
+                name = _HASH_SUFFIX.sub("", str(func_name))
+                entry = wrapped[key] = _TracedForeignCall(
+                    func, name, "aiter.cpp_itfs", pointer_args=True
+                )
+            return entry
+
+        functools.update_wrapper(traced_run_lib, run_lib)
+        for attr in ("cache_clear", "cache_info"):
+            if hasattr(run_lib, attr):
+                setattr(traced_run_lib, attr, getattr(run_lib, attr))
+        traced_run_lib._jit_shape_traced = True
+        mod.run_lib = traced_run_lib
+        _installed["aiter.cpp_itfs"] = f"{mod.__name__}.run_lib"
+
+    if callable(run_hsaco) and not getattr(run_hsaco, "_jit_shape_traced", False):
+
+        @functools.wraps(run_hsaco)
+        def traced_run_hsaco(func_name, *args, **kwargs):
+            if not _enabled:
+                return run_hsaco(func_name, *args, **kwargs)
+            try:
+                tensors = _collect_tensors(args, {})
+            except Exception:  # pragma: no cover - never break the workload
+                tensors = []
+            if not tensors:
+                return run_hsaco(func_name, *args, **kwargs)
+            return _trace_launch(
+                "aiter.hsaco", str(func_name), tensors,
+                lambda: run_hsaco(func_name, *args, **kwargs),
+            )
+
+        traced_run_hsaco._jit_shape_traced = True
+        mod.run_hsaco = traced_run_hsaco
+        _installed["aiter.hsaco"] = f"{mod.__name__}.run_hsaco"
+
+    for hook_id in ("aiter.cpp_itfs", "aiter.hsaco"):
+        if hook_id in _installed and _should_break(hook_id):
+            _break_hooks.add(hook_id)
+    return callable(run_lib) and callable(run_hsaco)
+
+
+def _traced_tensor_call(func: Callable, name: str, hook_id: str) -> Callable:
+    """Wrap a Python-level launcher whose arguments carry the operand tensors."""
+
+    @functools.wraps(func)
+    def traced(*args, **kwargs):
+        if not _enabled:
+            return func(*args, **kwargs)
+        try:
+            tensors = _collect_tensors(args, kwargs)
+        except Exception:  # pragma: no cover - never break the workload
+            return func(*args, **kwargs)
+        if not tensors:
+            return func(*args, **kwargs)
+        return _trace_launch(hook_id, name, tensors, lambda: func(*args, **kwargs))
+
+    traced._jit_shape_traced = True
+    return traced
+
+
+def install_triton_compiled_hooks() -> bool:
+    """Hook launches of an already-compiled Triton kernel.
+
+    ``JITFunction.run`` returns the ``CompiledKernel`` it launched, and callers
+    that keep it relaunch with ``compiled[grid](*args)`` (ATOM's packed H2D
+    scatter does), which never re-enters ``JITFunction.run``. False if Triton's
+    compiler module is not imported yet.
+    """
+    mod = sys.modules.get("triton.compiler.compiler")
+    cls = getattr(mod, "CompiledKernel", None) if mod is not None else None
+    if not isinstance(cls, type):
+        return False
+    if getattr(cls, "_jit_shape_traced_getitem", False):
+        return True
+    original = getattr(cls, "__getitem__", None)
+    if original is None:
+        return False
+
+    @functools.wraps(original)
+    def __getitem__(self, grid):
+        runner = original(self, grid)
+        if not _enabled:
+            return runner
+        return _traced_tensor_call(runner, getattr(self, "name", None) or "triton_kernel", "triton.compiled")
+
+    cls.__getitem__ = __getitem__
+    cls._jit_shape_traced_getitem = True
+    _installed["triton.compiled"] = f"{cls.__module__}.{cls.__qualname__}.__getitem__"
+    if _should_break("triton.compiled"):
+        _break_hooks.add("triton.compiled")
+    return True
+
+
+def install_aiter_flydsl_hooks() -> bool:
+    """Hook aiter's FlyDSL dispatch helper, ``tensor_shim._run_compiled``.
+
+    aiter launches its FlyDSL kernels as ``_run_compiled(exe, ptr_arg(t), ...)``:
+    ``flyc.compile`` on the first call and the cached ``CompiledFunction``
+    afterwards, so ``JitFunction.__call__`` never runs, and the arguments are
+    raw pointers. The operands are taken from the calling wrapper's tensor
+    arguments. Callers import ``_run_compiled`` by name, so this must be
+    installed when ``tensor_shim`` finishes importing. False until then.
+    """
+    mod = sys.modules.get("aiter.ops.flydsl.kernels.tensor_shim")
+    original = getattr(mod, "_run_compiled", None) if mod is not None else None
+    if not callable(original):
+        return False
+    if getattr(original, "_jit_shape_traced", False):
+        return True
+
+    @functools.wraps(original)
+    def _run_compiled(exe, *args, **kwargs):
+        if not _enabled:
+            return original(exe, *args, **kwargs)
+        name = _name_of(exe) or "flydsl_kernel"
+        return _trace_launch("aiter.flydsl", name, None, lambda: original(exe, *args, **kwargs))
+
+    _run_compiled._jit_shape_traced = True
+    mod._run_compiled = _run_compiled
+    _installed["aiter.flydsl"] = f"{mod.__name__}._run_compiled"
+    if _should_break("aiter.flydsl"):
+        _break_hooks.add("aiter.flydsl")
+    return True
+
+
+def install_aiter_compile_ops_hooks() -> bool:
+    """Hook aiter's ``compile_ops`` for the ops it leaves off the dispatcher.
+
+    ``compile_ops`` registers almost every op as ``torch.ops.aiter.*``, which
+    the profiler already shapes. The ops named in ``torch_guard.NONE_WRAPPED_OP``
+    (custom all-reduce / all-gather, which take aiter's own tensor type
+    internally) stay plain Python calls, so those are wrapped here. The
+    decorator runs when ``aiter.ops.*`` modules import, so this must be
+    installed when ``aiter.jit.core`` finishes importing. False until then.
+    """
+    core = sys.modules.get("aiter.jit.core")
+    original = getattr(core, "compile_ops", None) if core is not None else None
+    if not callable(original):
+        return False
+    if getattr(original, "_jit_shape_traced", False):
+        return True
+    guard = getattr(core, "torch_compile_guard", None)
+    guard_mod = sys.modules.get(getattr(guard, "__module__", "") or "")
+    none_wrapped = frozenset(getattr(guard_mod, "NONE_WRAPPED_OP", ()) or ())
+    if not none_wrapped:
+        return False
+
+    @functools.wraps(original)
+    def compile_ops(*args, **kwargs):
+        decorator = original(*args, **kwargs)
+
+        def traced_decorator(func):
+            op = decorator(func)
+            name = getattr(func, "__name__", "")
+            if name in none_wrapped and callable(op):
+                return _traced_tensor_call(op, name, "aiter.compile_ops")
+            return op
+
+        return traced_decorator
+
+    compile_ops._jit_shape_traced = True
+    core.compile_ops = compile_ops
+    _installed["aiter.compile_ops"] = f"{core.__name__}.compile_ops"
+    if _should_break("aiter.compile_ops"):
+        _break_hooks.add("aiter.compile_ops")
+    return True
+
+
 def install_hooks() -> bool:
     """Install every JIT hook whose library is currently importable.
 
@@ -761,5 +1086,10 @@ def install_hooks() -> bool:
     a new JIT module shows up in ``sys.modules``.
     """
     triton = install_triton_hooks()
+    compiled = install_triton_compiled_hooks()
     flydsl = install_flydsl_hooks()
-    return triton or flydsl
+    tvm_ffi = install_tvm_ffi_hooks()
+    cpp_itfs = install_aiter_cpp_itfs_hooks()
+    aiter_flydsl = install_aiter_flydsl_hooks()
+    compile_ops = install_aiter_compile_ops_hooks()
+    return triton or compiled or flydsl or tvm_ffi or cpp_itfs or aiter_flydsl or compile_ops
