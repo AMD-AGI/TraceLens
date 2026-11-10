@@ -38,6 +38,8 @@ From the TraceLens repository root:
 pip install -e ".[Visualizer]"
 ```
 
+That extra installs the current CPU PyTorch wheel and the `visualize_model_in_explorer` and `TraceLens_model_roofline_projection` commands. The `torch` package on PyPI is the CUDA build, and the visualizer does not use it.
+
 For local development and tests, also install the dev extra:
 
 ```bash

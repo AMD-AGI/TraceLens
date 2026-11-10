@@ -115,7 +115,7 @@ Roofline analysis compares each measured kernel against your GPU's max-achievabl
 
 3. **Results:**
    - **User-facing output**: `analysis.md` is the only artifact intended for end-user review - a stakeholder report with prioritized recommendations organized into three sections: Compute Kernel Optimizations, Kernel Fusion Opportunities (experimental), and System-Level Optimizations. The Detailed Analysis section mirrors this order with detailed Compute Kernel Insights, Kernel Fusion Insights and System-Level Insights.
-   - **Agent internals** (agent intermediates; review not recommended): `system_findings/`, `category_findings/`, `category_data/`, `metadata/`, `perf_report_csvs/`, `perf_report.xlsx`. See [Output Files](#output-files) for the full layout.
+   - **Agent internals** (agent intermediates; review not recommended): `system_findings/`, `category_findings/`, `category_data/`, `cache/`, `perf_report_csvs/`, `perf_report.xlsx`. See [Output Files](#output-files) for the full layout.
 
 ### To run headless (non-interactive):
 
@@ -275,12 +275,12 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 0.   Query User Inputs (interactive answers or a run YAML, Environment Setup) → cache/run_config.yaml
 1.   Generate Performance Report (one wrapper call on cache/run_config.yaml; semantic pre-processing first)
 2.   Trace-Quality Gate (deterministic fallback branch for graph-under-recorded traces)
-3-6. Prepare Category Data (GPU Util, Top Ops, Tree Data, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json + kernel_fusion_metrics.json
+3-6. Prepare Category Data (GPU Util, Top Ops, Multi-Kernel Data, Category Filtering) + Fusion Candidate Extraction → category_data/fusion_candidates.json
 7.   System-Level Analysis (CPU/Idle + Multi-Kernel + Kernel Fusion, PARALLEL) → system_findings/
 8.   Compute Kernel Subagents (PARALLEL) → category_findings/
 8.5. Aggregate per-category Compute Kernel findings → priority_data.json (globally ranked)
 9.   Validate Subagent Outputs (time sanity, efficiency anomalies, coverage)
-10.  Prepare Report Data + Model Identification (subagent) → metadata/model_info.json
+10.  Prepare Report Data + Model Identification (subagent) → cache/model_info.json
 10.2 Analytical Roofline Augmentation (optional; only when <augment_analytical_roofline> is set)
 11.  Render performance PNG if agent_extension.py is absent
 12.  Generate Final Report (analysis.md): compose System-Level + Kernel Fusion + Compute Kernel sections
@@ -301,11 +301,11 @@ It queries user inputs, runs TraceLens to pre-compute trace data, and invokes sy
 | Agent | Purpose |
 |-------|---------|
 | `gemm-analyzer` | Analyzes matrix multiplication operations (mm, bmm, addmm) |
-| `sdpa-analyzer` | Analyzes scaled dot-product attention (Flash, Paged) |
-| `elementwise-analyzer` | Analyzes elementwise operations |
-| `reduce-analyzer` | Analyzes reduction operations |
+| `sdpa-analyzer` | Analyzes scaled dot-product attention (training Flash, inference attention) |
+| `elementwise-analyzer` | Analyzes elementwise, group quantization, RoPE and multi-tensor apply operations |
+| `reduce-analyzer` | Analyzes reduction and cross-entropy operations |
 | `triton-analyzer` | Analyzes Triton-compiled kernels |
-| `moe-analyzer` | Analyzes Mixture-of-Experts fused operations |
+| `moe-analyzer` | Analyzes Mixture-of-Experts fused and routing operations |
 | `norm-analyzer` | Analyzes normalization operations (BatchNorm, LayerNorm, GroupNorm, etc.) |
 | `convolution-analyzer` | Analyzes convolution operations |
 | `generic-op-analyzer` | Analyzes uncategorized operations or operations without dedicated sub-agent |
@@ -348,59 +348,47 @@ The orchestrator supports three execution environments. During Step 0, you are a
 ```
 analysis_output/
 ├── analysis.md                     # Stakeholder report (only user-facing output)
+├── perf_improvement.png            # Kernel tuning potential plot (Internal)
+├── perf_improvement_base64.txt     # Base64 of the plot, embedded in analysis.md (Internal)
+├── priority_data.json              # Step 8.5 global ranking; report and plot input (Internal)
 ├── perf_report.xlsx                # Excel export of TraceLens perf report (Internal)
 ├── perf_report_csvs/               # CSV exports: gpu_timeline, ops_summary, ... (Internal)
 ├── run_config.resolved.yaml        # Run config with every report option spelled out (Internal)
-├── cache/                          # cmd_prefix.txt + run_config.yaml, the completed run config (Internal)
-├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
-│   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
+├── cache/                          # Orchestrator inputs and scratch (Internal)
+│   ├── cmd_prefix.txt                  # Command prefix for the execution environment
+│   ├── run_config.yaml                 # The completed run config
+│   ├── model_info.json                 # Model identification (model, architecture, scale, precision)
+│   ├── condensed_op_info.csv           # Op names and shapes read by model identification
+│   ├── nn_modules.txt                  # nn.Module class names from the trace
+│   └── roofline_augment*.json          # Roofline augmentation only
+├── category_data/                  # Per-category CSVs, metrics JSONs, fusion inputs (Internal)
+│   ├── category_manifest.json          # Categories, GPU utilization, tier info, platform specs
 │   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
 │   ├── fusion_candidates.json          # Kernel fusion candidate modules
 │   ├── kernel_fusion_metrics.json      # Roofline savings estimates for fusion candidates
 │   ├── <category>_ops.csv              # Filtered operations table for one compute-kernel category
-│   ├── <category>_metrics.json         # Per-op metrics consumed by sub-agents
-│   └── <category>_tree_data.json       # Pre-computed Trace2Tree slice for that category
+│   └── <category>_metrics.json         # Per-op metrics consumed by sub-agents
 ├── system_findings/                # Sub-agent outputs: CPU/idle, multi-kernel, fusion (Internal)
 │   ├── cpu_idle_findings.md            # CPU/idle (host-bound, GPU-idle) analysis output
 │   ├── multi_kernel_findings.md        # Memcpy / collective-comm / overlap analysis output
 │   └── kernel_fusion_findings.md       # Kernel fusion analysis output
-├── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
-│   └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
-└── metadata/                       # Category metadata + model_info.json (Internal)
-    ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
-    └── model_info.json                 # Model identification (model, architecture, scale, precision)
+└── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
+    └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
 ```
 
-**Comparative** layout:
+**Comparative** layout differs from standalone only in the perf reports and, for semantic comparison, one extra folder:
 
 ```
 analysis_output/
-├── analysis.md                     # Stakeholder report (only user-facing output)
-├── perf_report_trace1.xlsx         # Excel export of TraceLens perf report for trace 1 (Internal)
-├── perf_report_trace1_csvs/        # Trace 1 CSV exports: gpu_timeline, ops_summary, ... (Internal)
-├── perf_report_trace2.xlsx         # Excel export of TraceLens perf report for trace 2 (Internal)
-├── perf_report_trace2_csvs/        # Trace 2 CSV exports: gpu_timeline, ops_summary, ... (Internal)
-├── run_config.resolved.yaml        # Run config with every report option spelled out (Internal)
-├── cache/                          # cmd_prefix.txt + run_config.yaml, the completed run config (Internal)
-├── category_data/                  # Per-category CSVs, metrics JSONs, tree data, fusion inputs (Internal)
-│   ├── category_manifest.json          # Category metadata, GPU utilization, tier info
-│   ├── multi_kernel_data.json          # Pre-computed memcpy/comm./overlap data
-│   ├── fusion_candidates.json          # Kernel fusion candidate modules
-│   ├── kernel_fusion_metrics.json      # Gap-based savings estimates for fusion candidates
-│   ├── priority_data.json              # Globally ranked findings + impact scores
-│   ├── <category>_ops.csv              # Filtered operations table for one compute-kernel category
-│   ├── <category>_metrics.json         # Per-op metrics consumed by sub-agents
-│   └── <category>_tree_data.json       # Pre-computed Trace2Tree slice for that category
-├── system_findings/                # Sub-agent outputs: CPU/idle, multi-kernel, fusion (Internal)
-│   ├── cpu_idle_findings.md            # CPU/idle (host-bound, GPU-idle) analysis output
-│   ├── multi_kernel_findings.md        # Memcpy / collective-comm / overlap analysis output
-│   └── kernel_fusion_findings.md       # Kernel fusion analysis output
-├── category_findings/              # Sub-agent outputs: per compute-kernel category (Internal)
-│   └── <category>_findings.md          # One file per compute-kernel category (gemm, sdpa, norm, ...)
-└── metadata/                       # Category metadata + model_info.json (Internal)
-    ├── <category>_metadata.json        # Platform specs, GPU utilization, config per category
-    └── model_info.json                 # Model identification (model, architecture, scale, precision)
+├── perf_report_trace1.xlsx         # Replaces perf_report.xlsx, one per trace (Internal)
+├── perf_report_trace1_csvs/        # Replaces perf_report_csvs/, one per trace (Internal)
+├── perf_report_trace2.xlsx
+├── perf_report_trace2_csvs/
+├── semantic/                       # Semantic comparison only: work/ and tracediff_output/ (Internal)
+└── ...                             # As standalone
 ```
+
+**Multi-trace** runs write `perf_report_<job>.xlsx` and `perf_report_<job>_csvs/` per job, plus `perf_report_aggregated_csvs/`, in place of the standalone perf report; everything else is as standalone.
 
 ---
 

@@ -1114,15 +1114,16 @@ class gemm_afp4wfp4(GEMM):
     Roofline calculation -- FLOPs:
         FLOPs = 2 * M * N * K   (inherited from GEMM base class)
 
-        Per-block scale multiplications are O(M * N * K / 32) and negligible
-        relative to the matmul.
+        Per-block scale multiplications are not counted: the scaled MFMA applies
+        the E8M0 scales inside the instruction, and MXFP4 peak is quoted on
+        2 * M * N * K.
 
     Roofline calculation -- Bytes:
-        bytes_X      = M * K * 0.5             # FP4 packed
-        bytes_W      = N * K * 0.5             # FP4 packed
-        bytes_output = M * N * bpe(output)     # BF16/FP16 -> 2 bytes
-
-        Scale tensors are negligible and omitted.
+        bytes_X        = M * K * 0.5             # FP4 packed
+        bytes_W        = N * K * 0.5             # FP4 packed
+        bytes_x_scales = M * K / 32 * bpe(scale) # E8M0 -> 1 byte
+        bytes_w_scales = N * K / 32 * bpe(scale) # E8M0 -> 1 byte
+        bytes_output   = M * N * bpe(output)     # BF16/FP16 -> 2 bytes
 
     Compute precision:
         MXFP4 -> mapped via torch_dtype_map("mxfp4"). We override get_compute_precision
@@ -1149,6 +1150,10 @@ class gemm_afp4wfp4(GEMM):
                 event["args"]["Input type"][1],
                 "c10::bfloat16",
             ),
+            "x_scales_shape": event["args"]["Input Dims"][2],
+            "w_scales_shape": event["args"]["Input Dims"][3],
+            "dtype_x_scales": event["args"]["Input type"][2],
+            "dtype_w_scales": event["args"]["Input type"][3],
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
@@ -1158,12 +1163,19 @@ class gemm_afp4wfp4(GEMM):
         self.bpe_output = name2bpe(dtype_A_B[2])
         self.bpe_bias = name2bpe(dtype_A_B[2])  # unused (bias=False)
 
-        return super().bytes(
+        operand_bytes = super().bytes(
             bpe_mat1=self.bpe_mat1,
             bpe_mat2=self.bpe_mat2,
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+        bytes_x_scales = prod(self.param_details["x_scales_shape"]) * name2bpe(
+            self.param_details["dtype_x_scales"]
+        )
+        bytes_w_scales = prod(self.param_details["w_scales_shape"]) * name2bpe(
+            self.param_details["dtype_w_scales"]
+        )
+        return operand_bytes + bytes_x_scales + bytes_w_scales
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
@@ -1708,6 +1720,97 @@ class fused_qk_rope_concat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
         write_q = T * QH * (D_lora + D_pe) * bpe_out
         write_kv = T * KH * (D_lora + D_pe) * bpe_kv
         return read_q + read_k + write_q + write_kv
+
+
+class fused_fp8_bmm_rope_cat_and_cache_mla(aiter_fused_qk_rope_cat_and_cache_mla):
+    """
+    Reference implementation:
+        aiter/aiter/ops/triton/fusions/fused_bmm_rope_kv_cache.py
+        (fused_fp8_bmm_rope_cat_and_cache_mla)
+
+    Fuses two independent pieces in one launch:
+      1. FP8 BMM (per-token-group prequant of q_nope): ql_nope = q_nope @ w_k^T,
+         written to q_out[:, :, :N]
+      2. RoPE on q_pe / k_rope, q_pe written to q_out[:, :, N:], and
+         (k_nope || rotated k_rope) written into kv_cache at slot_mapping.
+    The two q_out slices are one buffer, written once.
+
+    Expected Input Dims from trace:
+        [0]  q_nope       = (QH, B, K)
+        [1]  w_k          = (QH, N, K)          N = kv_lora_rank
+        [2]  w_k_scale    = ()
+        [3]  q_pe         = (B, QH, D_pe)
+        [4]  k_nope       = (B_slot, KH, N)
+        [5]  k_rope       = (B_slot, KH, D_pe)
+        [6]  kv_cache     = (B_cache, KH, N + D_pe)
+        [7]  slot_mapping = (B_slot,)
+        [8]  positions    = (B_slot,)
+        [9]  cos, [10] sin, [11] k_scale
+
+    Roofline -- FLOPs:
+        BMM  : 2 * QH * B * N * K
+        RoPE : 3 * (B * QH * D_pe + B_slot * KH * D_pe)
+
+    Roofline -- bytes moved:
+        read  q_nope + q_pe + k_nope + k_rope : nelems * bpe_in
+        read  w_k                             : QH * N * K * bpe_w
+        write q_out  (B, QH, N + D_pe)        : * bpe_kv (KV-cache dtype, Input type[6])
+        write kv rows (B_slot tokens written) : B_slot * KH * (N + D_pe) * bpe_kv
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        QH, B, K = tuple(dims[0])
+        _, N, _ = tuple(dims[1])
+        D_pe = dims[3][2]
+        B_slot, KH, D_lora = tuple(dims[4])
+        dtype_in = types[0]
+        dtype_w = types[1]
+        dtype_kv = types[6] if len(types) > 6 and types[6] else dtype_in
+        return {
+            "T": B,
+            "B": B,
+            "B_slot": B_slot,
+            "QH": QH,
+            "KH": KH,
+            "N": N,
+            "K": K,
+            "D_lora": D_lora,
+            "D_pe": D_pe,
+            "dtype_in": dtype_in,
+            "dtype_w": dtype_w,
+            "dtype_kv": dtype_kv,
+        }
+
+    def flops(self):
+        p = self.param_details
+        bmm = 2 * p["QH"] * p["B"] * p["N"] * p["K"]
+        rope = 3 * (p["B"] * p["QH"] * p["D_pe"] + p["B_slot"] * p["KH"] * p["D_pe"])
+        return bmm + rope
+
+    def bytes(self):
+        p = self.param_details
+        bpe_in = self.bpe_in
+        bpe_w = name2bpe(p["dtype_w"])
+        if bpe_in is None or bpe_w is None:
+            return None
+        bpe_kv = self.bpe_kv if self.bpe_kv is not None else bpe_in
+        QH, B, B_slot, KH = p["QH"], p["B"], p["B_slot"], p["KH"]
+        N, K, D_lora, D_pe = p["N"], p["K"], p["D_lora"], p["D_pe"]
+        read_q = (QH * B * K + B * QH * D_pe) * bpe_in
+        read_w = QH * N * K * bpe_w
+        read_k = B_slot * KH * (D_lora + D_pe) * bpe_in
+        write_q = B * QH * (N + D_pe) * bpe_kv
+        write_kv = B_slot * KH * (D_lora + D_pe) * bpe_kv
+        return read_q + read_w + read_k + write_q + write_kv
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def get_compute_precision(self):
+        return torch_dtype_map(self.param_details["dtype_w"])
 
 
 class sglang_quant_dynamic_mxfp4_quant(fused_flatten_mxfp4_quant):

@@ -43,6 +43,7 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 
 _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "vllm::unified_attention_with_output",
+    "vllm::rocm_aiter_sparse_attn_indexer",
     "aiter::mha_varlen_fwd",
     "pseudo_mla_decode_fwd",
     "pseudo_mla_prefill_fwd",
