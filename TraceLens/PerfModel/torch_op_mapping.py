@@ -45,7 +45,6 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "FusedRoPEFuncBackward": "RoPE_bwd",
     "CrossEntropyFunctionBackward": "CrossEntropy_bwd",
     # MoE auxiliary ops.
-    "aiter::moe_sorting_opus_fwd": "MoE_aux",
     "aiter::moe_align_block_size": "MoE_aux",
     "_moe_C::moe_align_block_size": "MoE_aux",
     "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)": "MoE_aux",
@@ -216,7 +215,15 @@ op_to_perf_model_class_map = {
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
     "aiter::mha_fwd": perf_model.aiter__mha_fwd,
     "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::fmha_v3_bwd": perf_model.aiter__fmha_v3_bwd,
     "aiter::mha_bwd": perf_model.aiter__mha_bwd,
+    # aiter varlen FlashAttention (Wan 2.x training, sglang/vLLM inference). Issue #650 / #290.
+    "aiter::fmha_v3_varlen_fwd": perf_model.aiter__fmha_v3_varlen_fwd,
+    "aiter::fmha_v3_varlen_bwd": perf_model.aiter__fmha_v3_varlen_bwd,
+    "aiter::wrapper_fmha_v3_varlen_fwd": perf_model.aiter__fmha_v3_varlen_forward,
+    "aiter::wrapper_fmha_v3_varlen_bwd": perf_model.aiter__fmha_v3_varlen_backward,
+    # aten dispatcher-level Flash-Attention forward (PyTorch SDPA flash backend). Issue #650.
+    "aten::_flash_attention_forward": perf_model.aten___flash_attention_forward,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
     "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
     "EvoformerAttention": perf_model.evoformer_attention,
@@ -399,6 +406,29 @@ for op in upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
 for op in bilinear_upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
+
+# Embedding lookup is a gather: zero FLOPs, bytes for the gathered rows
+# (read and write) plus the index vector. Bag offsets are extra index reads.
+# Backward scatter-adds also re-read the updated row.
+data_movement_ops = {
+    "aten::embedding": perf_model.aten_embedding,
+    "aten::embedding_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_dense_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_forward_only": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_dense_backward": perf_model.aten_embedding_bag_dense_backward,
+    "aten::index_select": perf_model.aten_index_select,
+    "aten::index_select_backward": perf_model.aten_index_select_backward,
+    "aten::gather": perf_model.aten_gather,
+    # tensor[indices], and the write side of the same indexing.
+    "aten::index": perf_model.aten_index,
+    "aten::index_put": perf_model.aten_index_put,
+    "aten::index_put_": perf_model.aten_index_put,
+    "aten::_index_put_impl_": perf_model.aten_index_put,
+}
+for op_name, op_class in data_movement_ops.items():
+    op_to_perf_model_class_map[op_name] = op_class
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.

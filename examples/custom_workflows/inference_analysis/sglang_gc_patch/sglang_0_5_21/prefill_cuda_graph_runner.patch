@@ -1,0 +1,203 @@
+diff --git a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
+index 1b506b8..26e51ab 100644
+--- a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
+@@ -41,6 +41,7 @@ import copy
+ import dataclasses
+ import inspect
+ import logging
++import os
+ from collections.abc import Sequence
+ from contextlib import contextmanager, nullcontext
+ from dataclasses import dataclass
+@@ -48,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+ 
+ import torch
+ import tqdm
++from torch.profiler import ProfilerActivity, profile
+ 
+ from sglang.kernels.ops.kvcache.kv_indices import (
+     create_chunked_prefix_cache_kv_indices,
+@@ -136,6 +138,7 @@ from sglang.srt.runtime_context import (
+ )
+ from sglang.srt.speculative.eagle_utils import get_draft_input_from_target_hidden_dim
+ from sglang.srt.utils import (
++    empty_context,
+     get_available_gpu_memory,
+     is_cuda,
+     is_npu,
+@@ -144,6 +147,11 @@ from sglang.srt.utils import (
+     require_mlp_tp_gather,
+ )
+ from sglang.srt.utils.aiter import maybe_pre_warm_aiter_chip_info
++from sglang.srt.utils.profile_utils import (
++    export_cuda_graph_capture_trace,
++    graph_capture_profile_dir,
++)
++from sglang.srt.environ import envs
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+@@ -306,6 +314,9 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
+         # capture must use the same flag value as replay for those models.
+         self.capture_return_pooled_hidden_states = not model_runner.is_generation
+ 
++        # Per-shape CUDA-graph capture traces (TraceLens); mirrors decode.
++        self.enable_profile_cuda_graph = get_exec().graph.enable_profile_cuda_graph
++
+         # --- prefill graph config -------------------------------------
+         prefill_config = get_exec().graph.cuda_graph_config.prefill
+         self.prefill_backend_name = prefill_config.backend
+@@ -1532,22 +1543,111 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
+             self.tbo_plugin.capture_one_batch_size(forward_batch, num_tokens=num_tokens)
+         return forward_batch, self.model_runner.attn_backend
+ 
++    def _graph_batch_capture_active(self) -> bool:
++        """Whether per-shape capture traces are active (SGLANG_GRAPH_BATCH_CAPTURE)."""
++        return (
++            envs.SGLANG_GRAPH_BATCH_CAPTURE.get()
++            and not envs.SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE.get()
++        )
++
++    def _profile_runner_name(self) -> str:
++        return type(self).__name__
++
++    def _set_profile_trace_tag(self, size: int, variant_label: Optional[str]) -> None:
++        """Name the trace for one prefill capture shape. ``size`` is the prefill
++        token count; ``variant_label`` distinguishes chunked-prefix captures."""
++        if getattr(self, "_profiler", None) is None:
++            return
++        parts = [f"tokens_{size}"]
++        if variant_label is not None:
++            parts.append(str(variant_label))
++        self._profile_trace_tag = "_".join(parts)
++
++    def _init_profile_context_and_memory_record(self):
++        if self._graph_batch_capture_active():
++            # Per-shape capture traces (SGLANG_GRAPH_BATCH_CAPTURE): a scheduled
++            # profiler is stepped once per shape (see
++            # BreakableCudaGraphBackend.capture_one) and on_trace_ready writes
++            # one chrome trace per shape.
++            rank = get_parallel().tp_rank
++            runner_name = self._profile_runner_name()
++            trace_dir = graph_capture_profile_dir()
++            os.makedirs(trace_dir, exist_ok=True)
++            self._profile_trace_tag = None
++
++            def on_trace_ready(prof):
++                tag = self._profile_trace_tag
++                if tag is None:
++                    logger.warning(
++                        "%s: prefill capture trace flushed with no shape tag; "
++                        "skipping export.",
++                        runner_name,
++                    )
++                    return
++                trace_file = os.path.join(
++                    trace_dir, f"{runner_name}_{tag}_rank{rank}.json.gz"
++                )
++                prof.export_chrome_trace(trace_file)
++                logger.info(f"Saved prefill capture trace for {tag} to {trace_file}")
++
++            profile_context = profile(
++                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
++                schedule=torch.profiler.schedule(wait=2, warmup=0, active=1, repeat=0),
++                record_shapes=True,
++                with_stack=True,
++                with_flops=True,
++                profile_memory=True,
++                on_trace_ready=on_trace_ready,
++            )
++        else:
++            profile_context = profile(
++                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
++                record_shapes=True,
++            )
++        torch.cuda.memory._record_memory_history()
++        return profile_context
++
++    def _post_process_after_profile(self, prof_context):
++        torch.cuda.memory._record_memory_history(enabled=None)
++        # Single-trace export for the whole capture pass; no-op unless
++        # SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE is set (per-shape mode uses
++        # on_trace_ready instead).
++        export_cuda_graph_capture_trace(
++            prof_context,
++            runner_name=self._profile_runner_name(),
++        )
++
+     def capture(self) -> None:
+         # Warm up + autotune kernels once before capture (run-once across the
+         # decode + prefill runners; see BaseRunner.warmup).
+         self.warmup()
++        profile_context = empty_context()
++        # Holds the active torch profiler during capture so the backend can
++        # advance its schedule (profiler.step()) per shape. Only the scheduled
++        # per-shape profiler (SGLANG_GRAPH_BATCH_CAPTURE) needs stepping.
++        self._profiler = None
++        if self.enable_profile_cuda_graph:
++            profile_context = self._init_profile_context_and_memory_record()
++            if self._graph_batch_capture_active():
++                self._profiler = profile_context
+         dp_flags = get_flags().dp
+         dp_flags.capturing_prefill_graph = True
+         try:
+             with freeze_gc(get_exec().graph.enable_cudagraph_gc):
+-                with graph_capture(
+-                    stream=get_or_create_global_graph_capture_stream()
+-                ) as graph_capture_context:
++                with (
++                    graph_capture(
++                        stream=get_or_create_global_graph_capture_stream()
++                    ) as graph_capture_context,
++                    profile_context as prof,
++                ):
+                     self.stream = graph_capture_context.stream
+                     with self.backend.capture_session(self.stream):
+                         self._capture_one_stream()
+         finally:
+             dp_flags.capturing_prefill_graph = False
++        if self.enable_profile_cuda_graph:
++            self._post_process_after_profile(prof)
++        self._profiler = None
+         if dp_flags.prefill_graph_has_dp_gather:
+             logger.info(
+                 "Prefill CUDA graph captured a DP gather/scatter; "
+@@ -1621,6 +1721,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
+                 else None
+             ),
+         )
++        self._set_profile_trace_tag(num_tokens, shape_key.variant_label)
+         if prefix_num_chunks:
+             self._prepare_chunked_prefix_capture(
+                 forward_batch, shape_key, prefix_num_chunks
+diff --git a/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py b/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py
+index b36c637..6e92de5 100644
+--- a/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py
++++ b/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py
+@@ -116,12 +116,25 @@ class BreakableCudaGraphBackend(DedupedCudaGraphMixin, BaseCudaGraphBackend):
+         capture_inputs: Optional[Any] = None,
+         post_warmup_hook: Optional[Callable[[], None]] = None,
+     ) -> None:
++        # Per-shape capture traces (--enable-profile-cuda-graph +
++        # SGLANG_GRAPH_BATCH_CAPTURE): the prefill runner exposes a scheduled
++        # torch profiler as _profiler. Step it past the two warmups so each
++        # shape's capture run lands in its own trace, mirroring
++        # FullCudaGraphBackend.capture_one. _profiler is None otherwise.
++        runner = self._cuda_graph_runner
++        profiler = (
++            getattr(runner, "_profiler", None)
++            if getattr(runner, "enable_profile_cuda_graph", False)
++            else None
++        )
+         warmup_out = None
+         for _ in range(2):
+             self._device_module.synchronize()
+             self._tp_group.barrier()
+             with self._precarve.measure():
+                 warmup_out = forward_fn()
++            if profiler is not None:
++                profiler.step()
+             if post_warmup_hook is not None:
+                 post_warmup_hook()
+ 

@@ -24,6 +24,8 @@ subtrees:
   - file: how-to/generate-reports
     title: Generate reports
     entries:
+    - file: how-to/generate-perf-report-from-config
+      title: Reports from a YAML config
     - file: how-to/generate-perf-report-pytorch
       title: PyTorch performance report
     - file: how-to/generate-perf-report-pytorch-inference

@@ -57,7 +57,6 @@ from TraceLens.Agent.Analysis.triage.checks import (
     check_corrupt_json,
     check_disk_full,
     check_docker_missing,
-    check_gpu_graph_replay,
     check_high_idle,
     check_hipgraph_launch_in_report,
     check_inference_annotation_missing,
@@ -144,17 +143,17 @@ def _reset_triage_caches(monkeypatch):
     """Isolate the two triage-module caches so tests don't leak into each other.
 
     ``checks._load_trace_json`` is ``lru_cache(maxsize=1)``: rewriting a file at
-    the same path and re-reading returns stale content. ``checks._PATH_REMAPS_CACHE``
+    the same path and re-reading returns stale content. ``checks._path_remaps``
     memoizes ``TRACELENS_PATH_REMAPS`` once, so a remap set in one test would bleed
     into the next. Clear both before and after each test, and strip the env var so
     remap tests start from a clean environment.
     """
     monkeypatch.delenv("TRACELENS_PATH_REMAPS", raising=False)
     checks._load_trace_json.cache_clear()
-    checks._PATH_REMAPS_CACHE = None
+    checks._path_remaps.cache_clear()
     yield
     checks._load_trace_json.cache_clear()
-    checks._PATH_REMAPS_CACHE = None
+    checks._path_remaps.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +287,7 @@ def make_run_dir(
             ``trace_input/model_TP-0_rank0.json.gz`` (wrapped in
             ``{"traceEvents": ...}``). Triggers the trace_input manifest.
         output_dirs: iterable of directory names to create under ``run_dir``
-            (e.g. ``("metadata", "category_data", "system_findings",
+            (e.g. ``("category_data", "system_findings",
             "category_findings")``).
         analysis_md: content written to ``analysis.md``.
     """
@@ -398,7 +397,7 @@ def make_triage_csv(run_dir, rows):
 
 # Registry size is load-bearing: the reserved-stub and sublabel checks below
 # depend on it not drifting silently.
-_EXPECTED_CHECK_COUNT = 36
+_EXPECTED_CHECK_COUNT = 35
 
 _PARSE_FLOAT_CASES = [
     (None, None),
@@ -655,7 +654,7 @@ def _set_remaps(value):
     after the test, so we only need to prime them here.
     """
     os.environ["TRACELENS_PATH_REMAPS"] = value
-    checks._PATH_REMAPS_CACHE = None
+    checks._path_remaps.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -848,8 +847,8 @@ def test_stream_lines_strips_sdk_prefix_and_handles_missing(tmp_path):
 
 
 def test_stream_contains_is_case_insensitive(tmp_path):
-    path = write_stream(tmp_path / "s.log", ["some GPU_GRAPH_REPLAY line"])
-    assert stream_contains(path, r"gpu_graph_replay") is True
+    path = write_stream(tmp_path / "s.log", ["some SAMPLE_TOKEN line"])
+    assert stream_contains(path, r"sample_token") is True
     assert stream_contains(path, r"nomatch") is False
 
 
@@ -1103,7 +1102,7 @@ def test_inference_annotation_no_main_trace(tmp_path):
     run_dir = make_run_dir(tmp_path)
     finding = check_inference_annotation_missing(str(run_dir), None)
     assert finding is not None
-    assert finding.failure_mode == "Main inference trace missing "
+    assert finding.failure_mode == "Main inference trace missing"
 
 
 def test_inference_annotation_present_returns_none(tmp_path):
@@ -1301,26 +1300,6 @@ def test_high_idle_from_manifest(tmp_path):
 def test_high_idle_no_data_returns_none(tmp_path):
     run_dir = make_run_dir(tmp_path)
     assert check_high_idle(str(run_dir), None) is None
-
-
-# ---------------------------------------------------------------------------
-# 2h: check_gpu_graph_replay
-# ---------------------------------------------------------------------------
-
-
-def test_gpu_graph_replay_fires_from_stream(tmp_path):
-    stream = write_stream(
-        tmp_path / "s.log", ["... DIAG:trace_quality:GPU_GRAPH_REPLAY ..."]
-    )
-    finding = check_gpu_graph_replay(str(tmp_path), stream)
-    assert finding is not None
-    assert finding.failure_mode == "GPU Graph Replay detected in default mode"
-
-
-def test_gpu_graph_replay_no_match_returns_none(tmp_path):
-    stream = write_stream(tmp_path / "s.log", ["nothing interesting here"])
-    assert check_gpu_graph_replay(str(tmp_path), stream) is None
-    assert check_gpu_graph_replay(str(tmp_path), None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1696,8 +1675,7 @@ def test_output_incomplete_fires(tmp_path):
     assert isinstance(finding, FindingDraft)
     assert finding.failure_mode == "Output directory structure incomplete"
     assert finding.evidence == (
-        "Missing directories: metadata, category_data, system_findings, "
-        "category_findings"
+        "Missing directories: category_data, system_findings, category_findings"
     )
 
 
@@ -1705,7 +1683,6 @@ def test_output_incomplete_none_when_all_present(tmp_path):
     run_dir = make_run_dir(
         tmp_path,
         output_dirs=(
-            "metadata",
             "category_data",
             "system_findings",
             "category_findings",
@@ -1783,6 +1760,20 @@ def test_subagent_budget_none_when_all_written(tmp_path):
     assert check_subagent_budget(str(run_dir), None) is None
 
 
+def test_subagent_budget_gates_cpu_idle_on_focus_job(tmp_path):
+    manifest = {
+        "focus_job": "decode",
+        "gpu_utilization": {
+            "idle_time_percent": 5,
+            "nodes": {"decode": {"idle_time_percent": 20}},
+        },
+        "categories": [{"name": "cpu_idle", "tier": "system"}],
+    }
+    run_dir = make_run_dir(tmp_path, manifest=manifest)
+    finding = check_subagent_budget(str(run_dir), None)
+    assert "Missing findings for: cpu_idle" in finding.evidence
+
+
 def test_subagent_budget_none_without_manifest(tmp_path):
     run_dir = make_run_dir(tmp_path)
     assert check_subagent_budget(str(run_dir), None) is None
@@ -1842,6 +1833,7 @@ def test_disk_full_zero_byte_files(tmp_path):
     run_dir = make_run_dir(tmp_path)
     for i in range(4):
         (run_dir / f"empty{i}.txt").touch()
+    (run_dir / "dangling").symlink_to(run_dir / "nowhere")
     finding = check_disk_full(str(run_dir), None)
     assert isinstance(finding, FindingDraft)
     assert finding.failure_mode == "Disk space exhausted"
@@ -1925,9 +1917,15 @@ def test_resource_exhausted_json_system(tmp_path):
     assert finding.evidence == "RESOURCE_EXHAUSTED system error in agent stream"
 
 
-def test_resource_exhausted_plain_regex(tmp_path):
-    # A non-JSON log line takes the except branch and matches case-insensitively.
-    stream = write_stream(tmp_path / "s.log", ["fatal: Resource_Exhausted on host"])
+@pytest.mark.parametrize(
+    "line",
+    ["fatal: Resource_Exhausted on host", ["Resource_Exhausted"]],
+    ids=["plain", "json_list"],
+)
+def test_resource_exhausted_plain_regex(tmp_path, line):
+    # Non-JSON and non-object JSON lines take the regex branch and match
+    # case-insensitively.
+    stream = write_stream(tmp_path / "s.log", [line])
     finding = check_resource_exhausted(str(tmp_path), stream)
     assert isinstance(finding, FindingDraft)
     assert finding.evidence.startswith("resource_exhausted in stream:")
@@ -2714,13 +2712,6 @@ def test_auto_detect_log_none_when_absent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_run_triage_missing_run_dir_exits(tmp_path, capsys):
-    with pytest.raises(SystemExit) as exc:
-        run_triage(str(tmp_path / "does_not_exist"))
-    assert exc.value.code == 1
-    assert "OUTPUT_INCOMPLETE" in capsys.readouterr().out
-
-
 def test_run_triage_warns_on_absent_stream_file(tmp_path, capsys):
     run_dir = make_run_dir(tmp_path)
     run_triage(str(run_dir), stream_file=str(tmp_path / "missing.ndjson"))
@@ -2855,6 +2846,16 @@ def test_main_requires_a_target(monkeypatch):
         main()
     # argparse.error exits with code 2.
     assert exc.value.code == 2
+
+
+def test_main_run_dir_missing_exits(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys, "argv", ["triage", "--run-dir", str(tmp_path / "does_not_exist")]
+    )
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 1
+    assert "OUTPUT_INCOMPLETE" in capsys.readouterr().out
 
 
 def test_main_run_dir_writable_writes_and_exits(tmp_path, monkeypatch, capsys):

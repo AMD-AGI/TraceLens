@@ -68,6 +68,35 @@ pip install -e '.[dev,jax]'
 python -m pytest tests/ -v
 ```
 
+### Optional: Visualizer (Model Explorer export)
+
+Install the CPU-only LLM architecture visualizer and its `huggingface_hub`
+dependency with the `[Visualizer]` extra:
+
+```bash
+pip install -e ".[Visualizer]"
+```
+
+The extra installs the current CPU PyTorch wheel from the PyTorch CPU index.
+PyPI's `torch` package is the CUDA build, which this extra does not use.
+
+This installs the `TraceLens.ModelUtils` and `TraceLens.Visualizer.model_explorer_export` packages and adds these commands to your `PATH`:
+
+- `visualize_model_in_explorer` (alias: `TraceLens_visualize_model_in_explorer`), the Model Explorer export
+- `TraceLens_model_roofline_projection`, the trace-free roofline projection
+
+See `TraceLens/Visualizer/README.md` for the export CLI. The
+model visualizer agent that drives this command is
+`TraceLens/Agent/Visualizer/`; see
+[Visualize a model](../how-to/visualize-model.md).
+
+For development on the visualizer, combine extras:
+
+```bash
+pip install -e ".[Visualizer,dev]"
+python3 -m pytest tests/Visualizer/ tests/ModelUtils/
+```
+
 ## Optional: `traceconv` for `.pftrace` input
 
 `traceconv` is needed only when you pass a Perfetto-style `.pftrace` trace

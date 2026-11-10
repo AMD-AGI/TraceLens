@@ -27,31 +27,54 @@ def optional_float(value, default=0.0):
         return default
 
 
+def rates_for_duration(gflops, bytes_moved, time_us):
+    """Return ``(tflops_per_s, tb_per_s)`` implied by a duration in microseconds.
+
+    ``time_us`` is any duration estimate: measured kernel time, the roofline
+    ceiling, or an Origami simulation. A missing or non-positive duration
+    yields NaN for both rates. A missing ``bytes_moved`` yields NaN TB/s.
+    """
+    if time_us is None or not (time_us > 0):
+        return float("nan"), float("nan")
+    tflops_per_s = (gflops / 1e3) / (time_us / 1e6)
+    if bytes_moved is None:
+        tb_per_s = float("nan")
+    else:
+        tb_per_s = (bytes_moved / 1e12) / (time_us / 1e6)
+    return tflops_per_s, tb_per_s
+
+
+def add_duration_rate_columns(dict_metrics, gflops, bytes_moved, time_us, prefix):
+    """Write ``"{prefix} TFLOPS/s"`` and ``"{prefix} TB/s"`` for ``time_us``.
+
+    ``prefix`` names the estimate, for example ``"Roofline"`` or ``"Origami"``.
+    """
+    tflops_per_s, tb_per_s = rates_for_duration(gflops, bytes_moved, time_us)
+    dict_metrics[f"{prefix} TFLOPS/s"] = tflops_per_s
+    dict_metrics[f"{prefix} TB/s"] = tb_per_s
+    return tflops_per_s, tb_per_s
+
+
 def add_simulation_time_columns(
     dict_metrics,
     simulated_time,
     gflops,
     bytes_moved,
     busy_kernel_time,
+    label="Origami",
 ):
     """
-    Add simulated time columns when using Origami
+    Add simulated time columns (Origami, or ``label`` for other op projections).
+    For dict outputs with extra columns, use
+    ``TraceLens.PerfModel.op_projections.add_op_projection_columns``.
     """
     if not simulated_time:
         return
-    dict_metrics["Origami Time (µs)"] = simulated_time
-    dict_metrics["Origami TFLOPS/s"] = (
-        (gflops / 1e3) / (simulated_time / 1e6) if simulated_time > 0 else float("nan")
+    dict_metrics[f"{label} Time (µs)"] = simulated_time
+    add_duration_rate_columns(
+        dict_metrics, gflops, bytes_moved, simulated_time, prefix=label
     )
-    if bytes_moved is not None:
-        dict_metrics["Origami TB/s"] = (
-            (bytes_moved / 1e12) / (simulated_time / 1e6)
-            if simulated_time > 0
-            else float("nan")
-        )
-    else:
-        dict_metrics["Origami TB/s"] = float("nan")
-    dict_metrics["Pct Origami"] = (
+    dict_metrics[f"Pct {label}"] = (
         (simulated_time / busy_kernel_time) * 100
         if busy_kernel_time > 0
         else float("nan")
@@ -63,11 +86,7 @@ def build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time):
     Build the standard GFLOPS/TFLOPS/TB-per-s metrics dict shared by the
     PyTorch and JAX perf-metric code paths.
     """
-    tflops_per_s = (
-        (gflops / 1e3) / (busy_kernel_time / 1e6)
-        if busy_kernel_time > 0
-        else float("nan")
-    )
+    tflops_per_s, tb_per_s = rates_for_duration(gflops, bytes_moved, busy_kernel_time)
     dict_metrics = {
         "GFLOPS": gflops,
         "Kernel Time (µs)": busy_kernel_time,
@@ -78,11 +97,7 @@ def build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time):
         dict_metrics["FLOPS/Byte"] = (
             (gflops * 1e9) / bytes_moved if bytes_moved > 0 else float("nan")
         )
-        dict_metrics["TB/s"] = (
-            (bytes_moved / 1e12) / (busy_kernel_time / 1e6)
-            if busy_kernel_time > 0
-            else float("nan")
-        )
+        dict_metrics["TB/s"] = tb_per_s
     else:
         dict_metrics["Data Moved (MB)"] = float("nan")
         dict_metrics["FLOPS/Byte"] = float("nan")
@@ -93,6 +108,37 @@ def build_perf_metrics_dict(gflops, bytes_moved, busy_kernel_time):
 def gemm_tflops(M, N, K, time_ms):
     """Achieved TFLOPS for a dense GEMM of shape (M, N, K) given elapsed time in ms."""
     return (2 * M * N * K) / (time_ms * 1e-3) / 1e12
+
+
+def dense_layout(shape, stride):
+    """True when ``stride`` is dense, including column-major; a missing stride counts as dense."""
+    if not shape or not stride or len(stride) != len(shape):
+        return True
+    pairs = [(size, step) for size, step in zip(shape, stride) if size > 1]
+    if any(step <= 0 for _, step in pairs):
+        return False
+    pairs.sort(key=lambda item: item[1])
+    expect = 1
+    for size, step in pairs:
+        if step != expect:
+            return False
+        expect *= size
+    return True
+
+
+def dense_counted_tensor(event, indexes):
+    """False when a counted tensor's recorded stride is not dense."""
+    args = event.get("args") or {}
+    dims = args.get("Input Dims") or []
+    strides = args.get("Input Strides") or []
+    if not strides:
+        return True
+    for index in indexes:
+        if index >= len(dims) or index >= len(strides):
+            continue
+        if not dense_layout(dims[index], strides[index]):
+            return False
+    return True
 
 
 def name2bpe(name):
@@ -131,46 +177,49 @@ def name2bpe(name):
     return dict_dtype2bpe.get(name.lower(), None)
 
 
-def simulation_dtype_map(dtype):
-    """
-    This function maps a PyTorch data type to a simulation data type.
-    Args:
-        dtype (str): The name of the pytorch data type.
-    Returns:
-        str: The name of the PyTorch data type.
-    """
-    dict_dtype2simulation = {
-        "fp32": "float",
-        "fp64": "double",
-        "fp16": "c10::half",
-        "bf16": "c10::bfloat16",
-        "fp8": "c10::float8_e4m3fnuz",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
+# Keys are stored without a namespace, because torch_dtype_map strips one off
+# its input before looking it up. That way "c10::Half" and the already-stripped
+# "half" take the same path, and a new c10 spelling of a type already listed
+# here needs no entry of its own.
+_DTYPE2SIMULATION = {
+    "float": "fp32",
+    "double": "fp64",
+    "float16": "fp16",
+    "float32": "fp32",
+    "float64": "fp64",
+    "half": "fp16",
+    "bfloat16": "bf16",
+    "float8_e4m3fn": "fp8",
+    "float8_e4m3fnuz": "fp8",
+    "float4_e2m1fn_x2": "fp4",
+    "mxfp4": "fp4",
+    "unsigned char": "fp8",
+}
+
+# Canonical values map to themselves, so normalising an already-normalised
+# value is a no-op. Derived rather than written out, so adding a type above is
+# enough.
+_DTYPE2SIMULATION.update({value: value for value in set(_DTYPE2SIMULATION.values())})
 
 
 def torch_dtype_map(dtype):
     """
     This function maps a PyTorch data type to a simulation data type.
+
+    Accepts the c10 spelling ("c10::BFloat16"), the same name with the
+    namespace already stripped ("bfloat16"), and the canonical simulation name
+    ("bf16").
+
     Args:
         dtype (str): The name of the PyTorch data type.
     Returns:
-        str: The name of the simulation data type.
+        str: The name of the simulation data type, or None if the type has no
+            simulation equivalent — integer, boolean and complex types among
+            them, which have no place in a floating-point roofline.
     """
-    dict_dtype2simulation = {
-        "float": "fp32",
-        "double": "fp64",
-        "c10::half": "fp16",
-        "c10::bfloat16": "bf16",
-        "c10::float8_e4m3fnuz": "fp8",
-        "unsigned char": "fp8",
-        "fp8": "fp8",
-        "fp4": "fp4",
-        "mxfp4": "fp4",
-        "c10::float4_e2m1fn_x2": "fp4",
-        "c10::float8_e4m3fn": "fp8",
-    }
-    return dict_dtype2simulation.get(dtype.lower(), None)
+    if dtype is None:
+        return None
+    return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
 
 
 def parse_bool(input):

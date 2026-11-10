@@ -84,7 +84,10 @@ def make_entry(
         kernel_id: Stable-within-run kernel id (e.g. ``k001``).
         name: Kernel symbol as the profiler reported it.
         gpu_pct: Share of GPU time, used to rank what is worth resolving.
-        source_file: Resolved path, or ``""`` when unresolved/non-patchable.
+        source_file: Resolved path, or ``""`` when unresolved. A non-patchable
+            kernel may still carry a path (a dispatcher/wrapper source, or a
+            generated file's cache path) -- ``method`` says whether it's
+            editable, this says where it lives, if known.
         source_line: 1-based line when the method produced one.
         source_function: Enclosing function when the method produced one.
         method: One of the ``METHOD_*`` labels defined in this module.

@@ -18,8 +18,20 @@ from unittest.mock import patch
 from TraceLens.PerfModel.benchmarking.microbench_utils import (
     _int_metric,
     check_gpu_idle,
+    gfx_target,
+    mx_peak_without_native_support,
     resolve_physical_device,
 )
+
+# These modules import torch; without it they stay None and the tests that use them skip in _require_torch.
+try:
+    from TraceLens.PerfModel.benchmarking import (
+        fp4fp6_helpers,
+        microbench,
+        microbench_rocprof,
+    )
+except ImportError:
+    fp4fp6_helpers = microbench = microbench_rocprof = None
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 
@@ -37,20 +49,17 @@ def _require_cuda_gpu():
 
 def _import_microbench():
     _require_torch()
-
-    return mb
+    return microbench
 
 
 def _import_microbench_rocprof():
     _require_torch()
-
-    return rp
+    return microbench_rocprof
 
 
 def _import_fp4fp6_helpers():
     _require_torch()
-
-    return fp
+    return fp4fp6_helpers
 
 
 class TestMicrobenchUtils:
@@ -123,6 +132,30 @@ class TestMicrobenchUtils:
         assert "idle" in msg.lower()
 
 
+class TestMxPeakWithoutNativeSupport:
+    MATRIX = {"matrix_fp16": 100.0, "matrix_bf16": 120.0, "matrix_fp4": 10.0}
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("gfx942:sramecc+:xnack-", "gfx942"),
+            ("gfx1201", "gfx1201"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_gfx_target(self, name, expected):
+        assert gfx_target(name) == expected
+
+    @pytest.mark.parametrize("gfx", ["gfx1201", "gfx1151", "gfx942"])
+    def test_non_native_targets_use_16bit_peak(self, gfx):
+        assert mx_peak_without_native_support(gfx, self.MATRIX) == 120.0
+
+    @pytest.mark.parametrize("gfx", ["gfx950", ""])
+    def test_native_or_non_amd_targets_keep_measurement(self, gfx):
+        assert mx_peak_without_native_support(gfx, self.MATRIX) is None
+
+
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestMicrobenchHelpers:
     def test_gemm_flops(self):
@@ -156,9 +189,26 @@ class TestMicrobenchHelpers:
             vector_results={"vector_fp16": 45.6},
         )
         assert payload["name"] == "MI300X"
-        assert payload["max_achievable_tflops"]["matrix_fp16"] == 123
-        assert payload["max_achievable_tflops"]["vector_fp16"] == 46
+        assert payload["max_achievable_tflops"]["matrix_fp16"] == 123.4
+        assert payload["max_achievable_tflops"]["vector_fp16"] == 45.6
         assert set(mb.ARCH_TLOPS_KEYS) <= set(payload["max_achievable_tflops"])
+
+    def test_build_measured_arch_json_keeps_sub_one_tflops(self):
+        mb = _import_microbench()
+        payload = mb._build_measured_arch_json(
+            gpu_name="R9600D",
+            mem_gb=47.6,
+            read_bw_gbps=640.4,
+            matrix_results={"matrix_fp64": 0.4, "matrix_bf16": 69.1},
+            vector_results={"vector_fp64": 0.4},
+        )
+        maf = payload["max_achievable_tflops"]
+        assert maf["matrix_fp64"] == 0.4
+        assert maf["vector_fp64"] == 0.4
+        assert maf["matrix_bf16"] == 69.1
+        assert payload["mem_bw_gbps"] == 640.4
+        assert payload["memory_gb"] == 47.6
+        assert maf["vector_fp16"] == 0.0
 
     def test_gemm_shapes_non_empty(self):
         mb = _import_microbench()
@@ -247,6 +297,47 @@ class TestFp4Fp6Helpers:
             fp.bench_mxfp4_gemm(64, 64, 33, 0, warmup=1, rep=1, do_bench_fn=fake_bench)
             == 0.0
         )
+
+    def test_mx_tile_sweep_keeps_original_tile_first(self):
+        fp = _import_fp4fp6_helpers()
+        assert fp.MX_TILE_CONFIGS[0] == (128, 128, 256, 8, None)
+
+    def test_best_tile_keeps_fastest_and_skips_non_dividing(self):
+        fp = _import_fp4fp6_helpers()
+        ms_by_tile = {
+            (128, 128, 256, 8, None): 8.0,
+            (128, 128, 128, 8, None): 2.0,
+            (128, 128, 64, 8, None): 3.0,
+            (64, 128, 64, 4, None): 4.0,
+            (128, 128, 64, 4, 1): 1.0,
+        }
+        tried = []
+
+        def run(*tile):
+            tried.append(tile)
+
+        def fake_bench(fn, *, warmup, rep):
+            fn()
+            return ms_by_tile[tried[-1]]
+
+        m, n, k = 256, 256, 1152  # 1152 is not a multiple of BLOCK_K=256
+        best = fp._bench_best_tile(
+            m, n, k, run, warmup=1, rep=1, do_bench_fn=fake_bench
+        )
+        assert (128, 128, 256, 8, None) not in tried
+        assert (128, 128, 64, 4, 1) in tried
+        assert best == pytest.approx(fp.gemm_tflops(m, n, k, 1.0))
+
+    def test_best_tile_raises_when_every_tile_fails(self):
+        fp = _import_fp4fp6_helpers()
+
+        def fake_bench(_fn, *, warmup, rep):
+            raise RuntimeError("out of resources")
+
+        with pytest.raises(RuntimeError, match="out of resources"):
+            fp._bench_best_tile(
+                256, 256, 256, lambda *t: None, warmup=1, rep=1, do_bench_fn=fake_bench
+            )
 
 
 @pytest.mark.gpu

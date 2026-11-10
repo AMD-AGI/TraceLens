@@ -8,11 +8,84 @@
 # https://github.com/ROCm/tritonBLAS/blob/main/include/tritonblas/origami.py
 # an exhaustive list can also be pulled from hipblaslt https://github.com/ROCm/rocm-libraries/tree/develop/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/Origami
 
+from __future__ import annotations
+
 import itertools
+import sys
 import warnings
 from math import ceil, gcd
 
-import origami
+# Loaded on first use, so importing TraceLens doesn't load Origami's libraries.
+origami = None
+
+# TraceLens precision name -> origami.data_type_t member
+ORIGAMI_DTYPES = {
+    "fp32": "Float",
+    "fp16": "Half",
+    "bf16": "BFloat16",
+    "fp64": "Double",
+    "fp8": "Float8_fnuz",
+}
+
+_import_error_printed = False
+
+
+def _load_origami():
+    global origami
+    import origami as module
+
+    origami = module
+    return module
+
+
+def gemm_time_us(arch, M, N, K, B, dtype, force_to_l1=False, num_cus=None):
+    """GEMM time in µs from Origami, or None if Origami isn't installed or
+    doesn't support ``dtype`` (a TraceLens precision name such as ``"bf16"``).
+
+    ``arch`` needs ``name`` (MI300X, MI325X, MI350X, MI355X), ``freq_mhz``,
+    ``num_cus``, and ``lds_capacity``. The report fills the last two from the
+    trace's ``deviceProperties``. The ``num_cus`` argument times this GEMM on
+    that many CUs; ``force_to_l1`` treats the operands as cache resident, as
+    in flash attention."""
+    global _import_error_printed
+    if dtype not in ORIGAMI_DTYPES:
+        warnings.warn(
+            f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
+            RuntimeWarning,
+        )
+        return None
+    try:
+        module = _load_origami()
+    except ImportError as error:
+        if not _import_error_printed:
+            print(
+                "TraceLens: Origami is enabled but the 'origami' package "
+                f"could not be imported: {error}. Install rocm-origami (or ensure "
+                "the Origami Python bindings are on PYTHONPATH), or disable "
+                "Origami simulation.",
+                file=sys.stderr,
+            )
+            _import_error_printed = True
+        return None
+    origami_dtype = getattr(module.data_type_t, ORIGAMI_DTYPES[dtype])
+
+    hardware = OrigamiHelper.get_hardware(arch)
+    if force_to_l1:
+        # Until Origami has a flash-attention model, make L1 and L2 really big.
+        hardware.lds_capacity = 1024 * 1024 * 1024 * 1024
+        hardware.L2_capacity = 1024 * 1024 * 1024 * 1024
+    helper = OrigamiHelper(
+        M,
+        N,
+        K,
+        B,
+        origami_dtype,
+        origami_dtype,
+        origami_dtype,
+        hardware,
+        num_cus=num_cus,
+    )
+    return helper.get_simulation_time()
 
 
 class OrigamiHelper:
@@ -28,7 +101,11 @@ class OrigamiHelper:
         hardware: origami.hardware_t,
         mx_block_size=0,
         streamk=False,
+        num_cus=None,
     ):
+        """``num_cus`` times the GEMM on that many CUs. ``hardware`` must keep
+        the full GPU's CU count: the matrix instruction is chosen from it."""
+        _load_origami()
         self._m = m
         self._n = n
         self._k = k
@@ -76,6 +153,10 @@ class OrigamiHelper:
 
         # Create Origami problem_t based on problem metadata
         self._problem = self._make_problem()
+
+        if num_cus is not None:
+            self._hardware.N_CU = num_cus
+            self._N_CU = num_cus
 
         # Run Origami solution selection
         self._result = origami.select_config(
@@ -359,6 +440,19 @@ class OrigamiHelper:
 
     @staticmethod
     def get_hardware(arch: dict) -> origami.hardware_t:
+        num_cus = arch.get("num_cus")
+        lds_capacity = arch.get("lds_capacity")
+        if not num_cus:
+            raise ValueError(
+                "arch['num_cus'] is required. The report takes it from the "
+                "trace's deviceProperties numSms."
+            )
+        if not lds_capacity:
+            raise ValueError(
+                "arch['lds_capacity'] is required. The report takes it from the "
+                "trace's deviceProperties maxSharedMemoryPerMultiProcessor."
+            )
+        _load_origami()
         # find architecture name, look up
         # need to map from GPU name ("mi300x") to internal name ("gfx42a")
         arch_name = arch.get("name", None)
@@ -380,19 +474,15 @@ class OrigamiHelper:
         }
         arch_name = name_to_arch.get(arch_name, arch_name)
 
-        # The origami python bindings only support the 3xx series
+        # The origami python bindings only support the 3xx series.
+        # Compute units and LDS come from the trace. L2 is not in the trace.
         arch_to_props = {
-            # Architecture strings
             "gfx942": {
                 "arch": origami.architecture_t.gfx942,
-                "N_CU": 304,
-                "lds_capacity": 64 * 1024,  # 64 KB
                 "L2_capacity": 4 * 1024 * 1024,  # 4 MB
             },
             "gfx950": {
                 "arch": origami.architecture_t.gfx950,
-                "N_CU": 256,
-                "lds_capacity": 64 * 1024,  # 64 KB
                 "L2_capacity": 4 * 1024 * 1024,  # 4 MB
             },
         }
@@ -400,8 +490,8 @@ class OrigamiHelper:
         props = arch_to_props[arch_name]  # throw an error for unknown devices
         return origami.get_hardware_for_arch(
             arch=props["arch"],
-            N_CU=props["N_CU"],
-            lds_capacity=props["lds_capacity"],
+            N_CU=int(num_cus),
+            lds_capacity=int(lds_capacity),
             L2_capacity=props["L2_capacity"],
             compute_clock_khz=freq_mhz * 1000,
         )

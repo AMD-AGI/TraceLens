@@ -6,7 +6,7 @@ See LICENSE for license information.
 
 # Workflow LLM eval — reference
 
-Detailed rubric and output format for **workflow-llm-eval** ([SKILL.md](SKILL.md)) — eval 12 (Appendix hardware reference) only.
+Detailed rubric and output format for **workflow-llm-eval** ([SKILL.md](SKILL.md)) — eval 11 (Appendix hardware reference) only.
 
 ---
 
@@ -25,14 +25,14 @@ Read these before evaluating:
 
 ## Scoring Rubric
 
-Eval 12 uses **multi-dimensional weighted scoring** (adopted from the Gaia eval framework).
+Eval 11 uses **multi-dimensional weighted scoring** (adopted from the Gaia eval framework).
 
 ### Dimensions
 
 | Dimension | Weight | Description |
 |-----------|--------|-------------|
 | **correctness** | 50% | Are the hardware values present and plausible? 10=all correct, 7=minor issue, 0=wrong/missing |
-| **completeness** | 50% | Are all three items (platform, HBM BW, MAF) present? 10=all three, 7=two of three, 4=one, 0=none |
+| **completeness** | 50% | Are all three items (platform, memory BW, MAF) present? 10=all three, 7=two of three, 4=one, 0=none |
 
 ### Pass/Fail
 
@@ -43,7 +43,7 @@ Eval 12 uses **multi-dimensional weighted scoring** (adopted from the Gaia eval 
 
 ## Eval
 
-### workflow_eval_12: Hardware Reference in Appendix
+### workflow_eval_11: Hardware Reference in Appendix
 
 **Category:** Workflow
 **Issue Summary:** Hardware Reference in Appendix
@@ -51,7 +51,7 @@ Eval 12 uses **multi-dimensional weighted scoring** (adopted from the Gaia eval 
 In `analysis.md`, find the `## Appendix` section. Verify it contains:
 
 - Platform name
-- Peak HBM BW value
+- Peak memory BW value
 - At least one Peak MAF value
 
 **Scoring guide (multi-dimensional):**
@@ -68,7 +68,7 @@ Write a CSV to the specified `results_path` with exactly these columns and **1**
 
 `index,category,issue_summary,result,details,root_cause,recommended_fix`
 
-Use `workflow_eval_12` as the `index` value.
+Use `workflow_eval_11` as the `index` value.
 
 Include scoring breakdown in the `details` column:
 `correctness=N/10 completeness=N/10 overall=N.N | <explanation>`

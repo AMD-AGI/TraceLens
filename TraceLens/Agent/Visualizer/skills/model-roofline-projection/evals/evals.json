@@ -1,0 +1,70 @@
+{
+  "evaluations": [
+    {
+      "id": "roofline-tiny-llama-flops",
+      "skill_should_trigger": true,
+      "prompt": "Project the FLOPs and bytes for hf-internal-testing/tiny-random-LlamaForCausalLM at batch size 1 and sequence length 128. I don't need a GPU time estimate, no trace.",
+      "expected_behavior": [
+        "Installed the TraceLens Visualizer extra when the exporter was not already importable",
+        "Ran TraceLens_model_roofline_projection or python -m TraceLens.Visualizer.model_explorer_export.roofline_cli against the checkpoint with --batch-size 1 --seq-len 128",
+        "Reported total FLOPs/bytes and the modeled-output-element coverage from the rollup line"
+      ],
+      "unexpected_behavior": [
+        "Loaded full checkpoint weights onto a GPU",
+        "Read or required a PyTorch profiler trace file",
+        "Wrote an analysis.md performance report",
+        "Opened or wrote a Model Explorer HTML/JSON graph"
+      ]
+    },
+    {
+      "id": "roofline-mi300x-time",
+      "skill_should_trigger": true,
+      "prompt": "What's the projected roofline time for meta-llama/Llama-3.1-8B at sequence length 4096 on an MI300X, with no trace and no GPU run?"
+    },
+    {
+      "id": "roofline-vllm-tp-shard",
+      "skill_should_trigger": true,
+      "prompt": "Project how meta-llama/Llama-3.1-70B's FLOPs and roofline time are split across 8 GPUs under vLLM tensor parallelism, with no trace needed."
+    },
+    {
+      "id": "roofline-decode-dim",
+      "skill_should_trigger": true,
+      "prompt": "Estimate the roofline for one decode step of MiniMaxAI/MiniMax-M3.1-Flash with a KV cache of 1024 tokens, sharded with SGLang tensor parallel 2 and expert parallel 4, targeting MI325X."
+    },
+    {
+      "id": "roofline-config-override",
+      "skill_should_trigger": true,
+      "prompt": "Size moonshotai/Kimi-K3's compute and memory roofline if num_hidden_layers were 2, as FLOPs and bytes only, no GPU run."
+    },
+    {
+      "id": "roofline-follow-skill",
+      "skill_should_trigger": true,
+      "prompt": "Follow the model roofline projection skill installed with TraceLens and project meta-llama/Llama-3.1-8B at sequence length 2048 on MI300X."
+    },
+    {
+      "id": "roofline-gpu-sizing-question",
+      "skill_should_trigger": true,
+      "prompt": "How many MI300X GPUs would I need for inference on meta-llama/Llama-3.1-70B at sequence length 8192, based on FLOPs and bytes alone, no trace?"
+    },
+    {
+      "id": "roofline-visualize-graph",
+      "skill_should_trigger": false,
+      "prompt": "Draw the architecture of moonshotai/Kimi-K3 in Model Explorer and save an HTML file I can open in a browser."
+    },
+    {
+      "id": "roofline-trace-analysis",
+      "skill_should_trigger": false,
+      "prompt": "My training step is slow. The PyTorch profiler trace is at trace.json. Tell me which GPU kernels to fix first and write analysis.md."
+    },
+    {
+      "id": "roofline-magpie-profile",
+      "skill_should_trigger": false,
+      "prompt": "Profile a vLLM benchmark with Magpie on the GPU node and collect a PyTorch profiler trace for the analysis orchestrator."
+    },
+    {
+      "id": "roofline-rewrite-modeling",
+      "skill_should_trigger": false,
+      "prompt": "Rewrite modeling_llama.py so attention is one fused kernel, then run the unit tests."
+    }
+  ]
+}

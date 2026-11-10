@@ -53,6 +53,16 @@ def conv_events(perf_analyzer):
         [perf_analyzer.get_event_perf_model_name(event) for event in events]
     )
     assert result == {"jax_conv": 10}
+    # Perf models read dims from args. get_kernel_launchers writes them as a
+    # side effect; attach them here so these tests do not depend on that test
+    # having already run on this worker.
+    for event in events:
+        meta = JaxTreePerfAnalyzer.get_event_metadata(event)
+        args = event.get("args")
+        if not isinstance(args, dict):
+            event["args"] = {}
+            args = event["args"]
+        args.update(meta)
     return events
 
 
@@ -260,10 +270,12 @@ def test_xprof_preserves_hlo_linking_and_sidecars(tmp_path):
 def test_conv_perf_metrics(perf_analyzer, conv_events):
 
     df = perf_analyzer.build_df_perf_metrics(conv_events)
-    assert df.shape == (10, 23)
+    assert df.shape == (10, 24)
+    assert "Compute Spec" in df.columns
 
     df_conv = df[df["perf model"].str.contains("jax_conv")]
     df_metrics = perf_analyzer.summarize_df_perf_metrics(
         df_conv, agg_metrics=["mean", "std"]
     )
-    assert df_metrics.shape == (2, 23)
+    assert df_metrics.shape == (2, 24)
+    assert "Compute Spec" in df_metrics.columns

@@ -14,20 +14,25 @@ points at the exact arithmetic. No GPU, no LLM, no network.
 """
 
 import csv
+import json
 import re
 
 import pytest
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    KERNEL_NAME_TRUNC_LEN,
+)
+from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 from TraceLens.Agent.Analysis.utils.deterministic_fallback import (
     GRAPH_REPLAY_FRACTION_MAX,
     MAX_PITEM_COUNT,
     MIN_PITEM_PERCENT_E2E,
-    _KERNEL_NAME_TRUNC_LEN,
     _normalize_kernel_name,
     check_graph_replay_coverage,
     main,
     render_fallback_report,
 )
+from TraceLens.Agent.Analysis.utils.validation_utils import MarkerValidator
 
 # ---------------------------------------------------------------------------
 # Structural regexes: match the markers/headings the producer emits, so the
@@ -39,6 +44,20 @@ _PITEM_MARKER_RE = re.compile(
 )
 _REASONING_MARKER_RE = re.compile(
     r"<!--\s*reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->",
+    re.IGNORECASE,
+)
+_REPORT_MODE_RE = re.compile(
+    r"<!--\s*report-begin\s+kind=report_mode\s+mode=([\w-]+)\s*-->",
+    re.IGNORECASE,
+)
+_REPORT_WARNING_RE = re.compile(
+    r"<!--\s*report-begin\s+kind=warning\s*-->",
+    re.IGNORECASE,
+)
+_REPORT_BEGIN_RE = re.compile(r"<!--\s*report-begin\b", re.IGNORECASE)
+_REPORT_END_RE = re.compile(r"<!--\s*report-end\s*-->", re.IGNORECASE)
+_OP_ROW_RE = re.compile(
+    r"<!--\s*impact-begin\s+kind=op_row\s+rank=(\d+)\s+impacts=([^>]*?)-->",
     re.IGNORECASE,
 )
 _HEADING_RE = re.compile(
@@ -195,6 +214,28 @@ def test_detector_threshold_boundary(tmp_path, graph_weight, expected):
 
 
 # ---------------------------------------------------------------------------
+# multi_trace: the worst node decides, not the whole-file fraction
+# ---------------------------------------------------------------------------
+def test_detector_judges_each_node(tmp_path):
+    perf_csv = tmp_path / "unified_perf_summary.csv"
+    with open(perf_csv, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["name", "Kernel Time (µs)_sum", "node"])
+        writer.writerows(
+            [
+                ("aten::mm", 900, "prefill_0"),
+                ("hipGraphLaunch->k1 (Synthetic Op)", 20, "decode_0"),
+                ("aten::mm", 80, "decode_0"),
+            ]
+        )
+    verdict = check_graph_replay_coverage(perf_csv)
+
+    assert verdict.graph_under_recorded is True
+    assert verdict.graph_replay_fraction == pytest.approx(0.20)
+    assert "decode_0" in verdict.reason
+
+
+# ---------------------------------------------------------------------------
 # wrapper-strip + exact-name grouping
 # ---------------------------------------------------------------------------
 def test_writer_strips_wrapper_and_groups_by_name(tmp_path):
@@ -211,7 +252,7 @@ def test_writer_strips_wrapper_and_groups_by_name(tmp_path):
     assert set(headings.values()) == {"foo", "bar"}
 
     # foo group = 10 + 30 = 40 of total 60 -> 66.667%; bar = 20 -> 33.333%.
-    # Impact low = round(pct * 0.15, 2). Both foo cards carry the SAME group value.
+    # Impact low = round(pct * 0.15, 2). The two foo rows form one P-item.
     foo_low = round(40.0 / 60.0 * 100.0 * 0.15, 2)
     bar_low = round(20.0 / 60.0 * 100.0 * 0.15, 2)
     assert foo_low != bar_low  # distinct groups -> distinct impact
@@ -220,8 +261,68 @@ def test_writer_strips_wrapper_and_groups_by_name(tmp_path):
         float(re.search(r"low=([\d.]+)", blob).group(1))
         for blob in _PITEM_MARKER_RE.findall(md)
     ]
-    assert lows.count(foo_low) == 2  # two foo rows, one card each, same group value
+    assert lows.count(foo_low) == 1
     assert lows.count(bar_low) == 1
+
+
+def test_writer_cards_per_node(tmp_path):
+    perf_csv = tmp_path / "unified_perf_summary.csv"
+    with open(perf_csv, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "name",
+                "Kernel Time (µs)_sum",
+                "Percentage (%)",
+                "operation_count",
+                "node",
+            ]
+        )
+        writer.writerows(
+            [
+                ("hipGraphLaunch->foo (Synthetic Op)", 800.0, 99.0, 3, "prefill_0"),
+                ("hipGraphLaunch->foo (Synthetic Op)", 400.0, 99.0, 1, "decode_0"),
+                ("hipGraphLaunch->bar (Synthetic Op)", 16.0, 99.0, 1, "decode_0"),
+            ]
+        )
+    with open(tmp_path / "gpu_timeline.csv", "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["node", "type", "time ms", "percent"])
+        writer.writerows(
+            [
+                ("prefill_0", "total_time", 3.2, 100.0),
+                ("decode_0", "total_time", 0.8, 100.0),
+                ("all", "total_time", 4.0, 100.0),
+            ]
+        )
+    md = render_fallback_report(perf_csv, 0.95)
+
+    assert (
+        "## Executive Summary\n\n| Metric | Total | prefill_0 | decode_0 |\n"
+        "|---|---|---|---|\n| Total Time | 4.00 ms | 3.20 ms | 0.80 ms |\n\n"
+        "Total is the sum of node times, not wall time.\n\n"
+        "## Compute Kernel Optimizations\n\n"
+    ) in md
+    # Impact is the group's share of all nodes' 4.0 ms; the table shows its share
+    # of its own node.
+    assert (
+        "#### P1: foo\n**Node**: prefill_0\n"
+        "<!-- impact-begin kind=p_item category=unknown "
+        "low=3.0 mid=6.0 high=9.0 node=prefill_0 -->"
+    ) in md
+    assert (
+        "#### P2: foo\n**Node**: decode_0\n"
+        "<!-- impact-begin kind=p_item category=unknown "
+        "low=1.5 mid=3.0 high=4.5 node=decode_0 -->"
+    ) in md
+    assert "% of Node |" in md
+    assert "| foo | 0.800 | 25.00 | 3 |" in md
+    assert "| foo | 0.400 | 50.00 | 1 |" in md
+    # bar is 2% of decode_0 but 0.4% of all nodes, under the 0.5% gate.
+    assert "#### P3" not in md
+    assert "Dropped 1 P-items below 0.5% of all nodes" in md
+    scan_errors, _ = MarkerValidator.scan(md, "analysis.md")
+    assert not scan_errors, scan_errors
 
 
 def test_writer_keeps_tile_variants_separate(tmp_path):
@@ -353,6 +454,57 @@ def test_writer_structure_contract(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Report-level marker contract: exactly one paired report_mode
+# (mode=deterministic-fallback), exactly one paired warning, and one op_row per
+# P-item (one-value CSV == 1 row). The fallback path skips Steps 3-12 so
+# check_report never runs on it; this unit test is the sole enforcer.
+# ---------------------------------------------------------------------------
+def test_writer_emits_report_mode_warning_and_op_rows(tmp_path):
+    rows = [
+        ("hipGraphLaunch->foo (Synthetic Op)", 60.0, 60.0),
+        ("hipGraphLaunch->bar (Synthetic Op)", 40.0, 40.0),
+    ]
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
+
+    # report-begin/report-end are paired.
+    assert len(_REPORT_BEGIN_RE.findall(md)) == len(_REPORT_END_RE.findall(md))
+
+    # impact-begin/impact-end are paired too: every p_item AND op_row marker is
+    # closed.
+    scan_errors, _ = MarkerValidator.scan(md, "analysis.md")
+    assert not any("pairing mismatch" in e for e in scan_errors), scan_errors
+
+    # Exactly one report_mode marker, mode=deterministic-fallback, before the title body.
+    modes = _REPORT_MODE_RE.findall(md)
+    assert modes == ["deterministic-fallback"]
+    assert md.index("report-begin kind=report_mode") < md.index("#### P1:")
+
+    # Exactly one warning marker wrapping the degraded banner.
+    assert len(_REPORT_WARNING_RE.findall(md)) == 1
+    warn_idx = md.index("report-begin kind=warning")
+    banner_idx = md.index("> **⚠ Degraded (deterministic fallback) report.**")
+    assert warn_idx < banner_idx < md.index("#### P1:")
+
+    # One op_row per P-item; each CSV carries exactly one value (== 1 data row).
+    op_rows = _OP_ROW_RE.findall(md)
+    n_pitems = len(_HEADING_RE.findall(md))
+    assert len(op_rows) == n_pitems == 2
+    for rank, impacts in op_rows:
+        vals = [v for v in impacts.strip().split(",") if v.strip()]
+        assert len(vals) == 1
+
+    # op_row mid matches the P-item card's mid for the same rank.
+    pitem_mids = [
+        re.search(r"mid=([\d.]+)", blob).group(1)
+        for blob in _PITEM_MARKER_RE.findall(md)
+    ]
+    op_row_by_rank = {int(rank): impacts.strip() for rank, impacts in op_rows}
+    for i, mid in enumerate(pitem_mids, start=1):
+        assert op_row_by_rank[i] == mid
+
+
+# ---------------------------------------------------------------------------
 # separate-row vs grouped invariant; plumbing dropped
 # ---------------------------------------------------------------------------
 def test_writer_separate_rows_grouped_impact(tmp_path):
@@ -367,11 +519,11 @@ def test_writer_separate_rows_grouped_impact(tmp_path):
     md = render_fallback_report(perf_csv, 0.95)
 
     headings = _HEADING_RE.findall(md)
-    # One card per SURVIVING CSV kernel row (3), plumbing row dropped.
-    assert len(headings) == 3
+    # One card per surviving op group (2), plumbing row dropped.
+    assert len(headings) == 2
     assert _data_row_cells(md, "copy") is None  # plumbing not rendered
 
-    # Two foo rows share a bare name -> two cards, SAME name-grouped impact.
+    # Two foo rows share a bare name -> one card with the name-grouped impact.
     total = 60.0  # 30 + 10 + 20 (plumbing excluded from the group total)
     foo_low = round(40.0 / total * 100.0 * 0.15, 2)
     bar_low = round(20.0 / total * 100.0 * 0.15, 2)
@@ -379,8 +531,42 @@ def test_writer_separate_rows_grouped_impact(tmp_path):
         float(re.search(r"low=([\d.]+)", blob).group(1))
         for blob in _PITEM_MARKER_RE.findall(md)
     ]
-    assert lows.count(foo_low) == 2
+    assert lows.count(foo_low) == 1
     assert lows.count(bar_low) == 1
+
+
+# ---------------------------------------------------------------------------
+# Rows that resolve to one op: one P-item ranked by group time, impact counted
+# once in analysis.json.
+# ---------------------------------------------------------------------------
+def test_writer_one_pitem_per_op_impact_counted_once(tmp_path):
+    rows = [
+        ("hipGraphLaunch->foo (Synthetic Op)", 30.0, 30.0, 7),
+        ("Torch-Compiled Region: 0/0->foo (Synthetic Op)", 30.0, 30.0, 3),
+        ("hipGraphLaunch->bar (Synthetic Op)", 40.0, 40.0, 4),
+        ("hipGraphLaunch->baz (Synthetic Op)", 0.0, 0.2, 1),
+        ("hipGraphLaunch->baz (Synthetic Op)", 0.0, 0.2, 1),
+    ]
+    perf_csv = _make_perf_csv(tmp_path, rows)
+    md = render_fallback_report(perf_csv, 0.95)
+
+    # baz (0.2 + 0.2 < 0.5) is one dropped group, not two.
+    assert "Dropped 1 P-items" in md
+    # foo (30 + 30 = 60) outranks bar (40) only as a group.
+    assert [name for _, name in _HEADING_RE.findall(md)] == ["foo", "bar"]
+    assert "| foo | 0.060 | 60.00 | 10 |" in md
+    assert [impacts.strip() for _, impacts in _OP_ROW_RE.findall(md)] == [
+        "18.0",
+        "12.0",
+    ]
+
+    md_path = tmp_path / "analysis.md"
+    md_path.write_text(md, encoding="utf-8")
+    tasks = json.loads(render_analysis_json(md_path).read_text())[
+        "compute_optimizations"
+    ]
+    assert [len(t["members"]) for t in tasks] == [1, 1]
+    assert [t["impact"]["mid"] for t in tasks] == [18.0, 12.0]
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +583,7 @@ def test_writer_count_summed_per_group(tmp_path):
     md = render_fallback_report(perf_csv, 0.95)
 
     # Count is cell index 6 (Operation, Args, Kernel Path, Kernel Name, Time,
-    # %E2E, Count, ...); every foo card shows the group sum, not the per-row count.
+    # %E2E, Count, ...); the foo card shows the group sum, not a per-row count.
     def _count_cells(kernel):
         return [
             [c.strip() for c in line.split("|")[1:-1]][6]
@@ -405,7 +591,7 @@ def test_writer_count_summed_per_group(tmp_path):
             if line.strip().startswith("| —") and f"| {kernel} |" in line
         ]
 
-    assert _count_cells("foo") == ["10", "10"]  # 7 + 3, same on both foo cards
+    assert _count_cells("foo") == ["10"]  # 7 + 3
     assert _count_cells("bar") == ["4"]
 
 
@@ -423,7 +609,7 @@ def test_writer_degraded_banner(tmp_path):
 
     # Visible call-out with the fraction rendered as a percent.
     assert "> **⚠ Degraded (deterministic fallback) report.**" in md
-    assert "graph-replay fraction 95%" in md
+    assert "graph-replay fraction 95.0% > 10.0%)" in md
 
     # The banner is INERT: stripping it must not change any parsed candidate count.
     stripped = _strip_banner(md)
@@ -444,7 +630,7 @@ def test_normalizer_bare_triton_identity():
 def test_normalizer_clean_aiter_identity():
     # A real ~50-char aiter config passes through untouched (< the 75 cap).
     name = "aiter::f4gemm_bf16_per1x32Fp4_BpreShuffle_192x128"
-    assert len(name) < _KERNEL_NAME_TRUNC_LEN
+    assert len(name) < KERNEL_NAME_TRUNC_LEN
     assert _normalize_kernel_name(name) == name
 
 
@@ -454,30 +640,30 @@ def test_normalizer_void_template_truncated_void_kept():
         "void at::native::elementwise_kernel<128, 2, "
         "at::native::gpu_kernel_impl<at::native::BinaryFunctor>>(int, char*)"
     )
-    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
+    assert len(raw) > KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
     assert out.startswith("void ")
-    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
-    assert len(out) == _KERNEL_NAME_TRUNC_LEN + 3
+    assert out == raw[:KERNEL_NAME_TRUNC_LEN] + "..."
+    assert len(out) == KERNEL_NAME_TRUNC_LEN + 3
 
 
 def test_normalizer_tensile_truncated():
     raw = "Cijk_Ailk_Bljk_HHS_BH_Bias_AS_MT128x160x16_MI16x16x16x1_SN_WG32_8_1_ABCD"
     raw = raw + "_extra_tokens_pushing_well_past_the_cap"
-    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
+    assert len(raw) > KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
-    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    assert out == raw[:KERNEL_NAME_TRUNC_LEN] + "..."
 
 
 def test_normalizer_mangled_zn_truncated_not_demangled():
     # Locks in the no-demangle decision: the symbol stays mangled, just shorter.
     raw = "_ZN5aiter24add_rmsnorm_quant_kernelIN3std10bfloat16_tES2_Li256ELb1EEEvPT_"
     raw = raw + "PKS1_iiffb"
-    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
+    assert len(raw) > KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
     assert out.startswith("_ZN")
     assert out.endswith("...")
-    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    assert out == raw[:KERNEL_NAME_TRUNC_LEN] + "..."
 
 
 def test_normalizer_never_returns_empty():
@@ -487,8 +673,8 @@ def test_normalizer_never_returns_empty():
 
 
 def test_normalizer_length_boundary():
-    at_cap = "a" * _KERNEL_NAME_TRUNC_LEN
-    over_cap = "a" * (_KERNEL_NAME_TRUNC_LEN + 1)
+    at_cap = "a" * KERNEL_NAME_TRUNC_LEN
+    over_cap = "a" * (KERNEL_NAME_TRUNC_LEN + 1)
     assert _normalize_kernel_name(at_cap) == at_cap  # len 75 -> identity
     assert _normalize_kernel_name(over_cap) == at_cap + "..."  # len 76 -> truncates
 
@@ -712,5 +898,5 @@ def test_main_derives_fraction_when_omitted(tmp_path, monkeypatch):
 
     # 90% graph-replay fraction is recovered from the gate and rendered in the banner.
     md = (out_dir / "analysis.md").read_text(encoding="utf-8")
-    assert "90%" in md
+    assert "90.0%" in md
     assert "#### P1:" in md

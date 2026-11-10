@@ -34,12 +34,12 @@ Run these against every generated `analysis.md` after the programmatic validator
 
 ## Field Name Placement
 
-- [ ] JSON keys, dotted field paths, internal CSV column names, and internal variable names (e.g. `matrix_bf16`, `peak_hbm_bw`) appear **only** in the **Identification** `(source: ...)` parenthetical
+- [ ] JSON keys, dotted field paths, internal CSV column names, and internal variable names (e.g. `matrix_bf16`, `peak_mem_bw`) appear **only** in the **Identification** `(source: ...)` parenthetical
 - [ ] **Data**, **Reasoning for Slowdown**, **Resolution**, and **Impact estimate** use plain-language display headers and narrative only
 
 ## Metadata Integrity
 
-- [ ] `impact_estimates` in each `metadata/*.json` is an **array** (not a bare object) with exactly one entry per `reasoning-candidate` block, ordered by ascending `rank`. Each entry sums only the operations that its candidate covers — not the entire category
+- [ ] `impact_estimates` in each `category_data/*_metrics.json` is an **array** (not a bare object) with exactly one entry per `reasoning-candidate` block, ordered by ascending `rank`. Each entry sums only the operations that its candidate covers — not the entire category
 - [ ] Reasoning candidate blocks (`<!-- reasoning-candidate tier=... rank=... -->`) are present in the corresponding findings files under `category_findings/` or `system_findings/`
 
 ## Sentence Quality

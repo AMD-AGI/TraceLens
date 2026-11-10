@@ -43,6 +43,21 @@ def test_gate_non_patchable_entry_may_omit_source():
     assert validate_document(doc) == []
 
 
+def test_gate_non_patchable_entry_may_also_carry_a_source():
+    # The compute core is non-editable, but its dispatcher/wrapper source (or a
+    # generated file's cache path) can still be known and worth auditing.
+    entry = contract.make_entry(
+        kernel_id="k002b",
+        name="triton_poi_fused_add_0",
+        gpu_pct=3.0,
+        source_file="/tmp/torchinductor_u/abc.py",
+        method=contract.METHOD_GATE_NON_PATCHABLE,
+        reason="generated/non-editable Triton source",
+    )
+    doc = contract.make_document([entry], generated_by="unit-test")
+    assert validate_document(doc) == []
+
+
 def test_source_without_method_flagged():
     # A resolved-looking method with no source_file is a contract violation.
     entry = contract.make_entry(

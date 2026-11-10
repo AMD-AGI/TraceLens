@@ -131,6 +131,7 @@ Example execution_details.json entry:
   "num_gpu_events": 1250,
   "gpu_duration": 2300000,
   "gpu_busy_duration": 1000000,
+  "busy_ratio": 0.4348,
   "phase": {
     "num_prefill": 5,
     "num_prefilldecode": 10,
@@ -163,6 +164,8 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     ITERATION_PATTERNS,  # noqa: F401
     IterationAnnotation,
 )
+from ..utils.detect_utils import BOOKEND_NAMES
+from .startup_transient import trim_startup_transient
 
 SERVING_KINDS = {
     "vllm_detailed",
@@ -249,10 +252,6 @@ def _conservation(events: list, per_iteration_details: list | None, args) -> dic
     return report
 
 
-# Bookend roots are the warmup/wrapup spans, excluded from the analysis window.
-_BOOKEND_NAMES = {"warmup", "wrapup"}
-
-
 def _base_name(trace_path: str) -> str:
     name = os.path.basename(trace_path)
     return name.replace(".pt.trace", "").replace(".json.gz", "").replace(".json", "")
@@ -275,6 +274,7 @@ def _load_and_detect(args):
         return None
 
     detection = find_iteration_roots(events, trace_index=trace_index)
+    detection = trim_startup_transient(detection, trace_index)
     print(
         f"\nDetection: {detection.method} -> {len(detection.roots)} roots, "
         f"status={detection.status.name}, phase_confidence="
@@ -350,16 +350,14 @@ def _extract_iterations(detection, ctx, args, start, end):
             end,
         )
         return details, details
-    if args.iterations != "all":
-        details = extract_and_save_single_trace(
-            iteration_roots[start:end],
-            ctx,
-            start,
-            end,
-            uid_map=detection.diagnostics.get("_events_by_uid", {}),
-        )
-        return details, None
-    return [], None
+    details = extract_and_save_single_trace(
+        iteration_roots[start:end],
+        ctx,
+        start,
+        end,
+        uid_map=detection.diagnostics.get("_events_by_uid", {}),
+    )
+    return details, None
 
 
 def _working_roots(iteration_roots, args, start, end):
@@ -371,7 +369,7 @@ def _working_roots(iteration_roots, args, start, end):
         source = iteration_roots[start:end]
     else:
         source = iteration_roots
-    return [r for r in source if r.get("name") not in _BOOKEND_NAMES]
+    return [r for r in source if r.get("name") not in BOOKEND_NAMES]
 
 
 def _has_serving_annotations(working_roots) -> bool:
@@ -516,7 +514,63 @@ def _write_execution_details(execution_details, output_dir):
     print(f"Wrote execution details CSV to {csv_path}")
 
 
-def main():
+def run(args: argparse.Namespace) -> list[dict]:
+    """Programmatic entry point: run the split pipeline on a prepared args
+    Namespace (no argv parsing) and return the execution_details list.
+
+    Thin wrapper over main(), which holds the orchestration. Used by the
+    in-process split_and_enumerate() entry point; the CLI goes through main()
+    directly. Returns the execution_details list (same shape written to
+    execution_details.json), or [] when nothing was extracted.
+    """
+    return main(args)
+
+
+def split_and_enumerate(
+    trace_path: str,
+    output_dir: str,
+    *,
+    iterations: str = "all",
+    store_single_iteration: bool = False,
+    find_steady_state: bool = False,
+    num_steps: int = 32,
+    CONC: int | None = None,
+    OSL: float | None = None,
+    R: float | None = None,
+    divide_phases: bool = False,
+    no_gap_fill: bool = False,
+    allow_degraded: bool = False,
+    llm_inference: bool = False,
+    max_num_seq: int | None = None,
+) -> list[dict]:
+    """Programmatic (in-process) equivalent of the CLI.
+
+    Splits trace_path and writes outputs into output_dir exactly as
+    python -m TraceLens.TraceUtils.split_trace.main would with the
+    corresponding flags, but runs in-process (no subprocess, no argv) and
+    returns the execution_details list directly. Keyword defaults mirror
+    the CLI argparse defaults exactly.
+    """
+    args = argparse.Namespace(
+        trace_path=trace_path,
+        output_dir=output_dir,
+        iterations=iterations,
+        store_single_iteration=store_single_iteration,
+        find_steady_state=find_steady_state,
+        num_steps=num_steps,
+        CONC=CONC,
+        OSL=OSL,
+        R=R,
+        divide_phases=divide_phases,
+        no_gap_fill=no_gap_fill,
+        allow_degraded=allow_degraded,
+        llm_inference=llm_inference,
+        max_num_seq=max_num_seq,
+    )
+    return run(args)
+
+
+def main(args: argparse.Namespace | None = None) -> list[dict]:
     parser = argparse.ArgumentParser(
         description="Split vLLM trace into per-iteration traces"
     )
@@ -628,11 +682,12 @@ def main():
             "prefill-bearing. When not set, a heuristic is used."
         ),
     )
-    args = parser.parse_args()
+    if args is None:
+        args = parser.parse_args()
 
     loaded = _load_and_detect(args)
     if loaded is None:
-        return
+        return []
     detection, trace_json, trace_index = loaded
     events = trace_json.get("traceEvents", [])
     iteration_roots = detection.roots
@@ -682,6 +737,7 @@ def main():
     _write_manifest(args.output_dir, manifest)
     if execution_details:
         _write_execution_details(execution_details, args.output_dir)
+    return execution_details
 
 
 if __name__ == "__main__":

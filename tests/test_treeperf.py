@@ -25,6 +25,7 @@ from TraceLens.Reporting.pftrace_hip_activity_analysis import (
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
 )
+from TraceLens.PerfModel import origami_helper
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf import (
     GPUEventAnalyser,
@@ -35,6 +36,7 @@ from TraceLens.TreePerf import (
     TreePerfAnalyzer,
 )
 from TraceLens.TreePerf.tree_perf import (
+    compute_roofline_time_and_bound,
     get_compute_spec,
     get_max_achievable_tflops,
     normalize_dtype_to_precision,
@@ -119,6 +121,50 @@ class TestTreePerfModuleHelpers:
         assert get_max_achievable_tflops(perf_model, None) is None
         assert get_max_achievable_tflops(perf_model, {}) is None
         assert get_max_achievable_tflops(SimpleNamespace(), arch) is None
+
+    def test_compute_roofline_time_and_bound_compute_bound(self):
+        # 200 GFLOP at 100 TFLOPS peak = 2000us compute; 1GB at 2000GB/s = 500us
+        # memory -- compute is the larger (binding) term.
+        roofline_time_us, roofline_bound = compute_roofline_time_and_bound(
+            gflops=200, bytes_moved=1e9, peak_tflops=100, mem_bw_gbps=2000
+        )
+        assert roofline_time_us == pytest.approx(2000)
+        assert roofline_bound == "COMPUTE_BOUND"
+
+    def test_compute_roofline_time_and_bound_memory_bound(self):
+        # 50 GFLOP at 100 TFLOPS peak = 500us compute; 2GB at 1000GB/s = 2000us
+        # memory -- memory is the larger (binding) term.
+        roofline_time_us, roofline_bound = compute_roofline_time_and_bound(
+            gflops=50, bytes_moved=2e9, peak_tflops=100, mem_bw_gbps=1000
+        )
+        assert roofline_time_us == pytest.approx(2000)
+        assert roofline_bound == "MEMORY_BOUND"
+
+    def test_compute_roofline_time_and_bound_tie_favors_compute(self):
+        # Compute and memory time land on the same 1000us -- the ">=" tie-break
+        # reports COMPUTE_BOUND rather than an arbitrary pick.
+        roofline_time_us, roofline_bound = compute_roofline_time_and_bound(
+            gflops=100, bytes_moved=1e9, peak_tflops=100, mem_bw_gbps=1000
+        )
+        assert roofline_time_us == pytest.approx(1000)
+        assert roofline_bound == "COMPUTE_BOUND"
+
+    @pytest.mark.parametrize(
+        ("gflops", "bytes_moved", "peak_tflops", "mem_bw_gbps"),
+        [
+            (100, 1e9, None, 1000),  # no peak TFLOPS for this compute spec
+            (100, 1e9, 100, None),  # no arch memory bandwidth
+            (100, None, 100, 1000),  # perf model reported no bytes
+            (0, 1e9, 100, 1000),  # no work performed
+            (-1, 1e9, 100, 1000),  # a malformed negative FLOPs count
+        ],
+    )
+    def test_compute_roofline_time_and_bound_missing_input_is_unbounded(
+        self, gflops, bytes_moved, peak_tflops, mem_bw_gbps
+    ):
+        assert compute_roofline_time_and_bound(
+            gflops, bytes_moved, peak_tflops, mem_bw_gbps
+        ) == (None, None)
 
 
 class TestGPUEventAnalyserStatic:
@@ -408,6 +454,24 @@ class TestJaxAnalyses:
         metrics = JaxAnalyses.gemm_perf_metrics(gemm_event, op_params)
         assert metrics["GFLOPS"] > 0
         assert metrics["param: M"] == 128
+        assert "Roofline Time (µs)" not in metrics
+
+        arch = {
+            "name": "mi300x",
+            "mem_bw_gbps": 5300,
+            "max_achievable_tflops": {"matrix_bf16": 700},
+        }
+        with patch.object(origami_helper, "gemm_time_us", return_value=9.0) as sim:
+            metrics = JaxAnalyses.gemm_perf_metrics(
+                gemm_event,
+                {**op_params, "Type": "bf16"},
+                arch=arch,
+                enable_origami_gemm=True,
+            )
+        assert metrics["Compute Spec"] == "matrix_bf16"
+        assert metrics["Roofline Time (µs)"] > 0
+        assert metrics["Origami Time (µs)"] == 9.0
+        assert sim.call_args.args[5] == "bf16"
         with pytest.raises(NotImplementedError):
             JaxAnalyses.JaxGemm(
                 {
@@ -463,14 +527,6 @@ class TestTreePerfAnalyzer:
         assert total == 50
         assert len(kernel_uids) == 1
 
-    def test_non_data_mov_filter(self):
-        kernel = _make_gpu_event(1, 0, 10, "kernel", "aten::mm")
-        data_mov = _make_gpu_event(
-            2, 0, 10, "kernel", "at::native::direct_copy_kernel_cuda"
-        )
-        assert TreePerfAnalyzer.non_data_mov_filter(kernel) is True
-        assert TreePerfAnalyzer.non_data_mov_filter(data_mov) is False
-
     def test_get_df_gpu_timeline_from_synthetic_trace(self):
         analyzer = _build_analyzer(_mk_pytorch_trace())
         df = analyzer.get_df_gpu_timeline()
@@ -486,6 +542,102 @@ class TestTreePerfAnalyzer:
         assert details["Parent cpu_op"] in {"aten::matmul", "aten::mm"}
         df = analyzer.get_df_kernels(launcher_detail=True, cpu_op_detail=True)
         assert len(df) == 1
+
+    def test_arch_compute_units_come_from_the_trace(self):
+        devices = [
+            {
+                "name": "AMD Instinct MI355X",
+                "numSms": 256,
+                "maxSharedMemoryPerMultiProcessor": 163840,
+            }
+        ] * 2
+        tree = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": devices},
+        )
+        supplied = {"name": "MI355X", "num_cus": 304, "lds_capacity": 64 * 1024}
+        analyzer = TreePerfAnalyzer(tree, rebuild_tree=False, arch=supplied)
+        assert analyzer.arch["num_cus"] == 256
+        assert analyzer.arch["lds_capacity"] == 163840
+        assert supplied["num_cus"] == 304
+        assert supplied["lds_capacity"] == 64 * 1024
+
+        mixed = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": [{"numSms": 256}, {"numSms": 104}]},
+        )
+        kept = TreePerfAnalyzer(
+            mixed, rebuild_tree=False, arch={"name": "MI355X", "num_cus": 80}
+        )
+        assert kept.arch["num_cus"] == 80
+
+        cus_only = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={"deviceProperties": [{"numSms": 256}]},
+        )
+        cus_arch = TreePerfAnalyzer(
+            cus_only,
+            rebuild_tree=False,
+            arch={"name": "MI355X", "num_cus": 80, "lds_capacity": 65536},
+        )
+        assert cus_arch.arch["num_cus"] == 256
+        assert cus_arch.arch["lds_capacity"] == 65536
+
+        lds_only = TraceToTree(
+            [],
+            prune_nongpu_paths=False,
+            trace_metadata={
+                "deviceProperties": [{"maxSharedMemoryPerMultiProcessor": 163840}]
+            },
+        )
+        lds_arch = TreePerfAnalyzer(
+            lds_only,
+            rebuild_tree=False,
+            arch={"name": "MI355X", "num_cus": 80, "lds_capacity": 65536},
+        )
+        assert lds_arch.arch["num_cus"] == 80
+        assert lds_arch.arch["lds_capacity"] == 163840
+
+        untouched = TreePerfAnalyzer(tree, rebuild_tree=False, arch=None)
+        assert untouched.arch is None
+
+    def test_device_property_readers_reject_incomplete_metadata(self):
+        assert TraceEventUtils.num_cus_from_trace(None) is None
+        assert TraceEventUtils.lds_capacity_from_trace({}) is None
+        assert TraceEventUtils.num_cus_from_trace({"deviceProperties": []}) is None
+        assert (
+            TraceEventUtils.lds_capacity_from_trace({"deviceProperties": None}) is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace(
+                {"deviceProperties": ["not-a-device", {"numSms": 256}]}
+            )
+            is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace({"deviceProperties": [{"numSms": 0}]})
+            is None
+        )
+        assert (
+            TraceEventUtils.lds_capacity_from_trace(
+                {
+                    "deviceProperties": [
+                        {"maxSharedMemoryPerMultiProcessor": 163840},
+                        {"maxSharedMemoryPerMultiProcessor": 65536},
+                    ]
+                }
+            )
+            is None
+        )
+        assert (
+            TraceEventUtils.num_cus_from_trace(
+                {"deviceProperties": [{"numSms": 256}, {"numSms": 256}]}
+            )
+            == 256
+        )
 
     def test_get_df_gpu_timeline_detect_recompute(self):
         events = [
@@ -504,7 +656,7 @@ class TestTreePerfAnalyzer:
         analyzer = _build_analyzer(_mk_pytorch_trace())
         calls = []
 
-        def fake_compute(event, bwd=False, non_data_mov=False, perf_model_class=None):
+        def fake_compute(event, bwd=False, perf_model_class=None):
             calls.append(bwd)
             return {"bwd": bwd}
 
@@ -2213,6 +2365,11 @@ class TestTreePerfFinalCoverage:
             df_raw, agg_metrics=["mean", "std"]
         )
         assert isinstance(summary, pd.DataFrame)
+        for col in ("Origami Time (µs)", "Origami TFLOPS/s", "Origami TB/s"):
+            assert f"{col}_first" in summary.columns
+        assert "Pct Origami_mean" in summary.columns
+        assert "Non-Data-Mov TFLOPS/s_mean" in summary.columns
+        assert "Non-Data-Mov Kernel Time (µs)_sum" in summary.columns
 
     def test_collect_unified_perf_events_with_python_stack(self):
         analyzer = _build_analyzer(self._nn_module_trace(), add_python_func=True)
