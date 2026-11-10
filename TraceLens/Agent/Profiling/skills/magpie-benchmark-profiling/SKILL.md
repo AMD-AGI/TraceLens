@@ -31,18 +31,18 @@ Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `buil
 ## Workflow index
 
 ```
-0. Gather execution environment (node, conda env, conda prefix)
-1. Read benchmark YAML; optionally build TraceLens-patched Docker image (vLLM, SGLang, or ATOM)
-2. Ensure torch profiler enabled; apply common graph/capture flags (SGLang: kernel shape tool, not shape discovery); choose targeted vs full profiling
+0. Gather execution environment (node, conda env, conda prefix) and workload (fixed_seq or agentx)
+1. Use the named YAML, a matching one from Magpie examples/benchmarks, or a template; optionally build TraceLens-patched Docker image (vLLM, SGLang, or ATOM)
+2. Ensure torch profiler enabled; apply common graph/capture flags (SGLang: kernel shape tool, not shape discovery); fixed_seq: targeted vs full profiling; agentx: capture settings
 3. Run: python -m Magpie benchmark --benchmark-config <yaml> (long-running; monitor via docker)
 4. Monitor container / logs on the remote node
-5. Verify trace files and GPU kernel categories in torch_trace/
+5. After Step 6: triage.runner --bench-dir profile checks
 6. split_trace.main on rank-0 trace; print (do not run) generate_perf_report_pytorch_inference.py command
 ```
 
 ## Rules
 
-- Do **not** guess node names or conda envs — ask the user (see reference Step 0).
+- Do **not** guess node names or conda envs — ask the user (see reference Step 0). In unattended mode, ask nothing (see reference **Unattended mode**).
 - Discover supported Docker image tags by **reading** `examples/custom_workflows/inference_analysis/build_docker_vllm.sh` / `build_docker_sglang.sh` / `build_docker_atom.sh` at runtime; do not hardcode version matrices in chat.
 - After Step 6, **print only** the suggested `generate_perf_report_pytorch_inference.py` invocation for the user; the skill does not substitute for their analysis run unless they ask.
 
@@ -52,4 +52,4 @@ Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `buil
 
 ## Skill layout
 
-Bundled as: `TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/` (`SKILL.md`, `reference.md`). Cursor’s default project skill discovery uses `.cursor/skills/`; symlink or copy this folder there if you rely on automatic skill pickup.
+Bundled as: `TraceLens/Agent/Profiling/skills/magpie-benchmark-profiling/` (`SKILL.md`, `reference.md`, `templates/`). Cursor’s default project skill discovery uses `.cursor/skills/`; symlink or copy this folder there if you rely on automatic skill pickup.

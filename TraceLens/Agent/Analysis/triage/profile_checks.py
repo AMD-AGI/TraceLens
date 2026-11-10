@@ -1,52 +1,27 @@
-#!/usr/bin/env python3
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
-"""Check a Magpie torch_trace directory against TraceLens collection requirements.
+"""Profile checks on a Magpie benchmark directory, before any analysis exists.
 
-Installed with the package. After ``pip install``:
-
-    python -m TraceLens.Agent.Profiling.check_torch_trace <benchmark-or-torch_trace-dir>
-
-Pass a benchmark directory or its ``torch_trace`` directory. The checker
-looks at rank 0 only. Requirements are listed in
-``TraceLens/Agent/Profiling/trace_collection_requirements.md``.
-
-Checks:
-
-1. Graph-capture traces exist. When the run uses speculative decoding,
-   drafter capture traces exist as well.
-2. The rank-0 trace carries the detailed user annotations the patches add
-   (``sqsq`` / ``sqsk`` aggregates parsed by ``TraceLens/TraceUtils``).
-3. That trace contains ``--expected-steps`` engine steps (default 256).
-4. SGLang traces contain kernel-shape-tool ops (``sglang_profiler::``) with
-   input shapes. Other frameworks skip this check.
-5. CPU call stacks are on (``python_function`` events).
-6. ``cpu_op`` events carry input shapes (``Input Dims``).
-7. The trace has GPU kernel events, so device activity was recorded.
-8. When capture traces exist, the trace has graph launches to merge them into.
-9. ``benchmark_report.json`` says the benchmark succeeded. This check only
-   warns: agentic runs can report a failure after the trace was written.
-
-Speculative decoding is read from ``config.yaml`` next to ``torch_trace``
-(``--speculative-algorithm``, ``--spec-method``, ``--method eagle``,
-``--draft-model``, ``--num-speculative-tokens``). ``SPEC_NUM_TOKENS_OVERRIDE: 0``
-turns it off. ``--speculative`` / ``--no-speculative`` override the file.
-``--json-out`` writes the results for the run record.
+``triage.runner --bench-dir`` runs them through ``PROFILE_CHECKS`` in ``checks.py``.
+They look at rank 0 only and stream each trace once instead of loading the JSON.
+Requirements are listed in ``TraceLens/Agent/Profiling/trace_collection_requirements.md``.
+Speculative decoding and AgentX are read from ``config.yaml`` next to ``torch_trace``.
 """
 
 from __future__ import annotations
 
-import argparse
+import functools
 import gzip
 import json
 import re
-import sys
 from collections import Counter
 from pathlib import Path
+
+import yaml
 
 from TraceLens.TraceUtils.utils.annotation_utils import (
     ATOM_DETAILED_PATTERN,
@@ -56,6 +31,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     VLLM_DETAILED_PATTERN,
     VLLM_NATIVE_PATTERN,
 )
+from TraceLens.TraceUtils.utils.detect_utils import DetectStatus
 
 # Constants
 
@@ -108,6 +84,11 @@ BENCHMARK_REPORT = "benchmark_report.json"
 ERROR_LINE_RE = re.compile(
     r"Error\b|Exception\b|Traceback|died|Killed|out of memory", re.IGNORECASE
 )
+XTRACE_PREFIX_RE = re.compile(r"^\++ (?:echo )?")
+SPLIT_MANIFEST = "split_manifest.json"
+MIXED_SPLIT_RE = re.compile(
+    r"^mixed_steady_state_prefill_\d+_prefilldecode_(\d+)_decode_(\d+)_"
+)
 
 
 class Check:
@@ -115,13 +96,6 @@ class Check:
         self.name = name
         self.status = status
         self.detail = detail
-
-    @property
-    def failed(self):
-        return self.status == "FAIL"
-
-    def to_dict(self):
-        return {"name": self.name, "status": self.status, "detail": self.detail}
 
 
 def resolve_torch_trace(path):
@@ -612,93 +586,66 @@ def _failure_reason(errors):
     ]
     flagged = [line for line in lines if ERROR_LINE_RE.search(line)]
     if flagged:
-        return flagged[-1]
+        return XTRACE_PREFIX_RE.sub("", flagged[-1]).strip("'\"")
     return lines[0] if lines else "no error recorded"
 
 
-def _format_report(label, framework, speculative, checks):
-    spec = {True: "on", False: "off", None: "unknown"}[speculative]
-    lines = [f"{label}  framework={framework}  speculative={spec}"]
-    for check in checks:
-        lines.append(f"  {check.status:<4}  {check.name:<24}  {check.detail}")
-    failed = [check.name for check in checks if check.failed]
-    lines.append("  FAIL  " + ", ".join(failed) if failed else "  PASS")
-    return "\n".join(lines), not failed
+def expected_steps(config_text):
+    """Steps the rank-0 trace should hold: AgentX ``num_steps``, else ``EXPECTED_STEPS``."""
+    config = yaml.safe_load(config_text or "") or {}
+    if (config.get("agentx") or {}).get("enabled"):
+        profiler = (config.get("profiler") or {}).get("torch_profiler") or {}
+        return profiler.get("num_steps", EXPECTED_STEPS)
+    return EXPECTED_STEPS
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "paths",
-        nargs="+",
-        help="benchmark directory or its torch_trace directory",
-    )
-    parser.add_argument(
-        "--expected-steps",
-        type=int,
-        default=EXPECTED_STEPS,
-        help=f"engine steps required in the rank-0 trace (default {EXPECTED_STEPS})",
-    )
-    spec = parser.add_mutually_exclusive_group()
-    spec.add_argument(
-        "--speculative",
-        action="store_true",
-        help="require drafter capture traces even if config.yaml does not say so",
-    )
-    spec.add_argument(
-        "--no-speculative",
-        action="store_true",
-        help="do not require drafter capture traces",
-    )
-    parser.add_argument(
-        "--framework",
-        choices=("vllm", "sglang", "atom"),
-        help="override the framework read from config.yaml",
-    )
-    parser.add_argument(
-        "--json-out",
-        type=Path,
-        help="write every result to this JSON file",
-    )
-    args = parser.parse_args(argv)
-
-    all_ok = True
-    reports = []
-    results = []
-    for raw_path in args.paths:
-        torch_trace, config_text = resolve_torch_trace(raw_path)
-        framework = args.framework or detect_framework(config_text, torch_trace)
-        if args.speculative:
-            speculative = True
-        elif args.no_speculative:
-            speculative = False
-        else:
-            speculative = detect_speculative(config_text)
-        checks = check_trace(
-            torch_trace,
-            framework,
-            speculative,
-            args.expected_steps,
-        )
-        label = torch_trace.parent.name
-        report, ok = _format_report(label, framework, speculative, checks)
-        reports.append(report)
-        results.append(
-            {
-                "benchmark_dir": str(torch_trace.parent),
-                "framework": framework,
-                "speculative": speculative,
-                "status": "PASS" if ok else "FAIL",
-                "checks": [check.to_dict() for check in checks],
-            }
-        )
-        all_ok = all_ok and ok
-    print("\n\n".join(reports))
-    if args.json_out is not None:
-        args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        args.json_out.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
-    return 0 if all_ok else 1
+def check_split(benchmark_dir):
+    """The splitter returns normally when it refuses to split, so read its manifest."""
+    manifests = sorted(benchmark_dir.rglob(SPLIT_MANIFEST))
+    if not manifests:
+        return [
+            Check("split traces", "FAIL", f"no {SPLIT_MANIFEST} under {benchmark_dir}")
+        ]
+    split_dir = manifests[-1].parent
+    manifest = json.loads(manifests[-1].read_text(encoding="utf-8"))
+    mixed = [MIXED_SPLIT_RE.match(path.name) for path in split_dir.iterdir()]
+    mixed = [match for match in mixed if match]
+    problems = []
+    if manifest.get("aborted"):
+        problems.append("split aborted")
+    if manifest.get("status") != DetectStatus.SPLITTABLE:
+        problems.append(f"status {manifest.get('status')}")
+    if manifest.get("phase_confidence") != "high":
+        problems.append(f"phase confidence {manifest.get('phase_confidence')}")
+    if manifest.get("suspiciously_few_roots"):
+        problems.append("suspiciously few roots")
+    if any(int(match.group(1)) + int(match.group(2)) == 0 for match in mixed):
+        problems.append("mixed split has no decode steps")
+    return [
+        Check(
+            "split traces",
+            "PASS" if mixed else "FAIL",
+            f"{len(mixed)} mixed steady-state split(s) in {split_dir}",
+        ),
+        Check(
+            "split quality",
+            "FAIL" if problems else "PASS",
+            f"{'; '.join(problems) or 'splittable'} (coverage "
+            f"{manifest.get('coverage_selected_roots')}, root span share "
+            f"{manifest.get('root_span_share')})",
+        ),
+    ]
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+@functools.lru_cache(maxsize=None)
+def check_bench(bench_dir):
+    """Every profile check for one benchmark dir, keyed by check name."""
+    torch_trace, config_text = resolve_torch_trace(bench_dir)
+    checks = check_trace(
+        torch_trace,
+        detect_framework(config_text, torch_trace),
+        detect_speculative(config_text),
+        expected_steps(config_text),
+    )
+    checks += check_split(torch_trace.parent)
+    return {check.name: check for check in checks}

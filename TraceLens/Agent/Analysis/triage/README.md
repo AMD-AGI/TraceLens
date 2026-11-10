@@ -40,6 +40,19 @@ and prints one `[DIAG:...]` line per finding. The `--detailed` flag additionally
 runs the trace-loading checks, which are slower and more I/O-intensive; omit it
 for a faster pass.
 
+### Profile mode (CLI)
+
+```bash
+python -m TraceLens.Agent.Analysis.triage.runner \
+    --bench-dir /path/to/magpie/benchmark_dir --out-dir /path/to/profile_check
+```
+
+Runs only `PROFILE_CHECKS` on a Magpie benchmark directory, before any analysis exists.
+The checks live in `profile_checks.py` and stream each trace once. They reuse the
+sublabels of the matching run-dir checks, and add `1e` drafter captures, `1f` graph
+launches, `1g` benchmark report (informational), `2d` split quality from
+`split_manifest.json`, `2k` step count and `2l` CPU call stack.
+
 ### 2. General, single run (library)
 
 ```python

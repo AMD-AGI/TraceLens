@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
 ###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 """
-Triage for unified-perf-report-postprocess: rank ops in a
-unified_perf_summary.csv that are worth a perf model.
+Read a unified_perf_summary.csv: rank ops worth a perf model, measure the share
+of kernel time without one, and turn traced shapes into validator cases.
 
 Modes
 -----
@@ -20,28 +19,30 @@ top-ops:
   whose summed runtime is at least --threshold (default 4%) of the global
   total and has has_perf_model == False on some row.
 
-Usage (from repo root):
-  python3 <skill-dir>/run_other_bucket_triage.py unified_perf_summary.csv
-  python3 <skill-dir>/run_other_bucket_triage.py unified_perf_summary.csv \\
+Usage:
+  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv
+  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv \\
     --mode top-ops --threshold 0.04
 
   # Write a starter extension next to the CSV (<stem>_triage_extension.py):
-  python3 <skill-dir>/run_other_bucket_triage.py unified_perf_summary.csv \\
+  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv \\
     --emit-extension [--extension-out PATH]
-
-No TraceLens import is needed, except for --check-mapping, which needs
-TraceLens importable (`pip install -e .`).
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+from TraceLens.Agent.PerfModel.perf_model_generate.scan_framework_ops import (
+    builtin_perf_model_map,
+)
 
 RUNTIME_COLUMNS = ("Kernel Time (µs)_sum", "total_duration_us")
 # Newer TraceLens embeds the call stack in the summary CSV; prefer the full one.
@@ -103,6 +104,65 @@ def load_rows(path: Path) -> Tuple[List[Row], str]:
         r["call_stack"] = next((s for s in stacks if s), "")
         r["_us"] = _float(r.get(runtime_col))
     return rows, runtime_col
+
+
+def row_has_perf_model(row: Row) -> bool:
+    return (row.get("has_perf_model") or "").strip().lower() in ("true", "1", "yes")
+
+
+def missing_perf_model_share(rows: List[Row]) -> float:
+    """Fraction of kernel time in rows without a perf model."""
+    total = sum(r["_us"] for r in rows)
+    missing = sum(r["_us"] for r in rows if not row_has_perf_model(r))
+    return missing / total if total > 0 else 0.0
+
+
+def validation_cases(report_dir: Path) -> List[Dict]:
+    """One validator case per unique (name, Input Dims, Input type) with a perf model.
+
+    Attention parameters come from InferenceAttention_fwd.csv when it exists.
+    """
+    attn = {}
+    attn_csv = report_dir / "InferenceAttention_fwd.csv"
+    if attn_csv.is_file():
+        with attn_csv.open(newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                attn[(r.get("name", ""), r.get("Input Dims_first", ""))] = {
+                    k[len("param: ") :]: v
+                    for k, v in r.items()
+                    if k.startswith("param: ")
+                }
+    rows, _ = load_rows(report_dir / "unified_perf_summary.csv")
+    cases, seen = [], set()
+    for r in rows:
+        key = (r.get("name", ""), r.get("Input Dims", ""), r.get("Input type", ""))
+        if not row_has_perf_model(r) or key in seen or not key[1]:
+            continue
+        seen.add(key)
+        cases.append(
+            {
+                "trace_name": key[0],
+                "dims_str": key[1],
+                "input_dims": _literal(key[1]),
+                "input_types": _literal(key[2]),
+                "input_strides": _literal(r.get("Input Strides")),
+                "concrete_inputs": _literal(r.get("Concrete Inputs")),
+                "perf_params": _literal(r.get("perf_params")),
+                "attn_params": attn.get((key[0], key[1])),
+                "csv_flops": _float(r.get("GFLOPS")) * 1e9,
+                "csv_bytes": _float(r.get("Data Moved (MB)")) * 1024 * 1024,
+            }
+        )
+    return cases
+
+
+def _literal(text: Optional[str]):
+    """A Python literal cell (tuple, list, dict) as a JSON-able value."""
+    try:
+        value = ast.literal_eval(text) if text and text.strip() else None
+    except (ValueError, SyntaxError):
+        return text
+    return list(value) if isinstance(value, tuple) else value
 
 
 def infer_repo_hints(call_stack: str) -> List[str]:
@@ -223,11 +283,7 @@ def compute_top_ops(
             },
         )
         e["total_us"] += r["_us"]
-        e["covered"] &= (r.get("has_perf_model") or "").strip().lower() in (
-            "true",
-            "1",
-            "yes",
-        )
+        e["covered"] &= row_has_perf_model(r)
         if len(r["call_stack"]) > len(e["call_stack"]):
             e["call_stack"] = r["call_stack"]
 
@@ -318,20 +374,6 @@ def write_extension(
         ),
         encoding="utf-8",
     )
-
-
-def builtin_perf_model_map() -> Optional[Dict[str, type]]:
-    """TraceLens' built-in name -> perf model map (incl. pseudo ops), or None."""
-    try:
-        from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
-    except ImportError as e:
-        print(
-            f"\nMapping check skipped, TraceLens is not importable ({e}). "
-            "Run `pip install -e .` in the TraceLens repo.",
-            file=sys.stderr,
-        )
-        return None
-    return op_to_perf_model_class_map
 
 
 def main(argv: Optional[List[str]] = None) -> int:

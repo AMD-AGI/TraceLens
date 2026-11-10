@@ -23,9 +23,8 @@ Usage (batch):
     python validate_perf_model.py --all --arch gfx942 --output-dir /tmp/perf_val
     python validate_perf_model.py --category activation --arch gfx942 --output-dir /tmp/perf_val
 
-Usage (from TraceLens report directory):
-    python validate_perf_model.py \
-        --from-report-dir /path/to/report_folder \
+Usage (traced shapes; build the cases file with ModelBringup's bringup_gates cases):
+    python validate_perf_model.py --cases cases.json \
         --arch gfx942 --output-dir /tmp/perf_val
 
 Usage (discover missing coverage):
@@ -33,7 +32,6 @@ Usage (discover missing coverage):
 """
 
 import argparse
-import ast
 import csv
 import json
 import os
@@ -164,6 +162,7 @@ CSV_COLUMNS = [
     "measured_tb_s",
     "flops_ratio",
     "bytes_ratio",
+    "status",
     "comment",
 ]
 
@@ -984,121 +983,17 @@ def run_single_op_validation(op_name, args, output_dir):
     }
 
 
-def load_report_dir(report_dir):
-    """Load ops from a TraceLens report directory for validation.
-
-    Reads unified_perf_summary.csv, filters to ops with perf models and
-    matching OP_REGISTRY entries, deduplicates by (name, Input Dims, Input type),
-    and optionally loads InferenceAttention_fwd.csv for attention parameters.
-    """
-    unified_path = os.path.join(report_dir, "unified_perf_summary.csv")
-    if not os.path.isfile(unified_path):
-        raise FileNotFoundError(f"unified_perf_summary.csv not found in {report_dir}")
-    attn_csv_path = os.path.join(report_dir, "InferenceAttention_fwd.csv")
-    attn_params_map = {}
-    if os.path.isfile(attn_csv_path):
-        with open(attn_csv_path, newline="") as f:
-            for row in csv.DictReader(f):
-                key = row.get("name", "")
-                input_dims_str = row.get("Input Dims_first", "")
-                attn_params_map[(key, input_dims_str)] = {
-                    "N_Q": row.get("param: N_Q", ""),
-                    "H_Q": row.get("param: H_Q", ""),
-                    "H_KV": row.get("param: H_KV", ""),
-                    "d_h_qk": row.get("param: d_h_qk", ""),
-                    "d_h_v": row.get("param: d_h_v", ""),
-                    "c_sq": row.get("param: c_sq", ""),
-                    "c_sk": row.get("param: c_sk", ""),
-                    "c_sqsq": row.get("param: c_sqsq", ""),
-                    "c_sqsk": row.get("param: c_sqsk", ""),
-                    "g_sq": row.get("param: g_sq", ""),
-                    "g_sk": row.get("param: g_sk", ""),
-                    "g_sqsq": row.get("param: g_sqsq", ""),
-                    "g_sqsk": row.get("param: g_sqsk", ""),
-                }
+def load_cases(cases_path):
+    """Load cases written by ``bringup_gates cases``; keep those with a harness."""
     entries = []
-    seen_keys = set()
-    skipped_no_registry = set()
-    skipped_no_perf_model = 0
-    with open(unified_path, newline="") as f:
-        for row in csv.DictReader(f):
-            name = row.get("name", "")
-            has_pm = row.get("has_perf_model", "")
-            if has_pm != "True":
-                skipped_no_perf_model += 1
-                continue
-            registry_key = TRACE_NAME_TO_OP.get(name)
-            if registry_key is None:
-                skipped_no_registry.add(name)
-                continue
-            dims_str = row.get("Input Dims", "")
-            types_str = row.get("Input type", "")
-            dedup_key = (name, dims_str, types_str)
-            if dedup_key in seen_keys:
-                continue
-            seen_keys.add(dedup_key)
-            input_dims = _parse_csv_field(dims_str)
-            input_types = _parse_csv_field(types_str)
-            input_strides = _parse_csv_field(row.get("Input Strides", ""))
-            concrete_inputs = _parse_csv_field(row.get("Concrete Inputs", ""))
-            if input_dims is None:
-                continue
-            if isinstance(input_dims, tuple):
-                input_dims = list(input_dims)
-            if isinstance(input_types, tuple):
-                input_types = list(input_types)
-            if isinstance(input_strides, tuple):
-                input_strides = list(input_strides)
-            if isinstance(concrete_inputs, tuple):
-                concrete_inputs = list(concrete_inputs)
-            gflops_str = row.get("GFLOPS", "0")
-            data_moved_str = row.get("Data Moved (MB)", "0")
-            try:
-                csv_flops = float(gflops_str) * 1e9
-            except (ValueError, TypeError):
-                csv_flops = 0
-            try:
-                csv_bytes = float(data_moved_str) * 1024 * 1024
-            except (ValueError, TypeError):
-                csv_bytes = 0
-            ap = None
-            reg_cat = OP_REGISTRY[registry_key]["category"]
-            if reg_cat in ("attention", "vllm_attention"):
-                ap = attn_params_map.get((name, dims_str))
-            perf_params = None
-            pp_str = row.get("perf_params", "")
-            if pp_str:
-                try:
-                    pp = ast.literal_eval(pp_str)
-                    if isinstance(pp, dict):
-                        perf_params = pp
-                except (ValueError, SyntaxError):
-                    perf_params = None
-            entries.append(
-                {
-                    "trace_name": name,
-                    "registry_key": registry_key,
-                    "input_dims": input_dims,
-                    "input_types": input_types,
-                    "input_strides": input_strides,
-                    "concrete_inputs": concrete_inputs,
-                    "csv_flops": csv_flops,
-                    "csv_bytes": csv_bytes,
-                    "attn_params": ap,
-                    "perf_params": perf_params,
-                    "dims_str": dims_str,
-                }
-            )
-    print("\n--- Report Dir Summary ---")
-    print(f"  Found {len(entries)} unique (name, shape, dtype) combos to validate")
-    if skipped_no_registry:
-        print(f"  Skipped {len(skipped_no_registry)} op names (no registry entry):")
-        for s in sorted(skipped_no_registry)[:10]:
-            print(f"    {s}")
-        if len(skipped_no_registry) > 10:
-            print(f"    ... and {len(skipped_no_registry) - 10} more")
-    print(f"  Skipped {skipped_no_perf_model} rows without perf model")
-    print()
+    for case in json.loads(Path(cases_path).read_text(encoding="utf-8")):
+        registry_key = TRACE_NAME_TO_OP.get(case["trace_name"])
+        if registry_key is None:
+            print(f"  Skipped {case['trace_name']} (no registry entry)")
+            continue
+        if OP_REGISTRY[registry_key]["category"] not in ("attention", "vllm_attention"):
+            case["attn_params"] = None
+        entries.append({**case, "registry_key": registry_key})
     return entries
 
 
@@ -1557,10 +1452,9 @@ def main():
         help="List all aiter:: ops and their validation coverage, then exit.",
     )
     group.add_argument(
-        "--from-report-dir",
-        metavar="DIR",
-        help="Read a TraceLens report folder and validate all ops with matching "
-        "harnesses using shapes/dtypes from the CSV.",
+        "--cases",
+        metavar="JSON",
+        help="Validate the traced shapes in this cases file (from bringup_gates cases).",
     )
     parser.add_argument("--M", type=int, default=None, help="M dimension (tokens)")
     parser.add_argument(
@@ -1753,7 +1647,7 @@ def main():
     parser.add_argument(
         "--only-ops",
         default=None,
-        help="Comma-separated registry keys or trace names; with --from-report-dir, "
+        help="Comma-separated registry keys or trace names; with --cases, "
         "restrict the run to those ops (useful for targeted re-runs).",
     )
     args = parser.parse_args()
@@ -1762,13 +1656,12 @@ def main():
         discover_missing_coverage()
         return None
 
-    from_report_dir = getattr(args, "from_report_dir", None)
-    if from_report_dir:
+    if args.cases:
         if not args.output_dir:
             parser.error("--output-dir is required for validation runs.")
         base_output_dir = os.path.abspath(args.output_dir)
         os.makedirs(base_output_dir, exist_ok=True)
-        entries = load_report_dir(from_report_dir)
+        entries = load_cases(args.cases)
         if args.only_ops:
             wanted = {o.strip() for o in args.only_ops.split(",") if o.strip()}
             entries = [
@@ -1778,7 +1671,7 @@ def main():
             ]
             print(f"--only-ops filter kept {len(entries)} entries: {sorted(wanted)}")
         if not entries:
-            print("No ops to validate from report dir.")
+            print("No cases to validate.")
             return None
         results = []
         for idx, entry in enumerate(entries):
@@ -1820,7 +1713,7 @@ def main():
         csv_path = os.path.join(base_output_dir, csv_filename)
         write_results_csv(results, csv_path)
         print_batch_summary(results)
-        return None
+        return int(any(str(r.get("status", "")).startswith("FAIL") for r in results))
 
     if args.all:
         ops_to_run = list(OP_REGISTRY.keys())
@@ -1832,7 +1725,7 @@ def main():
         ops_to_run = [args.op]
     else:
         parser.error(
-            "One of --op, --all, --category, --discover, or --from-report-dir is required."
+            "One of --op, --all, --category, --discover, or --cases is required."
         )
 
     if not args.output_dir:
@@ -1989,20 +1882,6 @@ def _populate_varlen_attention_args(op_name, effective_args):
     effective_args._varlen_total_q = cu_q[-1]
     effective_args._varlen_total_kv = cu_k[-1]
     return None
-
-
-def _parse_csv_field(value_str):
-    """Parse a CSV field that contains a Python literal (tuple/list/string).
-
-    Returns the parsed Python object, or the original string on failure.
-    """
-    if not value_str or value_str.strip() == "":
-        return None
-    try:
-        parsed = ast.literal_eval(value_str)
-        return parsed
-    except (ValueError, SyntaxError):
-        return value_str
 
 
 def _extract_dims_for_existing_harness(
@@ -2271,4 +2150,4 @@ def _enrich_results(results):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

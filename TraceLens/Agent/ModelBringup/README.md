@@ -6,19 +6,24 @@ See LICENSE for license information.
 
 # TraceLens Agent: Model Bringup
 
-The [model-bringup skill](skills/model-bringup/SKILL.md) takes a model and serving image
-from profiling to a validated `kernel_candidates.json`. It chains existing tools:
+The [model-bringup skill](skills/model-bringup/SKILL.md) brings a new model up on TraceLens
+in one unattended run:
 
-1. The [Magpie profiling skill](../Profiling/README.md) and its trace quality check.
-2. The [analysis orchestrator](../Analysis/README.md) and the
-   [triage checks](../Analysis/triage/README.md), which include the graph capture merge
-   and capture mapping.
-3. The perf-model authoring and validation tools on `feat/perf_model_validation_skill`,
-   one parallel worker per op without a perf model.
-4. A coverage rerun.
-5. The Hyperloom kernel-candidates harness and `verify_kernel_candidates`.
+1. It profiles the model with the [Magpie profiling skill](../Profiling/README.md), using
+   either a fixed-sequence or an AgentX workload.
+2. It gates profile health and report health with the
+   [triage checks](../Analysis/triage/README.md).
+3. It runs the [analysis orchestrator](../Analysis/README.md).
+4. It drafts one validated perf-model PR or issue per op without a perf model.
 
-Ask the agent to "follow the model bringup skill with `<bringup_config.yaml>`", starting
-from [templates/bringup_config.yaml](skills/model-bringup/templates/bringup_config.yaml).
-Perf-model PRs and issues are drafted for review and filed on `AMD-AGI/TraceLens` only
-after the user approves them.
+A later Publish prompt files the drafts you approve on `AMD-AGI/TraceLens`.
+
+Start from [templates/bringup_config.yaml](skills/model-bringup/templates/bringup_config.yaml)
+and ask the agent to "follow the model-bringup skill installed with TraceLens and run it
+from config `<path>/bringup_config.yaml`".
+
+Code layout:
+- `utils/bringup_gates.py` holds the step gates.
+- `utils/unified_perf_ops.py` reads `unified_perf_summary.csv`: it ranks ops worth a perf
+  model, measures the share of kernel time without one, and builds validator cases.
+- Per-op authoring and validation stay in [`../PerfModel/`](../PerfModel/).

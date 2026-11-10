@@ -34,6 +34,7 @@ import pytest
 
 from TraceLens.Agent.Analysis.triage import checks, postprocess, runner
 from TraceLens.Agent.Analysis.triage.checks import (
+    PROFILE_CHECKS,
     ALL_CHECKS,
     CheckSpec,
     Finding,
@@ -2960,3 +2961,56 @@ def test_main_no_findings_healthy(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["triage", "--session-dir", str(session)])
     main()
     assert "No failures detected" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Profile mode (--bench-dir)
+# ---------------------------------------------------------------------------
+
+_STEP = "execute_1_context_1(sq1sk1sqsq1sqsk1)_generation_1(sq1sk1sqsq1sqsk1)"
+
+
+def _make_bench(tmp_path, *, steps=2, stacks=True, aborted=False):
+    bench = tmp_path / "benchmark_vllm_1"
+    events = [{"ph": "X", "cat": "user_annotation", "name": _STEP}] * steps
+    events += [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "aten::mm",
+            "args": {"Input Dims": [[2, 2]]},
+        },
+        {"ph": "X", "cat": "kernel", "name": "k"},
+        {"ph": "X", "cat": "cuda_runtime", "name": "hipGraphLaunch"},
+    ]
+    if stacks:
+        events.append({"ph": "X", "cat": "python_function", "name": "f"})
+    trace = bench / "torch_trace" / "dp0_pp0_tp0_dcp0_ep0_rank0.1.pt.trace.json.gz"
+    write_json_gz(trace, {"traceEvents": events})
+    write_json_gz(
+        bench / "torch_trace" / "capture_traces" / "graph_capture_rank_0.json.gz", {}
+    )
+    write_text(
+        bench / "config.yaml",
+        "framework: vllm\nagentx:\n  enabled: true\nprofiler:\n  torch_profiler:\n    num_steps: 2\n",
+    )
+    split = bench / "torch_trace" / "trace_split"
+    write_json(
+        split / "split_manifest.json",
+        {"status": 0, "phase_confidence": "high", "aborted": aborted},
+    )
+    write_json_gz(
+        split / "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs4_x.json.gz",
+        {},
+    )
+    return str(bench)
+
+
+def test_profile_checks_clean_bench(tmp_path):
+    assert run_triage(_make_bench(tmp_path), specs=PROFILE_CHECKS) == []
+
+
+def test_profile_checks_flag_split_stack_and_steps(tmp_path):
+    bench = _make_bench(tmp_path, steps=3, stacks=False, aborted=True)
+    found = {f.sublabel for f in run_triage(bench, specs=PROFILE_CHECKS)}
+    assert found == {"2d", "2k", "2l"}

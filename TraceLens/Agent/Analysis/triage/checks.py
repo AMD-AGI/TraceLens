@@ -23,11 +23,13 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     focus_job_utilization,
 )
+from TraceLens.Agent.Analysis.triage.profile_checks import check_bench, main_traces
 from TraceLens.util import DataLoader
 
 # ---------------------------------------------------------------------------
@@ -245,10 +247,9 @@ def resolve_main_trace_path(run_dir):
     """Resolve the main rank-0 trace file for a run."""
     trace_input = _trace_input_dir(run_dir)
     if trace_input:
-        for pattern in ("*TP-0*.json*", "*rank0*.json*"):
-            matches = sorted(glob.glob(os.path.join(trace_input, pattern)))
-            if matches:
-                return matches[0]
+        traces = main_traces(Path(trace_input))
+        if traces:
+            return str(traces[0])
 
     # Fallback: search within this run only.
     for search_root in (os.path.join(run_dir, "trace_split"), run_dir):
@@ -298,7 +299,7 @@ def stream_find(stream_file, pattern):
     return None
 
 
-def _rank_of(path):
+def rank_of(path):
     match = _RANK_RE.search(os.path.basename(path or ""))
     return int(match.group(1)) if match else None
 
@@ -337,7 +338,7 @@ def summarize_graph_merge(stream_file):
                 "merged": 0,
                 "rank_mismatch": (
                     current["capture"] is not None
-                    and _rank_of(current["capture"]) != _rank_of(trace)
+                    and rank_of(current["capture"]) != rank_of(trace)
                 ),
             },
         )
@@ -1574,4 +1575,121 @@ ALL_CHECKS = [
         "geak_interface",
         check_kernel_candidates_missing,
     ),
+]
+
+
+def _profile_check(name, remedy):
+    def check(bench_dir, _stream_file):
+        result = check_bench(bench_dir).get(name)
+        if result is None or result.status in ("PASS", "SKIP"):
+            return None
+        return FindingDraft(f"{name}: {result.status}", result.detail, remedy)
+
+    return check
+
+
+# Run by ``runner --bench-dir`` on a Magpie benchmark dir. Sublabels shared with
+# ALL_CHECKS keep the same tag, so one catalog covers both modes.
+PROFILE_CHECKS = [
+    CheckSpec(sublabel, name, category, _profile_check(check_name, remedy))
+    for sublabel, name, category, check_name, remedy in (
+        (
+            "1a",
+            "TRACE_MISSING",
+            "profiling",
+            "single rank-0 trace",
+            "Rerun profiling; exactly one rank-0 serving trace is needed",
+        ),
+        (
+            "1c",
+            "NO_GPU_KERNELS",
+            "profiling",
+            "gpu kernels",
+            "Profile with GPU activity enabled",
+        ),
+        (
+            "1d",
+            "CAPTURE_MISSING",
+            "profiling",
+            "capture traces",
+            "Enable graph-capture profiling",
+        ),
+        (
+            "1e",
+            "DRAFTER_CAPTURE_MISSING",
+            "profiling",
+            "drafter capture traces",
+            "Enable drafter graph-capture profiling",
+        ),
+        (
+            "1f",
+            "GRAPH_LAUNCHES_MISSING",
+            "profiling",
+            "graph launches",
+            "Profile the graph-replay steady state, not only warmup",
+        ),
+        (
+            "1g",
+            "BENCHMARK_REPORT_FAILED",
+            "profiling",
+            "benchmark report",
+            "Read benchmark.log; the trace checks decide usability",
+        ),
+        (
+            "2a",
+            "MISSING_CPU_OP_SHAPES",
+            "trace_quality",
+            "cpu_op shapes",
+            "Enable record_shapes",
+        ),
+        (
+            "2b",
+            "INFERENCE_ANNOTATION_MISSING",
+            "trace_quality",
+            "detailed annotations",
+            "Enable the detailed inference annotations",
+        ),
+        (
+            "2c",
+            "SPLIT_TRACE_MISSING",
+            "trace_quality",
+            "split traces",
+            "Rerun split_trace.main on the rank-0 trace",
+        ),
+        (
+            "2d",
+            "SPLIT_INCORRECT",
+            "trace_quality",
+            "split quality",
+            "Profile a longer steady state, or rerun the split with other options",
+        ),
+        (
+            "2e",
+            "SHAPE_PROFILER_MISSING",
+            "trace_quality",
+            "kernel shape profiler",
+            "Enable TRACELENS_SHAPE_DISCOVERY and the kernel shape tool",
+        ),
+        (
+            "2i",
+            "CORRUPT_JSON",
+            "trace_quality",
+            "trace readable",
+            "Rerun profiling; the trace was truncated",
+        ),
+        (
+            "2k",
+            "STEP_COUNT_MISMATCH",
+            "trace_quality",
+            "step count",
+            "Match the profiled steps to the expected count",
+        ),
+        (
+            "2l",
+            "CPU_CALL_STACK_MISSING",
+            "trace_quality",
+            "cpu call stack",
+            "Enable with_stack",
+        ),
+    )
 ]

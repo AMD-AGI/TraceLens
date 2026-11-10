@@ -157,7 +157,7 @@ For ATOM, the equivalent knobs are the `ATOM_ENABLE_DETAILED_ANNOTATION` environ
 
 ## Trace Quality Check
 
-`python -m TraceLens.Agent.Profiling.check_torch_trace <benchmark-dir> [--json-out <file>]` checks a Magpie run before analysis. It verifies that the traces exist and include GPU kernels, CPU call stacks, inference annotations and, when there are captures, graph launches. It also reports the `benchmark_report.json` result, including the root-cause line when the benchmark failed.
+`python -m TraceLens.Agent.Analysis.triage.runner --bench-dir <benchmark-dir> [--out-dir <dir>]` checks a Magpie run before analysis. It verifies that the traces exist and include GPU kernels, CPU call stacks, inference annotations, the expected step count (AgentX: `num_steps`) and, when there are captures, graph launches. It checks the trace split through `split_manifest.json`, and reports the `benchmark_report.json` result, including the root-cause line when the benchmark failed. See the [triage README](../Analysis/triage/README.md).
 
 ## Trace Splitting and Handoff to Analysis
 

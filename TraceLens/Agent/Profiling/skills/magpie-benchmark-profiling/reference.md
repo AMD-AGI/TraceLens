@@ -40,9 +40,31 @@ If any are missing, ask the user before proceeding. Example:
 
 Do not guess node names or environment names — these are site-specific and getting them wrong wastes time on SSH failures or missing-package errors.
 
+Also settle the **workload**: `fixed_seq` (random prompts at a fixed ISL/OSL) or `agentx` (InferenceX agentic replay through AIPerf). AgentX needs a Magpie build with bounded AgentX capture; check it before anything else:
+
+```bash
+ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
+  python -c 'import inspect, Magpie.modes.benchmark.agentx_profiling as m; assert \"start_seconds\" in inspect.getsource(m)'"
+```
+
+If it fails, stop: this Magpie cannot run the AgentX capture below.
+
+### Unattended mode
+
+When the caller (for example the model-bringup skill) asks for unattended mode, ask nothing. Where a step would ask, stop with that question as the reason. Use the computed window values without confirmation, run Step 1b with the rule below, edit only the copy of the YAML the caller names, keep the cleanup's script restores but skip the YAML restore, run Magpie and the AgentX check through the caller's command prefix instead of the conda activation shown in Steps 0 and 3 (no conda env is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log`, and stop after the Step 5 check. Do not print the TraceLens command.
+
+Step 1b without asking:
+
+1. Read the framework version from the image: `docker run --rm --entrypoint python3 <image> -c "import <framework>; print(<framework>.__version__)"`. If that fails, stop.
+2. A vLLM v0.26.0+ image, or an ATOM nightly from 2026-07-22 onward (date from the `nightly_<YYYYMMDD…>` tag), is used as is. Every other image is patched.
+3. Build it with the build script's arm for that version (for SGLang, with the `--gpu-type` from the node's GPU: `gfx942` is `mi300`, `gfx950` is `mi355`). Tag it `tracelens-<framework>:<version>`, and skip the build if `docker image inspect` finds that tag. If the script has no arm for the version, or the build fails, stop.
+4. Set `docker_image` in the YAML copy to the image used.
+
 ### Step 1: Read the Benchmark Config
 
-The user provides a YAML config (typically under `Magpie/examples/`). Read it to understand the run parameters.
+Use the YAML the user names. Otherwise look in `<magpie_repo>/examples/benchmarks/` for one whose `benchmark.model` and `benchmark.framework` match and whose `benchmark.agentx` matches the workload (AgentX when it is `enable`, `true`, or a mapping without `enabled: false`); take the newest by modification time and mention the others. If none matches, fill [templates/benchmark_fixed_seq.yaml](templates/benchmark_fixed_seq.yaml) or [templates/benchmark_agentx.yaml](templates/benchmark_agentx.yaml). Work on a copy; never edit the original.
+
+Read it to understand the run parameters.
 
 Key fields:
 
@@ -185,6 +207,8 @@ Proceed with the user's chosen image. Warn that traces may lack kernel-level det
 
 If the user wants a profiler trace, verify `profiler.torch_profiler.enabled` is `true` in the YAML. If it is `false`, edit it to `true` before running.
 
+Set `profiler.tracelens.enabled: false`. Magpie's built-in TraceLens pipeline would otherwise patch the image, rewrite the profiler flags, split the trace and run its own report; this workflow does those steps itself and hands the split to the TraceLens analysis agent.
+
 When enabled, the benchmarker automatically sets these env vars inside the container:
 - `PROFILE=1`
 - `VLLM_TORCH_PROFILER_DIR=/workspace/torch_trace`
@@ -319,6 +343,20 @@ Do **not** add `--torch-profiler-dir` to `EXTRA_ATOM_ARGS`. Magpie sets `ATOM_TO
 
 ATOM is **single-node only** in Magpie — the cross-node Ray branch logs and skips it, so do not propose a multi-node ATOM run.
 
+#### AgentX workload
+
+AgentX has no targeted window or full-run choice: Magpie starts each capture after AIPerf's measured phase begins, so skip **Profiling mode** below and the `num_prompts` patch. Magpie also owns the AgentX profiler configuration: with `detailed_annotations: true` it sets the annotation, shape, stack and graph-capture options itself and rejects `--profiler-config` in `EXTRA_<FRAMEWORK>_ARGS`, so skip the **Common profiler flags** too. Set these under `benchmark.profiler.torch_profiler` (the template has them). Traces land in `torch_trace/<capture_id>/`:
+
+```yaml
+num_steps: 256
+num_profiles: 1
+interval_seconds: 900     # only between captures
+start_seconds: 300        # wait this long after the measured phase starts
+detailed_annotations: true  # required: TraceLens needs the detailed annotations
+```
+
+Magpie verifies that the serving framework supports `detailed_annotations` before the run and fails if it does not, which usually means the image needs the Step 1b patch. With `agentx.mode: fast` the measured phase lasts 1200 s, so `start_seconds` plus the capture must fit inside it.
+
 #### Profiling mode
 
 Ask:
@@ -334,13 +372,19 @@ Compute recommended `delay_iterations` and `max_iterations` from the YAML config
 ```
 max_iters = min(1024, max(256,OSL * 16 / CONC))
 
-delay_iters = ( OSL * (RANDOM_RANGE_RATIO + 1 ) * 3 ) - (max_iters/2)
+delay_iters = ( ( OSL * (RANDOM_RANGE_RATIO + 1 ) * 3 ) - (max_iters/2) ) / tokens_per_step
 
 ```
 
+`tokens_per_step` is 1 without speculative decoding. With it, each engine step emits up to `tokens_per_step` tokens, so the run reaches steady state in fewer steps; divide only the delay, not `max_iters`. Read it in this order:
+
+1. `SPEC_NUM_TOKENS_OVERRIDE` in the YAML `envs`: 0 means no speculative decoding (`tokens_per_step` = 1).
+2. `EXTRA_VLLM_ARGS` / `EXTRA_SGLANG_ARGS` in the YAML: vLLM `--spec-tokens N` or `--num-speculative-tokens N` (or `num_speculative_tokens` inside `--speculative-config`) gives `1 + N`; SGLang `--speculative-num-draft-tokens D` gives `D`.
+3. The InferenceX `benchmark_script`: the same flags, or its default `NUM_SPEC_TOKENS` / `SPEC_NUM_TOKENS`, read the same way (for example `*_mtp.sh` passes `--speculative-num-draft-tokens 4`, so `tokens_per_step` = 4).
+
 Compute the values, round to integers, then present them to the user for confirmation:
 
-> "Based on your config (OSL=X, CONC=Y, RANDOM_RANGE_RATIO=Z), I'd suggest:
+> "Based on your config (OSL=X, CONC=Y, RANDOM_RANGE_RATIO=Z, tokens per step T), I'd suggest:
 > - **delay_iterations** = A  (skip A engine iterations before profiling)
 > - **max_iterations** = B  (profile B iterations then stop)
 >
@@ -519,27 +563,13 @@ The main process logs are sparse during container execution. To see detailed pro
 
 ### Step 5: Verify Trace Quality
 
-After completion, verify trace artifacts in the results workspace:
+Run this after Step 6, so the split is checked too. It runs the TraceLens profile checks (captures, rank-0 trace, annotations, step count, shapes, call stacks, GPU kernels, graph launches, split quality, benchmark report) without loading the trace into memory:
 
 ```bash
-# List all trace files and sizes
-ls -lh <workspace>/torch_trace/
-
-# Verify trace contains GPU kernels
-python3 -c "
-import json, gzip
-with gzip.open('<workspace>/torch_trace/<trace_file>', 'rt') as f:
-    data = json.load(f)
-events = data.get('traceEvents', [])
-cats = {}
-for e in events:
-    cat = e.get('cat', 'no_cat')
-    cats[cat] = cats.get(cat, 0) + 1
-print(f'Total events: {len(events)}')
-for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:10]:
-    print(f'  {cat}: {cnt}')
-"
+python -m TraceLens.Agent.Analysis.triage.runner --bench-dir <workspace> --out-dir <workspace>/profile_check
 ```
+
+It prints one DIAG line per finding and writes `triage_details.csv`. Exit 0 means no findings.
 
 **Quality checklist:**
 
@@ -584,6 +614,8 @@ ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> &
     --find-steady-state --num-steps 32 \
     --CONC <conc> --OSL <osl> --R <r>"
 ```
+
+For AgentX, use `--num-steps <num_steps>` and drop `--OSL`/`--R`.
 
 Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
 

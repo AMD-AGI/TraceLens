@@ -24,9 +24,10 @@ runtime impact.  Newer TraceLens embeds the full call stack inline in this CSV
 (`call_stack_full` column), so no companion `unified_perf_callstacks.csv` is
 needed; the triage script reads the call stack directly from the summary.
 
-**Run the triage script:**
+**Run the triage script** (it lives with the model-bringup skill, which owns the
+CSV-driven flow):
 ```bash
-python3 <skill-dir>/run_other_bucket_triage.py \
+python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops \
     /path/to/unified_perf_summary.csv \
     --mode top-ops --threshold 0.04
 ```
@@ -39,7 +40,7 @@ starter `<csv_stem>_triage_extension.py` beside the CSV.
 Also run the legacy `other-bucket` mode (default) to catch ops in the "other"
 category even if they are individually below the 4% threshold:
 ```bash
-python3 <skill-dir>/run_other_bucket_triage.py \
+python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops \
     /path/to/unified_perf_summary.csv --also-global-pareto
 ```
 
@@ -68,9 +69,8 @@ SGLang, or ATOM), optionally filtered (e.g. "attention kernels").
 
 ```bash
 python3 <skill-dir>/scan_framework_ops.py \
-    --repo /path/to/aiter \
-    --filter attention \
-    [--trace /path/to/unified_perf_summary.csv]
+    --aiter /path/to/aiter \
+    --filter attention
 ```
 
 The script performs a **static source scan** (no GPU/run required):
@@ -85,8 +85,7 @@ Add `--check-mapping` to mark ops that already have a built-in perf model
 
 For each matched op it outputs: registered name, source file, reconstructed
 call chain to kernel, and any sibling `test_<op>` / `benchmark_<op>` files
-(roofline reference).  When `--trace` is given it annotates which ops actually
-appeared in the trace.
+(roofline reference).
 
 For deep or ambiguous chains, instruct an explore subagent to traverse the
 repo (same technique used to map FlyDSL ops).
@@ -472,7 +471,7 @@ pre-placed in the right file.
 
 ### Mode B: extension-only file
 
-The `--emit-extension` flag of `run_other_bucket_triage.py` produces
+The `--emit-extension` flag of `unified_perf_ops` produces
 `<csv_stem>_triage_extension.py` with:
 - `TRIAGE_OP_NAMES`, the ranked candidate names
 - an empty `perf_model_extension` dict (name → class)

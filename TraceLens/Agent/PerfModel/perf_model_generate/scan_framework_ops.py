@@ -8,18 +8,15 @@
 EP3 — Framework source scanner for unified-perf-model-extension.
 
 Statically scans framework repos (aiter, vLLM, SGLang / sgl_kernel) for
-Python-side torch op registrations that TraceLens can model. Optionally
-cross-checks against a unified_perf_summary.csv to mark which ops appeared in
-a real trace.
+Python-side torch op registrations that TraceLens can model.
 
 Usage
 -----
 # Scan all frameworks under a common parent (<DIR>/aiter, <DIR>/vllm, <DIR>/sglang):
   python3 scan_framework_ops.py --repo-root /work
 
-# Scan one framework with a filter, and cross-check against a trace:
-  python3 scan_framework_ops.py --aiter /work/aiter --filter attention \\
-      --trace unified_perf_summary.csv
+# Scan one framework with a filter:
+  python3 scan_framework_ops.py --aiter /work/aiter --filter attention
 
 # Write the result table to JSON:
   python3 scan_framework_ops.py --repo-root /work --output-json /tmp/ops.json
@@ -42,9 +39,6 @@ import re
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-
-# Same directory; loads the summary CSV the same way as the triage script.
-from run_other_bucket_triage import builtin_perf_model_map, load_rows
 
 # framework -> (namespace for bare op names, namespaces to keep)
 FRAMEWORKS = {
@@ -134,8 +128,6 @@ def scan(framework: str, root: Path, filter_kw: Optional[str] = None) -> List[Di
                         "file": str(py_file),
                         "kernel_hints": [],
                         "sibling_benchmarks": [],
-                        "in_trace": False,
-                        "trace_pct": None,
                     },
                 )
                 _extend_unique(op["kernel_hints"], _kernel_calls(lines, base))
@@ -143,18 +135,18 @@ def scan(framework: str, root: Path, filter_kw: Optional[str] = None) -> List[Di
     return list(ops.values())
 
 
-def cross_check_trace(ops: List[Dict], trace_csv: Path) -> None:
-    """Set in_trace / trace_pct on each op from the summary CSV's runtime per name."""
-    rows, _ = load_rows(trace_csv)
-    trace_us: Dict[str, float] = {}
-    for r in rows:
-        name = (r.get("name") or "").strip()
-        trace_us[name] = trace_us.get(name, 0.0) + r["_us"]
-    total = sum(trace_us.values())
-    for op in ops:
-        us = trace_us.get(op["op_name"], trace_us.get(op["op_name"].split("::", 1)[-1]))
-        op["in_trace"] = us is not None
-        op["trace_pct"] = 100.0 * us / total if us is not None and total > 0 else 0.0
+def builtin_perf_model_map() -> Optional[Dict[str, type]]:
+    """TraceLens' built-in name -> perf model map (incl. pseudo ops), or None."""
+    try:
+        from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
+    except ImportError as e:
+        print(
+            f"\nMapping check skipped, TraceLens is not importable ({e}). "
+            "Run `pip install -e .` in the TraceLens repo.",
+            file=sys.stderr,
+        )
+        return None
+    return op_to_perf_model_class_map
 
 
 def print_results(ops: List[Dict], name_max: int = 60) -> None:
@@ -169,9 +161,8 @@ def print_results(ops: List[Dict], name_max: int = 60) -> None:
             model_tag = (
                 "" if hpm is None else (" [HAS MODEL]" if hpm else " [NO MODEL]")
             )
-            trace_tag = f"  trace:{op['trace_pct']:.1f}%" if op["in_trace"] else ""
             print(
-                f"  {name if len(name) <= name_max else name[: name_max - 3] + '...'}{model_tag}{trace_tag}"
+                f"  {name if len(name) <= name_max else name[: name_max - 3] + '...'}{model_tag}"
             )
             print(f"    file: {op['file']}")
             if op["kernel_hints"]:
@@ -202,12 +193,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     p.add_argument(
         "--frameworks", nargs="+", choices=list(FRAMEWORKS), default=list(FRAMEWORKS)
-    )
-    p.add_argument(
-        "--trace",
-        type=Path,
-        metavar="CSV",
-        help="unified_perf_summary.csv to cross-check against.",
     )
     p.add_argument(
         "--output-json",
@@ -247,10 +232,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return 0
-
-    if args.trace and args.trace.is_file():
-        print(f"Cross-checking against trace: {args.trace}", file=sys.stderr)
-        cross_check_trace(ops, args.trace)
 
     mapping = (
         builtin_perf_model_map() if args.check_mapping or args.no_model_only else None

@@ -2,19 +2,34 @@
 #
 # See LICENSE for license information.
 
-# Model bringup inputs. Analysis inputs (trace, platform, capture folder) go in the
-# orchestrator run config that Stage 1 builds with config_utils.
+# Model bringup inputs. With benchmark_yaml set, model, framework, image, HF cache and
+# workload come from it; otherwise set them below and the Magpie skill fills a template.
 
-model: <hf model id>
-image: <serving container image>
-framework: sglang # sglang | vllm | atom
-platform: MI300X # an arch config_utils knows
-workload: # passed to the Magpie profiling skill
-  tp: 8
-  input_len: 1024
-  output_len: 1024
-  concurrency: 8
-workspace: <abs path> # worktrees, drafts, stage outputs
-hyperloom_repo: <abs path>
-min_share: 0.02 # Stage 6 --threshold, fraction of total kernel time
-max_profile_retries: 2 # Stage 3 failures before stopping
+node: <gpu node>
+magpie_dir: <abs path> # Magpie checkout on node; runs on the host as python3 -m Magpie
+tracelens_dir: <abs path> # TraceLens git checkout on node
+tracelens_internal_dir: <abs path> # TraceLens-internal checkout on node (arch files)
+bringup_dir: <abs path> # outputs; same path on node, in the container and in the agent's shell
+
+benchmark_yaml: <abs path or empty> # Magpie benchmark YAML on node; copied, never edited
+
+# Used when benchmark_yaml is empty:
+# model: <hf model id>
+# framework: sglang # sglang | vllm | atom
+# docker_image: <serving image; stock is fine, Step 1b patches it if needed>
+# hf_cache_path: <HF_HOME on node>
+# workload: fixed_seq # fixed_seq | agentx
+# workload_params:
+#   tp: 8
+#   conc: 32
+#   isl: 1024 # fixed_seq only
+#   osl: 1024 # fixed_seq only
+#   num_steps: 256 # agentx only
+#   num_profiles: 1 # agentx only
+#   interval_seconds: 900 # agentx only
+#   start_seconds: 300 # agentx only
+
+# options: # uncomment only to override a default
+#   min_share: 0.02 # Step 5 threshold, fraction of total kernel time
+#   max_profile_retries: 2
+#   accept_triage: [] # sublabels Steps 2 and 4 do not block on
