@@ -26,6 +26,8 @@ from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     load_profile_kernels,
     points_from_report,
     main,
+    model_coverage,
+    model_coverage_note,
     plot_e2e_roofline,
     regimes_from_augmentation,
     report_kernel_category,
@@ -633,6 +635,66 @@ def _point(series, intensity, achieved):
         bytes=1.0,
         time_us=1.0,
     )
+
+
+def test_coverage_lists_unmodeled_kernels_over_one_percent_of_the_run():
+    # 1000 µs. The GEMM is modeled. The two chunk launches are one kernel at
+    # 7% once their phases are added. The prepare kernel is 2%. The filler is
+    # 0.5%, under the line, so it counts but is not named.
+    regime = Regime("prefill", 1, (_op("GEMM", 10.0, 2.0),))
+    decode = Regime("decode", 1, (_op("GEMM", 10.0, 2.0),))
+    chunk = (
+        "vllm::qwen_gdn_attention_core->chunk_gdn_fwd_h_flydsl_opt.kd "
+        "(Synthetic Op)"
+    )
+    prepare = "vllm::qwen_gdn_attention_core->gdn_prepare_kernel.kd (Synthetic Op)"
+    kernels = [
+        _kernel("prefill/aiter::gemm_a8w8_blockscale", 905.0, 1),
+        _kernel(f"prefill/{chunk}", 40.0, 1),
+        _kernel(f"decode/{chunk}", 30.0, 1),
+        _kernel(f"prefill/{prepare}", 20.0, 1),
+        _kernel("prefill/not_a_known_kernel", 5.0, 1),
+    ]
+    coverage = model_coverage([regime, decode], kernels)
+    assert coverage.covered_share == pytest.approx(0.905)
+    assert coverage.unmodeled_count == 3
+    assert coverage.unmodeled_share == pytest.approx(0.095)
+    assert [name for name, _share in coverage.listed] == [
+        "chunk_gdn_fwd_h_flydsl_opt",
+        "gdn_prepare_kernel",
+    ]
+    note = model_coverage_note(coverage)
+    assert "90.5% of kernel time" in note
+    assert "3 kernels are unmodeled (9.5% of kernel time)." in note
+    assert "chunk_gdn_fwd_h_flydsl_opt (7.0%)" in note
+    assert "gdn_prepare_kernel (2.0%)" in note
+    assert "not_a_known_kernel" not in note
+
+
+def test_unmodeled_kernels_under_one_percent_are_not_listed():
+    regime = Regime("prefill", 1, (_op("GEMM", 10.0, 2.0),))
+    kernels = [
+        _kernel("prefill/aiter::gemm_a8w8_blockscale", 995.0, 1),
+        _kernel("prefill/not_a_known_kernel", 5.0, 1),
+    ]
+    coverage = model_coverage([regime], kernels)
+    assert coverage.unmodeled_count == 1
+    assert coverage.listed == ()
+    note = model_coverage_note(coverage)
+    assert "99.5% of kernel time" in note
+    assert "unmodeled" not in note
+
+
+def test_communication_is_outside_the_coverage():
+    regime = Regime("prefill", 1, (_op("GEMM", 10.0, 2.0),))
+    kernels = [
+        _kernel("prefill/aiter::gemm_a8w8_blockscale", 100.0, 1),
+        _kernel("prefill/nccl_allreduce", 900.0, 1),
+    ]
+    coverage = model_coverage([regime], kernels)
+    assert coverage.covered_share == pytest.approx(1.0)
+    assert coverage.unmodeled_count == 0
+    assert "100.0% of kernel time" in model_coverage_note(coverage)
 
 
 def test_a_point_above_the_roof_is_flagged_and_explained():

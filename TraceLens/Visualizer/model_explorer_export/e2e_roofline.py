@@ -21,6 +21,7 @@ import csv
 import json
 import re
 import sys
+import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -65,6 +66,12 @@ _HARDWARE_ROOFS = (
 # and the paler gridlines, so each lower fraction is paler than the one above.
 _PEAK_FRACTIONS = ((0.75, "0.62"), (0.5, "0.86"), (0.25, "0.92"), (0.1, "0.96"))
 _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
+# The note under the legend names unmodeled kernels only when they are more
+# than this share of kernel time, both together and one by one.
+_UNMODELED_LIST_SHARE = 0.01
+_UNMODELED_LIST_LIMIT = 10
+_PHASE_PREFIX = re.compile(r"^(?:prefill|decode)/", re.IGNORECASE)
+_KERNEL_SUFFIX = re.compile(r"\.kd$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -1068,6 +1075,120 @@ def points_from_report(directory: Path) -> list[RooflinePoint]:
     return points
 
 
+@dataclass(frozen=True)
+class ModelCoverage:
+    """Kernel time a performance model prices, and the kernels it does not."""
+
+    covered_share: float
+    unmodeled_count: int
+    unmodeled_share: float
+    # ``(display name, share of kernel time)``, largest first. Only kernels
+    # over ``_UNMODELED_LIST_SHARE``, and only when the unmodeled kernels
+    # together are over that share. At most ``_UNMODELED_LIST_LIMIT``.
+    listed: tuple[tuple[str, float], ...]
+
+
+def _coverage_kernel_name(name: str) -> str:
+    """The device kernel, without the phase tag or a ``.kd`` suffix."""
+    computation = _PHASE_PREFIX.sub("", _kernel_computation(name))
+    return _KERNEL_SUFFIX.sub("", computation)
+
+
+def _modeled_categories(regimes: list[Regime]) -> dict[str, set[str]]:
+    """Categories a regime's projection gave a non-zero cost."""
+    categories: dict[str, set[str]] = {}
+    for regime in regimes:
+        priced: dict[str, list[float]] = {}
+        for op in regime.ops:
+            category = op.get("category")
+            if not category:
+                continue
+            slot = priced.setdefault(str(category), [0.0, 0.0])
+            slot[0] += float(op.get("total_flops") or 0.0)
+            slot[1] += float(op.get("total_bytes") or 0.0)
+        categories[regime.phase] = {
+            category
+            for category, (flops, nbytes) in priced.items()
+            if flops > 0 and nbytes > 0
+        }
+    return categories
+
+
+def model_coverage(
+    regimes: list[Regime], kernels: list[dict[str, Any]]
+) -> ModelCoverage | None:
+    """Share of kernel time whose computation a performance model prices.
+
+    A kernel is covered when its device computation maps to a category the
+    projection costed for that kernel's phase, or when the profile itself
+    recorded its FLOPs and bytes. Communication is outside the roofline and
+    is left out of both sides. The same kernel in two phases is one name,
+    and its time is the sum.
+    """
+    if not kernels:
+        return None
+    known = _modeled_categories(regimes)
+    any_known = set().union(*known.values()) if known else set()
+    total = 0.0
+    covered = 0.0
+    unmodeled: dict[str, float] = {}
+    for kernel in kernels:
+        name = str(kernel["name"])
+        if is_communication(name):
+            continue
+        time_us = float(kernel.get("time_us") or 0.0)
+        if time_us <= 0:
+            continue
+        total += time_us
+        phase = kernel_phase(name)
+        priced = known.get(phase, any_known) if phase else any_known
+        category = report_kernel_category(name)
+        if _has_profile_cost(kernel) or (category and category in priced):
+            covered += time_us
+            continue
+        label = _coverage_kernel_name(name)
+        unmodeled[label] = unmodeled.get(label, 0.0) + time_us
+    if total <= 0:
+        return None
+    unmodeled_time = total - covered
+    listed: tuple[tuple[str, float], ...] = ()
+    if unmodeled_time / total > _UNMODELED_LIST_SHARE:
+        ranked = sorted(unmodeled.items(), key=lambda item: item[1], reverse=True)
+        listed = tuple(
+            (label, time_us / total)
+            for label, time_us in ranked
+            if time_us / total > _UNMODELED_LIST_SHARE
+        )[:_UNMODELED_LIST_LIMIT]
+    return ModelCoverage(
+        covered_share=covered / total,
+        unmodeled_count=len(unmodeled),
+        unmodeled_share=unmodeled_time / total,
+        listed=listed,
+    )
+
+
+def model_coverage_note(coverage: ModelCoverage) -> str:
+    """The legend note: coverage, then the unmodeled kernels worth naming."""
+    lines = [
+        "Performance models cover "
+        f"{coverage.covered_share * 100:.1f}% of kernel time."
+    ]
+    if coverage.unmodeled_share > _UNMODELED_LIST_SHARE:
+        lines.append(
+            f"{coverage.unmodeled_count} kernels are unmodeled "
+            f"({coverage.unmodeled_share * 100:.1f}% of kernel time)."
+        )
+        if coverage.listed:
+            shown = ", ".join(
+                f"{name} ({share * 100:.1f}%)" for name, share in coverage.listed
+            )
+            lines.append(f"Top unmodeled kernels: {shown}.")
+    wrapped = [
+        textwrap.fill(line, width=118, break_long_words=False) for line in lines
+    ]
+    return "\n".join(wrapped)
+
+
 def plot_e2e_roofline(
     points: list[RooflinePoint],
     arch: dict[str, Any],
@@ -1076,6 +1197,7 @@ def plot_e2e_roofline(
     title: str,
     output_path: Path,
     series: tuple[Series, ...] = DEFAULT_SERIES,
+    kernels: list[dict[str, Any]] | None = None,
 ):
     """Draw the log-log roofline and write it to ``output_path``."""
     import matplotlib.pyplot as plt
@@ -1303,7 +1425,7 @@ def plot_e2e_roofline(
             )
         )
         labels.append(f"Concurrency {concurrency}")
-    ax.legend(
+    legend = ax.legend(
         handles,
         labels,
         loc="upper center",
@@ -1316,6 +1438,21 @@ def plot_e2e_roofline(
     ax.set_ylabel("TFLOP/s per GPU while the operation runs")
     ax.set_title(title)
     fig.tight_layout()
+    coverage = model_coverage(regimes, kernels) if kernels else None
+    if coverage is not None and legend is not None:
+        fig.canvas.draw()
+        below = legend.get_window_extent(fig.canvas.get_renderer())
+        below = below.transformed(fig.transFigure.inverted())
+        fig.text(
+            0.5,
+            below.y0 - 0.012,
+            model_coverage_note(coverage),
+            ha="center",
+            va="top",
+            fontsize=8,
+            color="0.2",
+            linespacing=1.4,
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -1454,6 +1591,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("pass --gpu-arch-name or --gpu-arch-json-path")
         regimes: list[Regime] = []
         series = DEFAULT_SERIES
+        kernels = None
         if args.profile_costs:
             if args.profile_dir is None:
                 raise ValueError("--profile-costs needs --profile-dir")
@@ -1489,7 +1627,13 @@ def main(argv: list[str] | None = None) -> int:
         print("e2e_roofline: no points to plot", file=sys.stderr)
         return 1
     plot_e2e_roofline(
-        points, arch, regimes, title=args.title, output_path=args.output, series=series
+        points,
+        arch,
+        regimes,
+        title=args.title,
+        output_path=args.output,
+        series=series,
+        kernels=kernels,
     )
     for point in points:
         print(
