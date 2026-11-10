@@ -192,6 +192,72 @@ def test_distributed_degree_value_resolves_group_object_and_standalone_styles():
     assert _distributed_degree_value(_expr("config.hidden")) is None
 
 
+def test_distributed_degree_value_reads_every_recorded_group():
+    """A run that recorded its process groups supplies each axis, not only TP."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        RUNTIME_REGIME_KEY,
+        RuntimeRegime,
+        _config_value,
+        _distributed_degree_value,
+        _distributed_single_rank_predicate,
+    )
+    from TraceLens.ModelUtils.parallel_plan import ParallelDegree
+
+    parallel = ParallelDegree(
+        tp=8,
+        pp=2,
+        ep=4,
+        dp=2,
+        cp=2,
+        groups={
+            "tp": 8,
+            "moe_ep": 4,
+            "moe_dp": 2,
+            "attn_cp": 2,
+            "pp": 2,
+        },
+    )
+    assert (
+        _distributed_degree_value(_expr("get_parallel().attn_tp_size"), parallel) == 8
+    )
+    assert _distributed_degree_value(_expr("get_parallel().moe_ep_size"), parallel) == 4
+    assert _distributed_degree_value(_expr("get_parallel().moe_dp_size"), parallel) == 2
+    assert (
+        _distributed_degree_value(_expr("get_parallel().attn_cp_size"), parallel) == 2
+    )
+    assert _distributed_degree_value(_expr("get_parallel().pp_size"), parallel) == 2
+    assert _distributed_degree_value(_expr("get_parallel().moe_ep_rank"), parallel) == 0
+    assert (
+        _distributed_degree_value(_expr("get_expert_parallel_world_size()"), parallel)
+        == 4
+    )
+    assert (
+        _distributed_degree_value(_expr("get_data_parallel_world_size()"), parallel)
+        == 2
+    )
+    assert (
+        _distributed_degree_value(
+            _expr("get_context_model_parallel_world_size()"), parallel
+        )
+        == 2
+    )
+    assert _distributed_single_rank_predicate(
+        _expr("self.pp_group.is_first_rank"), parallel
+    )
+    assert not _distributed_single_rank_predicate(
+        _expr("self.pp_group.is_last_rank"), parallel
+    )
+    assert not _distributed_single_rank_predicate(
+        _expr("self.pp_group.is_only_rank"), parallel
+    )
+    # No recorded degree: rank 0 of a single pipeline stage is every predicate.
+    assert _distributed_single_rank_predicate(_expr("self.pp_group.is_last_rank"))
+
+    config = {RUNTIME_REGIME_KEY: RuntimeRegime(parallel=parallel)}
+    assert _config_value(_expr("get_parallel().moe_dp_size"), config, {}) == 2
+    assert _config_value(_expr("self.pp_group.is_last_rank"), config, {}) is False
+
+
 def test_config_value_caps_a_distributed_degree_with_min_and_max():
     """``self.idx_head_tp_size = min(attn_tp_size, self.total_idx_heads)`` --
     once the parallelism accessor above resolves to a concrete int, capping it

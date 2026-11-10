@@ -28,7 +28,7 @@ _log = logging.getLogger(__name__)
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
 from TraceLens.ModelUtils.config_resolve import apply_config_attribute_aliases
 from TraceLens.ModelUtils.github import pinned_module_origin
-from TraceLens.ModelUtils.parallel_plan import _ENGINE_LINEAR_STYLES
+from TraceLens.ModelUtils.parallel_plan import ParallelDegree, _ENGINE_LINEAR_STYLES
 
 DECODER_CLASS_RE = re.compile(
     r"(DecoderLayer|DecoderBlock|TransformerBlock|ModelBlock|Block)$",
@@ -2321,6 +2321,11 @@ class RuntimeRegime:
     #: an answer this flag already has. Defaults to AMD's accelerator, this
     #: repo's own vendor.
     device: str = "hip"
+    #: Process-group sizes for this run. ``None`` leaves every axis at degree
+    #: 1, which is the unsharded constructor math ``parallel_plan`` later
+    #: localizes. A trace's ``distributedInfo`` fills this with every group
+    #: the run created, and shape inference reads those sizes.
+    parallel: ParallelDegree | None = None
 
     SEQUENCE_LAYOUTS = ("rectangular", "packed")
     PHASES = ("prefill", "decode")
@@ -6230,25 +6235,44 @@ _MODULE_REF = object()
 # back to ``_UNKNOWN`` so arithmetic/comparison folding stays value-based.
 _SCALAR_SETTING = object()
 # A distributed-parallelism group getter -- SGLang's ``get_parallel()`` --
-# whose own ``*_size``/``*_rank`` attribute (``get_parallel().attn_tp_size``)
-# this module has no distributed runtime to ask. Resolving it as though the
-# AST were running at world size 1, rank 0 is what every shape rule downstream
-# already expects: constructor math built from it (``self.num_heads =
-# self.total_num_heads // attn_tp_size``) settles to the *full*, unsharded
-# count, and the later, structural GPU-group localization pass
-# (``parallel_plan.py``) is what divides a module's declared full shape down
-# to one GPU's share -- not a second, AST-level guess at the real degree.
+# whose ``*_size``/``*_rank`` attribute (``get_parallel().attn_tp_size``,
+# ``.moe_ep_size``, ``.moe_dp_size``, ``.attn_cp_size``, ``.pp_size``) names a
+# process group. With no degree recorded on the regime, the accessor resolves
+# as world size 1, rank 0: constructor math (``self.num_heads =
+# self.total_num_heads // attn_tp_size``) settles to the full, unsharded
+# count, and ``parallel_plan.py`` divides that down to one GPU. When the run
+# records its groups (``RuntimeRegime.parallel``, from the trace's
+# ``distributedInfo``), each accessor reads that group's size instead. The
+# drawing is rank 0 of every group, so a rank accessor stays 0.
 _PARALLEL_GROUP_GETTER_NAMES = frozenset({"get_parallel"})
-# vLLM's standalone equivalents of the same two attributes, called directly
-# rather than through a group object.
-_PARALLEL_WORLD_SIZE_FUNCS = frozenset({"get_tensor_model_parallel_world_size"})
-_PARALLEL_RANK_FUNCS = frozenset({"get_tensor_model_parallel_rank"})
+# vLLM's standalone equivalents, called directly rather than through a group
+# object. The value is the process-group name :meth:`ParallelDegree.size` reads.
+_PARALLEL_FUNC_GROUPS = {
+    "get_tensor_model_parallel_world_size": "tp",
+    "get_tensor_model_parallel_rank": "tp",
+    "get_pipeline_model_parallel_world_size": "pp",
+    "get_pipeline_model_parallel_rank": "pp",
+    "get_expert_model_parallel_world_size": "moe_ep",
+    "get_expert_model_parallel_rank": "moe_ep",
+    "get_expert_parallel_world_size": "moe_ep",
+    "get_expert_parallel_rank": "moe_ep",
+    "get_data_parallel_world_size": "dp",
+    "get_data_parallel_rank": "dp",
+    "get_context_model_parallel_world_size": "attn_cp",
+    "get_context_model_parallel_rank": "attn_cp",
+}
+_PARALLEL_WORLD_SIZE_FUNCS = frozenset(
+    name for name in _PARALLEL_FUNC_GROUPS if name.endswith("_world_size")
+)
+_PARALLEL_RANK_FUNCS = frozenset(
+    name for name in _PARALLEL_FUNC_GROUPS if name.endswith("_rank")
+)
 # Pipeline-parallel single-rank predicates read off a group object stashed on
 # ``self`` in ``__init__`` (``self.pp_group = get_parallel().pp_group``), then
-# tested in ``forward`` (``if self.pp_group.is_first_rank:``). At the same
-# assumed world size 1 as ``_PARALLEL_GROUP_GETTER_NAMES``, rank 0 is every one
-# of these simultaneously, so each resolves to ``True`` regardless of the base
-# expression it is read off -- the name alone is unambiguous.
+# tested in ``forward`` (``if self.pp_group.is_first_rank:``). The drawing is
+# rank 0. At pipeline degree 1 that rank is first, last, and only, so each
+# predicate is ``True``. A recorded ``pp`` size above 1 leaves rank 0 first
+# and not last.
 _PP_SINGLE_RANK_ATTRS = frozenset(
     {"is_first_rank", "is_last_rank", "is_only_rank", "is_last_or_only_rank"}
 )
@@ -6952,13 +6976,18 @@ def _nested_call_param_values(
     return None
 
 
-def _distributed_degree_value(node: ast.AST) -> int | None:
-    """World size (1) or rank (0) for a distributed-parallelism accessor, else ``None``.
+def _parallel_on(config: dict | None) -> ParallelDegree | None:
+    """The run's process-group sizes, when the regime recorded them."""
+    regime = (config or {}).get(RUNTIME_REGIME_KEY)
+    parallel = getattr(regime, "parallel", None)
+    return parallel if isinstance(parallel, ParallelDegree) else None
 
-    Covers both call shapes seen across engines: SGLang's group-object style
-    (``get_parallel().attn_tp_size``/``.attn_tp_rank``) and vLLM's standalone
-    functions (``get_tensor_model_parallel_world_size()``/``_rank()``). See
-    ``_PARALLEL_GROUP_GETTER_NAMES`` for why world size resolves to 1, rank to 0.
+
+def _parallel_group_of(node: ast.AST) -> tuple[str, bool] | None:
+    """``(group name, is_rank)`` for a parallelism accessor, else ``None``.
+
+    ``get_parallel().moe_ep_size`` is ``("moe_ep", False)``. A vLLM
+    ``get_data_parallel_rank()`` is ``("dp", True)``.
     """
     if (
         isinstance(node, ast.Attribute)
@@ -6967,26 +6996,60 @@ def _distributed_degree_value(node: ast.AST) -> int | None:
         and node.value.func.id in _PARALLEL_GROUP_GETTER_NAMES
     ):
         if node.attr.endswith("_size"):
-            return 1
+            return node.attr[: -len("_size")], False
         if node.attr.endswith("_rank"):
-            return 0
+            return node.attr[: -len("_rank")], True
         return None
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        if node.func.id in _PARALLEL_WORLD_SIZE_FUNCS:
-            return 1
-        if node.func.id in _PARALLEL_RANK_FUNCS:
-            return 0
+        group = _PARALLEL_FUNC_GROUPS.get(node.func.id)
+        if group is None:
+            return None
+        return group, node.func.id in _PARALLEL_RANK_FUNCS
     return None
 
 
-def _distributed_single_rank_predicate(node: ast.AST) -> bool | None:
-    """``True`` for a pipeline-parallel single-rank attribute read, else ``None``.
+def _distributed_degree_value(
+    node: ast.AST, parallel: ParallelDegree | None = None
+) -> int | None:
+    """Size or rank of a distributed-parallelism accessor, else ``None``.
 
-    See ``_PP_SINGLE_RANK_ATTRS``.
+    Covers both call shapes seen across engines: SGLang's group-object style
+    (``get_parallel().attn_tp_size``/``.moe_ep_size``/``.moe_dp_size``/
+    ``.attn_cp_size``/``.pp_size``) and vLLM's standalone functions
+    (``get_tensor_model_parallel_world_size()``, and the pipeline, expert,
+    data, and context equivalents). With no recorded degree every size is 1.
+    A recorded :class:`ParallelDegree` supplies the size of the named group.
+    The drawing is rank 0, so a rank accessor is 0.
     """
-    if isinstance(node, ast.Attribute) and node.attr in _PP_SINGLE_RANK_ATTRS:
-        return True
-    return None
+    found = _parallel_group_of(node)
+    if found is None:
+        return None
+    name, is_rank = found
+    if is_rank:
+        return 0
+    if parallel is None:
+        return 1
+    return parallel.size(name)
+
+
+def _distributed_single_rank_predicate(
+    node: ast.AST, parallel: ParallelDegree | None = None
+) -> bool | None:
+    """A pipeline-parallel single-rank predicate, else ``None``.
+
+    See ``_PP_SINGLE_RANK_ATTRS``. Rank 0 of a degree-1 pipeline is first,
+    last, and only. A larger recorded ``pp`` size leaves it first only.
+    """
+    if not (isinstance(node, ast.Attribute) and node.attr in _PP_SINGLE_RANK_ATTRS):
+        return None
+    size = 1 if parallel is None else parallel.size("pp")
+    last = size <= 1
+    return {
+        "is_first_rank": True,
+        "is_last_rank": last,
+        "is_only_rank": last,
+        "is_last_or_only_rank": last,
+    }[node.attr]
 
 
 def _config_value(
@@ -6996,10 +7059,11 @@ def _config_value(
     param_values: dict[str, Any] | None = None,
 ) -> Any:
     """Evaluate the small literal/config expression subset used by model constructors."""
-    degree = _distributed_degree_value(node)
+    parallel = _parallel_on(config)
+    degree = _distributed_degree_value(node, parallel)
     if degree is not None:
         return degree
-    single_rank = _distributed_single_rank_predicate(node)
+    single_rank = _distributed_single_rank_predicate(node, parallel)
     if single_rank is not None:
         return single_rank
     if isinstance(node, ast.Constant):

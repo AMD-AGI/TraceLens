@@ -1293,6 +1293,15 @@ GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
 GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
 GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
 
+# Product name, without a trailing X, to the gfx arch. Origami and the
+# inference report both start from a product name such as MI355X.
+PRODUCT_GFX = {
+    "mi300": "gfx942",
+    "mi325": "gfx942",
+    "mi350": "gfx950",
+    "mi355": "gfx950",
+}
+
 
 class RocprofParser:
     """Parser for rocprofiler-sdk JSON format (rocprofv3)"""

@@ -107,7 +107,7 @@ The prompt selects the input mode:
      3. **Graph replay only** (`<inference_exec_mode>` = `graph_replay_only`) — graph replay with no capture folder available:
      - `standalone`, `multi_trace`: continue without a capture folder; the Step 2 gate routes to the deterministic fallback.
      - `comparative`: use scope `semantic`.
-     - DeepSeek-V4: if the user has the served model's Hugging Face `config.json` and the tensor-parallel size of the traced rank, set top-level `graph_model_config_path` and `graph_model_tp` on the run config. The report then fills graph-kernel shapes from the model schedule. This does not restore call stacks, and the orchestrator does not ask for the two keys unless the user already has them. See [Shapes from the model config](../../../../../docs/how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config).
+     - DeepSeek-V4: if the user has the served model's Hugging Face `config.json`, set top-level `graph_model_config_path` on the run config. The report reads the tensor-parallel degree from the trace's `tp` process group and fills graph-kernel shapes from the model schedule. This does not restore call stacks, and the orchestrator does not ask for the key unless the user already has the config. See [Shapes from the model config](../../../../../docs/how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config).
 
 5. **Environment Setup**
    - Ask: "Are you running locally or on a cluster?"

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import ast
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from TraceLens.TraceUtils.utils.annotation_utils import parse_annotation
 
@@ -71,9 +71,27 @@ class GraphModel:
     # ``engine_facts``), as ``(name, value)`` pairs. A fact that is absent
     # leaves the launch shapes that depend on it out.
     facts: tuple[tuple[str, object], ...] = ()
+    # Every process group the trace recorded (``tp``, ``moe_ep``, ``moe_dp``,
+    # ``attn_cp``, ``pp``, ...). Empty means only ``tp`` shards, at ``self.tp``.
+    groups: dict[str, int] = field(default_factory=dict)
 
     def fact(self, name: str, default=None):
         return dict(self.facts).get(name, default)
+
+    def degree(self, name: str) -> int:
+        """The size of one parallelism axis on this GPU's run.
+
+        ``moe_ep`` is the expert-parallel group, ``moe_tp`` the tensor
+        parallel group inside an expert, ``attn_tp`` the attention group,
+        ``attn_cp`` context parallel, ``moe_dp`` expert data parallel, ``pp``
+        pipeline. A group the trace did not create is 1, except the tensor
+        axes, which fall back to ``tp``.
+        """
+        from TraceLens.ModelUtils.parallel_plan import ParallelDegree
+
+        recorded = dict(self.groups)
+        recorded.setdefault("tp", self.tp)
+        return ParallelDegree(tp=self.tp, groups=recorded).size(name)
 
     def __post_init__(self) -> None:
         if self.tp < 1:
@@ -122,8 +140,14 @@ class Launch:
     same_call: bool = False
 
 
-def graph_model_from_config(config: dict, tp: int) -> GraphModel:
-    """Build a :class:`GraphModel` from a Hugging Face ``config.json``."""
+def graph_model_from_config(
+    config: dict, tp: int, groups: dict | None = None
+) -> GraphModel:
+    """Build a :class:`GraphModel` from a Hugging Face ``config.json``.
+
+    ``groups`` is every process-group size the trace recorded. Tensor parallel
+    is also ``tp``, so a caller that only knows that degree still shards.
+    """
     ratios = config.get("compress_ratios") or ()
     quant = config.get("quantization_config") or {}
     block = quant.get("weight_block_size") or ()
@@ -154,7 +178,28 @@ def graph_model_from_config(config: dict, tp: int) -> GraphModel:
         max_position_embeddings=int(config.get("max_position_embeddings") or 0),
         capture_buckets=tuple(int(size) for size in buckets),
         sliding_window=int(config.get("sliding_window") or 0),
+        groups={**dict(groups or {}), "tp": int((groups or {}).get("tp", tp))},
     )
+
+
+def tp_from_trace(metadata: dict | None) -> int | None:
+    """Tensor-parallel degree recorded on the trace's ``distributedInfo``.
+
+    The ``tp`` process group (``tp:device`` and its ``tp:cpu`` twin). A trace
+    whose only world has one rank is not sharded. A trace with no such group,
+    or whose device and cpu groups disagree, does not say. Every other group
+    is :func:`parallel_degree_from_trace`.
+    """
+    from TraceLens.ModelUtils.parallel_plan import parallel_degree_from_trace
+
+    degree = parallel_degree_from_trace(metadata)
+    if degree is None:
+        return None
+    if "tp" in degree.groups:
+        return degree.groups["tp"]
+    if degree.groups.get("world") == 1:
+        return 1
+    return None
 
 
 def num_cus_from_trace(metadata: dict | None) -> int | None:
@@ -781,18 +826,29 @@ def _shuffled_scale(rows: int, cols: int) -> tuple[int, int]:
     return ((rows + 255) // 256 * 256, (cols + 7) // 8 * 8)
 
 
+def _resident_experts(model: GraphModel) -> int:
+    """Routed experts that live on this GPU, plus the shared expert.
+
+    Expert parallel splits the routed set. The shared expert is replicated,
+    so it stays on every rank. The gate still scores the full routed set.
+    """
+    routed = model.n_routed_experts // model.degree("moe_ep")
+    return routed + model.n_shared_experts
+
+
 def _moe_signature(model: GraphModel, tokens: int, hidden: int, scales: bool = False):
     """The fused MoE call, or ``None`` when the experts are not FP4.
 
     FP4 experts are stored packed: ``w13`` is ``(E, 2 * inter_local, hidden/2)``
-    and ``w2`` is ``(E, hidden, inter_local/2)``. ``E`` counts the routed
-    experts plus the shared one, and ``inter_local`` is the intermediate
-    sharded by tensor parallel. The top-k width includes that shared expert.
+    and ``w2`` is ``(E, hidden, inter_local/2)``. ``E`` is the routed experts
+    on this GPU (the expert-parallel group) plus the shared one, and
+    ``inter_local`` is the intermediate sharded by the expert tensor-parallel
+    group. The top-k width includes that shared expert.
     """
     if model.expert_dtype != "fp4":
         return None
-    inter = model.moe_intermediate_size // model.tp
-    experts = model.n_routed_experts + model.n_shared_experts
+    inter = model.moe_intermediate_size // model.degree("moe_tp")
+    experts = _resident_experts(model)
     topk = model.num_experts_per_tok + model.n_shared_experts
     shapes = (
         (tokens, hidden),
@@ -851,8 +907,8 @@ def _moe_sort_shapes(model: GraphModel, tokens: int, hidden: int, stage: int) ->
     if model.expert_dtype != "fp4":
         return None
     topk = model.num_experts_per_tok + model.n_shared_experts
-    experts = model.n_routed_experts + model.n_shared_experts
-    inter = model.moe_intermediate_size // model.tp
+    experts = _resident_experts(model)
+    inter = model.moe_intermediate_size // model.degree("moe_tp")
     block = _moe_block_m(model, tokens, topk, experts, inter)
     if block is None:
         return None
@@ -931,8 +987,8 @@ def _opus_stage2_shapes(model: GraphModel, tokens: int, hidden: int):
     if not contract or model.expert_dtype != "fp4":
         return None
     topk = model.num_experts_per_tok + model.n_shared_experts
-    experts = model.n_routed_experts + model.n_shared_experts
-    inter = model.moe_intermediate_size // model.tp
+    experts = _resident_experts(model)
+    inter = model.moe_intermediate_size // model.degree("moe_tp")
     block = _moe_block_m(model, tokens, topk, experts, inter)
     if block is None:
         return None
@@ -1137,7 +1193,9 @@ def _mla_splits(model: GraphModel, tokens: int) -> int:
     """
     if not model.num_cus:
         return 0
-    occupancy = tokens * max(1, math.ceil(model.num_attention_heads // model.tp / 64))
+    occupancy = tokens * max(
+        1, math.ceil(model.num_attention_heads // model.degree("attn_tp") / 64)
+    )
     fill = [
         (
             occupancy
@@ -1416,24 +1474,27 @@ def _hc_head_shapes(model: GraphModel, tokens: int, hidden: int) -> tuple:
 def schedule_deepseek_v4(model: GraphModel, invocation: Invocation) -> list[Launch]:
     """Ordered launches of one DeepSeek-V4 graph at ``invocation``.
 
-    Shapes are the tensors the SGLang modules are constructed with, sharded by
-    ``model.tp`` the way those modules shard them: ``wq_a`` is replicated,
-    ``wq_b`` and ``wo_b`` are column- and row-parallel on the attention group,
-    and the routed experts stay on this GPU (expert parallel degree 1).
+    Shapes are the tensors the SGLang modules are constructed with, sharded
+    the way those modules shard them: ``wq_a`` is replicated, ``wq_b`` and
+    ``wo_b`` are column- and row-parallel on the attention group, the routed
+    experts split across the expert-parallel group, and the expert
+    intermediate splits across the expert tensor-parallel group. A group the
+    trace did not create has degree 1.
     """
     t = replay_size(invocation.tokens, model.capture_buckets)
     h = model.hidden_size
-    tp = model.tp
+    tp = model.degree("tp")
+    attn = model.degree("attn_tp")
     q_lora = model.q_lora_rank
     heads = model.num_attention_heads
     head = model.head_dim
-    local_heads = heads // tp
-    q_b_out = heads * head // tp
+    local_heads = heads // attn
+    q_b_out = heads * head // attn
     groups = model.o_groups
     o_lora = model.o_lora_rank
     wo_in = heads * head // groups
-    local_groups = groups // tp
-    wo_b_k = groups * o_lora // tp
+    local_groups = groups // attn
+    wo_b_k = groups * o_lora // attn
     inter = model.moe_intermediate_size
     experts = model.n_routed_experts
     topk = model.num_experts_per_tok
@@ -1559,7 +1620,7 @@ def _schedule_prefill(
     for layer in range(model.num_hidden_layers):
         ratio = model.compress_ratios[layer]
         kv = _kv_span(invocation.past_len, invocation.seq_len, ratio)
-        q = (t, model.num_attention_heads // model.tp, head)
+        q = (t, model.num_attention_heads // model.degree("attn_tp"), head)
         launches.extend(
             _prefill_attention(
                 model,
@@ -1698,7 +1759,11 @@ def _prefill_attention(
             _launch(
                 "sglang::apply_rotary_emb",
                 "rope",
-                _rope_shapes(model, t, model.num_attention_heads // model.tp),
+                _rope_shapes(
+                    model,
+                    t,
+                    model.num_attention_heads // model.degree("attn_tp"),
+                ),
                 layer,
             ),
             _launch(
@@ -1826,7 +1891,9 @@ def _prefill_moe(model, layer, t, h, inter, experts, routed) -> list[Launch]:
         )
     packed = _moe_signature(model, t, h)
     scaled = _moe_signature(model, t, h, scales=True) if packed else None
-    local_inter = model.moe_intermediate_size // model.tp if packed else inter
+    local_inter = (
+        model.moe_intermediate_size // model.degree("moe_tp") if packed else inter
+    )
     for _phase in range(4):
         block.append(
             _launch("aiter::moe_sorting_opus_fwd", "opus_sort", ((t, experts),), layer)
@@ -2405,14 +2472,14 @@ def _logits_tail(model: GraphModel, tokens: int, hidden: int) -> list[Launch]:
     The gathered ``(tp, tokens, vocab / tp)`` shards move to ``(tokens, tp,
     vocab / tp)``, a copy once there is more than one token to interleave.
     """
-    local_vocab = model.vocab_size // model.tp
+    local_vocab = model.vocab_size // model.degree("tp")
     launches = [
         _final_norm(tokens, hidden),
         _launch("aten::mm", "tensile", ((tokens, hidden), (hidden, local_vocab)), None),
         _launch(
             "aiter::reg_all_gather",
             "allgather",
-            ((model.tp * tokens, local_vocab), (tokens, local_vocab)),
+            ((model.degree("tp") * tokens, local_vocab), (tokens, local_vocab)),
             None,
         ),
     ]
@@ -2420,8 +2487,8 @@ def _logits_tail(model: GraphModel, tokens: int, hidden: int) -> list[Launch]:
         # The all-gather buffer is ``(tp, tokens, vocab / tp)``, contiguous.
         # ``permute(1, 0, 2)`` moves it to ``(tokens, tp, vocab / tp)``, so the
         # source strides follow that order and the destination is packed.
-        gathered = (tokens, model.tp, local_vocab)
-        packed = _row_major((model.tp, tokens, local_vocab))
+        gathered = (tokens, model.degree("tp"), local_vocab)
+        packed = _row_major((model.degree("tp"), tokens, local_vocab))
         src_stride = (packed[1], packed[0], packed[2])
         launches.append(_copy(gathered, _BF16, _BF16, src_stride=src_stride))
     logits = (tokens, model.vocab_size)
@@ -2753,7 +2820,9 @@ def _topk_main_shapes(model, pools, t, kv):
 def _moe_block(model, layer, t, h, inter, experts, routed, last: bool) -> list[Launch]:
     packed = _moe_signature(model, t, h)
     scaled = _moe_signature(model, t, h, scales=True) if packed else None
-    local_inter = model.moe_intermediate_size // model.tp if packed else inter
+    local_inter = (
+        model.moe_intermediate_size // model.degree("moe_tp") if packed else inter
+    )
     block = [
         _launch(
             "aiter::mhc_pre_big_fuse_rmsnorm",

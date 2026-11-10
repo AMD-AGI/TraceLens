@@ -1325,6 +1325,30 @@ def test_resolve_dim_expr_distributed_degree_and_min_max():
         )
         == 0
     )
+    from TraceLens.ModelUtils.ast_analyze import RUNTIME_REGIME_KEY, RuntimeRegime
+    from TraceLens.ModelUtils.parallel_plan import ParallelDegree
+
+    sharded = {
+        **config,
+        RUNTIME_REGIME_KEY: RuntimeRegime(
+            parallel=ParallelDegree(
+                groups={"tp": 8, "moe_ep": 4, "moe_dp": 2, "attn_cp": 2, "pp": 2}
+            )
+        ),
+    }
+    for src, size in (
+        ("get_parallel().attn_tp_size", 8),
+        ("get_parallel().moe_ep_size", 4),
+        ("get_parallel().moe_dp_size", 2),
+        ("get_parallel().attn_cp_size", 2),
+        ("get_parallel().pp_size", 2),
+        ("get_data_parallel_world_size()", 2),
+        ("get_parallel().moe_ep_rank", 0),
+    ):
+        assert (
+            _resolve_dim_expr(_expr(src), config=sharded, local_vars={}, context=ctx)
+            == size
+        )
     assert (
         _resolve_dim_expr(
             _expr("get_parallel().pp_group"), config=config, local_vars={}, context=ctx

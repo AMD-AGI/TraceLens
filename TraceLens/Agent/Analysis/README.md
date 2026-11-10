@@ -325,7 +325,7 @@ The orchestrator supports two analysis modes, selected during Step 0. Step 1 run
 
 For inference mode, the orchestrator also asks for the execution mode:
 - **Eager mode** — only the trace file is needed
-- **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree. A DeepSeek-V4 replay can omit the capture folder and set `graph_model_config_path` and `graph_model_tp` on the run config. See [Shapes from the model config](../../../docs/how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config). The orchestrator does not ask for those two keys.
+- **Graph replay + capture** — requires a capture folder path; the script automatically classifies graph capture traces and merges call-stack/shape information into the graph replay tree. A DeepSeek-V4 replay can omit the capture folder and set `graph_model_config_path` on the run config. The report reads the tensor-parallel degree from the trace. See [Shapes from the model config](../../../docs/how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config). The orchestrator does not ask for that key.
 
 ### Execution Environments
 

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from TraceLens.TreePerf.graph_schedule import (
     GraphModel,
     Invocation,
+    _moe_signature,
     align_kernels,
     graph_model_from_config,
     invocation_from_annotation,
@@ -20,6 +21,7 @@ from TraceLens.TreePerf.graph_schedule import (
     mhc_fused_split,
     mhc_pre_split,
     num_cus_from_trace,
+    tp_from_trace,
     replay_size,
     schedule_deepseek_v4,
 )
@@ -253,6 +255,77 @@ def test_mhc_split_follows_the_device_policy():
     assert fused.input_shapes[0] == (112, 4, 24)
     assert fused.input_shapes[5] == (4, 4)
     assert fused.input_shapes[7] == (24, 28672)
+
+
+def test_tensor_parallel_degree_comes_from_the_trace_process_group():
+    info = {
+        "distributedInfo": {
+            "world_size": 16,
+            "pg_config": [
+                {"pg_desc": "default_pg", "pg_size": 16},
+                {"pg_desc": "tp:device", "pg_size": 8},
+                {"pg_desc": "tp:cpu", "pg_size": 8},
+                {"pg_desc": "moe_ep:device", "pg_size": 2},
+            ],
+        }
+    }
+    assert tp_from_trace(info) == 8
+    assert tp_from_trace({"distributedInfo": {"world_size": 1}}) == 1
+    assert tp_from_trace({}) is None
+    assert (
+        tp_from_trace(
+            {
+                "distributedInfo": {
+                    "world_size": 8,
+                    "pg_config": [
+                        {"pg_desc": "tp:device", "pg_size": 8},
+                        {"pg_desc": "tp:cpu", "pg_size": 4},
+                    ],
+                }
+            }
+        )
+        is None
+    )
+
+
+def test_every_process_group_is_a_degree():
+    from TraceLens.ModelUtils.parallel_plan import parallel_degree_from_trace
+
+    info = {
+        "distributedInfo": {
+            "world_size": 8,
+            "pg_config": [
+                {"pg_desc": "default_pg", "pg_size": 8},
+                {"pg_desc": "tp:device", "pg_size": 8},
+                {"pg_desc": "tp:cpu", "pg_size": 8},
+                {"pg_desc": "moe_ep:device", "pg_size": 2},
+                {"pg_desc": "moe_dp:device", "pg_size": 4},
+                {"pg_desc": "attn_cp:device", "pg_size": 1},
+                {"pg_desc": "pp:device", "pg_size": 1},
+            ],
+        }
+    }
+    degree = parallel_degree_from_trace(info)
+    assert degree.size("tp") == 8
+    assert degree.size("attn_tp") == 8
+    assert degree.size("moe_tp") == 8
+    assert degree.size("moe_ep") == 2
+    assert degree.size("ep") == 2
+    assert degree.size("moe_dp") == 4
+    assert degree.size("dp") == 4
+    assert degree.size("attn_cp") == 1
+    assert degree.size("pp") == 1
+    assert "default_pg" not in degree.groups
+
+    model = replace(_pro(), groups=dict(degree.groups))
+    signature = _moe_signature(model, 4, model.hidden_size)
+    assert signature[1][0] == 384 // 2 + 1
+    assert signature[1][1] == 2 * (3072 // 8)
+    decode = schedule_deepseek_v4(
+        model, Invocation(batch_size=4, seq_len=1, past_len=0, tokens=4)
+    )
+    local_q = (4, 128 // 8, 512)
+    assert any(shape == local_q for launch in decode for shape in launch.input_shapes)
 
 
 def test_compute_units_come_from_the_trace_device_block():

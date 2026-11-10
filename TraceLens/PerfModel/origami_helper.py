@@ -15,6 +15,8 @@ import sys
 import warnings
 from math import ceil, gcd
 
+from TraceLens.util import PRODUCT_GFX
+
 # Loaded on first use, so importing TraceLens doesn't load Origami's libraries.
 origami = None
 
@@ -466,13 +468,7 @@ class OrigamiHelper:
         arch_name = arch_name.lower()
         if arch_name.endswith("x"):
             arch_name = arch_name[:-1]
-        name_to_arch = {
-            "mi300": "gfx942",
-            "mi325": "gfx942",
-            "mi350": "gfx950",
-            "mi355": "gfx950",
-        }
-        arch_name = name_to_arch.get(arch_name, arch_name)
+        arch_name = PRODUCT_GFX.get(arch_name, arch_name)
 
         # The origami python bindings only support the 3xx series.
         # Compute units and LDS come from the trace. L2 is not in the trace.
