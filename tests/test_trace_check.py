@@ -480,27 +480,6 @@ class TestPostReportChecks:
         )
         assert any("ops have shapes" in f.message for f in report.findings)
 
-    def test_high_idle_ops_detected(self, monkeypatch):
-        import pandas as pd
-
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = {
-            "gpu_timeline": pd.DataFrame({"type": ["idle_time"], "percent": [5.0]}),
-            "ops_summary": pd.DataFrame({"name": ["op"], "Count": [1]}),
-            "ops_unique_args": pd.DataFrame(
-                {
-                    "name": ["op"],
-                    "Input Dims": [[[1]]],
-                    "total_subtree_kernel_time_sum": [100.0],
-                    "total_direct_kernel_time_sum": [10.0],
-                }
-            ),
-        }
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert any("non-kernel time" in f.message for f in report.findings)
-
     def test_attention_kernel_count_skipped_for_pytorch(self, monkeypatch):
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
         dfs = self._make_dfs()
@@ -545,32 +524,6 @@ class TestPostReportChecks:
             pre_report=False, dfs=dfs, framework="pytorch"
         )
         assert not any("ops have shapes" in f.message for f in report.findings)
-
-    def test_high_idle_ops_none_detected(self, monkeypatch):
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = self._make_dfs()
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert not any("non-kernel time" in f.message for f in report.findings)
-
-    def test_high_idle_ops_skips_zero_subtree(self, monkeypatch):
-        import pandas as pd
-
-        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
-        dfs = self._make_dfs()
-        dfs["ops_unique_args"] = pd.DataFrame(
-            {
-                "name": ["op"],
-                "Input Dims": [[[1]]],
-                "total_subtree_kernel_time_sum": [0.0],
-                "total_direct_kernel_time_sum": [0.0],
-            }
-        )
-        report = trace_check.run_trace_checks(
-            pre_report=False, dfs=dfs, framework="pytorch"
-        )
-        assert not any("non-kernel time" in f.message for f in report.findings)
 
     def test_ops_have_shapes_empty_df(self, monkeypatch):
         import pandas as pd

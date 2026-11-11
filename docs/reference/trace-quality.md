@@ -57,7 +57,6 @@ Checks are organized into four stages:
 | `_check_kernels_dropped_correlation` | post-report | no | all | warn | Checks each CUDA runtime launch event for a matching GPU kernel via correlation ID after tree building. Reports the count of launches with no corresponding kernel. |
 | `_check_gpu_idle` | post-report | yes | all | info | Reads the `idle_time` percent from the report's `gpu_timeline` sheet. Flags at 30% idle. Idle time is expected for CPU-bound or graph-replay workloads, but could be worth looking into otherwise. |
 | `_check_ops_have_shapes` | post-report | yes | all | warn | Checks `Input Dims` coverage in the `ops_unique_args` sheet. Flags below 40% — shape data did not survive through the analysis pipeline. |
-| `_check_high_idle_ops` | post-report | yes | all | warn | Flags operations where `subtree_kernel_time - direct_kernel_time` exceeds 40% of subtree time, indicating significant non-kernel overhead. |
 | `_check_attention_kernel_count` | post-report | yes | JAX | warn | Validates observed attention kernel launches against a model config formula: `num_gpus * num_steps * num_layers * calls * unique_kernels`, computed separately for forward and backward passes. Requires `AttnCountConfig` with `num_layers` and `num_steps` set. |
 
 ## Severity levels

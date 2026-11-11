@@ -132,9 +132,6 @@ class QualityThresholds:
     cpu_gpu_ratio_min: float = 0.2
     cpu_gpu_ratio_max: float = 50.0
 
-    # high-idle ops
-    op_high_idle_pct: float = 40.0
-
 
 @dataclass
 class AttnCountConfig:
@@ -489,33 +486,6 @@ def _check_ops_have_shapes(ctx) -> List[TraceCheck]:
     return []
 
 
-def _check_high_idle_ops(ctx) -> List[TraceCheck]:
-    """Flag ops with a large gap between subtree wall time and kernel time."""
-    dfs, sheets, thr = ctx["dfs"], ctx["sheets"], ctx["thr"]
-    df = dfs.get(sheets["unique_args"])
-    cols = set(df.columns) if df is not None else set()
-    need = {"total_subtree_kernel_time_sum", "total_direct_kernel_time_sum"}
-    if df is None or not need.issubset(cols):
-        return []
-    offenders = 0
-    for _, row in df.iterrows():
-        subtree = float(row["total_subtree_kernel_time_sum"] or 0)
-        direct = float(row["total_direct_kernel_time_sum"] or 0)
-        if subtree <= 0:
-            continue
-        gap_pct = 100.0 * max(0.0, subtree - direct) / subtree
-        if gap_pct >= thr.op_high_idle_pct:
-            offenders += 1
-    if offenders:
-        return [
-            TraceCheck(
-                Status.WARN,
-                f"{offenders} op(s) with >= {thr.op_high_idle_pct}% non-kernel time.",
-            )
-        ]
-    return []
-
-
 def _check_kernel_time_coverage(ctx) -> List[TraceCheck]:
     """Check that kernel time in reports accounts for GPU computation time."""
     dfs, sheets = ctx.get("dfs"), ctx.get("sheets")
@@ -788,7 +758,6 @@ CHECK_REGISTRY = [
     # Post-report, detailed
     (_check_gpu_idle, False, True, None),
     (_check_ops_have_shapes, False, True, None),
-    (_check_high_idle_ops, False, True, None),
     (_check_attention_kernel_count, False, True, "jax"),
 ]
 
