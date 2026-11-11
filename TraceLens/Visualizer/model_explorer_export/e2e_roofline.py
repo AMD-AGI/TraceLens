@@ -8,9 +8,10 @@
 
 FLOPs and bytes come from the profile when its ``GFLOPS`` and ``FLOPS/Byte``
 columns are filled. A kernel the trace could not model (a GPU-graph launch with
-no ``Input Dims``) falls back to the roofline projection. The profile always
-supplies the time. Hardware roofs come from the GPU arch spec (``load_arch``,
-including ``$TL_EXTENSION``).
+no ``Input Dims``) falls back to the roofline projection. The profile supplies
+the time, unless ``--model-only`` is set: then the projection's own roofline
+time is the denominator and no profile is read. Hardware roofs come from the
+GPU arch spec (``load_arch``, including ``$TL_EXTENSION``).
 """
 
 from __future__ import annotations
@@ -88,6 +89,8 @@ class Series:
 # The perf report's catch-all. It is not a series: a kernel that landed here
 # has no category to draw.
 _UNCLASSIFIED = frozenset({"unknown", "other", "others"})
+
+
 def _extra_markers() -> tuple[tuple[int, int, int], ...]:
     """Stars Matplotlib does not already name.
 
@@ -96,11 +99,7 @@ def _extra_markers() -> tuple[tuple[int, int, int], ...]:
     stars do not read as the same glyph. Three-point stars are omitted: they
     read as triangles.
     """
-    return tuple(
-        (sides, 1, angle)
-        for sides in (5, 7, 9, 11)
-        for angle in (45, 60)
-    )
+    return tuple((sides, 1, angle) for sides in (5, 7, 9, 11) for angle in (45, 60))
 
 
 # One shape per report category, in ``GEMM`` then alphabetical order. The
@@ -149,9 +148,7 @@ def report_categories() -> tuple[str, ...]:
     names = set(OP_CATEGORY_REGISTRY.values())
     names.update(category for _pattern, category in OP_CATEGORY_PATTERNS)
     names.update({"elementwise", "reduce", "multi_tensor_apply"})
-    return tuple(
-        sorted(name for name in names if name.lower() not in _UNCLASSIFIED)
-    )
+    return tuple(sorted(name for name in names if name.lower() not in _UNCLASSIFIED))
 
 
 def _category_series(names: tuple[str, ...]) -> tuple[Series, ...]:
@@ -216,7 +213,8 @@ class RooflinePoint:
     bytes: float
     time_us: float
     # ``profile`` when every kernel of the series carried GFLOPS and FLOPS/Byte,
-    # ``export`` when none did, ``mixed`` when the series spans both.
+    # ``export`` when none did, ``mixed`` when the series spans both, ``model``
+    # when the time is the projection's roofline time and no profile was read.
     cost_source: str = "export"
     # Set when the point sits above the roof it can reach. No kernel can run
     # faster than the roof, so the projection's FLOPs or bytes, or the kernels
@@ -357,6 +355,23 @@ def load_profile_json(path: Path) -> list[dict[str, Any]]:
     return kernels
 
 
+def _projection_roofline_time_us(row: dict[str, Any]) -> float:
+    """One forward's roofline time for a projection row.
+
+    ``total_roofline_time_us`` is already scaled by ``instances``. A row that
+    only has the per-launch time is scaled the same way. Zero means the
+    projection did not cost this row.
+    """
+    total = row.get("total_roofline_time_us")
+    if total:
+        return float(total)
+    per_launch = row.get("roofline_time_us")
+    if not per_launch:
+        return 0.0
+    instances = int(row.get("instances") or 0)
+    return float(per_launch) * instances if instances else float(per_launch)
+
+
 def regimes_from_augmentation(payload: dict[str, Any]) -> list[Regime]:
     """Category rollups from ``roofline_augmentation.json``.
 
@@ -384,6 +399,9 @@ def regimes_from_augmentation(payload: dict[str, Any]) -> list[Regime]:
                     "compute_spec": facts.get("compute_spec"),
                     "flops_per_launch": facts.get("flops_per_invocation") or None,
                     "instances": facts.get("invocations") or 0,
+                    # The augmentation already sums one forward. Do not scale
+                    # it by invocations again.
+                    "roofline_time_us": facts.get("roofline_time_us") or 0.0,
                 }
             )
         out.append(
@@ -412,6 +430,7 @@ def regime_from_projection(path: Path, phase: str, concurrency: int) -> Regime:
                 "compute_spec": row.get("compute_spec"),
                 "flops_per_launch": row.get("flops") or None,
                 "instances": row.get("instances") or 0,
+                "roofline_time_us": _projection_roofline_time_us(row),
             }
         )
     return Regime(phase=phase, concurrency=concurrency, ops=tuple(ops))
@@ -1003,6 +1022,63 @@ def _batch_dim(raw: str) -> int | None:
     return None
 
 
+def _model_forward_time_us(ops: list[dict[str, Any]]) -> float | None:
+    """Roofline time of one forward. None when a costed op has no time."""
+    time_us = 0.0
+    for op in ops:
+        if float(op.get("total_flops") or 0.0) <= 0:
+            continue
+        part = op.get("roofline_time_us")
+        if not part:
+            return None
+        time_us += float(part)
+    return time_us
+
+
+def points_from_model(
+    regimes: list[Regime],
+    *,
+    series: tuple[Series, ...] = DEFAULT_SERIES,
+) -> tuple[list[RooflinePoint], list[str]]:
+    """Points from a projection alone.
+
+    X is the projection's FLOPs over its bytes. Y divides those FLOPs by the
+    projection's roofline time, so a single-spec series sits on the roof those
+    shapes imply. No profile is read.
+    """
+    points: list[RooflinePoint] = []
+    warnings: list[str] = []
+    for regime in regimes:
+        for spec in series:
+            if spec.phase is not None and spec.phase != regime.phase:
+                continue
+            chosen = _bucket_ops(regime.ops, spec.categories)
+            flops = sum(float(op.get("total_flops") or 0.0) for op in chosen)
+            nbytes = sum(float(op.get("total_bytes") or 0.0) for op in chosen)
+            if flops <= 0 or nbytes <= 0:
+                continue
+            time_us = _model_forward_time_us(chosen)
+            if time_us is None or time_us <= 0:
+                warnings.append(
+                    f"{spec.label} {regime.phase}: projection has no roofline time"
+                )
+                continue
+            points.append(
+                RooflinePoint(
+                    series=spec.label,
+                    phase=regime.phase,
+                    concurrency=regime.concurrency,
+                    arithmetic_intensity=flops / nbytes,
+                    achieved_tflops=flops / (time_us * 1e-6) / 1e12,
+                    flops=flops,
+                    bytes=nbytes,
+                    time_us=time_us,
+                    cost_source="model",
+                )
+            )
+    return _drop_whole_model_matching_end_to_end(points, warnings), warnings
+
+
 def points_from_report(directory: Path) -> list[RooflinePoint]:
     """Points from a perf report whose graph launches carry Input Dims.
 
@@ -1183,9 +1259,7 @@ def model_coverage_note(coverage: ModelCoverage) -> str:
                 f"{name} ({share * 100:.1f}%)" for name, share in coverage.listed
             )
             lines.append(f"Top unmodeled kernels: {shown}.")
-    wrapped = [
-        textwrap.fill(line, width=118, break_long_words=False) for line in lines
-    ]
+    wrapped = [textwrap.fill(line, width=118, break_long_words=False) for line in lines]
     return "\n".join(wrapped)
 
 
@@ -1198,6 +1272,7 @@ def plot_e2e_roofline(
     output_path: Path,
     series: tuple[Series, ...] = DEFAULT_SERIES,
     kernels: list[dict[str, Any]] | None = None,
+    ylabel: str = "TFLOP/s per GPU while the operation runs",
 ):
     """Draw the log-log roofline and write it to ``output_path``."""
     import matplotlib.pyplot as plt
@@ -1435,7 +1510,7 @@ def plot_e2e_roofline(
         fontsize=8,
     )
     ax.set_xlabel("Arithmetic intensity, FLOP per byte of compulsory HBM traffic")
-    ax.set_ylabel("TFLOP/s per GPU while the operation runs")
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     fig.tight_layout()
     coverage = model_coverage(regimes, kernels) if kernels else None
@@ -1484,7 +1559,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Plot an end-to-end roofline. FLOPs and bytes come from the profile "
             "when it has them, and from a roofline projection otherwise. Y is "
-            "those FLOPs divided by kernel time from the same profile."
+            "those FLOPs divided by kernel time from the same profile. "
+            "--model-only uses the projection's roofline time instead, and "
+            "reads no profile."
         ),
     )
     parser.add_argument("--title", required=True, help="Figure title")
@@ -1525,6 +1602,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile-dir",
         type=Path,
         help="Directory of perf-report *_ops.csv files",
+    )
+    parser.add_argument(
+        "--model-only",
+        action="store_true",
+        help=(
+            "Plot the projection with no profile. Y is one forward's FLOPs "
+            "divided by the projection's roofline time, so each point sits on "
+            "the roof its shapes imply."
+        ),
     )
     parser.add_argument(
         "--profile-costs",
@@ -1592,6 +1678,13 @@ def main(argv: list[str] | None = None) -> int:
         regimes: list[Regime] = []
         series = DEFAULT_SERIES
         kernels = None
+        ylabel = "TFLOP/s per GPU while the operation runs"
+        if args.model_only and (
+            args.profile_costs
+            or args.profile_dir is not None
+            or args.profile_json is not None
+        ):
+            raise ValueError("--model-only does not read a profile")
         if args.profile_costs:
             if args.profile_dir is None:
                 raise ValueError("--profile-costs needs --profile-dir")
@@ -1605,17 +1698,21 @@ def main(argv: list[str] | None = None) -> int:
             regimes.extend(_projection_regime(entry) for entry in args.projection)
             if not regimes:
                 raise ValueError("pass --augmentation or at least one --projection")
-            if args.profile_json is not None:
-                kernels = load_profile_json(args.profile_json)
-            elif args.profile_dir is not None:
-                kernels = load_profile_kernels(args.profile_dir)
+            if args.model_only:
+                points, warnings = points_from_model(regimes, series=series)
+                ylabel = "TFLOP/s per GPU at the roofline"
             else:
-                raise ValueError("pass --profile-dir or --profile-json")
-            includes = _parse_keyed_flag(args.kernels, value_is_float=False)
-            overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
-            points, warnings = build_points(
-                regimes, kernels, includes=includes, time_overrides_us=overrides
-            )
+                if args.profile_json is not None:
+                    kernels = load_profile_json(args.profile_json)
+                elif args.profile_dir is not None:
+                    kernels = load_profile_kernels(args.profile_dir)
+                else:
+                    raise ValueError("pass --profile-dir or --profile-json")
+                includes = _parse_keyed_flag(args.kernels, value_is_float=False)
+                overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
+                points, warnings = build_points(
+                    regimes, kernels, includes=includes, time_overrides_us=overrides
+                )
         points, roof_warnings = flag_points_above_roof(points, arch)
         warnings.extend(roof_warnings)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -1634,6 +1731,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path=args.output,
         series=series,
         kernels=kernels,
+        ylabel=ylabel,
     )
     for point in points:
         print(

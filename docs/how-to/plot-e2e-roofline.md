@@ -30,10 +30,12 @@ the whole forward) at one concurrency.
   whose modeled FLOPs use more than one of those peaks also gets an
   end-to-end blend roof, the FLOP-weighted harmonic mean of the peaks.
 
-A projection alone puts every point on a roof. A profile of a GPU-graph replay
-has kernel time and no `Input Dims`, so those kernels have no `GFLOPS`. The
-plot uses the projection for them and the profile for every kernel the trace
-did model. Whole model is the sum of those categories at one concurrency.
+`--model-only` draws the projection with no profile. Y is then the projection's
+FLOPs divided by its roofline time, so each point sits on the roof its shapes
+imply. A profile of a GPU-graph replay has kernel time and no `Input Dims`, so
+those kernels have no `GFLOPS`. The plot uses the projection for them and the
+profile for every kernel the trace did model. Whole model is the sum of those
+categories at one concurrency.
 
 ## Run the tool
 
@@ -72,6 +74,29 @@ TraceLens_e2e_roofline_plot \
 `--gpu-arch-name` is resolved by `load_arch`. Names that are not in the bundled
 arch directory (`MI300X`, `MI325X`) come from `$TL_EXTENSION`.
 `--gpu-arch-json-path` names a spec file directly.
+
+## Without a profile
+
+`--model-only` reads a projection or an augmentation and no trace. Each point
+is one forward. X is the projection's FLOPs divided by its compulsory bytes.
+Y divides those FLOPs by `total_roofline_time_us` (or `roofline_time_us` on a
+category rollup). A series that uses one compute spec lands on that spec's
+roof. Whole model and end to end sum every category, so they are one point and
+only end to end is drawn. The printed `source` is `model`.
+
+```bash
+TraceLens_model_roofline_projection <checkpoint> \
+    --phase decode --batch-size 48 --seq-len 1 --dim past_len=8192 \
+    --tp 8 --gpu-arch-name MI300X \
+    --output-json decode.json
+
+TraceLens_e2e_roofline_plot \
+    --model-only \
+    --gpu-arch-name MI300X \
+    --projection decode:48:decode.json \
+    --title "decode concurrency 48, model roofline" \
+    --output roofline.png
+```
 
 ## From a report with graph-launch shapes
 

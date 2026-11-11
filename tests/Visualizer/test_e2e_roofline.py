@@ -24,6 +24,7 @@ from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     build_points,
     flag_points_above_roof,
     load_profile_kernels,
+    points_from_model,
     points_from_report,
     main,
     model_coverage,
@@ -221,8 +222,7 @@ def test_a_kernel_is_counted_by_its_computation_not_its_launcher():
         "(Synthetic Op)"
     )
     prepare = (
-        "prefill/vllm::qwen_gdn_attention_core->gdn_prepare_kernel.kd "
-        "(Synthetic Op)"
+        "prefill/vllm::qwen_gdn_attention_core->gdn_prepare_kernel.kd " "(Synthetic Op)"
     )
     post_conv = (
         "prefill/vllm::qwen_gdn_attention_core->_fused_post_conv_kernel.kd "
@@ -644,8 +644,7 @@ def test_coverage_lists_unmodeled_kernels_over_one_percent_of_the_run():
     regime = Regime("prefill", 1, (_op("GEMM", 10.0, 2.0),))
     decode = Regime("decode", 1, (_op("GEMM", 10.0, 2.0),))
     chunk = (
-        "vllm::qwen_gdn_attention_core->chunk_gdn_fwd_h_flydsl_opt.kd "
-        "(Synthetic Op)"
+        "vllm::qwen_gdn_attention_core->chunk_gdn_fwd_h_flydsl_opt.kd " "(Synthetic Op)"
     )
     prepare = "vllm::qwen_gdn_attention_core->gdn_prepare_kernel.kd (Synthetic Op)"
     kernels = [
@@ -763,3 +762,97 @@ def test_cli_warns_when_a_point_is_above_the_roof(tmp_path, capsys):
     )
     assert exit_code == 0
     assert "above the" in capsys.readouterr().err
+
+
+def test_model_only_points_sit_on_the_roof():
+    # 2e8 bytes at 8 TB/s is 25 µs, and 4e9 FLOPs in that time is 160 TFLOP/s,
+    # which is the bandwidth roof at 20 FLOP/byte.
+    regime = Regime(
+        "decode",
+        48,
+        (
+            _op("Attention", 4.0e9, 2.0e8, spec="matrix_bf16"),
+            _op("GEMM", 2.5e10, 2.5e7, spec="matrix_bf16"),
+        ),
+    )
+    regime.ops[0]["roofline_time_us"] = 25.0
+    regime.ops[1]["roofline_time_us"] = 10.0
+    points, warnings = points_from_model([regime])
+    by_series = {point.series: point for point in points}
+    assert "Whole model" not in by_series
+    assert any("Whole model" in warning for warning in warnings)
+    attention = by_series["Decode attention"]
+    assert attention.cost_source == "model"
+    assert attention.arithmetic_intensity == pytest.approx(20.0)
+    assert attention.achieved_tflops == pytest.approx(160.0)
+    assert attention.achieved_tflops == pytest.approx(
+        roof_tflops(attention.arithmetic_intensity, _ARCH)
+    )
+    gemm = by_series["GEMM"]
+    assert gemm.achieved_tflops == pytest.approx(2500.0)
+    assert gemm.time_us == 10.0
+    end = by_series["End to end"]
+    assert end.flops == pytest.approx(2.9e10)
+    assert end.time_us == 35.0
+
+
+def test_model_only_skips_a_series_with_no_roofline_time():
+    regime = Regime("decode", 3, (_op("Attention", 4.0e9, 2.0e8),))
+    points, warnings = points_from_model([regime])
+    assert points == []
+    assert any("no roofline time" in warning for warning in warnings)
+
+
+def test_cli_model_only_reads_no_profile(tmp_path, capsys):
+    projection = {
+        "ops": [
+            {
+                "category": "Attention",
+                "total_flops": 4.0e9,
+                "total_bytes": 2.0e8,
+                "compute_spec": "matrix_bf16",
+                "instances": 40,
+                "total_roofline_time_us": 25.0,
+            }
+        ]
+    }
+    path = tmp_path / "decode.json"
+    path.write_text(json.dumps(projection), encoding="utf-8")
+    arch_path = tmp_path / "arch.json"
+    arch_path.write_text(json.dumps(_ARCH), encoding="utf-8")
+    output = tmp_path / "model.png"
+    exit_code = main(
+        [
+            "--model-only",
+            "--title",
+            "model",
+            "--output",
+            str(output),
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--projection",
+            f"decode:48:{path}",
+        ]
+    )
+    assert exit_code == 0
+    assert output.is_file()
+    stdout = capsys.readouterr().out
+    assert "source=model" in stdout
+    assert "Decode attention" in stdout
+    refused = main(
+        [
+            "--model-only",
+            "--title",
+            "model",
+            "--output",
+            str(output),
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--projection",
+            f"decode:48:{path}",
+            "--profile-json",
+            str(path),
+        ]
+    )
+    assert refused == 1
+    assert "does not read a profile" in capsys.readouterr().err
