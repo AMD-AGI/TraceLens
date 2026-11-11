@@ -118,7 +118,11 @@ Then launch one sub-agent:
     - Container: <container>; command prefix: Read <bringup_dir>/cache/cmd_prefix.txt and substitute {CMD}
     - TraceLens repo: <tracelens_dir>
     - Output directory: <profile_dir>
-    - Output file: <profile_dir>/result.json
+    - Output file: <profile_dir>/result.json, written also on a stop:
+      {"outcome": "profiled | retry | stop", "reason": "<required unless profiled>"}
+      - profiled: the benchmark ran and the split wrote its windows.
+      - retry: the benchmark or the split failed; reason has the failing command and the tail of its output.
+      - stop: any other stop, including a question you would have asked and a failed image build.
 
     Execute every step in the skill. Return "DONE" when complete.
 

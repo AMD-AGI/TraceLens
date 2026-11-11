@@ -25,7 +25,7 @@ See LICENSE for license information.
 
 - An op: its profiler `name`, kernel names and call stack, from a `unified_perf_summary.csv` (EP1), the user (EP2) or a framework scan (EP3).
 - The vendor framework source the op comes from.
-- A TraceLens checkout to edit, and a Python environment that imports it. Ask the user for their conda or venv Python; do not use the system `python3`.
+- A TraceLens checkout to edit, and a Python environment that imports it.
 
 ## Outputs
 
@@ -114,8 +114,7 @@ The script performs a **static source scan** (no GPU/run required):
   `sglang_profiler::*`
 
 Add `--check-mapping` to mark ops that already have a built-in perf model
-(needs TraceLens importable, e.g. `pip install -e .`). It checks the core map before
-`apply_extension`, so ops that only an extension covers show False.
+(needs TraceLens importable, e.g. `pip install -e .`).
 
 For each matched op it outputs: registered name, source file, reconstructed
 call chain to kernel, and any sibling `test_<op>` / `benchmark_<op>` files
@@ -347,7 +346,7 @@ rather than the Q dtype.
 "aiter::my_op": "GEMM",
 ```
 
-**Extension-only mode** — edit only `<csv_stem>_triage_extension.py`, not TraceLens core:
+**Extension-only mode** — add to `<csv_stem>_triage_extension.py`:
 ```python
 perf_model_extension = {
     "aiter::my_op": MyOp,   # category comes from the class
@@ -550,3 +549,31 @@ head count. Set the variant and check the pseudo-op args.
 
 DeepSeek-V4-Flash is not FlashAttention (`flash_attention` / `flash_impl`).
 FlashAttention does not use `TL_MODEL` or `TL_TP`.
+
+---
+
+## Pitfalls
+
+| Pitfall | Correct approach |
+|---------|----------------|
+| Inferring FLOPs from output buffer only | Read the kernel source; count MFMA ops |
+| Assuming `output_bpe == input_bpe` | Check the output dtype in the binding |
+| Using `bpe = 1` for fp4/mxfp4 weights | Use `bpe = 0.5` |
+| Wrong `get_compute_precision()` | Check which MFMA path the kernel actually uses |
+| New attention op has no FLOPs/bytes | Its events lack `annotation`; add `tree_postprocess_extension` calling `apply_annotation(name_filters=[...])` |
+| Using BF16 bpe for an FP8 KV cache | Override `bytes()` to read the K/V cache dtype from `Input type`; KV reads dominate decode |
+| Assuming KV context length is in `Input Dims` | It's runtime-only; comes from the `user_annotation` event via `_parse_chunk_stats` |
+| Assuming the annotation is the vLLM `execute_*` format | Any format `IterationAnnotation` parses with sq/sk sums works (vLLM, SGLang, ATOM); add new ones with `register_format` |
+| Profiling with native (count-only) annotations | Enable detailed annotations; without sq/sk the attention op is no-perf |
+| Adding perf model for `(Synthetic Op)` name | Categorize only; names are unstable |
+| Editing TraceLens core in extension-only mode | Only edit extension file; pass via `--extension_file` |
+| Trusting `--check-mapping` "False" as gap | It checks core map before `apply_extension`; extensions show False there |
+| Using system `python3` for TraceLens import | Ask for conda/venv Python first |
+| Skipping vendor test_*/benchmark_* check | Always look for roofline reference before writing formulas |
+| Wrapper, kernel, and vendor formula disagree | Investigate; do not pick the convenient number |
+| Modeling one dtype from one trace | Cover every dtype the binding can emit |
+| Missing compute precision or compute unit | Roofline percentage is blank and impact score uses a heuristic |
+| Reading `TL_MODEL` / `TL_TP` inside `flops()` | Stamp them onto the event while injecting the pseudo op |
+| Unset `TL_MODEL` on a DeepSeek-V4-Pro trace | Fallback is DeepSeek-V4-Flash (wrong top-k and head count) |
+| Pseudo op for an op that already has a stable cpu_op | Register that name directly |
+| Pseudo-op rule tied to one UID or timestamp | Detect from op name, call stack, or kernel family |

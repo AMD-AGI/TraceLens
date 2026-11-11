@@ -63,6 +63,7 @@ When the caller (for example the model-bringup skill) asks for unattended mode:
 - Stop after the Step 6 split, which runs through the caller's container command prefix.
 - Do not print the TraceLens command.
 - Set `inferencex_path` to `<output_dir>/InferenceX` and create it as described under **Common SGLang flags**, so parallel runs never share patched InferenceX scripts.
+- If the caller names an output file, write it in the caller's format, also when you stop.
 
 Step 1b without asking:
 
@@ -79,18 +80,6 @@ Step 1b without asking:
    Every other image is patched.
 3. Build it with the build script's arm for that version (for SGLang, with the `--gpu-type` from the node's GPU: `gfx942` is `mi300`, `gfx950` is `mi355`). Tag it `tracelens-<framework>:<version>`, and skip the build if `docker image inspect` finds that tag. If the script has no arm for the version, or the build fails, stop.
 4. Set `docker_image` in the YAML copy to the image used.
-
-#### Output file
-
-Write `<output_dir>/result.json`, also when you stop, then return "DONE":
-
-```json
-{"outcome": "profiled | retry | stop", "reason": "<required unless profiled>"}
-```
-
-- `profiled`: the benchmark ran and the split wrote its windows.
-- `retry`: the benchmark or the split failed; `reason` has the failing command and the tail of its output.
-- `stop`: any other stop, including a question you would have asked and a failed image build.
 
 ### Step 1: Read the Benchmark Config
 

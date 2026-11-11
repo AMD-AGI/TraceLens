@@ -27,12 +27,12 @@ Read [reference.md](reference.md) before Step 0 and run every step from it.
 | Step | Name | Gate |
 |---|---|---|
 | 0 | Environment and Input Sanity Checks | every command succeeds |
-| 1 | Profile (Magpie sub-agent) | its `result.json` outcome is `profiled` |
+| 1 | Profile (Magpie sub-agent) | `result.json` reports outcome `profiled` |
 | 2 | Profile health | `prepare` and `report-health --phase profile` exit 0 |
 | 3 | Baseline analysis (orchestrator, inline) | `analysis.md`, unified CSV, `perf_report.log` non-empty |
 | 4 | Report health | `report-health --phase report` exits 0 |
 | 5 | Find gaps | `gaps` exits 0 |
-| 6 | Perf-model sub-agents | `op-result` exits 0 for each op, else relaunch once, then exclude |
+| 6 | Perf-model sub-agents | `op-result` exits 0 per op; a failing op is relaunched once, then excluded |
 | 7 | Coverage | `coverage` exits 0 |
 | 8 | Summary | always runs |
 | Publish | Separate prompt after review | only the named op slugs |
