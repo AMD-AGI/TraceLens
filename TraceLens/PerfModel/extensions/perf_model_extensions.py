@@ -2174,6 +2174,94 @@ class mhc_fused_post_pre_gemm_sqrsum(_MHCBase):
         )
 
 
+class sglang_hc_combine_split(_MHCBase):
+    """
+    Performance model for sglang_profiler::hc_combine_hc_combine_split.
+
+    Reference implementation:
+        sglang/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
+        (HcCombineSplitKernel: hc_combine_gate_kernel + hc_combine_apply_kernel)
+        sglang/python/sglang/kernels/ops/elementwise/hc_combine.py (hc_combine_split)
+
+    Per token, one gate per residual stream scales the block output, which is
+    added onto that stream:
+
+        a[c] = 2 * sigmoid(dot(normed, weight[c]) / n)
+        out[c] = residual[c] + a[c] * block_output
+
+    FLOPs: 2 * M * n * C * (n + 1). The sigmoid is left out.
+    Bytes: each tensor once, plus fp32 partials (M * 8 * n * 4 B) written
+    by the gate and read by the apply.
+
+    Expected Input Dims from trace:
+        [0] block_output    (M, C)
+        [1] residual        (M, n*C)
+        [2] normed_residual (M, n*C)
+        [3] inject_weight   (n, n*C)
+    """
+
+    _PARTIAL_SPLITS = 8
+
+    @staticmethod
+    def get_param_details(event):
+        dims = (event.get("args") or {}).get("Input Dims") or []
+        types = (event.get("args") or {}).get("Input type") or []
+        blank = {"M": None, "n": None, "C": None, "dtype_in": None}
+        if len(dims) < 4:
+            return blank
+        block_output, residual, weight = dims[0], dims[1], dims[3]
+        if (
+            len(block_output) != 2
+            or len(residual) != 2
+            or len(weight) != 2
+        ):
+            return blank
+        M, C = block_output
+        n = weight[0]
+        if (
+            not M
+            or not n
+            or not C
+            or residual[0] != M
+            or residual[1] != n * C
+            or weight[1] != n * C
+        ):
+            return blank
+        return {
+            "M": M,
+            "n": n,
+            "C": C,
+            "dtype_in": types[0] if types else "c10::BFloat16",
+        }
+
+    def flops(self):
+        if not self.M or not self.n or not self.C:
+            return None
+        return 2 * self.M * self.n * self.C * (self.n + 1)
+
+    def bytes(self):
+        if self.bpe_in is None or not self.M:
+            return None
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3)):
+            return None
+        row = self.n * self.C * self.bpe_in
+        read_block_output = self.M * self.C * self.bpe_in
+        read_residual = self.M * row
+        read_normed = self.M * row
+        read_weight = self.n * row
+        write_out = self.M * row
+        partial_elems = self.M * self._PARTIAL_SPLITS * self.n
+        partials = 2 * partial_elems * 4
+        return (
+            read_block_output
+            + read_residual
+            + read_normed
+            + read_weight
+            + write_out
+            + partials
+        )
+
+
 class topk_softplus(_MHCBase):
     """
     Performance model for aiter::topk_softplus.

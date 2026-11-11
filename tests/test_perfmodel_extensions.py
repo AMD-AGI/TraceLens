@@ -70,6 +70,7 @@ from TraceLens.PerfModel.extensions.perf_model_extensions import (
     gemm_afp4wfp4,
     mhc_fused_post_pre_gemm_sqrsum,
     mhc_post,
+    sglang_hc_combine_split,
     mhc_pre_big_fuse_rmsnorm,
     mhc_pre_gemm_sqrsum,
     mixed_sample_outer_exponential,
@@ -2844,6 +2845,45 @@ class TestPerfModelExtensionsCoverage:
             }
         )
         assert topk.flops() > 0
+
+    def test_sglang_hc_combine_split(self):
+        # Decode shape from the Qwen3.8 trace: M=32, C=2560, n=4.
+        event = {
+            "args": {
+                "Input Dims": [(32, 2560), (32, 10240), (32, 10240), (4, 10240), ()],
+                "Input type": ["c10::BFloat16"] * 4 + ["Scalar"],
+                "Input Strides": [(2560, 1), (10240, 1), (10240, 1), (10240, 1), ()],
+            }
+        }
+        model = sglang_hc_combine_split(event)
+        assert model.flops() == 2 * 32 * 4 * 2560 * 5
+        assert model.bytes() == (
+            32 * 2560 * 2
+            + 3 * 32 * 10240 * 2
+            + 4 * 10240 * 2
+            + 2 * 32 * 8 * 4 * 4
+        )
+        assert model.get_compute_precision() == "bf16"
+        assert model.get_maf_type() == "vector"
+        assert model.category == "mHC"
+
+        gapped = {
+            "args": {
+                "Input Dims": event["args"]["Input Dims"],
+                "Input type": event["args"]["Input type"],
+                "Input Strides": [(2560, 1), (20480, 1), (10240, 1), (10240, 1), ()],
+            }
+        }
+        assert sglang_hc_combine_split(gapped).flops() == model.flops()
+        assert sglang_hc_combine_split(gapped).bytes() is None
+        assert (
+            sglang_hc_combine_split({"args": {"Input Dims": [(32, 2560)]}}).flops()
+            is None
+        )
+        assert (
+            get_pseudo_op_mappings()["sglang_profiler::hc_combine_hc_combine_split"]
+            is sglang_hc_combine_split
+        )
 
     def test_misc_extension_ops(self):
         rope = aiter_rope_cached_positions_2c_fwd_impl(
