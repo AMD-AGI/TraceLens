@@ -14,7 +14,7 @@ The TraceLens Agentic Profiling module drives LLM inference benchmarking and PyT
 
 ### 1. Install TraceLens
 
-Installing TraceLens makes the skill discoverable to the agentic runner.
+The skill ships inside the TraceLens package.
 
 **Local (no container):**
 

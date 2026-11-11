@@ -147,6 +147,8 @@ the SGLang version (`--sglang-version`, default `0.5.9`), and the GPU type
 | `0.5.16`     | MI350/MI355 | `lmsysorg/sglang:v0.5.16-rocm720-mi35x` |
 | `0.5.17`     | MI300       | `lmsysorg/sglang:v0.5.17-rocm720-mi30x` |
 | `0.5.17`     | MI350/MI355 | `lmsysorg/sglang:v0.5.17-rocm720-mi35x` |
+| `0.5.18`     | MI300       | `lmsysorg/sglang:v0.5.18-rocm720-mi30x` |
+| `0.5.18`     | MI350/MI355 | `lmsysorg/sglang:v0.5.18-rocm720-mi35x` |
 
 On SGLang **0.5.13 and 0.5.14**, kernel-shape wrapping is incompatible with the
 EAGLE/MTP speculative *overlap* decode, so the speculative patches disable capture
@@ -197,6 +199,7 @@ TraceLens clone and any standard `docker build` flags:
 |---------|-----------|------------|
 | `v26.6` | `rocm/pytorch-xdit:v26.6` | `config_xdit_v26.6.patch` |
 | `v26.7` | `rocm/pytorch-xdit:v26.7` | `config_xdit_v26.7.patch` |
+| `v26.8` | `rocm/pytorch-xdit:v26.8` | `config_xdit_v26.8.patch` |
 
 ```bash
 bash examples/custom_workflows/inference_analysis/build_docker_xdit.sh \
@@ -420,7 +423,7 @@ python -m TraceLens.TraceUtils.split_trace.main trace.json.gz \
     --CONC 32 --OSL 1024 --R 0.8
 ```
 
-**One trace file per execution step** (vLLM v0.13+, SGLang v0.5.9, ATOM 0.1.3+) -
+**One trace file per execution step** (vLLM v0.14+, SGLang v0.5.9, ATOM 0.1.3+) -
 use when you want to analyze an isolated execution step:
 
 ```bash
@@ -446,7 +449,7 @@ replay) traces. Pass the graph-replay trace to generate the default Excel report
 
 ```bash
 TraceLens_generate_perf_report_pytorch_inference \
-    --profile_json_path tests/traces/inference/graph_full/graph_execution.json.gz
+    --profile_json_path tests/traces/inference/vllm_decode_full/graph_execution.json.gz
 ```
 
 Output behavior matches the PyTorch report: a single Excel workbook is written
@@ -463,8 +466,8 @@ and roofline analysis:
 
 ```bash
 TraceLens_generate_perf_report_pytorch_inference \
-    --profile_json_path tests/traces/inference/graph_full/graph_execution.json.gz \
-    --capture_folder tests/traces/inference/graph_full/capture_traces
+    --profile_json_path tests/traces/inference/vllm_decode_full/graph_execution.json.gz \
+    --capture_folder tests/traces/inference/vllm_decode_full/capture_traces
 ```
 
 When `--capture_folder` is set, TraceLens first classifies the capture traces

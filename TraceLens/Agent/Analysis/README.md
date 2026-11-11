@@ -329,7 +329,7 @@ For inference mode, the orchestrator also asks for the execution mode:
 
 ### Execution Environments
 
-The orchestrator supports three execution environments. During Step 0, you are asked whether you are running locally or on a cluster, and the orchestrator builds the appropriate command prefixes automatically.
+The orchestrator supports five execution environments. During Step 0, you are asked whether you are running locally or on a cluster, and the orchestrator builds the appropriate command prefixes automatically.
 
 | Environment | When to use | What happens |
 |-------------|-------------|--------------|

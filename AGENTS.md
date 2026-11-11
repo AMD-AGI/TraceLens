@@ -61,8 +61,9 @@ Demo traces for local runs are bundled in `tests/traces`.
 - **Group helpers; don't sprawl.** A pile of one-line functions across many files is a class you
   haven't named yet: put a helper in the module whose responsibility matches its purpose, not
   next to its first caller, and extend an existing helper over adding a parallel one.
-- **Derive over hardcode.**  drop references to a
-  concern from agents that don't own it, and template sections the downstream consumer never reads.
+- **Derive over hardcode.** Derive a value from its source instead of hardcoding a copy. Drop
+  references to a concern from agents that don't own it, and template sections the downstream
+  consumer never reads.
 - **Don't reinvent what already exists.** Before writing a helper, loader, or parser, check
   whether one already exists and import it. If new code is genuinely needed, place it in the
   module whose responsibility matches its purpose.

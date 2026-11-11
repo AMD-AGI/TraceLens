@@ -41,10 +41,17 @@ Generate a multi-sheet Excel report from a PyTorch (`torch.profiler`) trace.
 | `--include_unlinked_kernels` | off | Include kernels with no linked CPU op in the GPU-timeline analysis. |
 | `--micro_idle_thresh_us` | None | Threshold (µs) to classify an idle interval as micro-idle. |
 | `--comparison_json_path` | None | Second trace to compare against; runs TraceDiff and adds speedup/delta/LCA columns plus a `diff_stats` sheet. |
+| `--precomputed_diff_stats` | None | Precomputed TraceDiff-schema `diff_stats.csv` to use instead of running TraceDiff. Mutually exclusive with `--comparison_json_path`. |
+| `--gpu_arch_json_path` / `--gpu_arch_platform` | None | GPU architecture JSON file, or a bundled platform name such as `MI300X`. Mutually exclusive. |
 | `--enable-origami-gemm` | off | Add `Origami` GEMM times when a GPU arch is given. |
 | `--enable-origami-sdpa-tile` | off | Add `SDPA Tile Origami` attention times from TraceLens's tile model, with Origami timing each tile GEMM. |
+| `--enable_pseudo_ops` | off | Add pseudo-ops to the tree to isolate specific kernels, for example FusedMoE. |
+| `--group_by_num_kernels` | off | Group by number of kernels in summary tables. |
+| `--inductor_cache_dir` | auto | TorchInductor cache directory for Triton kernel metadata. Defaults to `$TORCHINDUCTOR_CACHE_DIR`, `~/.cache/torchinductor`, or `/tmp/torchinductor_<user>`. |
 | `--detect_recompute` | off | Detect activation recomputation and add an `is_recompute` column. |
 | `--include_overlap_info` | off | Add kernel-overlap sheets. |
+| `--include_first_occurrence_time` | off | Add `first_occurrence_time` to `ops_unique_args`: earliest launcher timestamp per group, relative to the minimum in the table. |
+| `--include_call_stack` | off | Add `call_stack_trimmed` and `call_stack_full` columns to `unified_perf_summary`. |
 | `--topk_ops`, `--topk_roofline_ops` | None | Limit rows in the unique-args and roofline tables. |
 | `--extension_file` | None | Python file with custom hooks: tree post-processing, perf models, op categories, op projections (your own predicted times and columns), and kernel filters. See [Extend the report](../how-to/generate-perf-report-pytorch.md#extend-the-report-custom-hooks). |
 
@@ -60,6 +67,7 @@ Inference-oriented variant of the PyTorch report.
 | `--profile_json_path` | required | Path to the trace. |
 | `--group_by_parent_module` | off | Group kernel-launcher summaries by parent `nn.Module`. |
 | `--capture_folder` | None | Path to the capture-trace folder. |
+| `--comparison_capture_folder` | None | Path to the capture-trace folder for the comparison trace. |
 | `--include_overlap_info` | off | Add `*_kl_overlap` sheets when data exists. |
 
 Shares most options with `TraceLens_generate_perf_report_pytorch` (output
@@ -107,6 +115,7 @@ trace).
 | `--output_xlsx_path` | auto | Output Excel file. |
 | `--output_csvs_dir` | None | Directory for CSV output. |
 | `--kernel_metadata_keyword_filters` | None | Only analyze events whose metadata contains the given keyword(s), for example `remat checkpoint`. |
+| `--gpu_arch_json_path` / `--gpu_arch_platform` | None | GPU architecture JSON file, or a bundled platform name such as `MI300X`. Mutually exclusive. |
 | `--enable-origami-gemm` | off | Add `Origami` GEMM times when a GPU arch is given. |
 
 ### TraceLens_generate_perf_report_rocprof
@@ -130,7 +139,7 @@ Compare two or more previously generated reports.
 |----------|---------|-------------|
 | `reports` | required | One or more TraceLens reports: `.xlsx` files or directories of per-sheet `.csv` files. |
 | `--names` | None | Optional display tags for each report (count must match). |
-| `--sheets` | `all` | Sheet groups to compare: `gpu_timeline`, `ops_summary`, `kernel_summary`, `ops_all`, `roofline`, or `all`. |
+| `--sheets` | `all` | Sheet groups to compare: `gpu_timeline`, `ops_summary`, `ops_summary_by_category`, `kernel_summary`, `ops_all`, `roofline`, or `all`. |
 | `-o`, `--output` | `comparison.xlsx` | Output Excel file. |
 | `--output_csvs_dir` | None | Also write each comparison sheet as a CSV here. |
 
@@ -144,6 +153,9 @@ Generate a collective-communication report across ranks.
 | `--trace_pattern` | — | Template path with a single `*` placeholder for rank. |
 | `--trace_glob` | — | Glob for arbitrarily named trace files (requires `--world_size`, uses `--rank_regex`). |
 | `--world_size` | required | Number of ranks. |
+| `--rank_regex` | `rank[\[\-_/]?(?P<rank>\d+)` | Regex used with `--trace_glob` to extract the rank id from file names. Must contain a named group `rank` or a single capture group. |
+| `--output_xlsx_path` / `--output_csvs_dir` | auto / None | Output destinations. |
+| `--detailed_analysis` | on | Include detailed information. Always on. |
 | `--agg_metrics` | `mean median min max` | Aggregation metrics in the summary. |
 | `--gpus_per_node` | auto | Adds `node_id`/`node_span` columns and labels each process group `intra_node` or `inter_node`. |
 | `--all2allv_heatmap` | off | Add an `nccl_all2allv_heatmap` sheet with per rank-pair send volumes. |
@@ -194,6 +206,17 @@ involved.
 | `--output_csvs_dir` | None | Directory for CSV output. |
 | `--traceconv` | auto | Path to `traceconv`. |
 
+### TraceLens_generate_perf_report_genesis
+
+Generate rocprof and pftrace reports for a Genesis physics-simulation run. See
+[Generate a Genesis or Taichi performance report](../how-to/generate-perf-report-genesis.md)
+for the full option list.
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--capture-dir`, `--combined-run-dir` | required | `profile_output/<timestamp>/` from `run_combined_trace.sh` or `run_profile.sh`. |
+| `--output-dir` | `analysis_output` | Where to write the report. |
+
 ### TraceLens_split_trace
 
 Split an inference trace into per-iteration or per-phase sub-traces.
@@ -223,6 +246,47 @@ Global options: `--backend` (default `sqlite`) and `--db` (default
 | `build --traces-file FILE` | Create or open the catalog and append a batch of traces (one path per line). Repeatable `--trace-path` is also accepted. |
 | `search TERMS` | Full-text search over indexed traces, ops, kernels, and categories. |
 | `sqlite-sql SQL` | Run one read-only SQL statement. |
+
+### TraceLens_resolve_kernel_source
+
+Resolve a GPU kernel to its editable source, or explain why it has none. Prints
+the result as JSON. See [Map a GPU kernel to its source](../how-to/map-kernel-source.md).
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--kernel` | None | Device kernel name/symbol (native or plain). |
+| `--search-path` | auto | A directory to search for native sources. Repeatable. When omitted, defaults are auto-discovered. |
+| `--op-name` | None | Launching op name (used by the gate, for example MIOpen). |
+| `--triton-kernel-file` | None | Resolve a Triton `.py` kernel from this trace `kernel_file` instead of a native symbol. |
+
+### TraceLens_visualize_model_in_explorer
+
+Build a Model Explorer graph from a Hugging Face checkpoint, then serve it or
+write a standalone viewer page. Also installed as `visualize_model_in_explorer`.
+Requires the `Visualizer` extra. See
+[Visualize a model with the TraceLens Agent](../how-to/visualize-model.md).
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `source` / `--checkpoint`, `-c` | required | Hugging Face model id or local checkpoint directory. |
+| `-o`, `--output` | `<model>.html` | Write a standalone `.html` viewer page, or an explicit `.html` / `.json` path. |
+| `--serve` / `--port` | off / 8765 | Start a local HTTP server with the graph embedded in the viewer page. |
+| `--tp`, `--pp`, `--ep` | 1 | Tensor-, pipeline-, and expert-parallel partitions. |
+
+### TraceLens_model_roofline_projection
+
+Project a kernel-by-kernel roofline for a model checkpoint from its config and
+modeling source alone, with no trace or GPU run. Requires the `Visualizer`
+extra. See
+[Project a model's roofline from its checkpoint](../how-to/generate-model-roofline-projection.md).
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `source` / `--checkpoint`, `-c` | required | Hugging Face model id or local checkpoint directory. |
+| `--batch-size` / `--seq-len` | 1 / 2048 | Batch size and sequence length to project at. |
+| `--gpu-arch-name` / `--gpu-arch-json-path` | None | GPU architecture to bound against. Without one, FLOPs and bytes are reported but no roofline time is computed. |
+| `--output-csv` / `--output-json` | None | Write the per-op table as CSV, or the table and rollup as JSON. |
+| `--tp`, `--pp`, `--ep` | 1 | Tensor-, pipeline-, and expert-parallel partitions. |
 
 ## Python SDK
 
