@@ -66,6 +66,13 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
+    # moe_sorting_fwd launches _moe_sorting_small_kernel. A graph replay keeps
+    # that kernel as a synthetic child of fused_moe_ rather than the CPU op.
+    (re.compile(r".*moe_sorting"), "MoE_aux"),
+    # quant_wo_a_act_mxfp8 launches _wo_a_quant_mxfp8_kernel.
+    (re.compile(r".*_wo_a_quant"), "GroupQuant"),
+    # topk_transform_paged_v2 launches topk_main_kernel.
+    (re.compile(r".*topk_main_kernel"), "InferenceAttention"),
 ]
 
 

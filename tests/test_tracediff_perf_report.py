@@ -361,6 +361,25 @@ class TestBuildUidToRowIdx:
         assert idx[300] == 1
         assert idx[400] == 1
 
+    def test_same_op_different_kernels_stay_on_their_rows(self):
+        wide = _kd_list((1, 10))
+        narrow = _kd_list((2, 4))
+        df = pd.DataFrame(
+            {
+                "name": ["sglang::flash_c4", "sglang::flash_c4"],
+                "kernel_details": [wide, narrow],
+            }
+        )
+        summary = pd.DataFrame(
+            {
+                "name": ["sglang::flash_c4", "sglang::flash_c4"],
+                "kernel_details_summary": [wide, narrow],
+            }
+        )
+        idx = _build_uid_to_row_idx(df, summary)
+        assert idx[1] == 0
+        assert idx[2] == 1
+
 
 class TestResolveDiffRowToKey:
     def test_returns_none_when_index_empty(self):

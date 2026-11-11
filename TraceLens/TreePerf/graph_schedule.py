@@ -566,12 +566,17 @@ _DTYPES = {
         "Scalar",
         "",
     ),
-    # dynamic_per_group_scaled_quant(out, input, scales).
+    # dynamic_per_token_scaled_quant(out, input, scales). The kernel is
+    # dynamic_per_group_scaled_quant_kernel.
     "quant": (_FP8, _BF16, "float"),
     "wo_quant": (_FP8, _BF16, "float"),
     # fused_dynamic_mx_quant_moe_sort_hip(out, scales, x, ...): x is bf16.
     "mx_sort": (_FP4, _E8M0, _BF16, "int", "int", "float"),
-    "moe_sort": ("int", "int", "int", "int", _BF16),
+    # moe_sorting_small: ids, weights, sorted ids, sorted weights, block ids,
+    # the length pair, and the optional moe buffer.
+    "moe_sort": ("int", "float", "int", "float", "int", "int", _BF16),
+    # reg_all_gather_into_tensor(out, shard, handle).
+    "allgather": (_BF16, _BF16, "Scalar"),
 }
 
 
@@ -893,6 +898,26 @@ def _moe_block_m(model: GraphModel, tokens: int, topk: int, experts: int, inter:
         if best is None or (rounds, wasted) < best[0]:
             best = ((rounds, wasted), size)
     return best[1]
+
+
+def _small_sort_argument_shapes(model: GraphModel, tokens: int, hidden: int) -> tuple:
+    """Arguments ``_moe_sorting_small_kernel`` reads.
+
+    Ids and weights are ``(tokens, topk)``. The sorted buffers hold one slot
+    per routed pair plus each resident expert's tile. The block-id length is
+    that span rounded up to the tile. The moe buffer is absent on this kernel,
+    so its shape is empty and the model does not charge it.
+    """
+    topk = model.num_experts_per_tok + model.n_shared_experts
+    ids = (tokens, topk)
+    experts = _resident_experts(model)
+    inter = model.moe_intermediate_size // model.degree("moe_tp")
+    block = _moe_block_m(model, tokens, topk, experts, inter)
+    if block is None:
+        return (ids, ids)
+    slots = tokens * topk + experts * block - topk
+    blocks = (slots + block - 1) // block
+    return (ids, ids, (slots,), (slots,), (blocks,), (2,), (0, hidden))
 
 
 def _moe_sort_shapes(model: GraphModel, tokens: int, hidden: int, stage: int) -> tuple:
@@ -1701,7 +1726,7 @@ def _prefill_attention(
         )
         block.append(
             _launch(
-                "aiter::dynamic_per_group_scaled_quant",
+                "aiter::dynamic_per_token_scaled_quant",
                 "quant",
                 _quant_shapes(model, t, h),
                 layer,
@@ -1767,7 +1792,7 @@ def _prefill_attention(
                 layer,
             ),
             _launch(
-                "aiter::dynamic_per_group_scaled_quant",
+                "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8",
                 "wo_quant",
                 ((t, local_groups, wo_in),),
                 layer,
@@ -1779,7 +1804,7 @@ def _prefill_attention(
                 layer,
             ),
             _launch(
-                "aiter::dynamic_per_group_scaled_quant",
+                "aiter::dynamic_per_token_scaled_quant",
                 "quant",
                 _quant_shapes(model, t, wo_b_k),
                 layer,
@@ -1804,7 +1829,7 @@ def _prefill_c4(model, layer, t, h, q_lora, index_q_out, kv, chunks) -> list[Lau
             layer,
         ),
         _launch(
-            "aiter::dynamic_per_group_scaled_quant",
+            "aiter::dynamic_per_token_scaled_quant",
             "quant",
             _quant_shapes(model, t, h),
             layer,
@@ -1837,7 +1862,12 @@ def _prefill_c4(model, layer, t, h, q_lora, index_q_out, kv, chunks) -> list[Lau
                     ((t, model.index_n_heads, index_dim), (kv, 1, index_dim)),
                     layer,
                 ),
-                _launch("sglang::topk", "topk_main", ((t, kv),), layer),
+                _launch(
+                    "sglang_profiler::topk_topk_transform_paged_v2",
+                    "topk_main",
+                    ((t, kv),),
+                    layer,
+                ),
             ]
         )
     block.extend(
@@ -1901,7 +1931,7 @@ def _prefill_moe(model, layer, t, h, inter, experts, routed) -> list[Launch]:
     block.extend(
         [
             _launch(
-                "aiter::dynamic_per_group_scaled_quant",
+                "aiter::dynamic_per_token_scaled_quant",
                 "quant",
                 _quant_shapes(model, t if packed else routed, h),
                 layer,
@@ -1919,7 +1949,7 @@ def _prefill_moe(model, layer, t, h, inter, experts, routed) -> list[Launch]:
                 layer,
             ),
             _launch(
-                "aiter::dynamic_per_group_scaled_quant",
+                "aiter::dynamic_per_token_scaled_quant",
                 "quant",
                 _quant_shapes(
                     model, t if packed else routed, local_inter if packed else inter
@@ -2477,9 +2507,13 @@ def _logits_tail(model: GraphModel, tokens: int, hidden: int) -> list[Launch]:
         _final_norm(tokens, hidden),
         _launch("aten::mm", "tensile", ((tokens, hidden), (hidden, local_vocab)), None),
         _launch(
-            "aiter::reg_all_gather",
+            "sglang::reg_all_gather_into_tensor",
             "allgather",
-            ((model.degree("tp") * tokens, local_vocab), (tokens, local_vocab)),
+            (
+                (model.degree("tp") * tokens, local_vocab),
+                (tokens, local_vocab),
+                (),
+            ),
             None,
         ),
     ]
@@ -2545,7 +2579,7 @@ def _attention_block(
         )
         block.append(
             _launch(
-                "aiter::dynamic_per_group_scaled_quant",
+                "aiter::dynamic_per_token_scaled_quant",
                 "quant",
                 _quant_shapes(model, t, h),
                 layer,
@@ -2651,7 +2685,7 @@ def _attention_block(
     )
     block.append(
         _launch(
-            "aiter::dynamic_per_group_scaled_quant",
+            "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8",
             "wo_quant",
             ((t, local_groups, wo_in),),
             layer,
@@ -2668,7 +2702,7 @@ def _attention_block(
     )
     block.append(
         _launch(
-            "aiter::dynamic_per_group_scaled_quant",
+            "aiter::dynamic_per_token_scaled_quant",
             "quant",
             _quant_shapes(model, t, wo_b_k),
             layer,
@@ -2706,7 +2740,7 @@ def _c4_indexer(model, layer, t, h, q_lora, index_q_out, kv) -> list[Launch]:
             layer,
         ),
         _launch(
-            "aiter::dynamic_per_group_scaled_quant",
+            "aiter::dynamic_per_token_scaled_quant",
             "quant",
             _quant_shapes(model, t, q_lora),
             layer,
@@ -2743,7 +2777,7 @@ def _c4_indexer(model, layer, t, h, q_lora, index_q_out, kv) -> list[Launch]:
             layer,
         ),
         _launch(
-            "sglang::topk",
+            "sglang_profiler::topk_topk_transform_paged_v2",
             "topk_main",
             _topk_main_shapes(model, pools, t, kv),
             layer,
@@ -2864,7 +2898,7 @@ def _moe_block(model, layer, t, h, inter, experts, routed, last: bool) -> list[L
             _launch(
                 "aiter::moe_sorting_fwd",
                 "moe_sort",
-                scaled if packed else ((t, experts),),
+                _small_sort_argument_shapes(model, t, h),
                 layer,
             ),
             _launch(

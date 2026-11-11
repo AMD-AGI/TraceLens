@@ -747,17 +747,23 @@ def _graph_model_on_device(graph_model, gpu_arch):
     """Fill the gfx name and the compute-unit count from the device arch.
 
     The mHC split policy is selected by that pair. The compute-unit count is
-    the trace's ``num_cus`` (``deviceProperties`` numSms). A trace that records
-    no device leaves it at zero rather than assuming a count. A model that
-    already carries a device is left as is.
+    the trace's ``num_cus`` (``deviceProperties`` numSms) when the caller has
+    one; an arch table that omits the count still supplies the gfx name.
+    A model that already carries both is left as is.
     """
-    if graph_model is None or gpu_arch is None or graph_model.num_cus:
+    if graph_model is None or gpu_arch is None:
         return graph_model
-    num_cus = gpu_arch.get("num_cus")
-    if not num_cus:
+    if graph_model.gfx_arch and graph_model.num_cus:
         return graph_model
-    gfx = gpu_arch.get("gfx") or _gfx_for_product(gpu_arch.get("name"))
-    return replace(graph_model, num_cus=int(num_cus), gfx_arch=str(gfx))
+    gfx = (
+        graph_model.gfx_arch
+        or gpu_arch.get("gfx")
+        or _gfx_for_product(gpu_arch.get("name"))
+    )
+    num_cus = graph_model.num_cus or int(gpu_arch.get("num_cus") or 0)
+    if gfx == graph_model.gfx_arch and num_cus == graph_model.num_cus:
+        return graph_model
+    return replace(graph_model, num_cus=num_cus, gfx_arch=str(gfx or ""))
 
 
 def generate_perf_report_pytorch(
