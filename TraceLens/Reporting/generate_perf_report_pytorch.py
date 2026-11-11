@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
-from TraceLens.TraceUtils import trace_check
+from TraceLens.TraceUtils.utils import trace_check
 from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (

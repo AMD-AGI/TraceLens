@@ -184,9 +184,7 @@ def _check_trace_file_size(ctx) -> List[TraceCheck]:
     except OSError:
         return []
     compressed = filepath.endswith(".gz") or filepath.endswith(".zip")
-    limit = (
-        _MAX_TRACE_BYTES_COMPRESSED if compressed else _MAX_TRACE_BYTES_UNCOMPRESSED
-    )
+    limit = _MAX_TRACE_BYTES_COMPRESSED if compressed else _MAX_TRACE_BYTES_UNCOMPRESSED
     if size <= limit:
         return []
     suffix = " compressed" if compressed else ""
@@ -543,10 +541,7 @@ def _check_kernel_time_coverage(ctx) -> List[TraceCheck]:
         kl_us = _sum_time(
             kl, "total_direct_kernel_time_sum", "total_direct_kernel_time"
         )
-        if (
-            kl_us is not None
-            and kl_us < computation_time_us - TIMESTAMP_TOLERANCE_US
-        ):
+        if kl_us is not None and kl_us < computation_time_us - TIMESTAMP_TOLERANCE_US:
             findings.append(
                 TraceCheck(
                     Status.WARN,
@@ -558,10 +553,7 @@ def _check_kernel_time_coverage(ctx) -> List[TraceCheck]:
     up = dfs.get("unified_perf_summary")
     if up is not None:
         up_us = _sum_time(up, "Kernel Time (µs)_sum", "Kernel Time (µs)")
-        if (
-            up_us is not None
-            and up_us < computation_time_us - TIMESTAMP_TOLERANCE_US
-        ):
+        if up_us is not None and up_us < computation_time_us - TIMESTAMP_TOLERANCE_US:
             findings.append(
                 TraceCheck(
                     Status.WARN,
@@ -573,34 +565,56 @@ def _check_kernel_time_coverage(ctx) -> List[TraceCheck]:
     return findings
 
 
+def _extract_kernel_counts(df) -> Optional[Counter]:
+    """Per-kernel-name counts from a report df's kernel_details column."""
+    for col in ["kernel_details_summary", "kernel_details"]:
+        if col not in getattr(df, "columns", []):
+            continue
+        counts: Counter = Counter()
+        for kd in df[col]:
+            if isinstance(kd, list):
+                for d in kd:
+                    counts[d["name"]] += d.get("count", 1)
+        return counts
+    return None
+
+
+def _kernel_mismatches(tree_counts: Counter, df_counts: Counter) -> List[tuple]:
+    """List of (name, tree_count, df_count) where the two counts differ."""
+    out = []
+    for name in sorted(set(tree_counts) | set(df_counts)):
+        t, d = tree_counts.get(name, 0), df_counts.get(name, 0)
+        if t != d:
+            out.append((name, t, d))
+    return out
+
+
+def _format_mismatch_detail(mismatches: List[tuple], label: str) -> str:
+    """Render mismatches as 2-per-line ``name (tree=.., label=.., diff=..)`` text."""
+    entries = [
+        f"{(name[:80] + '...') if len(name) > 80 else name} "
+        f"(tree={t}, {label}={d}, diff={t - d})"
+        for name, t, d in mismatches
+    ]
+    lines = ["; ".join(entries[i : i + 2]) for i in range(0, len(entries), 2)]
+    return "\n  ".join(lines)
+
+
 def _check_kernel_count_alignment(ctx) -> List[TraceCheck]:
     """Check that kernel counts in report match ground truth from tree events."""
     tree, dfs, sheets = ctx.get("tree"), ctx.get("dfs"), ctx.get("sheets")
     if not tree or not dfs or not sheets:
         return []
-    events = tree.events
 
     tree_counts = Counter(
         e["name"]
-        for e in events
+        for e in tree.events
         if e.get("cat") in GPU_KERNEL_CATEGORIES
         and not TraceEventUtils.is_communication_string(e.get("name", ""))
     )
     if not tree_counts:
         return []
     tree_total = sum(tree_counts.values())
-
-    def _extract_counts(df):
-        for col in ["kernel_details_summary", "kernel_details"]:
-            if col not in getattr(df, "columns", []):
-                continue
-            counts = Counter()
-            for kd in df[col]:
-                if isinstance(kd, list):
-                    for d in kd:
-                        counts[d["name"]] += d.get("count", 1)
-            return counts
-        return None
 
     findings = []
     for label, df in [
@@ -609,44 +623,28 @@ def _check_kernel_count_alignment(ctx) -> List[TraceCheck]:
     ]:
         if df is None:
             continue
-        df_counts = _extract_counts(df)
+        df_counts = _extract_kernel_counts(df)
         if df_counts is None:
             continue
         df_total = sum(df_counts.values())
         if df_total == tree_total:
             continue
 
-        # Per-kernel contributions to the difference (diff = tree - report;
-        # positive means kernels present in the tree but missing from the report).
-        mismatches = []
-        for name in sorted(set(tree_counts) | set(df_counts)):
-            t = tree_counts.get(name, 0)
-            d = df_counts.get(name, 0)
-            if t != d:
-                mismatches.append((name, t, d))
-
-        entries = [
-            f"{(name[:80] + '...') if len(name) > 80 else name} "
-            f"(tree={t}, {label}={d}, diff={t - d})"
-            for name, t, d in mismatches
-        ]
-        lines = [
-            "; ".join(entries[i : i + 2]) for i in range(0, len(entries), 2)
-        ]
-        detail = "\n  ".join(lines)
-
+        # diff = tree - report; positive means kernels in the tree missing from the report.
+        mismatches = _kernel_mismatches(tree_counts, df_counts)
         findings.append(
             TraceCheck(
                 Status.WARN,
                 f"{label} kernel count ({df_total}) does not match "
                 f"tree kernel count ({tree_total}).\n"
-                f"Per-kernel mismatches ({len(mismatches)}):\n  {detail}",
+                f"Per-kernel mismatches ({len(mismatches)}):\n  "
+                f"{_format_mismatch_detail(mismatches, label)}",
                 metrics={
                     "tree_total": tree_total,
                     "df_total": df_total,
                     "mismatches": [
-                        {"name": name, "tree": t, "report": d, "diff": t - d}
-                        for name, t, d in mismatches
+                        {"name": n, "tree": t, "report": d, "diff": t - d}
+                        for n, t, d in mismatches
                     ],
                 },
             )
@@ -661,7 +659,7 @@ def _infer_num_gpus(dfs: Dict) -> Optional[int]:
         return None
     try:
         n = int(tl["gpu_pid"].nunique())
-    except Exception:
+    except (TypeError, ValueError):
         return None
     return n or None
 

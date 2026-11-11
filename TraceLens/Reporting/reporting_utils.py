@@ -197,7 +197,7 @@ def write_report_outputs(
     output_dir = csvs_dir or (os.path.dirname(xlsx_path) or "." if xlsx_path else None)
     if output_dir:
         try:
-            from TraceLens.TraceUtils import trace_check
+            from TraceLens.TraceUtils.utils import trace_check
 
             trace_check.write_accumulated_json(output_dir)
         except ImportError:

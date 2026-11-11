@@ -21,7 +21,7 @@ import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
-from TraceLens.TraceUtils import trace_check
+from TraceLens.TraceUtils.utils import trace_check
 from TraceLens.util import DataLoader, most_common_first_dim
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point

@@ -17,7 +17,7 @@ logging.basicConfig(
     format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
 )
 
-from TraceLens.TraceUtils import trace_check
+from TraceLens.TraceUtils.utils import trace_check
 from TraceLens.TreePerf import JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,

@@ -931,7 +931,7 @@ def test_trace_missing_recursive_walk_oserror_swallowed(tmp_path, monkeypatch):
 
 
 def test_trace_size_too_large(tmp_path, monkeypatch):
-    from TraceLens.TraceUtils import trace_check
+    from TraceLens.TraceUtils.utils import trace_check
 
     monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_COMPRESSED", 100)
     trace = write_text(tmp_path / "big.json.gz", "x" * 500)

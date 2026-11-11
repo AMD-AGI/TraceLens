@@ -25,7 +25,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from TraceLens.TraceUtils import trace_check
+from TraceLens.TraceUtils.utils import trace_check
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     IDLE_PCT_THRESHOLD,
     focus_job_utilization,

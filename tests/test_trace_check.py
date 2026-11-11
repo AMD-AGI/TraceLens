@@ -8,8 +8,8 @@ import warnings
 
 import pytest
 
-from TraceLens.TraceUtils import trace_check
-from TraceLens.TraceUtils.trace_check import Status
+from TraceLens.TraceUtils.utils import trace_check
+from TraceLens.TraceUtils.utils.trace_check import Status
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 
 

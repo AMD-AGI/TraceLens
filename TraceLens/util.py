@@ -477,7 +477,7 @@ class DataLoader:
             os.environ.get("TRACELENS_SKIP_QUALITY_CHECK")
         )
         if run_checks:
-            from .TraceUtils import trace_check
+            from .TraceUtils.utils import trace_check
 
             # Pre-parse: flag oversized traces before paying the parse cost.
             trace_check.run_pre_load_checks(filepath).log_findings()
