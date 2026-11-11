@@ -7020,3 +7020,104 @@ class TestSyntheticOpPerfModels:
         events = [{"name": "op1", "ts": 100, "dur": 10}]
         _propagate_annotation_to_synthetic_ops(FakeTree(), events)
         assert "annotation" not in events[0]
+
+    PREFILL_ROWS = 29224
+    PREFILL_CHUNKS = [1457] * 20 + [84]
+    PREFILL_CAUSAL_SCORES = 7418358184 - (638555048 - 29224) // 2
+
+    def _mqa_chunk_event(self, rows, block_m=1, name=None):
+        name = name or (
+            "hipModuleLaunchKernel->_gluon_fp8_mqa_logits_kernel"
+            f"_NUM_HEADS_32_HEAD_SIZE_128_BLOCK_KV_64_BLOCK_M_{block_m}"
+            "_MFMA_NONK_DIM_32 (Synthetic Op)"
+        )
+        return {
+            "name": name,
+            "annotation": self.ANNOTATION_PREFILL,
+            "args": {"grid": [-(-rows // block_m), 1, 1]},
+        }
+
+    def test_mqa_logits_chunk_scaled_by_grid_rows(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        model = paged_mqa_logits_preshuffle_synthetic(self._mqa_chunk_event(1457))
+        p = model.param_details
+        assert p["seq_q"] == pytest.approx(1457)
+        assert p["sum_len"] == pytest.approx(7418358184 * 1457 / self.PREFILL_ROWS)
+        assert p["kv_touched"] == 368232
+
+    def test_mqa_logits_chunks_sum_to_layer_total(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        total = sum(
+            paged_mqa_logits_preshuffle_synthetic(self._mqa_chunk_event(rows)).flops()
+            for rows in self.PREFILL_CHUNKS
+        )
+        assert total == pytest.approx(2 * 32 * 128 * 7418358184)
+
+    def test_mqa_logits_block_m_multiplies_grid(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        model = paged_mqa_logits_preshuffle_synthetic(
+            self._mqa_chunk_event(2914, block_m=2)
+        )
+        assert model.param_details["seq_q"] == pytest.approx(2914)
+
+    def test_mqa_logits_full_grid_not_scaled(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        model = paged_mqa_logits_preshuffle_synthetic(
+            self._mqa_chunk_event(self.PREFILL_ROWS)
+        )
+        assert model.flops() == 2 * 32 * 128 * 7418358184
+
+    def test_mqa_logits_paged_grid_ignored(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            paged_mqa_logits_preshuffle_synthetic,
+        )
+
+        event = {
+            "name": self.MQA_PAGED_NAME,
+            "annotation": self.ANNOTATION_WITH_STATS,
+            "args": {"grid": [1, 1, 1]},
+        }
+        model = paged_mqa_logits_preshuffle_synthetic(event, arch={"tp_world_size": 4})
+        assert model.flops() == 2 * 32 * 128 * 524286
+
+    def _topk_chunk_event(self, rows):
+        return {
+            "annotation": self.ANNOTATION_PREFILL,
+            "args": {
+                "Input Dims": [(rows, 368232), (rows,), (rows, 2048)],
+                "Input type": ["float", "int", "int"],
+            },
+        }
+
+    def test_topk_chunk_scaled_by_rows(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            sgl_kernel_fast_topk_transform_fused,
+        )
+
+        model = sgl_kernel_fast_topk_transform_fused(self._topk_chunk_event(1457))
+        assert model.flops() == pytest.approx(
+            self.PREFILL_CAUSAL_SCORES * 1457 / self.PREFILL_ROWS
+        )
+
+    def test_topk_chunks_sum_to_layer_total(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            sgl_kernel_fast_topk_transform_fused,
+        )
+
+        total = sum(
+            sgl_kernel_fast_topk_transform_fused(self._topk_chunk_event(rows)).flops()
+            for rows in self.PREFILL_CHUNKS
+        )
+        assert total == pytest.approx(self.PREFILL_CAUSAL_SCORES)
