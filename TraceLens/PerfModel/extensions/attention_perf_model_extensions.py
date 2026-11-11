@@ -107,7 +107,15 @@ class InferenceAttention:
 
     @staticmethod
     def _row_fraction(rows, stats):
-        """Share of ``c_sq + g_sq`` covered by a launch that handles one row chunk."""
+        """Share of the iteration's query rows (``c_sq + g_sq``) one launch covers.
+
+        Kernels that split query rows into chunks launch several times per
+        layer under the same annotation, while the annotation's sq-sk
+        aggregates describe the whole layer. Scaling by this fraction makes the
+        chunks of a layer sum to the layer total; per-chunk values assume every
+        row attends to the same number of KV tokens. Returns 1.0 when the row
+        count is unknown or covers all rows.
+        """
         total = stats["c_sq"] + stats["g_sq"]
         if not rows or not total:
             return 1.0
@@ -1228,7 +1236,8 @@ class sgl_kernel_fast_topk_transform_fused:
 
     The score buffer is padded to the max context length, so the number of
     valid scores per row comes from the step annotation (causal within a
-    request), scaled to this launch's share of rows.
+    request). When the indexer chunks query rows, each launch is credited
+    with its ``rows`` share of the layer's scores.
 
     Expected Input Dims from trace:
         [0] score (rows, L_max)  [1] lengths (rows,)
@@ -1334,8 +1343,12 @@ class paged_mqa_logits_preshuffle_synthetic:
     stats (g_sqsk, g_sq).  When the annotation is missing or unparseable,
     flops() and bytes() return None.
 
-    The non-paged kernel may run once per query-row chunk; sum_len and seq_q
-    are scaled by the chunk's rows (``grid[0] * BLOCK_M``).
+    The non-paged prefill kernel (``_gluon_fp8_mqa_logits``) is launched once
+    per query-row chunk when the logits buffer exceeds sglang's memory budget.
+    aiter launches it with ``grid = (cdiv(rows, BLOCK_M), kv_splits)``, so the
+    launcher's ``grid[0] * BLOCK_M`` gives the chunk's rows and sum_len / seq_q
+    are scaled to that share of the layer.  kv_touched stays at the layer
+    total because every chunk walks the KV cache again.
 
     Vendor roofline reference:
         aiter/op_tests/op_benchmarks/triton/bench_fp8_mqa_logits.py

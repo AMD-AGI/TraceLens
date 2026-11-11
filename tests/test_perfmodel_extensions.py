@@ -7021,6 +7021,8 @@ class TestSyntheticOpPerfModels:
         _propagate_annotation_to_synthetic_ops(FakeTree(), events)
         assert "annotation" not in events[0]
 
+    # GLM-5.2 prefill trace: each indexer layer splits 29224 query rows into
+    # 20 chunks of 1457 rows and one of 84.
     PREFILL_ROWS = 29224
     PREFILL_CHUNKS = [1457] * 20 + [84]
     PREFILL_CAUSAL_SCORES = 7418358184 - (638555048 - 29224) // 2
