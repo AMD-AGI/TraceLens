@@ -29,7 +29,7 @@ class _Config:
 
 
 def _patch_autoconfig(monkeypatch, config):
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     monkeypatch.setattr(
         transformers.AutoConfig,
@@ -40,7 +40,7 @@ def _patch_autoconfig(monkeypatch, config):
 
 def test_native_architecture_needs_no_separate_environment(monkeypatch):
     """A class the installed transformers already defines is never a mismatch."""
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     _patch_autoconfig(monkeypatch, _Config(architectures=["AutoModel"]))
     assert getattr(transformers, "AutoModel", None) is not None
@@ -56,6 +56,7 @@ def test_remote_code_that_imports_cleanly_is_not_a_mismatch(monkeypatch):
             auto_map={"AutoModelForCausalLM": "modeling_x.NotInstalledForCausalLM"},
         ),
     )
+    pytest.importorskip("transformers")
     import transformers.dynamic_module_utils as dmu
 
     monkeypatch.setattr(dmu, "get_class_from_dynamic_module", lambda *a, **k: object)
@@ -71,6 +72,7 @@ def test_remote_code_failing_to_import_is_a_mismatch(monkeypatch):
             auto_map={"AutoModelForCausalLM": "modeling_x.NotInstalledForCausalLM"},
         ),
     )
+    pytest.importorskip("transformers")
     import transformers.dynamic_module_utils as dmu
 
     def _boom(*_args, **_kwargs):
@@ -91,6 +93,7 @@ def test_non_import_failure_is_not_an_environment_problem(monkeypatch):
             auto_map={"AutoModelForCausalLM": "modeling_x.NotInstalledForCausalLM"},
         ),
     )
+    pytest.importorskip("transformers")
     import transformers.dynamic_module_utils as dmu
 
     def _boom(*_args, **_kwargs):
@@ -588,7 +591,7 @@ def test_no_mismatch_when_the_config_names_no_remote_class(monkeypatch):
 
 
 def test_config_that_cannot_be_imported_is_a_mismatch(monkeypatch):
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     def _boom(cls, *_a, **_k):
         raise ImportError("no module named 'custom_cfg'")
@@ -655,7 +658,7 @@ def test_no_mismatch_when_transformers_is_absent(monkeypatch):
 
 def test_config_failure_that_is_not_an_import_error_is_not_a_mismatch(monkeypatch):
     """A download or parse failure is a real error to surface, not a reason."""
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     def _boom(cls, *_a, **_k):
         raise OSError("could not reach the hub")
@@ -666,7 +669,7 @@ def test_config_failure_that_is_not_an_import_error_is_not_a_mismatch(monkeypatc
 
 def test_unrecognized_architecture_asks_for_a_newer_transformers(monkeypatch, tmp_path):
     """A model type this release has no class for is a newer-transformers request."""
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     (tmp_path / "config.json").write_text(
         json.dumps(
@@ -690,7 +693,7 @@ def test_unrecognized_architecture_asks_for_a_newer_transformers(monkeypatch, tm
 
 def test_unrecognized_architecture_with_remote_code_stays(monkeypatch, tmp_path):
     """auto_map means the class lives in the checkpoint, not in a future release."""
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     (tmp_path / "config.json").write_text(
         json.dumps(
