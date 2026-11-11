@@ -6,8 +6,8 @@
 
 """Gates for the model-bringup skill.
 
-Each gate writes ``<bringup_dir>/gates/<name>.json`` and exits 0 (pass), 1 (fail)
-or 2 (input error)::
+Each gate exits 0 (pass), 1 (fail) or 2 (input error). All but ``cases`` and
+``op-result`` write ``<bringup_dir>/gates/<name>.json``::
 
     python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates <subcommand> --bringup-dir B ...
 """
@@ -19,14 +19,13 @@ import re
 import sys
 from pathlib import Path
 
-import yaml
-
 from TraceLens.Agent.Analysis.triage.checks import (
     ALL_CHECKS,
     PROFILE_CHECKS,
     rank_of,
 )
 from TraceLens.Agent.ModelBringup.utils.unified_perf_ops import (
+    DEFAULT_THRESHOLD,
     compute_top_ops,
     load_rows,
     missing_perf_model_share,
@@ -38,12 +37,33 @@ from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions imp
 from TraceLens.util import TraceEventUtils
 
 # Constants
-BLOCKING_SUBLABELS = {
-    "profile": ("1a", "1c", "1d", "1e", "1f", "2a", "2b", "2c", "2d", "2k", "2l"),
-    "report": ("1c", "3b", "3c", "3i", "4a"),
+BLOCKING_CHECKS = {
+    "profile": (
+        "TRACE_MISSING",
+        "NO_GPU_KERNELS",
+        "CAPTURE_MISSING",
+        "DRAFTER_CAPTURE_MISSING",
+        "GRAPH_LAUNCHES_MISSING",
+        "MISSING_CPU_OP_SHAPES",
+        "INFERENCE_ANNOTATION_MISSING",
+        "SPLIT_TRACE_MISSING",
+        "SPLIT_INCORRECT",
+        "STEP_COUNT_MISMATCH",
+        "CPU_CALL_STACK_MISSING",
+    ),
+    "report": (
+        "NO_GPU_KERNELS",
+        "HIPGRAPH_LAUNCH_IN_REPORT",
+        "CAPTURE_GRAPH_MERGE_FAIL",
+        "CAPTURE_RANK_MISMATCH",
+        "PERF_REPORT_FAILURE",
+    ),
 }
 CAPTURE_DIRS = ("capture_traces", "graph_capture_profile")
+USABLE_OUTCOMES = ("pr_draft", "issue_draft")
+RESULT_KEYS = ("op", "op_slug", "outcome")
 SLUG_MAX = 48
+STOP_TAG = "[DIAG:bringup:STEP{step}_{code}]"
 
 
 def prepare(args):
@@ -70,15 +90,11 @@ def prepare(args):
             if not link.exists():
                 link.symlink_to(p)
         capture_folder = str(folder)
-    config = yaml.safe_load((bench / "config.yaml").read_text()) or {}
     values = {
         "bench_dir": str(bench),
         "mixed_split": str(splits[-1]) if splits else "",
         "replay_rank": replay_rank,
         "capture_folder": capture_folder,
-        "workload": (
-            "agentx" if (config.get("agentx") or {}).get("enabled") else "fixed_seq"
-        ),
         "platform": args.platform,
     }
     for key, value in values.items():
@@ -87,18 +103,19 @@ def prepare(args):
 
 
 def report_health(args):
-    """Block on the phase's triage sublabels unless accepted."""
+    """Block on the phase's triage checks unless accepted."""
+    name = f"{args.phase}_health"
     triage_csv = Path(args.triage_dir) / "triage_details.csv"
     if not triage_csv.is_file():
         print(f"missing {triage_csv}", file=sys.stderr)
+        _gate(args, name, False, error=f"missing {triage_csv}")
         return 2
     specs = {
-        s.sublabel: s
-        for s in (PROFILE_CHECKS if args.phase == "profile" else ALL_CHECKS)
+        s.name: s for s in (PROFILE_CHECKS if args.phase == "profile" else ALL_CHECKS)
     }
     blocking = {
         specs[s].build_tag()
-        for s in BLOCKING_SUBLABELS[args.phase]
+        for s in BLOCKING_CHECKS[args.phase]
         if s not in args.accept
     }
     with triage_csv.open(newline="") as f:
@@ -111,7 +128,7 @@ def report_health(args):
     merge_json = Path(args.triage_dir) / "graph_merge_check.json"
     return _gate(
         args,
-        f"{args.phase}_health",
+        name,
         not blocked,
         blocking=blocked,
         accepted=args.accept,
@@ -165,6 +182,39 @@ def cases(args):
     return 0
 
 
+def op_result(args):
+    """Check a perf-model sub-agent's result.json: schema, and pr_draft implies a commit and all-OK validation rows."""
+    path = Path(args.result)
+    if not path.is_file():
+        print(f"missing {path}", file=sys.stderr)
+        return 2
+    try:
+        result = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"invalid JSON: {e}", file=sys.stderr)
+        return 1
+    problems = [f"missing key: {k}" for k in RESULT_KEYS if k not in result]
+    outcome = result.get("outcome")
+    if outcome not in USABLE_OUTCOMES:
+        problems.append(f"outcome is {outcome}: {result.get('reason')}")
+    else:
+        if not result.get("draft") or not Path(result["draft"]).is_file():
+            problems.append("draft file missing")
+        if outcome == "issue_draft" and not result.get("reason"):
+            problems.append("reason missing")
+        if outcome == "pr_draft":
+            if not result.get("commit"):
+                problems.append("commit missing")
+            csv_path = result.get("validation_csv")
+            if not csv_path or not Path(csv_path).is_file():
+                problems.append("validation CSV missing")
+            elif not _all_rows_ok(csv_path):
+                problems.append("validation CSV has a row that is not OK")
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    return 1 if problems else 0
+
+
 def coverage(args):
     """Every pr_draft op is covered after the merge and validated with all rows OK."""
     after_rows, _ = load_rows(Path(args.after))
@@ -176,9 +226,7 @@ def coverage(args):
     for result in _results(args.bringup_dir):
         if result.get("outcome") != "pr_draft":
             continue
-        with open(result["validation_csv"], newline="") as f:
-            statuses = [r.get("status") for r in csv.DictReader(f)]
-        if not covered.get(result["op"]) or not statuses or set(statuses) != {"OK"}:
+        if not covered.get(result["op"]) or not _all_rows_ok(result["validation_csv"]):
             failing.append(result["op"])
     return _gate(
         args,
@@ -193,11 +241,13 @@ def coverage(args):
 
 
 def summary(args):
-    """Render bringup_summary.md from the gate and worker files only."""
+    """Render bringup_summary.md from the gate and result files only."""
     root = Path(args.bringup_dir)
+    stop = STOP_TAG.format(step=args.step, code=args.code) if args.code else None
+    _gate(args, "summary", stop is None, stop=stop, reason=args.reason)
     lines = ["# Model bringup summary", ""]
-    if args.stop_reason:
-        lines += [f"**Stopped:** {args.stop_reason}", ""]
+    if stop:
+        lines += [f"**Stopped:** {stop} {args.reason or ''}".rstrip(), ""]
     lines += ["| Gate | Status |", "|---|---|"]
     for name in ("prepare", "profile_health", "report_health", "coverage"):
         path = root / "gates" / f"{name}.json"
@@ -219,6 +269,11 @@ def summary(args):
     (root / "bringup_summary.md").write_text("\n".join(lines) + "\n")
     print(root / "bringup_summary.md")
     return 0
+
+
+def _all_rows_ok(csv_path):
+    with open(csv_path, newline="") as f:
+        return {r.get("status") for r in csv.DictReader(f)} == {"OK"}
 
 
 def _results(bringup_dir):
@@ -245,23 +300,32 @@ def main(argv=None):
         "report-health": (report_health, ("--triage-dir",)),
         "gaps": (gaps, ("--unified-csv",)),
         "cases": (cases, ("--report-dir", "--out")),
+        "op-result": (op_result, ("--result",)),
         "coverage": (coverage, ("--before", "--after")),
         "summary": (summary, ()),
     }
     for name, (fn, required) in commands.items():
         p = sub.add_parser(name, help=fn.__doc__)
         p.set_defaults(fn=fn)
-        if name != "cases":
+        if name not in ("cases", "op-result"):
             p.add_argument("--bringup-dir", required=True)
         for flag in required:
             p.add_argument(flag, required=True)
     sub.choices["report-health"].add_argument(
-        "--phase", choices=BLOCKING_SUBLABELS, required=True
+        "--phase", choices=BLOCKING_CHECKS, required=True
     )
     sub.choices["report-health"].add_argument("--accept", action="append", default=[])
-    sub.choices["gaps"].add_argument("--threshold", type=float, default=0.02)
-    sub.choices["summary"].add_argument("--stop-reason", default="")
+    sub.choices["gaps"].add_argument(
+        "--threshold", type=float, default=DEFAULT_THRESHOLD
+    )
+    sub.choices["summary"].add_argument("--step", type=int)
+    sub.choices["summary"].add_argument("--code")
+    sub.choices["summary"].add_argument("--reason")
     args = parser.parse_args(argv)
+    if args.command == "summary" and (args.step is None) != (args.code is None):
+        parser.error("--step and --code go together")
+    if args.command == "summary" and args.reason and args.code is None:
+        parser.error("--reason needs --step and --code")
     return args.fn(args)
 
 

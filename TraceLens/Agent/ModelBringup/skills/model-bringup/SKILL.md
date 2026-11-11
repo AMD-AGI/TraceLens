@@ -26,27 +26,28 @@ Read [reference.md](reference.md) before Step 0 and run every step from it.
 
 | Step | Name | Gate |
 |---|---|---|
-| 0 | Environment and inputs | every command succeeds |
-| 1 | Profile (Magpie skill, unattended) | Magpie exits 0 |
+| 0 | Environment and Input Sanity Checks | every command succeeds |
+| 1 | Profile (Magpie sub-agent) | its `result.json` outcome is `profiled` |
 | 2 | Profile health | `prepare` and `report-health --phase profile` exit 0 |
 | 3 | Baseline analysis (orchestrator, inline) | `analysis.md`, unified CSV, `perf_report.log` non-empty |
 | 4 | Report health | `report-health --phase report` exits 0 |
 | 5 | Find gaps | `gaps` exits 0 |
-| 6 | Perf-model workers (subagents) | each `result.json` valid, draft exists |
+| 6 | Perf-model sub-agents | `op-result` exits 0 for each op, else relaunch once, then exclude |
 | 7 | Coverage | `coverage` exits 0 |
 | 8 | Summary | always runs |
 | Publish | Separate prompt after review | only the named op slugs |
 
 ## Rules
 
-- Never ask the user after Step 0. Where a step or an owned skill would ask, stop.
-- Stop means: record the reason, run Step 8, end.
+- Never ask the user after Step 0. Where a step or an owned skill would ask, stop with `INPUT_REQUIRED`.
+- Stop means: run Step 8 with the stop's step and code, end. Step 0 failures end without Step 8.
 - Never push, run `gh`, or open an issue or PR during a run. Only Publish does, and only
   on `AMD-AGI/TraceLens` for the op slugs its prompt names.
 - PRs and issues report only TFLOPs and bytes moved per shape (predicted, measured,
   ratio). No runtime numbers.
 - Never commit in `<tracelens_dir>`. Commits go only on `perf_model/<op_slug>` in `<op_worktree>`.
 - Run git in your own shell, never through `<prefix>`.
+- Read only the files each step names, such as `result.json`, `gates/*.json` and `gaps.json`, never a sub-agent's instruction file, the Magpie reference or a PerfModel guide. The one exception is Step 3, which runs the orchestrator inline, so read the orchestrator skill there.
 - Never analyze a trace or author or validate a perf model by hand to work around a failed step.
 
 ## Primary outputs

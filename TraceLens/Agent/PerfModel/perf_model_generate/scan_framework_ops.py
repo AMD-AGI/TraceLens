@@ -4,6 +4,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
 """
 EP3 — Framework source scanner for unified-perf-model-extension.
 

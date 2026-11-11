@@ -51,7 +51,18 @@ If it fails, stop: this Magpie cannot run the AgentX capture below.
 
 ### Unattended mode
 
-When the caller (for example the model-bringup skill) asks for unattended mode, ask nothing. Where a step would ask, stop with that question as the reason. Use the computed window values without confirmation, run Step 1b with the rule below, edit only the copy of the YAML the caller names, keep the cleanup's script restores but skip the YAML restore, run Magpie and the AgentX check through the caller's command prefix instead of the conda activation shown in Steps 0 and 3 (no conda env is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log`, and stop after the Step 5 check. Do not print the TraceLens command. Set `inferencex_path` to `<output_dir>/InferenceX` and create it as described under **Common SGLang flags**, so parallel runs never share patched InferenceX scripts.
+When the caller (for example the model-bringup skill) asks for unattended mode:
+
+- Ask nothing. Where a step would ask, stop with that question as the reason.
+- Use the computed window values without confirmation.
+- Run Step 1b with the rule below.
+- Edit only the copy of the YAML the caller names.
+- Keep the cleanup's script restores but skip the YAML restore.
+- Run Magpie and the AgentX check through the caller's Magpie command instead of the conda activation shown in Steps 0 and 3 (no conda env is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log | tail -n 40`.
+- Skip Step 5.
+- Stop after the Step 6 split, which runs through the caller's container command prefix.
+- Do not print the TraceLens command.
+- Set `inferencex_path` to `<output_dir>/InferenceX` and create it as described under **Common SGLang flags**, so parallel runs never share patched InferenceX scripts.
 
 Step 1b without asking:
 
@@ -68,6 +79,18 @@ Step 1b without asking:
    Every other image is patched.
 3. Build it with the build script's arm for that version (for SGLang, with the `--gpu-type` from the node's GPU: `gfx942` is `mi300`, `gfx950` is `mi355`). Tag it `tracelens-<framework>:<version>`, and skip the build if `docker image inspect` finds that tag. If the script has no arm for the version, or the build fails, stop.
 4. Set `docker_image` in the YAML copy to the image used.
+
+#### Output file
+
+Write `<output_dir>/result.json`, also when you stop, then return "DONE":
+
+```json
+{"outcome": "profiled | retry | stop", "reason": "<required unless profiled>"}
+```
+
+- `profiled`: the benchmark ran and the split wrote its windows.
+- `retry`: the benchmark or the split failed; `reason` has the failing command and the tail of its output.
+- `stop`: any other stop, including a question you would have asked and a failed image build.
 
 ### Step 1: Read the Benchmark Config
 
@@ -239,7 +262,7 @@ The flags below must be applied **regardless** of whether the user chooses targe
 > ```bash
 > ssh <node> "find <ifx>/benchmarks -name 'gptoss_*' -o -name 'dsr1_*' | head -5"
 > ```
-> If a native script is found (or if `benchmark_script` is explicitly set to an InferenceX native script), `EXTRA_VLLM_ARGS`/`EXTRA_SGLANG_ARGS` will be silently ignored. In that case, **stop and ask the user to set `benchmark_script` in their YAML to the appropriate Magpie generic script** (e.g. `vllm_mi300x.sh`) before proceeding.
+> If a native script is found (or if `benchmark_script` is explicitly set to an InferenceX native script), `EXTRA_VLLM_ARGS`/`EXTRA_SGLANG_ARGS` will be silently ignored. In that case, **stop and ask the user to set `benchmark_script` in their YAML to the appropriate Magpie generic script** (e.g. `vllm_mi300x.sh`) before proceeding. In unattended mode, stop with that instruction as the reason.
 
 Add these flags to `EXTRA_VLLM_ARGS` in the user's YAML config (append to any existing value):
 
