@@ -106,6 +106,22 @@ class InferenceAttention:
         return IterationAnnotation(annotation).chunk_stats()
 
     @staticmethod
+    def _row_fraction(rows, stats):
+        """Share of the iteration's query rows (``c_sq + g_sq``) one launch covers.
+
+        Kernels that split query rows into chunks launch several times per
+        layer under the same annotation, while the annotation's sq-sk
+        aggregates describe the whole layer. Scaling by this fraction makes the
+        chunks of a layer sum to the layer total; per-chunk values assume every
+        row attends to the same number of KV tokens. Returns 1.0 when the row
+        count is unknown or covers all rows.
+        """
+        total = stats["c_sq"] + stats["g_sq"]
+        if not rows or not total:
+            return 1.0
+        return min(rows / total, 1.0)
+
+    @staticmethod
     def get_param_details(event):
         try:
             annotation = str(event.get("annotation"))
@@ -1220,7 +1236,8 @@ class sgl_kernel_fast_topk_transform_fused:
 
     The score buffer is padded to the max context length, so the number of
     valid scores per row comes from the step annotation (causal within a
-    request).
+    request). When the indexer chunks query rows, each launch is credited
+    with its ``rows`` share of the layer's scores.
 
     Expected Input Dims from trace:
         [0] score (rows, L_max)  [1] lengths (rows,)
@@ -1251,9 +1268,12 @@ class sgl_kernel_fast_topk_transform_fused:
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         params.update(stats)
-        params["valid_scores"] = sum(
+        layer_scores = sum(
             stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
             for p in ("c", "g")
+        )
+        params["valid_scores"] = layer_scores * InferenceAttention._row_fraction(
+            params["rows"], stats
         )
         return params
 
@@ -1323,6 +1343,13 @@ class paged_mqa_logits_preshuffle_synthetic:
     stats (g_sqsk, g_sq).  When the annotation is missing or unparseable,
     flops() and bytes() return None.
 
+    The non-paged prefill kernel (``_gluon_fp8_mqa_logits``) is launched once
+    per query-row chunk when the logits buffer exceeds sglang's memory budget.
+    aiter launches it with ``grid = (cdiv(rows, BLOCK_M), kv_splits)``, so the
+    launcher's ``grid[0] * BLOCK_M`` gives the chunk's rows and sum_len / seq_q
+    are scaled to that share of the layer.  kv_touched stays at the layer
+    total because every chunk walks the KV cache again.
+
     Vendor roofline reference:
         aiter/op_tests/op_benchmarks/triton/bench_fp8_mqa_logits.py
     """
@@ -1338,6 +1365,19 @@ class paged_mqa_logits_preshuffle_synthetic:
     BPE_OUT = 4
 
     _NAME_PARAMS_RE = re.compile(r"NUM_HEADS_(\d+)_HEAD_SIZE_(\d+)")
+    _BLOCK_M_RE = re.compile(r"_BLOCK_M_(\d+)")
+
+    @classmethod
+    def _launch_rows(cls, event):
+        """Query rows covered by one non-paged launch, or None if unknown."""
+        name = event.get("name", "")
+        if "paged_mqa_logits" in name:
+            return None
+        grid = (event.get("args") or {}).get("grid")
+        if not grid:
+            return None
+        m = cls._BLOCK_M_RE.search(name)
+        return grid[0] * (int(m.group(1)) if m else 1)
 
     @classmethod
     def _parse_dims_from_event(cls, event):
@@ -1363,8 +1403,9 @@ class paged_mqa_logits_preshuffle_synthetic:
         try:
             annotation = str(event.get("annotation"))
             stats = InferenceAttention._parse_chunk_stats(annotation)
-            sum_len = stats["c_sqsk"] + stats["g_sqsk"]
-            seq_q = stats["c_sq"] + stats["g_sq"]
+            frac = InferenceAttention._row_fraction(cls._launch_rows(event), stats)
+            sum_len = (stats["c_sqsk"] + stats["g_sqsk"]) * frac
+            seq_q = (stats["c_sq"] + stats["g_sq"]) * frac
             kv_touched = stats["c_sk"] + stats["g_sk"]
             # Try parsing H and D from the event name or kernel_details
             # (the Triton autotuned kernel name carries NUM_HEADS and
