@@ -119,7 +119,9 @@ class TestTraceFileSize:
         msgs = [f.message for f in report.findings if f.status == Status.WARN]
         assert any("consider splitting" in m and "compressed" in m for m in msgs)
 
-    def test_compressed_under_uncompressed_limit_no_finding(self, tmp_path, monkeypatch):
+    def test_compressed_under_uncompressed_limit_no_finding(
+        self, tmp_path, monkeypatch
+    ):
         # A .json.gz is gated by the compressed limit, not the (larger) uncompressed one.
         monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_COMPRESSED", 10_000)
         monkeypatch.setattr(trace_check, "_MAX_TRACE_BYTES_UNCOMPRESSED", 100)
@@ -341,6 +343,7 @@ class TestHelpers:
     def test_coefficient_of_variation_varied(self):
         cv = trace_check.coefficient_of_variation([1, 2, 3, 4, 5])
         assert 0.4 < cv < 0.6
+
 
 # ---------------------------------------------------------------------------
 # Detailed pre-report checks
