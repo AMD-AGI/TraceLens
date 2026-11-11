@@ -110,7 +110,13 @@ def test_label_for_branches():
 
 
 def test_config_value_arithmetic_and_logic():
-    config = {"hidden": 12, "flag": True, "off": False, "nested": {"k": 7}}
+    config = {
+        "hidden": 12,
+        "flag": True,
+        "off": False,
+        "nested": {"k": 7},
+        "gap": None,
+    }
     sv: dict = {}
 
     assert _config_value(_expr("config.hidden % 5"), config, sv) == 2  # 1399-1400
@@ -132,6 +138,9 @@ def test_config_value_arithmetic_and_logic():
     assert _config_value(_expr("config.hidden >= 12"), config, sv) is True
     assert _config_value(_expr("config.hidden < 5"), config, sv) is False
     assert _config_value(_expr("config.hidden <= 12"), config, sv) is True
+    # An absent value ordered against an int is not a decision.
+    assert _config_value(_expr("config.gap < 8"), config, sv) is aa._UNKNOWN
+    assert _config_value(_expr("config.gap == 8"), config, sv) is False
 
     # getattr on config dict + nested attribute (1367-1370, 1382-1383)
     assert _config_value(_expr("getattr(config, 'hidden', 0)"), config, sv) == 12
@@ -181,6 +190,72 @@ def test_distributed_degree_value_resolves_group_object_and_standalone_styles():
     # An unrelated call or attribute is not a distributed-degree accessor at all.
     assert _distributed_degree_value(_expr("some_other_call()")) is None
     assert _distributed_degree_value(_expr("config.hidden")) is None
+
+
+def test_distributed_degree_value_reads_every_recorded_group():
+    """A run that recorded its process groups supplies each axis, not only TP."""
+    from TraceLens.ModelUtils.ast_analyze import (
+        RUNTIME_REGIME_KEY,
+        RuntimeRegime,
+        _config_value,
+        _distributed_degree_value,
+        _distributed_single_rank_predicate,
+    )
+    from TraceLens.ModelUtils.parallel_plan import ParallelDegree
+
+    parallel = ParallelDegree(
+        tp=8,
+        pp=2,
+        ep=4,
+        dp=2,
+        cp=2,
+        groups={
+            "tp": 8,
+            "moe_ep": 4,
+            "moe_dp": 2,
+            "attn_cp": 2,
+            "pp": 2,
+        },
+    )
+    assert (
+        _distributed_degree_value(_expr("get_parallel().attn_tp_size"), parallel) == 8
+    )
+    assert _distributed_degree_value(_expr("get_parallel().moe_ep_size"), parallel) == 4
+    assert _distributed_degree_value(_expr("get_parallel().moe_dp_size"), parallel) == 2
+    assert (
+        _distributed_degree_value(_expr("get_parallel().attn_cp_size"), parallel) == 2
+    )
+    assert _distributed_degree_value(_expr("get_parallel().pp_size"), parallel) == 2
+    assert _distributed_degree_value(_expr("get_parallel().moe_ep_rank"), parallel) == 0
+    assert (
+        _distributed_degree_value(_expr("get_expert_parallel_world_size()"), parallel)
+        == 4
+    )
+    assert (
+        _distributed_degree_value(_expr("get_data_parallel_world_size()"), parallel)
+        == 2
+    )
+    assert (
+        _distributed_degree_value(
+            _expr("get_context_model_parallel_world_size()"), parallel
+        )
+        == 2
+    )
+    assert _distributed_single_rank_predicate(
+        _expr("self.pp_group.is_first_rank"), parallel
+    )
+    assert not _distributed_single_rank_predicate(
+        _expr("self.pp_group.is_last_rank"), parallel
+    )
+    assert not _distributed_single_rank_predicate(
+        _expr("self.pp_group.is_only_rank"), parallel
+    )
+    # No recorded degree: rank 0 of a single pipeline stage is every predicate.
+    assert _distributed_single_rank_predicate(_expr("self.pp_group.is_last_rank"))
+
+    config = {RUNTIME_REGIME_KEY: RuntimeRegime(parallel=parallel)}
+    assert _config_value(_expr("get_parallel().moe_dp_size"), config, {}) == 2
+    assert _config_value(_expr("self.pp_group.is_last_rank"), config, {}) is False
 
 
 def test_config_value_caps_a_distributed_degree_with_min_and_max():
@@ -679,6 +754,54 @@ def test_dispatches_to_imported_kernel_via_runtime_selected_attribute():
         ),
     )
     assert aa._dispatches_to_imported_kernel(unconditional, None) is False
+
+
+def test_embedding_forward_is_introspected_and_records_one_lookup():
+    """An embedding module stays open: the gather is the kernel, and the two
+    spellings of that lookup are one gather."""
+    src = (
+        "class VocabParallelEmbedding:\n"
+        "    def __init__(self, quant_config):\n"
+        "        if quant_config is None:\n"
+        "            self.quant_method = UnquantizedEmbeddingMethod()\n"
+        "        else:\n"
+        "            self.quant_method = resolve_quant_method(quant_config)\n"
+        "    def forward(self, input_):\n"
+        "        if self.tp_size == 1:\n"
+        "            return self.quant_method.embedding(self, input_)\n"
+        "        masked, mask = get_masked_input_and_mask(input_)\n"
+        "        output = self.quant_method.embedding(self, masked)\n"
+        "        output = ops.vocab_parallel_embedding(input_, self.weight)\n"
+        "        return tensor_model_parallel_all_reduce(output)\n"
+    )
+    parsed = aa.analyze_source(src, filename="embed.py")
+    cls = parsed.class_registry["VocabParallelEmbedding"]
+    assert aa._dispatches_to_imported_kernel(cls, None) is False
+    assert cls.forward_calls.count("@functional_embedding") == 1
+    assert any(
+        call.startswith("@fn_") and "get_masked_input_and_mask" in call
+        for call in cls.forward_calls
+    )
+
+
+def test_imported_kernel_with_a_local_helper_stays_a_boundary():
+    """A local helper beside an imported kernel does not open the class.
+
+    Opening every such class registered DeepSeek's vision tower and the stack
+    picker then chose it over the language model.
+    """
+    src = (
+        "from kernels import fused_op\n"
+        "def prepare(x):\n"
+        "    return x\n"
+        "class VisionTower:\n"
+        "    def forward(self, x):\n"
+        "        y = prepare(x)\n"
+        "        return fused_op(y)\n"
+    )
+    parsed = aa.analyze_source(src, filename="vision.py")
+    cls = parsed.class_registry["VisionTower"]
+    assert aa._dispatches_to_imported_kernel(cls, aa.parse_python_ast(src)) is True
 
 
 def test_parse_layer_module_list_edge_returns():

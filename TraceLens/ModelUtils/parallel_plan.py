@@ -28,8 +28,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import torch
-
 _log = logging.getLogger(__name__)
 
 # What each Hugging Face parallel style does to the activation. The mesh the
@@ -97,16 +95,136 @@ _ENGINE_MISSING_LAYER = "PPMissingLayer"
 _ENGINE_EP_COUNT_KWARGS = {"num_experts", "num_local_experts"}
 
 
+# A mesh the engine names one way and the trace records another. The first
+# hit in the recorded groups wins; the named fields below are the last resort.
+_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
+    "attn_tp": ("tp",),
+    "moe_tp": ("tp",),
+    "ep": ("moe_ep",),
+    "moe_ep": ("ep",),
+    "dp": ("moe_dp",),
+    "moe_dp": ("dp",),
+    "cp": ("attn_cp",),
+    "attn_cp": ("cp",),
+    "pp": ("self_pp",),
+    "self_pp": ("pp",),
+}
+_NAMED_DEGREE = {
+    "tp": "tp",
+    "attn_tp": "tp",
+    "moe_tp": "tp",
+    "pp": "pp",
+    "self_pp": "pp",
+    "ep": "ep",
+    "moe_ep": "ep",
+    "dp": "dp",
+    "moe_dp": "dp",
+    "cp": "cp",
+    "attn_cp": "cp",
+}
+
+
 @dataclass(frozen=True)
 class ParallelDegree:
-    """How many ways each axis is split. ``1`` leaves that axis whole."""
+    """How many ways each axis is split. ``1`` leaves that axis whole.
+
+    ``groups`` holds every process group a trace recorded (``tp``, ``moe_ep``,
+    ``moe_dp``, ``attn_cp``, ``pp``, and whatever else the run created). The
+    named fields are the axes the plan tables already count. Shape inference
+    asks :meth:`size` by the engine's own attribute name, so a group the plan
+    tables do not name is still a degree.
+    """
 
     tp: int = 1
     pp: int = 1
     ep: int = 1
+    dp: int = 1
+    cp: int = 1
+    groups: dict[str, int] = field(default_factory=dict)
 
     def requested(self) -> bool:
-        return self.tp > 1 or self.pp > 1 or self.ep > 1
+        return (
+            self.tp > 1
+            or self.pp > 1
+            or self.ep > 1
+            or self.dp > 1
+            or self.cp > 1
+            or any(size > 1 for size in self.groups.values())
+        )
+
+    def size(self, name: str) -> int:
+        """The degree of ``name`` (``moe_ep``, ``attn_tp``, ``dp``, ...).
+
+        A group the run recorded wins. An engine name the trace folded into
+        another group (attention TP is the ``tp`` group when no ``attn_tp``
+        group exists) uses that group. Anything the run does not mention is 1.
+        """
+        recorded = self.groups.get(name)
+        if isinstance(recorded, int) and recorded > 0:
+            return recorded
+        for alias in _GROUP_ALIASES.get(name, ()):
+            recorded = self.groups.get(alias)
+            if isinstance(recorded, int) and recorded > 0:
+                return recorded
+        field_name = _NAMED_DEGREE.get(name)
+        if field_name:
+            return int(getattr(self, field_name))
+        return 1
+
+
+def parallel_degree_from_trace(metadata: dict | None) -> ParallelDegree | None:
+    """Every process-group size on the trace's ``distributedInfo``.
+
+    SGLang and vLLM name a group ``tp:device`` (and a matching ``tp:cpu``
+    group), and the same way for ``moe_ep``, ``moe_dp``, ``attn_cp``, ``pp``.
+    The degree is ``pg_size``. A device group and its cpu group that disagree
+    are omitted: the trace does not say. ``None`` when the trace has no
+    distributed block at all.
+    """
+    info = (metadata or {}).get("distributedInfo")
+    if not isinstance(info, dict):
+        return None
+    buckets: dict[str, dict[str, int]] = {"device": {}, "cpu": {}, "bare": {}}
+    saw_group = False
+    for group in info.get("pg_config") or []:
+        if not isinstance(group, dict):
+            continue
+        desc = str(group.get("pg_desc") or "")
+        size = group.get("pg_size")
+        if not desc or desc == "default_pg":
+            continue
+        if not isinstance(size, int) or size < 1:
+            continue
+        saw_group = True
+        if desc.endswith(":device"):
+            buckets["device"][desc[: -len(":device")]] = size
+        elif desc.endswith(":cpu"):
+            buckets["cpu"][desc[: -len(":cpu")]] = size
+        else:
+            buckets["bare"][desc] = size
+    world = info.get("world_size")
+    if not saw_group and not isinstance(world, int):
+        return None
+    groups: dict[str, int] = {}
+    names = set(buckets["device"]) | set(buckets["cpu"]) | set(buckets["bare"])
+    for name in names:
+        present = [
+            buckets[kind][name]
+            for kind in ("device", "cpu", "bare")
+            if name in buckets[kind]
+        ]
+        if len(set(present)) == 1:
+            groups[name] = present[0]
+    if isinstance(world, int) and world > 0 and "world" not in groups:
+        groups["world"] = world
+    return ParallelDegree(
+        tp=groups.get("tp", 1),
+        pp=groups.get("pp", groups.get("self_pp", 1)),
+        ep=groups.get("moe_ep", groups.get("ep", 1)),
+        dp=groups.get("dp", groups.get("moe_dp", 1)),
+        cp=groups.get("cp", groups.get("attn_cp", 1)),
+        groups=groups,
+    )
 
 
 @dataclass(frozen=True)
@@ -1072,6 +1190,8 @@ def _dtype_bytes(dtype: str | None) -> int | None:
     table of numbers that can drift from what the installed torch build does."""
     if not dtype:
         return None
+    import torch
+
     key = dtype.lower()
     key = _DTYPE_ALIASES.get(key, key)
     torch_dtype = getattr(torch, key, None)

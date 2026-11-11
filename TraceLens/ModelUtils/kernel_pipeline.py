@@ -28,9 +28,16 @@ _KERNEL_SOURCE_CACHE = Path.home() / ".cache" / "tracelens" / "kernel_sources"
 _KERNEL_SEARCH_ROOTS: list[Path] = []
 
 # Top-level import roots -> (github org/repo, branch) for source fetch when the package is not installed.
-_PACKAGE_SOURCE_REPOS: dict[str, tuple[str, str]] = {
+_PACKAGE_SOURCE_REPOS: dict[str, tuple[str, str | None]] = {
     "fla": ("fla-org/flash-linear-attention", "main"),
+    # A modeling file imports these; they are not an installed package. The
+    # engine's container build says which commit its kernels were built from,
+    # so the ref is resolved from that pin (``None`` here), not stated here.
+    "aiter": ("ROCm/aiter", None),
 }
+
+# Package -> (engine, Dockerfile variable) naming the engine pin for its ref.
+_PACKAGE_ENGINE_PINS = {"aiter": ("sglang", "AITER_COMMIT_DEFAULT")}
 
 _BUILTIN_SKIP_CALLS = frozenset(
     {
@@ -330,6 +337,47 @@ def _search_root_module_file(module: str) -> Path | None:
     return None
 
 
+def package_source_file(module: str) -> Path | None:
+    """A module file from a pinned, not-installed library checkout.
+
+    Reads the local cache first. A miss of a registered library fetches that
+    one file into the cache. Nothing is imported.
+    """
+    parts = [part for part in module.split(".") if part]
+    if not parts:
+        return None
+    cache_file = _KERNEL_SOURCE_CACHE / Path(*parts).with_suffix(".py")
+    if cache_file.is_file():
+        return cache_file
+    cache_init = _KERNEL_SOURCE_CACHE / Path(*parts) / "__init__.py"
+    if cache_init.is_file():
+        return cache_init
+
+    repo = _PACKAGE_SOURCE_REPOS.get(parts[0])
+    if repo is None:
+        return None
+    org_repo, branch = repo
+    if branch is None:
+        from TraceLens.ModelUtils.engine_facts import kernel_library_commit
+
+        engine, variable = _PACKAGE_ENGINE_PINS[parts[0]]
+        branch = kernel_library_commit(engine, variable)
+        if branch is None:
+            return None
+    owner, repo_name = org_repo.split("/", 1)
+    from TraceLens.ModelUtils.github import GitHubRef, fetch_github_file
+
+    ref = GitHubRef(owner=owner, repo=repo_name, ref=branch)
+    relative = Path(*parts).with_suffix(".py")
+    found = fetch_github_file(ref, relative.as_posix(), cache_root=_KERNEL_SOURCE_CACHE)
+    if found is not None:
+        return found
+    package_init = Path(*parts) / "__init__.py"
+    return fetch_github_file(
+        ref, package_init.as_posix(), cache_root=_KERNEL_SOURCE_CACHE
+    )
+
+
 def _module_file_path(module: str) -> Path | None:
     from_root = _search_root_module_file(module)
     if from_root is not None:
@@ -344,30 +392,7 @@ def _module_file_path(module: str) -> Path | None:
         if origin.is_file():
             return origin
 
-    cache_file = _KERNEL_SOURCE_CACHE / Path(*module.split(".")).with_suffix(".py")
-    if cache_file.is_file():
-        return cache_file
-    cache_init = _KERNEL_SOURCE_CACHE / Path(*module.split(".")) / "__init__.py"
-    if cache_init.is_file():
-        return cache_init
-
-    top_level = module.split(".", 1)[0]
-    repo = _PACKAGE_SOURCE_REPOS.get(top_level)
-    if repo is None:
-        return None
-    org_repo, branch = repo
-    owner, repo_name = org_repo.split("/", 1)
-    from TraceLens.ModelUtils.github import GitHubRef, fetch_github_file
-
-    ref = GitHubRef(owner=owner, repo=repo_name, ref=branch)
-    relative = Path(*module.split(".")).with_suffix(".py")
-    found = fetch_github_file(ref, relative.as_posix(), cache_root=_KERNEL_SOURCE_CACHE)
-    if found is not None:
-        return found
-    package_init = Path(*module.split(".")) / "__init__.py"
-    return fetch_github_file(
-        ref, package_init.as_posix(), cache_root=_KERNEL_SOURCE_CACHE
-    )
+    return package_source_file(module)
 
 
 def _read_module_source(module: str) -> tuple[str, str] | None:
@@ -1419,8 +1444,16 @@ def introspect_kernel_op_substeps(
     owning_module: str,
     *,
     parent_attr: str,
+    stop_at_modeled_kernels: bool = False,
 ) -> tuple[KernelPipelineStep, ...]:
     """Expand one kernel call into inline sub-operations discovered from its AST."""
+    if stop_at_modeled_kernels:
+        # This stage is the cpu_op the collector stops on. The Triton body is
+        # that same op, not a second row.
+        from TraceLens.PerfModel.torch_op_mapping import source_call_has_perf_model
+
+        if source_call_has_perf_model(call_name):
+            return ()
     if not _should_expand_kernel_op(call_name):
         return ()
 
@@ -1472,6 +1505,8 @@ def _attach_kernel_op_expansions(
     steps: list[KernelPipelineStep],
     imports: dict[str, _ImportTarget],
     owning_module: str,
+    *,
+    stop_at_modeled_kernels: bool = False,
 ) -> list[KernelPipelineStep]:
     """Attach AST-derived sub-operation trees to expandable pipeline steps."""
     expanded: list[KernelPipelineStep] = []
@@ -1481,6 +1516,7 @@ def _attach_kernel_op_expansions(
             imports,
             owning_module,
             parent_attr=step.attr_name,
+            stop_at_modeled_kernels=stop_at_modeled_kernels,
         )
         if children:
             expanded.append(
@@ -1505,6 +1541,8 @@ def _attach_kernel_op_expansions(
 
 def introspect_kernel_pipeline(
     details: list[str],
+    *,
+    stop_at_modeled_kernels: bool = False,
 ) -> tuple[list[KernelPipelineStep], list[KernelPipelineStep]]:
     """Return ``(pipeline_steps, output_steps)`` from modeling call details and kernel code."""
     flags = parse_kernel_call_flags(details)
@@ -1574,10 +1612,16 @@ def introspect_kernel_pipeline(
                 )
                 owning_module = resolved[2]
         pipeline_steps = _attach_kernel_op_expansions(
-            pipeline_steps, merged_imports, owning_module
+            pipeline_steps,
+            merged_imports,
+            owning_module,
+            stop_at_modeled_kernels=stop_at_modeled_kernels,
         )
         output_steps = _attach_kernel_op_expansions(
-            output_steps, merged_imports, owning_module
+            output_steps,
+            merged_imports,
+            owning_module,
+            stop_at_modeled_kernels=stop_at_modeled_kernels,
         )
 
     return pipeline_steps, output_steps

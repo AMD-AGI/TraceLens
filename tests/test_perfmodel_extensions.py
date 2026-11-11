@@ -214,6 +214,10 @@ class TestPseudoOpsPerfUtils:
             category_only["sglang_profiler::topk_topk_transform_paged_v2"]
             == "InferenceAttention"
         )
+        assert (
+            category_only["sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8"]
+            == "GroupQuant"
+        )
 
 
 class TestPackageExports:

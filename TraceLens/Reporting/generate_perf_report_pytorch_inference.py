@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import warnings
+from dataclasses import replace
 from typing import Dict, Optional
 
 
@@ -36,6 +37,11 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     SPEC_ROLE_TARGET,
     CaptureAnnotation,
     filename_request_bs,
+)
+from TraceLens.TreePerf.graph_schedule import (
+    graph_model_from_config,
+    num_cus_from_trace,
+    tp_from_trace,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
@@ -580,6 +586,187 @@ def add_truncated_kernel_details(
     return df[cols]
 
 
+def _inference_engine(events) -> Optional[str]:
+    """The engine whose modeling source this trace ran, when the events say so."""
+    saw_sglang = False
+    saw_vllm = False
+    for event in events:
+        name = (event.get("name") or "").lower()
+        if "sglang" in name:
+            saw_sglang = True
+        elif name.startswith("vllm::") or "/vllm/" in name:
+            saw_vllm = True
+    if saw_sglang:
+        return "sglang"
+    if saw_vllm:
+        return "vllm"
+    return None
+
+
+def _annotated_phases(events) -> set[str]:
+    from TraceLens.TreePerf.graph_schedule import invocation_from_annotation
+
+    phases: set[str] = set()
+    for event in events:
+        name = event.get("name") or ""
+        if "step[" not in name:
+            continue
+        invocation = invocation_from_annotation(name)
+        if invocation is None:
+            continue
+        phases.add("prefill" if invocation.prefill else "decode")
+    return phases
+
+
+def _load_engine_architectures(
+    config_path: Optional[str], events, metadata=None
+) -> dict:
+    """Read the engine's own modeling source for each phase in the trace.
+
+    The source is the pinned checkout the architecture loader already keeps
+    locally. The engine package does not have to be installed. A phase that
+    cannot be read is omitted and the config schedule covers that graph.
+    The regime carries every process-group size on the trace, so constructor
+    math such as ``// moe_ep_size`` uses that degree.
+    """
+    engine = _inference_engine(events)
+    if not config_path or engine is None:
+        return {}
+    phases = _annotated_phases(events) or {"decode"}
+    from TraceLens.ModelUtils.ast_analyze import RuntimeRegime
+    from TraceLens.ModelUtils.extract import load_architecture
+    from TraceLens.ModelUtils.parallel_plan import parallel_degree_from_trace
+
+    parallel = parallel_degree_from_trace(metadata)
+    loaded = {}
+    for phase in sorted(phases):
+        try:
+            loaded[phase] = load_architecture(
+                config_path,
+                analyze_code=True,
+                detailed=True,
+                engine=engine,
+                regime=RuntimeRegime(
+                    phase=phase,
+                    cache="warm" if phase == "decode" else "cold",
+                    mode="inference",
+                    device="hip",
+                    parallel=parallel,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - a source the analyzer cannot read
+            warnings.warn(
+                f"Could not read the {engine} modeling source for the "
+                f"{phase} graph: {exc}",
+                UserWarning,
+            )
+    return loaded
+
+
+def _kernel_library_facts(graph_model, engine) -> tuple:
+    """What the kernel library the engine's build pins fixes for this model."""
+    from TraceLens.ModelUtils.aiter_facts import moe_facts_for_model
+    from TraceLens.ModelUtils.engine_facts import kernel_library_commit
+    from TraceLens.ModelUtils.kernel_pipeline import _PACKAGE_ENGINE_PINS
+
+    pinned_by, variable = _PACKAGE_ENGINE_PINS["aiter"]
+    if engine != pinned_by:
+        return ()
+    return moe_facts_for_model(graph_model, kernel_library_commit(engine, variable))
+
+
+def _graph_model_with_engine_facts(graph_model, engine, events=()):
+    """Attach the numbers the engine's source and the run's pools fix.
+
+    The engine is read at the release the trace's python frames match. The
+    pool sizes come from the eager ops the profile recorded.
+    """
+    if graph_model is None or engine is None or graph_model.facts:
+        return graph_model
+    from TraceLens.ModelUtils.engine_facts import (
+        load_engine_facts,
+        trace_runtime_facts,
+        use_traced_engine_source,
+    )
+
+    events = list(events)
+    use_traced_engine_source(engine, events)
+    hip = graph_model.gfx_arch.startswith("gfx")
+    facts = load_engine_facts(engine, hip=hip) + trace_runtime_facts(events)
+    facts += _kernel_library_facts(graph_model, engine)
+    # A config that names no capture sizes takes the sizes the replays padded to.
+    buckets = dict(facts).get("replay_tokens") or ()
+    if graph_model.capture_buckets:
+        buckets = graph_model.capture_buckets
+    return replace(graph_model, facts=facts, capture_buckets=tuple(buckets))
+
+
+def _gfx_for_product(name: Optional[str]) -> str:
+    """The gfx arch for a product name. The trace records the product, not the gfx.
+
+    The product-to-gfx table is ``PRODUCT_GFX``. Compute units are never taken
+    from a table: they come from the trace's deviceProperties.
+    """
+    from TraceLens.util import PRODUCT_GFX
+
+    if not name:
+        return ""
+    key = name.lower()
+    if key.endswith("x") and not key.startswith("gfx"):
+        key = key[:-1]
+    return PRODUCT_GFX.get(key, key if key.startswith("gfx") else "")
+
+
+def _graph_model_for_trace(config_path, metadata, gpu_arch):
+    """The per-rank model for ``config_path``, sharded as the trace records.
+
+    Every process group on the trace supplies a degree: tensor, expert, data,
+    context, and pipeline. The compute-unit count is the trace's device block.
+    """
+    from TraceLens.ModelUtils.parallel_plan import parallel_degree_from_trace
+
+    tp = tp_from_trace(metadata)
+    if tp is None:
+        raise ValueError(
+            "The trace does not record a tensor-parallel process group. "
+            "distributedInfo.pg_config needs a group named 'tp:device' "
+            "(or 'tp') with its pg_size."
+        )
+    degree = parallel_degree_from_trace(metadata)
+    with open(config_path, "r", encoding="utf-8") as handle:
+        model = graph_model_from_config(
+            json.load(handle), tp, None if degree is None else degree.groups
+        )
+    model = _graph_model_on_device(model, gpu_arch)
+    recorded = num_cus_from_trace(metadata)
+    if recorded:
+        model = replace(model, num_cus=recorded)
+    return model
+
+
+def _graph_model_on_device(graph_model, gpu_arch):
+    """Fill the gfx name and the compute-unit count from the device arch.
+
+    The mHC split policy is selected by that pair. The compute-unit count is
+    the trace's ``num_cus`` (``deviceProperties`` numSms) when the caller has
+    one; an arch table that omits the count still supplies the gfx name.
+    A model that already carries both is left as is.
+    """
+    if graph_model is None or gpu_arch is None:
+        return graph_model
+    if graph_model.gfx_arch and graph_model.num_cus:
+        return graph_model
+    gfx = (
+        graph_model.gfx_arch
+        or gpu_arch.get("gfx")
+        or _gfx_for_product(gpu_arch.get("name"))
+    )
+    num_cus = graph_model.num_cus or int(gpu_arch.get("num_cus") or 0)
+    if gfx == graph_model.gfx_arch and num_cus == graph_model.num_cus:
+        return graph_model
+    return replace(graph_model, num_cus=num_cus, gfx_arch=str(gfx or ""))
+
+
 def generate_perf_report_pytorch(
     profile_json_path: str,
     augmented_tree: TraceToTree = None,
@@ -618,12 +805,18 @@ def generate_perf_report_pytorch(
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
+    graph_model=None,
+    # Hugging Face config.json of the served model. The tensor-parallel degree
+    # comes from the trace's distributedInfo, so a config path is enough to
+    # build graph_model when graph_model is not given.
+    graph_model_config_path: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
         gpu_arch_platform=gpu_arch_platform,
         gpu_arch=gpu_arch,
     )
+    graph_model = _graph_model_on_device(graph_model, gpu_arch_json)
     add_python_func = (
         True
         if (
@@ -644,6 +837,7 @@ def generate_perf_report_pytorch(
             rebuild_tree=False,
             enable_origami_gemm=enable_origami_gemm,
             enable_origami_sdpa_tile=enable_origami_sdpa_tile,
+            graph_model=graph_model,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
@@ -654,6 +848,7 @@ def generate_perf_report_pytorch(
             enable_pseudo_ops=enable_pseudo_ops,
             enable_origami_gemm=enable_origami_gemm,
             enable_origami_sdpa_tile=enable_origami_sdpa_tile,
+            graph_model=graph_model,
         )
 
         graph_launch_events = [
@@ -669,6 +864,33 @@ def generate_perf_report_pytorch(
 
     ## Apply annotation for vLLM eager and replay phase
     perf_analyzer.tree.apply_annotation(name_filters=_INFERENCE_ANNOTATION_OP_PREFIXES)
+    if graph_model is None and graph_model_config_path is not None:
+        graph_model = _graph_model_for_trace(
+            graph_model_config_path,
+            perf_analyzer.trace_metadata,
+            gpu_arch_json,
+        )
+        perf_analyzer.graph_model = graph_model
+    if graph_model is not None and not graph_model.groups:
+        from TraceLens.ModelUtils.parallel_plan import parallel_degree_from_trace
+
+        degree = parallel_degree_from_trace(perf_analyzer.trace_metadata)
+        if degree is not None:
+            groups = dict(degree.groups)
+            groups.setdefault("tp", graph_model.tp)
+            graph_model = replace(graph_model, groups=groups)
+            perf_analyzer.graph_model = graph_model
+    if graph_model is not None:
+        perf_analyzer.architectures = _load_engine_architectures(
+            graph_model_config_path,
+            perf_analyzer.tree.events,
+            perf_analyzer.trace_metadata,
+        )
+        perf_analyzer.graph_model = _graph_model_with_engine_facts(
+            perf_analyzer.graph_model,
+            _inference_engine(perf_analyzer.tree.events),
+            perf_analyzer.tree.events,
+        )
 
     if extension_file:
         apply_extension(perf_analyzer, extension_file)
@@ -993,6 +1215,7 @@ def generate_perf_report_pytorch(
                     add_python_func=add_python_func,
                     enable_pseudo_ops=enable_pseudo_ops,
                     rebuild_tree=False,
+                    graph_model=graph_model,
                 )
             else:
                 perf_analyzer2 = TreePerfAnalyzer.from_file(
@@ -1421,6 +1644,15 @@ def main():
         "per-category *_kl_overlap / *_fwd_kl_overlap / *_bwd_kl_overlap sheets when data exists.",
     )
 
+    parser.add_argument(
+        "--graph_model_config",
+        type=str,
+        required=False,
+        help="Hugging Face config.json of the model. The trace's tp process "
+        "group supplies the tensor-parallel degree. The config then schedules "
+        "each graph kernel to its model launch and fills input shapes.",
+    )
+
     args = parser.parse_args()
     if args.comparison_json_path and args.precomputed_diff_stats:
         parser.error(
@@ -1481,6 +1713,7 @@ def main():
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,
+        graph_model_config_path=args.graph_model_config,
     )
 
 

@@ -414,6 +414,46 @@ def test_torch_op_shape_no_inputs_or_unknown_builder():
     assert inf._torch_op_shape(_node("NotAnOp"), [TensorSpec(("B", "S", 8))]) is None
 
 
+def test_slice_bound_by_another_tensors_axis_is_a_concrete_width():
+    """``rotary_dim = cos.shape[-1]`` then ``q[..., :rotary_dim]`` is that axis.
+
+    The complementary tail is the rest of the source width. When ``cos`` is
+    not in scope the bound stays the name the source wrote.
+    """
+    inf = _make_inferencer()
+    source = TensorSpec(("B", 24, "S", 256))
+    head = _node(
+        "Slice",
+        details=[
+            "slice: (..., :rotary_dim)",
+            "shape_locals: rotary_dim=cos.shape[-1]",
+        ],
+    )
+    tail = _node(
+        "Slice",
+        details=[
+            "slice: (..., rotary_dim:)",
+            "shape_locals: rotary_dim=cos.shape[-1]",
+        ],
+    )
+    inf._frame_parameter_shapes = lambda node, root: {"cos": (3, "S", 1, 64)}  # type: ignore[method-assign]
+    assert inf._infer_node_output(head, [source], root=None).shape == (
+        "B",
+        24,
+        "S",
+        64,
+    )
+    assert inf._infer_node_output(tail, [source], root=None).shape == (
+        "B",
+        24,
+        "S",
+        192,
+    )
+    inf._frame_parameter_shapes = lambda node, root: {}  # type: ignore[method-assign]
+    unresolved = inf._infer_node_output(head, [source], root=None)
+    assert unresolved.shape[-1] == "rotary_dim"
+
+
 def test_concrete_dim_and_shape_helpers():
     inf = _make_inferencer(head_dim=64)
     assert inf._concrete_dim("B") == 2
@@ -728,6 +768,23 @@ def test_lookup_meta_shape_via_id_segment():
     node.metadata.pop("class_name", None)
     out = inf._lookup_meta_shape(node)
     assert out is not None and out.shape == ("B", "S", 321)
+
+
+def test_lookup_meta_shape_skips_the_empty_segment_of_an_inlined_call():
+    """``::`` in an inlined op id must not match the root module.
+
+    ``named_modules()`` records the model itself under ``""``, and an inlined
+    call is namespaced ``@fn_...::@op_...``. Splitting that id on ``:`` yields
+    an empty segment, so the lookup used to hand every such op the model's own
+    output -- the logits -- and skip the op's real rule.
+    """
+    inf = _make_inferencer()
+    inf._meta_shapes[""] = TensorSpec(("B", "S", 248320), "bfloat16")
+    node = _node(
+        "Unsqueeze",
+        node_id="seq:15:@fn_l732_repeat_kv::@op_l718_c20_unsqueeze:0",
+    )
+    assert inf._lookup_meta_shape(node) is None
 
 
 def test_lookup_meta_shape_empty_returns_none():
@@ -1964,6 +2021,25 @@ def test_resolve_view_shape_collapses_head_block_when_star_ref_lower_rank():
     assert _resolve_view_shape("*x.shape[:-1], -1", flat, {}) == ("B", 128)
 
 
+def test_resolve_view_shape_snapshot_reads_the_named_tensor():
+    """A shape local reused on a different tensor keeps that tensor's rank.
+
+    ``input_shape = hidden_states.shape[:-1]`` then
+    ``query.view(*input_shape, -1, head_dim)`` views the chunked query
+    ``[B, S, heads, head_dim * 2]``, not ``hidden_states``. Reading the leading
+    axes off the query keeps the head axis and leaves ``-1`` equal to 1.
+    """
+    query = TensorSpec(("B", "S", 24, 256), "bfloat16")
+    out = _resolve_view_shape(
+        "*hidden_states.shape[:-1], -1, 256",
+        query,
+        {},
+        {"hidden_states": ("B", "S", 5120)},
+        frozenset({"hidden_states.shape[:-1]"}),
+    )
+    assert out == ("B", "S", 24, 256)
+
+
 def test_parse_split_sizes_nested_and_failure():
     assert _parse_split_sizes("[a, (b)]", {"a": 1, "b": 2}) == [1, 2]
     assert _parse_split_sizes("a, unknown", {"a": 1}) is None
@@ -1991,6 +2067,36 @@ def test_resolve_dim_expr_subscript_int_and_symbolic_paren():
     # Symbolic algebra requiring parenthesisation.
     paren = _ast.parse("(B + 1) * 2", mode="eval").body
     assert _resolve_dim_expr(paren, config={}, local_vars={}, context=ctx) == "(B+1)*2"
+    # A float factor survives until int() truncates it. int(0.25) used to be 0.
+    factor = _ast.parse(
+        'int(config.head_dim * config.rope_parameters.get("partial_rotary_factor", 1.0))',
+        mode="eval",
+    ).body
+    assert (
+        _resolve_dim_expr(
+            factor,
+            config={
+                "head_dim": 256,
+                "rope_parameters": {"partial_rotary_factor": 0.25},
+            },
+            local_vars={},
+            context=ctx,
+        )
+        == 64
+    )
+    defaulted = _ast.parse(
+        'config.rope_parameters.get("partial_rotary_factor", 1.0)',
+        mode="eval",
+    ).body
+    assert (
+        _resolve_dim_expr(
+            defaulted,
+            config={"rope_parameters": {}},
+            local_vars={},
+            context=ctx,
+        )
+        == 1
+    )
 
 
 def test_parse_module_ctor_tensor_factory_and_full():

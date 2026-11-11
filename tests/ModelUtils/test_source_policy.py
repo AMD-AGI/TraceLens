@@ -29,6 +29,11 @@ def test_default_policy_allows_fla_kernel_repo():
     assert policy.is_github_repo_allowed("fla-org", "flash-linear-attention")
 
 
+def test_default_policy_allows_the_aiter_kernel_repo():
+    policy = SourcePolicy.from_env_and_cli()
+    assert policy.is_github_repo_allowed("ROCm", "aiter")
+
+
 def test_default_policy_blocks_unknown_repo():
     policy = SourcePolicy.from_env_and_cli()
     assert not policy.is_github_repo_allowed("acme", "custom")

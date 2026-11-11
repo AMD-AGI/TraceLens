@@ -28,7 +28,10 @@ A depthwise short conv packed inside a fused attention leaf is the exception:
 its kernel comes from the checkpoint (``sconv_kernel_size`` /
 ``conv_kernel_size``) because that leaf has no conv node of its own. An
 embedding lookup is a gather: zero FLOPs, and bytes for the gathered rows,
-their write, and the index vector. Anything else (a conv with no threaded
+their write, and the index vector. A tensor index (``Indexing``,
+``aten::index``) uses that same gather. ``where`` reads every input and the
+output at the output dtype, one flop per output element. ``index_add`` is a
+scatter-add into the rows it updates. Anything else (a conv with no threaded
 geometry and no declared short-conv kernel) is reported as "unmodeled"
 rather than silently dropped, so the projection's coverage is always visible
 instead of assumed.
@@ -98,19 +101,24 @@ import json
 import re
 from pathlib import Path
 from dataclasses import dataclass, field, replace
-from math import prod
+from math import ceil, prod
 from typing import Any
 
 from TraceLens.ModelUtils.extract import ArchitectureSpec
 from TraceLens.ModelUtils.loader import build_roofline_basic_ops
 from TraceLens.ModelUtils.shape_inference import ShapeContext, Symbol
+from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+    InferenceAttention,
+)
 from TraceLens.PerfModel.perf_model import (
     CONV,
     GEMM,
     SDPA,
     BinaryElementwise,
-    GroupedGemm,
     IndexedCopy,
+    GroupedGemm,
+    IndexAdd,
+    Where,
     Normalization,
     Reduce,
     Softmax,
@@ -120,6 +128,10 @@ from TraceLens.PerfModel.utils import torch_dtype_map
 from TraceLens.TreePerf.tree_perf import compute_roofline_time_and_bound
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
     build_model_explorer_payload,
+)
+from TraceLens.Visualizer.model_explorer_export.computation_roles import (
+    ATTENTION_ROLE,
+    ROLE_BASIS_COMPUTATION,
 )
 from TraceLens.Visualizer.model_explorer_export.shapes import parse_shape_dims
 
@@ -212,6 +224,9 @@ def _classify_normalization(computation: str) -> tuple[str, bool, bool] | None:
 
 _SDPA_COMPUTATION = "scaled_dot_product_attention"
 _SOFTMAX_COMPUTATION = "Softmax"
+# The family a boundary formula and each step of a decomposed attention both
+# report under, so the roofline has one ``Attention`` row either way.
+ATTENTION_CATEGORY = "Attention"
 
 # Pointwise/reduction computation labels mapped to UnaryElementwise/
 # BinaryElementwise/Reduce. Shape-shuffling ops (reshape/transpose/concat/
@@ -408,7 +423,10 @@ def resolve_dim(dim: int | str, dims: dict[str, Any]) -> int:
         if dim < 0:
             raise DimResolutionError(str(dim))
         return dim
-    text = str(dim)
+    # The graph writes sums and products with spaces (``S + n_windows``,
+    # ``2 * ratio``). Splitting on the operator alone leaves ``"S "`` as a
+    # symbol name, which no dims dict holds, so such a dimension never resolved.
+    text = str(dim).strip()
     if "+" in text:
         return sum(resolve_dim(term, dims) for term in text.split("+"))
     if "*" in text:
@@ -455,6 +473,8 @@ def project_roofline(
     gpu_arch: dict[str, Any] | None = None,
     num_predicted_tokens: int = 0,
     checkpoint: str | Path | None = None,
+    routing_balance: float = 0.9,
+    phase: str = "prefill",
 ) -> RooflineProjection:
     """Project a kernel-by-kernel roofline for *spec* at a concrete batch/seq length.
 
@@ -466,11 +486,23 @@ def project_roofline(
     ``num_predicted_tokens`` appends a secondary MTP / speculative draft stack,
     one depth per token, capped at the depth the checkpoint declares. ``0``
     (the default) costs only the backbone.
+
+    ``routing_balance`` is the mean expert load divided by the busiest expert's
+    load. ``0.9`` means 90% balanced. The summed expert loop still costs every
+    local expert at the mean load; the fraction does not scale FLOPs. The
+    busiest load (mean / balance) is recorded and is not the loop that is summed.
     """
+    if not 0 < routing_balance <= 1:
+        raise ValueError(
+            "routing_balance must be in (0, 1]; 0.9 means the mean expert "
+            "carries 90% of the busiest expert's load"
+        )
     dims = build_projection_dims(
         spec, batch_size=batch_size, seq_len=seq_len, extra_dims=extra_dims
     )
     _populate_introspection(spec)
+    _RT.routing_balance = routing_balance
+    routing_note = _apply_expert_routing(dims, extra_dims)
     moe_top_k = spec.num_experts_per_tok
     moe_intermediate_size = spec.moe_intermediate_size or spec.intermediate_size
     payload = build_model_explorer_payload(
@@ -486,6 +518,8 @@ def project_roofline(
     nodes = graphs[0]["nodes"] if graphs else []
 
     result = RooflineProjection(batch_size=batch_size, seq_len=seq_len)
+    if routing_note:
+        result.notes.append(routing_note)
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -502,8 +536,17 @@ def project_roofline(
             role,
             details,
         ) = parsed
-        instances = _repeat_count(str(node.get("namespace") or ""), node)
+        namespace = str(node.get("namespace") or "")
+        instances = _repeat_count(namespace, node)
         node_id = str(node.get("id"))
+        # A leaf whose role was read from its own computation is one step of
+        # that computation (the score matmul, the softmax, the value matmul).
+        # Each is costed as the op it is. The boundary formulas below price a
+        # whole block, so handing a step the block's role would charge the full
+        # attention once per step.
+        computation_role = ""
+        if _attr_text(node.get("attrs"), "role_basis") == ROLE_BASIS_COMPUTATION:
+            computation_role, role = role, ""
         op = _project_op(
             node_id,
             section,
@@ -519,6 +562,8 @@ def project_roofline(
             moe_intermediate_size,
             role,
             details,
+            namespace,
+            computation_role=computation_role,
         )
         if _node_is_draft_container(node):
             # The synthetic stack, or the container's own drawn children, costs
@@ -564,6 +609,7 @@ def project_roofline(
             and op.modeled
             and op.category == "MoE"
             and not _is_leaf_computation(computation)
+            and _moe_boundary_owns_routing(class_name)
         ):
             result.ops.extend(
                 _moe_extra_ops(
@@ -587,7 +633,7 @@ def project_roofline(
                 _quant_side_ops(
                     node_id,
                     section,
-                    instances,
+                    op.instances,
                     input_texts,
                     output_text,
                     dims,
@@ -603,7 +649,7 @@ def project_roofline(
                 _formula_quant_rows(
                     node_id,
                     section,
-                    instances,
+                    op.instances,
                     op.category,
                     role,
                     dims,
@@ -625,6 +671,11 @@ def project_roofline(
             )
         )
     result.ops.extend(_persistent_state_ops(nodes, dims, gpu_arch))
+    # DeepSeek-V4 attention runs as fused MLA kernels (one latent KV head, a
+    # KV span set by the layer's compression ratio). The expanded graph draws
+    # that as matmuls whose compressed length never resolves, so it cannot
+    # stand in for the kernel. These rows are that kernel's roofline.
+    result.ops.extend(_mla_attention_ops(dims, phase, gpu_arch))
     if _RT.engine_miss:
         result.notes.append(_RT.engine_miss)
     return result
@@ -730,6 +781,17 @@ def _child_nodes(nodes: list[Any], parent: dict[str, Any]) -> list[dict[str, Any
         if child_namespace == namespace or child_namespace.startswith(namespace + "/"):
             children.append(node)
     return children
+
+
+def _moe_boundary_owns_routing(class_name: str) -> bool:
+    """True when this opaque tile swallowed the router and the shared expert.
+
+    A class named ``…Experts`` is only the grouped gate/up/down. The router and
+    the shared expert are siblings and are drawn on their own, so publishing
+    them again would count them twice. A sparse-MoE block or ``FusedMoE`` keeps
+    both inside the tile.
+    """
+    return not (class_name or "").endswith("Experts")
 
 
 def _moe_leaves_present(nodes: list[Any], moe_node: dict[str, Any]) -> frozenset[str]:
@@ -1104,6 +1166,8 @@ def _project_op(
     moe_intermediate_size: int | None,
     role: str = "",
     details: str = "",
+    namespace: str = "",
+    computation_role: str = "",
 ) -> RooflineOp:
     base = RooflineOp(
         name=node_id,
@@ -1114,7 +1178,7 @@ def _project_op(
         modeled=False,
         reason=None,
         output_elements=None,
-        instances=instances,
+        instances=instances * _expert_loop_multiplier(namespace or section),
     )
     _dims_only, dtype = _split_shape_text(output_text)
     bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
@@ -1194,6 +1258,7 @@ def _project_op(
             bpe,
             details,
             weight_bpe=_RT.weight_bpe,
+            dtype=dtype,
         )
     except DimResolutionError as exc:
         base.reason = f"unresolved input dim {exc}"
@@ -1204,6 +1269,12 @@ def _project_op(
         return base
 
     category, maf_type, flops, bytes_moved = cost
+    if computation_role == ATTENTION_ROLE:
+        # The cost is the op's own; only its family changes. The score and value
+        # matmuls multiply two activations, so they run at the activation
+        # precision and need no weight-quantization side rows, which a GEMM
+        # label would have given them.
+        category = ATTENTION_CATEGORY
     return _finish_op(base, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
 
 
@@ -1330,6 +1401,7 @@ class _RuntimeIntrospection:
         "moe_top_k",
         "moe_intermediate",
         "moe_num_experts",
+        "routing_balance",
         "num_shared_experts",
         "attn_heads",
         "attn_kv_heads",
@@ -1365,6 +1437,7 @@ class _RuntimeIntrospection:
         "sconv_kernel",
         "dense_intermediate",
         "mtp_layers",
+        "compress_ratios",
     )
 
     def __init__(self):
@@ -1375,6 +1448,7 @@ class _RuntimeIntrospection:
         self.moe_top_k = None
         self.moe_intermediate = None
         self.moe_num_experts = None
+        self.routing_balance = 0.9
         self.num_shared_experts = None
         self.attn_heads = None
         self.attn_kv_heads = None
@@ -1410,6 +1484,7 @@ class _RuntimeIntrospection:
         self.sconv_kernel = None
         self.dense_intermediate = None
         self.mtp_layers = None
+        self.compress_ratios = ()
 
 
 _RT = _RuntimeIntrospection()
@@ -1484,6 +1559,18 @@ def _populate_introspection(spec):
     )
     sw = tcfg.get("sliding_window_size") or tcfg.get("sliding_window")
     _RT.sliding_window = sw if isinstance(sw, int) and sw > 0 else None
+    ratios = tcfg.get("compress_ratios")
+    # One entry per layer. Trailing zeros pad the list out past the real stack
+    # (the next-token slots); they are not a compression ratio.
+    _RT.compress_ratios = (
+        tuple(
+            item
+            for item in ratios
+            if isinstance(item, int) and not isinstance(item, bool) and item > 0
+        )
+        if isinstance(ratios, list)
+        else ()
+    )
     lli = tcfg.get("local_layer_ids")
     _RT.n_local_layers = len(lli) if isinstance(lli, list) else None
     _RT.n_layers = spec.num_hidden_layers
@@ -2394,6 +2481,109 @@ def _dense_ffn_cost(
     flops = gate_up_flops + down_flops
     bytes_moved = None if bpe is None else gate_up_bytes + down_bytes
     return "GEMM", "matrix", flops, bytes_moved, tokens * hidden
+
+
+def _mla_kv_span(ctx: int, ratio: int, window: int, index_topk: int | None) -> int:
+    """KV entries one query attends, for one layer's compression ratio.
+
+    The finest ratio is compressed sparse attention: the window plus at most
+    ``index_topk`` compressed slots. A coarser ratio is the hierarchical
+    history, window plus one slot per ``ratio`` source tokens, with no top-k
+    cap. This is the span ``_V4PagedDecodeBase`` uses for CSA and HCA.
+    """
+    compressed = ceil(ctx / ratio) if ratio else ctx
+    if index_topk and ratio == _mla_finest_ratio():
+        compressed = min(compressed, index_topk)
+    return window + compressed
+
+
+def _mla_finest_ratio() -> int:
+    return min(_RT.compress_ratios) if _RT.compress_ratios else 0
+
+
+def _mla_attention_ops(
+    dims: dict[str, Any], phase: str, gpu_arch: dict[str, Any] | None
+) -> list[RooflineOp]:
+    """One MLA roofline row per compression ratio, repeated across its layers.
+
+    Empty unless the checkpoint lists ``compress_ratios`` and the head geometry
+    the fused kernel uses. Decode attends the cached context; prefill attends
+    the prompt, and its causal mask keeps half of that span.
+    """
+    ratios = _RT.compress_ratios
+    window = _RT.sliding_window
+    if not (
+        ratios and window and _RT.attn_heads and _RT.attn_head_dim and _RT.index_topk
+    ):
+        return []
+    try:
+        batch = resolve_dim(dims["B"], dims)
+        seq = resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError):
+        return []
+    past = _resolve_past(dims)
+    ctx = past if phase == "decode" and past else past + seq
+    if ctx <= 0 or batch <= 0 or seq <= 0:
+        return []
+    queries = batch * seq
+    heads = _shard_heads(_RT.attn_heads, _RT.tp)
+    width = _RT.attn_head_dim
+    # The V4 MLA model costs the latent KV cache at bf16, one head.
+    bpe = 2
+    counts: dict[int, int] = {}
+    for ratio in ratios:
+        counts[ratio] = counts.get(ratio, 0) + 1
+    ops: list[RooflineOp] = []
+    for ratio, layers in sorted(counts.items()):
+        span = _mla_kv_span(ctx, ratio, window, _RT.index_topk)
+        attended = queries * span
+        if phase == "decode":
+            flops = InferenceAttention.flops_func(heads, width, width, 0, 0, attended)
+            bytes_moved = InferenceAttention.bytes_func(
+                1, heads, 1, width, width, 0, 0, queries, attended, bpe, bpe
+            )
+        else:
+            # Causal over the compressed span: the subtraction of ``c_sqsq``
+            # drops the forward term to half when it equals ``c_sqsk``.
+            flops = InferenceAttention.flops_func(
+                heads, width, width, attended, attended, 0
+            )
+            # FLOPs scale with every (query, key) pair, but the queries of one
+            # request share one KV cache. HBM traffic is the union of the
+            # compressed slots they attend, read once, plus the chunk's own
+            # K/V that ``bytes_func`` already counts for ``c_sq``. Charging
+            # ``span`` per query would overstate prefill bytes by about the
+            # sequence length.
+            compressed = min(ceil(ctx / ratio), seq * (span - window))
+            bytes_moved = InferenceAttention.bytes_func(
+                1,
+                heads,
+                1,
+                width,
+                width,
+                queries,
+                queries + batch * compressed,
+                0,
+                0,
+                bpe,
+                bpe,
+            )
+        ops.append(
+            _analytical_op(
+                f"mla_ratio_{ratio}",
+                "attention",
+                "MLA",
+                layers,
+                ATTENTION_CATEGORY,
+                "matrix",
+                flops,
+                bytes_moved,
+                queries * heads * width,
+                "bfloat16",
+                gpu_arch,
+            )
+        )
+    return ops
 
 
 def _analytical_op(
@@ -3398,6 +3588,7 @@ def _dispatch_op_cost(
     bpe: float | None,
     details: str = "",
     weight_bpe: float | None = None,
+    dtype: str | None = None,
 ) -> tuple[str, str, float, float | None] | None:
     """Return ``(category, maf_type, flops, bytes)`` for an op, or ``None`` if unmodeled."""
     if computation in _GEMM_NN_MODULE_COMPUTATIONS:
@@ -3430,7 +3621,16 @@ def _dispatch_op_cost(
     if label in _UNARY_POINTWISE_COMPUTATIONS:
         return _unary_elementwise_cost(output_shape, bpe)
     if _is_embedding_lookup(computation):
-        return _embedding_lookup_cost(input_shapes, output_shape, bpe)
+        return _embedding_lookup_cost(
+            input_shapes,
+            output_shape,
+            bpe if bpe is not None else _integer_bpe(dtype),
+        )
+    value_bpe = bpe if bpe is not None else _integer_bpe(dtype)
+    if _is_where(computation):
+        return _where_cost(input_shapes, output_shape, value_bpe)
+    if _is_index_add(computation):
+        return _index_add_cost(input_shapes, output_shape, value_bpe)
     return None
 
 
@@ -3439,9 +3639,12 @@ def _is_embedding_lookup(computation: str) -> bool:
 
     Matches module labels (``Embedding``, ``Token Embedding``, ``EmbeddingBag``)
     and the graph's indexing labels (``Indexing``, ``Index select``,
-    ``aten::index``). A general ``Gather`` stays unmodeled: on a graph that
-    name is overloaded and is often one element per index, which this row
-    formula does not describe. Traces still cost ``aten::gather`` directly.
+    ``aten::index``). A weight select such as ``gate_up_proj[expert]`` is this
+    same gather. The GEMM that then multiplies those weights also reads them;
+    both kernels are charged, and they are not cancelled against each other.
+    A general ``Gather`` stays unmodeled: on a graph that name is overloaded
+    and is often one element per index, which this row formula does not
+    describe. Traces still cost ``aten::gather`` directly.
     """
     text = computation.lower().replace("_", " ").strip()
     labels = {
@@ -3483,6 +3686,175 @@ def _embedding_lookup_cost(
     flops = IndexedCopy.flops_func(tokens, hidden)
     bytes_moved = IndexedCopy.bytes_func(tokens, hidden, bpe, index_bpe)
     return IndexedCopy.category, "vector", flops, bytes_moved
+
+
+# Integer and boolean outputs have no floating-point roofline peak, but a
+# ``where`` that publishes indices is still a real read and write at that width.
+_INTEGER_BPE = {
+    "int64": 8,
+    "long": 8,
+    "longint": 8,
+    "int32": 4,
+    "int": 4,
+    "int16": 2,
+    "int8": 1,
+    "uint8": 1,
+    "bool": 1,
+}
+
+
+def _integer_bpe(dtype: str | None) -> float | None:
+    if not dtype:
+        return None
+    leaf = (
+        dtype.lower().split("::")[-1].split(".")[-1].replace(" ", "").replace("_", "")
+    )
+    return _INTEGER_BPE.get(leaf)
+
+
+def _computation_leaf(computation: str) -> str:
+    text = computation.lower().replace("_", "").replace(" ", "").replace(".", "")
+    return text.split("::")[-1]
+
+
+def _is_where(computation: str) -> bool:
+    return _computation_leaf(computation) == "where"
+
+
+def _is_index_add(computation: str) -> bool:
+    return _computation_leaf(computation) == "indexadd"
+
+
+def _where_cost(
+    input_shapes: list[tuple[int, ...] | None],
+    output_shape: tuple[int, ...],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """Read every input and the output; one flop per output element."""
+    if not output_shape:
+        return None
+    nelems_out = prod(output_shape)
+    nelems_in = 0
+    for shape in input_shapes:
+        if shape is not None:
+            nelems_in += prod(shape)
+    flops = Where.flops_func(nelems_out)
+    bytes_moved = Where.bytes_func(nelems_in, nelems_out, bpe)
+    return Where.category, "vector", flops, bytes_moved
+
+
+def _index_add_cost(
+    input_shapes: list[tuple[int, ...] | None],
+    output_shape: tuple[int, ...],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """Scatter-add: one add per source element, traffic only on updated rows."""
+    if not output_shape:
+        return None
+    shaped = [shape for shape in input_shapes if shape]
+    output_elems = prod(output_shape)
+    source = None
+    for shape in shaped:
+        if shape == output_shape:
+            continue
+        if len(shape) == len(output_shape) and prod(shape) <= output_elems:
+            if source is None or prod(shape) > prod(source):
+                source = shape
+    if source is None:
+        source = output_shape
+    source_elems = prod(source)
+    index_elems = None
+    for shape in shaped:
+        if shape == output_shape or shape == source:
+            continue
+        index_elems = prod(shape)
+        break
+    if index_elems is None:
+        index_elems = prod(source[:-1]) if len(source) > 1 else source_elems
+    flops = IndexAdd.flops_func(source_elems)
+    bytes_moved = IndexAdd.bytes_func(source_elems, index_elems, bpe)
+    return IndexAdd.category, "vector", flops, bytes_moved
+
+
+_EXPERT_LOOP_SECTION = re.compile(r"^loop_iterations_(\d+)$")
+
+
+def _expert_mean_tokens(dims: dict[str, Any]) -> tuple[int, int, float] | None:
+    """``(nnz, local_experts, mean)`` for a uniform expert load on this rank.
+
+    The mean is this rank's assignments divided by its local experts:
+    ``(batch * seq * top_k / ep) / (num_experts / ep)``, which is
+    ``batch * seq * top_k / num_experts``. Every local expert is given that
+    load. The balance fraction is not applied here: it describes how far the
+    busiest expert sits above the mean, and the summed loop uses the mean.
+    """
+    top_k = _RT.moe_top_k
+    experts = _RT.moe_num_experts
+    if not top_k or not experts:
+        return None
+    try:
+        tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError, TypeError):
+        return None
+    local_experts = _shard(int(experts), _RT.ep)
+    assignments = _shard(int(tokens) * int(top_k), _RT.ep)
+    if local_experts <= 0:
+        return None
+    mean = assignments / local_experts
+    nnz = max(1, int(round(mean)))
+    return nnz, local_experts, mean
+
+
+def _apply_expert_routing(
+    dims: dict[str, Any],
+    extra_dims: dict[str, int] | None,
+) -> str | None:
+    """Fill symbolic ``nnz`` with the mean tokens per local expert.
+
+    An explicit ``--dim nnz=`` wins. Returns the note to attach to the
+    projection, or ``None`` when this model has no routed experts.
+    """
+    if extra_dims and "nnz" in extra_dims:
+        return None
+    routed = _expert_mean_tokens(dims)
+    if routed is None:
+        return None
+    nnz, local_experts, mean = routed
+    dims["nnz"] = nnz
+    balance = _RT.routing_balance
+    busiest = mean / balance if balance else mean
+    return (
+        f"Expert routing: each of {local_experts} local experts is costed at "
+        f"{nnz} tokens (the mean load). Balance {balance:.0%} is mean/max, so "
+        f"the busiest expert would hold {busiest:.2f} tokens; that case is "
+        f"not summed."
+    )
+
+
+def _expert_loop_multiplier(namespace: str) -> int:
+    """How many expert iterations one drawn loop body stands for, on this rank.
+
+    The expert ``for`` loop is drawn once, and a helper it calls (the gate)
+    sits in a child frame under that loop. The frame count is the one-hot
+    width: the global expert count, that count on this EP rank, or either plus
+    the sentinel class the loop skips. The summed roofline runs every local
+    expert once, at the mean load, so the body is repeated that many times.
+    A loop whose trip count is not the expert count is left alone. The
+    innermost matching frame wins.
+    """
+    experts = _RT.moe_num_experts
+    if not experts:
+        return 1
+    local = _shard(int(experts), _RT.ep)
+    for segment in reversed((namespace or "").split("/")):
+        match = _EXPERT_LOOP_SECTION.fullmatch(segment)
+        if match is None:
+            continue
+        count = int(match.group(1))
+        if count in {int(experts), int(experts) + 1, local, local + 1}:
+            return local
+        return 1
+    return 1
 
 
 def _linear_has_bias(details: str) -> bool:

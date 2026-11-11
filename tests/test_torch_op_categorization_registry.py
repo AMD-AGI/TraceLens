@@ -16,6 +16,9 @@ from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
     op_to_perf_model_class_map,
     register_op_categories,
+    registered_op_for_kernel,
+    resolve_perf_model_class,
+    source_call_has_perf_model,
 )
 
 
@@ -84,6 +87,100 @@ def test_kernel_name_fallback(kernel_name, expected):
     assert categorize_torch_op(row) == expected
 
 
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("hipGraphLaunch->Cijk_Alik_Bljk_MT16x16x256 (Synthetic Op)", "other"),
+        (
+            "hipGraphLaunch->void ck::kernel_gemm_xdl_cshuffle_v3"
+            "<ck::tensor_operation::element_wise::PassThrough> (Synthetic Op)",
+            "other",
+        ),
+        (
+            "hipGraphLaunch->aiter::mla_a8w8_qh64_qseqlen1_gqaratio64_nm (Synthetic Op)",
+            "other",
+        ),
+        (
+            "hipGraphLaunch->void aiter::mhc_pre_big_fuse_rmsnorm_kernel<std::bfloat16_t> (Synthetic Op)",
+            "mHC",
+        ),
+        ("hipGraphLaunch->aiter::mhc_post (Synthetic Op)", "mHC"),
+        (
+            "aiter::fused_moe_->_moe_sorting_small_kernel (Synthetic Op)",
+            "MoE_aux",
+        ),
+        (
+            "hipGraphLaunch->_wo_a_quant_mxfp8_kernel (Synthetic Op)",
+            "GroupQuant",
+        ),
+        (
+            "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8",
+            "GroupQuant",
+        ),
+        (
+            "hipGraphLaunch->void sglang::topk_main_kernel<false, 2> (Synthetic Op)",
+            "InferenceAttention",
+        ),
+        (
+            "hipGraphLaunch->void at::native::elementwise_kernel<8, 4>() (Synthetic Op)",
+            "elementwise",
+        ),
+        ("hipGraphLaunch->totally_custom_kernel (Synthetic Op)", "other"),
+        (
+            "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)",
+            "InferenceAttention",
+        ),
+    ],
+)
+def test_synthetic_graph_row_uses_the_perf_report_categorizer(name, expected):
+    """A graph-replay row is categorized by the perf-report categorizer.
+
+    The launch's kernel list often starts with an ATen elementwise kernel.
+    That list must not relabel the kernel this row owns. A kernel takes a
+    registered op's category when its name contains that op at a kernel
+    boundary. An unrecognized kernel stays other.
+    """
+    row = _row(
+        name,
+        kernel_details=[{"name": "void at::native::elementwise_kernel<8, 4>()"}],
+    )
+    assert categorize_torch_op(row) == expected
+
+
+def test_registered_op_for_kernel_uses_the_longest_bounded_key():
+    registry = {
+        "aiter::mhc_pre": "mHC",
+        "aiter::mhc_pre_big_fuse_rmsnorm": "mHC",
+        "aiter::mhc_post": "mHC",
+        "aiter::gemm_a8w8": "GEMM",
+        "aiter::gemm_a8w8_blockscale_ck": "GEMM",
+    }
+    assert (
+        registered_op_for_kernel(
+            "void aiter::mhc_pre_big_fuse_rmsnorm_kernel<std::bfloat16_t>",
+            registry,
+        )
+        == "aiter::mhc_pre_big_fuse_rmsnorm"
+    )
+    assert (
+        registered_op_for_kernel(
+            "void aiter::mhc_post_kernel<std::bfloat16_t, 4>",
+            registry,
+        )
+        == "aiter::mhc_post"
+    )
+    assert (
+        registered_op_for_kernel(
+            "void aiter::gemm_a8w8_blockscale_ck_kernel<float>",
+            registry,
+        )
+        == "aiter::gemm_a8w8_blockscale_ck"
+    )
+    assert registered_op_for_kernel("Cijk_Alik_Bljk_MT16x16x256", registry) is None
+    assert registered_op_for_kernel("aiter::mla_a8w8_qh64", registry) is None
+    assert registered_op_for_kernel("mfma_moe1_silu_mul", registry) is None
+
+
 def test_registry_covers_every_perf_model_op():
     missing = [
         name for name in op_to_perf_model_class_map if name not in OP_CATEGORY_REGISTRY
@@ -124,6 +221,25 @@ def test_sheet_category_to_op_names_keeps_legacy_sheet_view():
     assert "TokenPermuteMaskMap" not in sheet_category_to_op_names["MoE_comm"]
 
 
+@pytest.mark.parametrize(
+    "name,modeled",
+    [
+        ("flash_attn_func", True),
+        ("_flash_attn_forward", True),
+        ("moe_sorting_fwd", True),
+        ("aiter::rms_norm", True),
+        ("FlashAttnFunc", True),
+        ("chunk_kda", False),
+        ("add", False),
+        ("aten::add", False),
+        ("", False),
+    ],
+)
+def test_source_call_has_perf_model_matches_the_collector_stop(name, modeled):
+    """A source kernel stops where the collector stops."""
+    assert source_call_has_perf_model(name) is modeled
+
+
 def test_register_op_category_extension_updates_registry_only():
     registry = {}
 
@@ -133,3 +249,11 @@ def test_register_op_category_extension_updates_registry_only():
     )
 
     assert registry["MyCategoryOnlyBackward"] == "SDPA_bwd"
+
+
+def test_a_shared_kernel_symbol_does_not_replace_the_op():
+    """add_rmsnorm_quant_kernel implements both calls. The op name selects the model."""
+    rmsnorm = resolve_perf_model_class("aiter::rmsnorm")
+    added = resolve_perf_model_class("aiter::add_rmsnorm")
+    assert rmsnorm is not None and added is not None
+    assert rmsnorm is not added

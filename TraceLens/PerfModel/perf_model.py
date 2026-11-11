@@ -3519,6 +3519,63 @@ class aten_index_put(IndexedCopy):
     kind = "index_put"
 
 
+class Where:
+    """``torch.where``: one flop per published output element.
+
+    Bytes read every input tensor and write every output element. The
+    projection has a single activation width, so the predicate, the data
+    operands, and the result are all charged at the output dtype. A missing
+    operand is omitted rather than invented. This covers both the select
+    form (``where(cond, a, b)``) and the index form (``where(cond)``), which
+    publishes the coordinates of the true entries.
+    """
+
+    category = "Where"
+
+    @staticmethod
+    def flops_func(nelems_out):
+        return nelems_out
+
+    @staticmethod
+    def bytes_func(nelems_in, nelems_out, bpe):
+        if bpe is None:
+            return None
+        return (nelems_in + nelems_out) * bpe
+
+
+class IndexAdd:
+    """Scatter-add into selected locations of an accumulator.
+
+    ``final.index_add_(dim, index, source)`` adds each element of ``source``
+    into ``final`` at ``index``. That is one add per source element, not a
+    GEMM and not a dense add over the whole accumulator.
+
+    Bytes, values at the output dtype and the index at int64:
+    - read ``source``
+    - read the index (one int64 per updated row)
+    - read the destination locations that are updated (the same volume as
+      ``source``)
+    - write those locations back
+
+    The rest of the accumulator stays put and is not moved. Duplicate indices
+    are not coalesced: each update pays for its row again. A gather that
+    selected these values, and a GEMM that produced them, are separate
+    kernels and are still charged on their own.
+    """
+
+    category = "IndexAdd"
+
+    @staticmethod
+    def flops_func(source_elems):
+        return source_elems
+
+    @staticmethod
+    def bytes_func(source_elems, index_elems, bpe, index_bpe=8):
+        if bpe is None or index_bpe is None:
+            return None
+        return source_elems * bpe * 3 + index_elems * index_bpe
+
+
 class UnaryElementwise:
     category = "elementwise"
     bwd_category = None

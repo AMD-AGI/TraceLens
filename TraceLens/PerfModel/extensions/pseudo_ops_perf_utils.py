@@ -201,6 +201,9 @@ def get_pseudo_op_category_only_mappings():
         "aiter::indexer_score_topk": "InferenceAttention",
         # Paged top-k walks scores[row, 0:seq_len] where seq_len is a device value, so classify only (sglang topk_v2.cuh).
         "sglang_profiler::topk_topk_transform_paged_v2": "InferenceAttention",
+        # deepseek_v4_wo_a_fp8.quant_wo_a_act_mxfp8. The profiler records the
+        # module and function; the kernel is _wo_a_quant_mxfp8_kernel.
+        "sglang_profiler::deepseek_v4_wo_a_fp8_quant_wo_a_act_mxfp8": "GroupQuant",
         # vLLM per-row top-k walks logits[row, 0:seq_len] where seq_len is a device tensor, so classify only.
         "_C::top_k_per_row_decode": "InferenceAttention",
         "hipGraphLaunch->void vllm::topKPerRowDecode<1024, true, false, true>(float const*, int const*, int*, int, int, int, int, int, float*, int, int const*) [clone .kd] (Synthetic Op)": "InferenceAttention",

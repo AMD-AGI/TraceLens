@@ -823,6 +823,14 @@ def merge_capture_trace_into_graph(
     print("Loaded graph tree with {} events".format(len(graph_tree.events)))
 
     execution_graph_root_map = build_execution_graph_root_map(graph_tree)
+    # scheduler.run_batch is the iteration boundary but carries no batch size.
+    # Graft the single contained step annotation so the capture lookup can run.
+    from ..TraceUtils.split_trace.root_detection import _enrich_unmatched_roots
+
+    _enrich_unmatched_roots(
+        [root for root, _ in execution_graph_root_map],
+        graph_tree.events,
+    )
 
     capture_map, capture_batch_sizes, request_bs_multiplier = load_capture_folder(
         capture_folder,

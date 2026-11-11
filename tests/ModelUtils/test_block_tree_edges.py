@@ -329,7 +329,9 @@ def test_kernel_pipeline_block_nodes_multi_input_step(monkeypatch):
             "operand_parameters": (),
         },
     )()
-    monkeypatch.setattr(kp, "introspect_kernel_pipeline", lambda d: ([step], []))
+    monkeypatch.setattr(
+        kp, "introspect_kernel_pipeline", lambda d, **_kwargs: ([step], [])
+    )
     pipeline, output = bt._kernel_pipeline_block_nodes(
         forward_order=0,
         details=["kernel: scan"],
@@ -1585,6 +1587,43 @@ def test_build_block_node_top_level_kernel_pipeline(monkeypatch):
     assert built is sentinel
 
 
+def test_roofline_stop_keeps_a_modeled_kernel_as_one_row(monkeypatch):
+    """A kernel with a perf model is the collector's row, so it is not opened."""
+    cls = structure("Owner", calls=[aa.SYNTHETIC_ATTENTION])
+    cls.forward_step_details[aa.SYNTHETIC_ATTENTION] = ["kernel: flash_attn_func"]
+    cls.attention_inputs = {"q": ["q_proj"], "k": ["k_proj"]}
+    monkeypatch.setattr(bt, "is_kernel_pipeline_step", lambda details, inputs: True)
+    called = {}
+
+    def _record(**_kwargs):
+        called["yes"] = True
+        return (
+            node("@attn_pipeline", "KernelPipeline", basic=False),
+            node("@attn_output", "KernelOutput", basic=False),
+        )
+
+    monkeypatch.setattr(bt, "_kernel_pipeline_block_nodes", _record)
+    built = build_block_node(
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    kernels = [child for child in built.children if child.class_name == "AttentionOp"]
+    assert len(kernels) == 1
+    assert kernels[0].label == "flash_attn_func"
+    assert not kernels[0].children
+    assert "yes" not in called
+
+    build_block_node(
+        attr_name="owner",
+        class_name="Owner",
+        registry={"Owner": cls},
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    assert called.get("yes") is True
+
+
 def test_build_block_node_forward_attention_kernel_pipeline(monkeypatch):
     cls = structure("Owner", calls=[aa.SYNTHETIC_ATTENTION])
     cls.forward_step_details[aa.SYNTHETIC_ATTENTION] = ["kernel: scan"]
@@ -1620,7 +1659,9 @@ def test_kernel_pipeline_block_nodes_single_child_step(monkeypatch):
         predecessors=[],
         operand_parameters=(),
     )
-    monkeypatch.setattr(kp, "introspect_kernel_pipeline", lambda d: ([step], []))
+    monkeypatch.setattr(
+        kp, "introspect_kernel_pipeline", lambda d, **_kwargs: ([step], [])
+    )
     pipeline, output = bt._kernel_pipeline_block_nodes(
         forward_order=0, details=["kernel: scan"]
     )
@@ -1651,7 +1692,7 @@ def test_kernel_pipeline_block_nodes_with_output_step(monkeypatch):
         operand_parameters=(),
     )
     monkeypatch.setattr(
-        kp, "introspect_kernel_pipeline", lambda d: ([step], [out_step])
+        kp, "introspect_kernel_pipeline", lambda d, **_kwargs: ([step], [out_step])
     )
     pipeline, output = bt._kernel_pipeline_block_nodes(
         forward_order=0, details=["kernel: scan"]

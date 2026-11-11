@@ -31,6 +31,9 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
 
 def test_classify_kernel_by_name_not_module():
     assert classify_kernel("_inkling_rel_attention_kernel.kd") == "Attention"
+    assert classify_kernel("aiter::mla_a8w8_qh64_qseqlen1_gqaratio64_nm") == "Attention"
+    assert classify_kernel("opus_mla_v4_prefill_a8w8_kernel") == "Attention"
+    assert classify_kernel("sglang::fused_norm_rope_flashmla") == "Attention"
     assert classify_kernel("fused_moe_kernel.kd") == "MoE"
     # A bare Tensile GEMM is a GEMM even when launched from an attention module.
     assert classify_kernel("Cijk_Alik_Bljk_BBS_BH.kd", ["Model", "Attention"]) == "GEMM"
@@ -70,8 +73,9 @@ def test_summarize_projection_derives_ai_bound_and_per_gpu():
     assert summary["Attention"]["arithmetic_intensity"] == 8.0
     assert summary["Attention"]["bound"] == "MEMORY_BOUND"
     assert summary["Attention"]["vs_ridge"] == "below"
-    # per-GPU floor = total roofline time (1000us * 66 instances) / tp.
-    assert summary["Attention"]["roofline_us_per_gpu"] == (1000.0 * 66) / 8
+    # The projection's roofline time is already one GPU's. Repeating the TP
+    # split here would shrink the floor by the tensor-parallel degree.
+    assert summary["Attention"]["roofline_us_per_gpu"] == 1000.0 * 66
     assert summary["MoE"]["arithmetic_intensity"] == 400.0
     assert summary["MoE"]["vs_ridge"] == "above"
     # Per-invocation (one layer) FLOPs/bytes of the dominant op are carried for

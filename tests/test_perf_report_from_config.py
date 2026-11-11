@@ -195,6 +195,24 @@ def test_top_level_flags_are_passed(tmp_path):
     assert kwargs == {"include_call_stack": True, "topk_ops": 50}
 
 
+def test_graph_model_flags_are_accepted_for_inference(tmp_path):
+    config_json = _touch(tmp_path, "config.json")
+    kwargs = plan_reports(
+        _config(
+            tmp_path,
+            mode="inference",
+            graph_model_config_path=config_json,
+        )
+    )[0].kwargs
+    assert kwargs["graph_model_config_path"] == config_json
+    assert "graph_model_tp" not in kwargs
+
+
+def test_graph_model_flags_rejected_for_default(tmp_path):
+    with pytest.raises(ConfigError, match="graph_model_config_path"):
+        plan_reports(_config(tmp_path, graph_model_config_path="config.json"))
+
+
 def test_unknown_top_level_key(tmp_path):
     with pytest.raises(ConfigError, match="unknown keys"):
         plan_reports(_config(tmp_path, not_a_report_flag=True))

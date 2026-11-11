@@ -547,3 +547,47 @@ def test_load_architecture_with_engine_uses_the_pinned_source_and_module(
         captured["config"][extract_module.ANALYZED_MODULE_KEY]
         == "vllm.model_executor.models.llama"
     )
+
+
+def test_listing_filters_blobs_by_pattern_and_caches_the_tree(monkeypatch, tmp_path):
+    import json
+
+    from TraceLens.ModelUtils import github
+
+    calls = []
+    tree = {
+        "tree": [
+            {"path": "cfg/a_tuned.csv", "type": "blob"},
+            {"path": "cfg/a_untuned.csv", "type": "blob"},
+            {"path": "cfg", "type": "tree"},
+        ]
+    }
+
+    def download(url):
+        calls.append(url)
+        return json.dumps(tree).encode()
+
+    monkeypatch.setattr(github, "_download_bytes", download)
+    ref = github.GitHubRef("acme", "models", "abc")
+    found = github.list_github_files(ref, r"^cfg/.*_tuned\.csv$", cache_root=tmp_path)
+    assert found == ["cfg/a_tuned.csv"]
+    assert "git/trees/abc?recursive=1" in calls[0]
+    # The second listing reads the cached tree.
+    assert github.list_github_files(ref, r"\.csv$", cache_root=tmp_path) == [
+        "cfg/a_tuned.csv",
+        "cfg/a_untuned.csv",
+    ]
+    assert len(calls) == 1
+
+
+def test_an_unreachable_listing_is_empty(monkeypatch, tmp_path):
+    import urllib.error
+
+    from TraceLens.ModelUtils import github
+
+    def fail(url):
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(github, "_download_bytes", fail)
+    ref = github.GitHubRef("acme", "models", "abc")
+    assert github.list_github_files(ref, r".", cache_root=tmp_path) == []

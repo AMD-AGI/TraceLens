@@ -55,6 +55,26 @@ kernel          → No shapes (GPU-side event)
 cuda_runtime    → No shapes (API-level event)
 ```
 
+## Graph replay
+
+A CUDA or HIP graph replay records the device kernels and not the CPU ops that
+were captured into the graph. Those kernels have no `Input Dims`. Registering
+the op with `torch.library` does not put the shapes back, because the replay
+does not run the Python op again.
+
+The inference report recovers them in two ways:
+
+- **Capture merge.** Pass the folder of graph-capture traces. TraceLens copies
+  the captured CPU op, including its shapes, dtypes, and strides, onto the
+  matching replay kernel.
+- **Model config.** Pass the Hugging Face `config.json` and the tensor-parallel
+  size of the traced rank. The DeepSeek-V4 schedule pairs each graph kernel with
+  the launch at that position and writes that launch's shapes. A kernel the
+  schedule does not recognize stays without shapes.
+
+See [Shapes from the model config](../how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config)
+and [Merge capture traces](../how-to/generate-perf-report-pytorch-inference.md#merge-capture-traces).
+
 ## How to get shapes when they're missing
 
 If an operation lacks shapes, the fix is to register it with the dispatcher through `torch.library`. There are two approaches.

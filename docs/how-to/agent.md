@@ -100,7 +100,9 @@ If prompted, provide the trace file path, the platform of the first trace, the
 analysis mode (`default` for training and eager inference outside vLLM, SGLang, and ATOM,
 or `inference` for vLLM, SGLang, or ATOM), the execution mode and capture-folder path for
 inference, environment details (node, container, or virtual environment), and an
-optional output directory.
+optional output directory. A DeepSeek-V4 replay can take shapes from the model
+config instead of a capture folder. See
+[Shapes from the model config](./generate-perf-report-pytorch-inference.md#shapes-from-the-model-config).
 
 ### Run the agent from a YAML config
 

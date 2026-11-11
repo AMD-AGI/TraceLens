@@ -28,7 +28,7 @@ _log = logging.getLogger(__name__)
 from TraceLens.ModelUtils.blocks import BlockComponent, CodeAnalysis
 from TraceLens.ModelUtils.config_resolve import apply_config_attribute_aliases
 from TraceLens.ModelUtils.github import pinned_module_origin
-from TraceLens.ModelUtils.parallel_plan import _ENGINE_LINEAR_STYLES
+from TraceLens.ModelUtils.parallel_plan import ParallelDegree, _ENGINE_LINEAR_STYLES
 
 DECODER_CLASS_RE = re.compile(
     r"(DecoderLayer|DecoderBlock|TransformerBlock|ModelBlock|Block)$",
@@ -652,6 +652,14 @@ def _module_origin(module: str) -> str | None:
     pinned = pinned_module_origin(module)
     if pinned:
         return pinned
+    # A kernel library the modeling file imports and that is not installed.
+    # The same pinned-checkout read the kernel pipeline already uses, so the
+    # file is fetched into the local cache and never imported.
+    from TraceLens.ModelUtils.kernel_pipeline import package_source_file
+
+    packaged = package_source_file(module)
+    if packaged is not None:
+        return str(packaged)
     for entry in sys.path:
         base = Path(entry) if entry else Path.cwd()
         try:
@@ -1829,7 +1837,10 @@ def _dispatches_to_imported_kernel(
 
     The import can sit inside the forward OR at the top of the defining file, so
     both are considered. A class whose forward does its own arithmetic is
-    expanded normally.
+    expanded normally. An embedding module is the same kind of exception: the
+    gather is the kernel, and the Python around it is the module. A local
+    helper next to an imported kernel does not open the class -- that kernel
+    is still the boundary.
 
     A third shape never names an import at all: ``ColumnParallelLinear.forward``
     reads ``output = self.quant_method.apply(self, x, bias)``, where
@@ -1878,6 +1889,12 @@ def _dispatches_to_imported_kernel(
         for stmt in ast.walk(scope):
             if isinstance(stmt, ast.ImportFrom):
                 imported.update(alias.asname or alias.name for alias in stmt.names)
+    # ``VocabParallelEmbedding.forward`` gathers rows, then may mask and
+    # all-reduce. The gather is the kernel; the module around it is not, so
+    # the class stays open. A vision tower that calls one local helper and
+    # one imported kernel does not match this and stays a boundary.
+    if _forward_calls_embedding_kernel(forward):
+        return False
     for stmt in ast.walk(forward):
         if (
             isinstance(stmt, ast.Call)
@@ -1886,6 +1903,38 @@ def _dispatches_to_imported_kernel(
         ):
             return True
     return _calls_a_runtime_selected_attribute(node, forward)
+
+
+def _forward_calls_embedding_kernel(forward: ast.FunctionDef) -> bool:
+    """True when *forward* itself performs an embedding lookup."""
+    for stmt in ast.walk(forward):
+        if isinstance(stmt, ast.Call) and _is_embedding_kernel_call(stmt):
+            return True
+    return False
+
+
+def _is_embedding_kernel_call(node: ast.Call) -> bool:
+    """True for an embedding lookup, which is a kernel and not a GEMM.
+
+    ``F.embedding`` is already a functional op. The other two spellings are the
+    ones vLLM's ``VocabParallelEmbedding`` actually calls: a strategy method
+    ``self.quant_method.embedding(...)`` whose body is ``F.embedding``, and the
+    fused ``ops.vocab_parallel_embedding(...)``. Both stop here. A call on a
+    registered submodule was recorded before this check.
+    """
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr == "vocab_parallel_embedding":
+        return True
+    if func.attr != "embedding":
+        return False
+    receiver = func.value
+    return (
+        isinstance(receiver, ast.Attribute)
+        and isinstance(receiver.value, ast.Name)
+        and receiver.value.id == "self"
+    )
 
 
 def _calls_a_runtime_selected_attribute(
@@ -2180,6 +2229,11 @@ class RuntimeRegime:
     #: an answer this flag already has. Defaults to AMD's accelerator, this
     #: repo's own vendor.
     device: str = "hip"
+    #: Process-group sizes for this run. ``None`` leaves every axis at degree
+    #: 1, which is the unsharded constructor math ``parallel_plan`` later
+    #: localizes. A trace's ``distributedInfo`` fills this with every group
+    #: the run created, and shape inference reads those sizes.
+    parallel: ParallelDegree | None = None
 
     SEQUENCE_LAYOUTS = ("rectangular", "packed")
     PHASES = ("prefill", "decode")
@@ -3217,6 +3271,14 @@ def _extract_self_calls_ordered(
             _append_forward_call(
                 out, positional_synthetic_attr(target, node.lineno, discriminator)
             )
+            return
+        if _is_embedding_kernel_call(node):
+            # The lookup is the kernel. Record it once, whichever branch
+            # spelled it, so the two arms of a sharded embedding do not become
+            # two gathers.
+            embedding_attr = functional_synthetic_attr("embedding")
+            if embedding_attr not in out:
+                _append_forward_call(out, embedding_attr)
             return
         if not skip_free_fn and _is_emittable_free_function(func, target):
             # Any other module-level free function still runs real computation the
@@ -4767,7 +4829,7 @@ def _inline_nested_free_functions(
         name = _synthetic_call_function_name(call_attr)
         nested_func = module_functions[name]
         bound = _nested_call_param_values(
-            nested_func, call_attr, caller, param_values or {}
+            nested_func, call_attr, caller, param_values or {}, self_values
         )
         nested_values = (
             {
@@ -4975,6 +5037,15 @@ def _multi_op_free_functions(
         # Filtered, never raw: a default is in force only if no visible caller
         # overrides it and the function is not entered from unparsed code.
         settled = _settled_param_defaults(func, module_functions, class_nodes)
+        # A dispatched kernel is ``interface(self, q, k, v, ...)``. The body
+        # names that first parameter ``module`` and reads constructor scalars
+        # off it (``module.num_key_value_groups`` into ``repeat_kv``). Seed the
+        # marker so the nested call binds the scalar; ``_config_value`` still
+        # treats the marker itself as unknown.
+        if call_attr == SYNTHETIC_ATTENTION:
+            params = _free_function_param_list(func)
+            if params and params[0] not in settled:
+                settled = {**settled, params[0]: _MODULE_REF}
         analysis = _forward_operations_from_forward(
             func,
             self_values=self_values,
@@ -5078,7 +5149,12 @@ def _register_forward_calls(
     norm_before: list[str],
     pending_norm: str | None,
 ) -> str | None:
+    embedding = functional_synthetic_attr("embedding")
     for attr in stmt_calls:
+        # Both spellings of one lookup share this attr. A forward that names
+        # the gather twice still performs it once.
+        if attr == embedding and attr in calls:
+            continue
         if attr == SYNTHETIC_ATTENTION:
             _append_forward_call(calls, attr)
             pending_norm = None
@@ -6053,6 +6129,11 @@ def effective_forward_calls(cls: ClassStructure) -> list[str]:
 
 
 _UNKNOWN = object()
+# ``eager(self, ...)`` then ``repeat_kv(key, module.num_key_value_groups)``: the
+# parameter is the module, so an attribute read on it is a ``self`` scalar. The
+# marker is not a value any branch should see; ``_config_value`` treats it as
+# unknown.
+_MODULE_REF = object()
 # A constructor attribute that is scalar-*typed* (an int/float/str/bool setting
 # built from config reads and arithmetic) but whose concrete value could not be
 # resolved -- e.g. ``self.qkv_dim = self.head_dim * self.num_heads`` when the
@@ -6062,25 +6143,44 @@ _UNKNOWN = object()
 # back to ``_UNKNOWN`` so arithmetic/comparison folding stays value-based.
 _SCALAR_SETTING = object()
 # A distributed-parallelism group getter -- SGLang's ``get_parallel()`` --
-# whose own ``*_size``/``*_rank`` attribute (``get_parallel().attn_tp_size``)
-# this module has no distributed runtime to ask. Resolving it as though the
-# AST were running at world size 1, rank 0 is what every shape rule downstream
-# already expects: constructor math built from it (``self.num_heads =
-# self.total_num_heads // attn_tp_size``) settles to the *full*, unsharded
-# count, and the later, structural GPU-group localization pass
-# (``parallel_plan.py``) is what divides a module's declared full shape down
-# to one GPU's share -- not a second, AST-level guess at the real degree.
+# whose ``*_size``/``*_rank`` attribute (``get_parallel().attn_tp_size``,
+# ``.moe_ep_size``, ``.moe_dp_size``, ``.attn_cp_size``, ``.pp_size``) names a
+# process group. With no degree recorded on the regime, the accessor resolves
+# as world size 1, rank 0: constructor math (``self.num_heads =
+# self.total_num_heads // attn_tp_size``) settles to the full, unsharded
+# count, and ``parallel_plan.py`` divides that down to one GPU. When the run
+# records its groups (``RuntimeRegime.parallel``, from the trace's
+# ``distributedInfo``), each accessor reads that group's size instead. The
+# drawing is rank 0 of every group, so a rank accessor stays 0.
 _PARALLEL_GROUP_GETTER_NAMES = frozenset({"get_parallel"})
-# vLLM's standalone equivalents of the same two attributes, called directly
-# rather than through a group object.
-_PARALLEL_WORLD_SIZE_FUNCS = frozenset({"get_tensor_model_parallel_world_size"})
-_PARALLEL_RANK_FUNCS = frozenset({"get_tensor_model_parallel_rank"})
+# vLLM's standalone equivalents, called directly rather than through a group
+# object. The value is the process-group name :meth:`ParallelDegree.size` reads.
+_PARALLEL_FUNC_GROUPS = {
+    "get_tensor_model_parallel_world_size": "tp",
+    "get_tensor_model_parallel_rank": "tp",
+    "get_pipeline_model_parallel_world_size": "pp",
+    "get_pipeline_model_parallel_rank": "pp",
+    "get_expert_model_parallel_world_size": "moe_ep",
+    "get_expert_model_parallel_rank": "moe_ep",
+    "get_expert_parallel_world_size": "moe_ep",
+    "get_expert_parallel_rank": "moe_ep",
+    "get_data_parallel_world_size": "dp",
+    "get_data_parallel_rank": "dp",
+    "get_context_model_parallel_world_size": "attn_cp",
+    "get_context_model_parallel_rank": "attn_cp",
+}
+_PARALLEL_WORLD_SIZE_FUNCS = frozenset(
+    name for name in _PARALLEL_FUNC_GROUPS if name.endswith("_world_size")
+)
+_PARALLEL_RANK_FUNCS = frozenset(
+    name for name in _PARALLEL_FUNC_GROUPS if name.endswith("_rank")
+)
 # Pipeline-parallel single-rank predicates read off a group object stashed on
 # ``self`` in ``__init__`` (``self.pp_group = get_parallel().pp_group``), then
-# tested in ``forward`` (``if self.pp_group.is_first_rank:``). At the same
-# assumed world size 1 as ``_PARALLEL_GROUP_GETTER_NAMES``, rank 0 is every one
-# of these simultaneously, so each resolves to ``True`` regardless of the base
-# expression it is read off -- the name alone is unambiguous.
+# tested in ``forward`` (``if self.pp_group.is_first_rank:``). The drawing is
+# rank 0. At pipeline degree 1 that rank is first, last, and only, so each
+# predicate is ``True``. A recorded ``pp`` size above 1 leaves rank 0 first
+# and not last.
 _PP_SINGLE_RANK_ATTRS = frozenset(
     {"is_first_rank", "is_last_rank", "is_only_rank", "is_last_or_only_rank"}
 )
@@ -6430,6 +6530,21 @@ def _schema_arguments(op: str, node: ast.Call) -> dict[str, ast.expr]:
 
 _DIM_DETAIL_METHODS = _REDUCTION_METHODS | {"unsqueeze", "squeeze", "gather"}
 
+
+def _rendered_dim_expr(expr: ast.AST, param_values: dict[str, Any] | None) -> str:
+    """Dim text, with a literal parameter standing in for its name.
+
+    ``cos.unsqueeze(unsqueeze_dim)`` leaves the axis as the parameter's name
+    unless this call's value is known. A default the caller left alone is that
+    value (``unsqueeze_dim=1``); a name with no settled value stays the name.
+    """
+    if isinstance(expr, ast.Name) and param_values:
+        value = param_values.get(expr.id)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+    return ast.unparse(expr)
+
+
 # How far ``_extent_source_producers`` chases a generator bound through
 # intermediate host-scalar locals (``n_windows = compressed.shape[1] //
 # self.block`` is two hops). Bounded so a self-referential or deeply chained
@@ -6662,7 +6777,10 @@ def _settled_param_defaults(
 
 
 def _bound_call_param_values(
-    func: ast.FunctionDef, call: ast.Call, caller_values: dict[str, Any]
+    func: ast.FunctionDef,
+    call: ast.Call,
+    caller_values: dict[str, Any],
+    self_values: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Callee parameter values settled by THIS call site, or ``None`` if none can be.
 
@@ -6670,17 +6788,36 @@ def _bound_call_param_values(
     its value across: ``get_vision_attention_seqlens`` defaults ``merge_temporal``
     to False and forwards it by keyword, which is how the branch inside
     ``get_vision_cu_seqlens`` becomes decidable two frames from the default.
+
+    A module attribute does too. ``repeat_kv(key, module.num_key_value_groups)``
+    is called from a free function whose ``module`` parameter was ``self``, and
+    ``self.num_key_value_groups`` is a constructor scalar. Without that, the
+    expand keeps its size-1 axis and grouped-query attention stays at the KV
+    head count.
     """
     if any(keyword.arg is None for keyword in call.keywords):
         return None
     names = [arg.arg for arg in func.args.posonlyargs + func.args.args]
     bound: dict[str, Any] = {}
+    module_values = self_values or {}
 
     def resolve(value: ast.expr) -> Any:
         if isinstance(value, ast.Constant):
             return value.value
-        if isinstance(value, ast.Name) and value.id in caller_values:
-            return caller_values[value.id]
+        if isinstance(value, ast.Name):
+            if value.id == "self":
+                return _MODULE_REF
+            if value.id in caller_values:
+                return caller_values[value.id]
+            return _UNKNOWN
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and resolve(value.value) is _MODULE_REF
+        ):
+            got = module_values.get(value.attr, _UNKNOWN)
+            if isinstance(got, (int, float, bool, str)):
+                return got
         return _UNKNOWN
 
     for index, arg in enumerate(call.args):
@@ -6725,6 +6862,7 @@ def _nested_call_param_values(
     call_attr: str,
     caller: ast.FunctionDef | None,
     caller_values: dict[str, Any],
+    self_values: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Callee parameter values this particular call site settles.
 
@@ -6742,17 +6880,22 @@ def _nested_call_param_values(
             continue
         if line is not None and node.lineno != line:
             continue
-        return _bound_call_param_values(callee, node, caller_values)
+        return _bound_call_param_values(callee, node, caller_values, self_values)
     return None
 
 
-def _distributed_degree_value(node: ast.AST) -> int | None:
-    """World size (1) or rank (0) for a distributed-parallelism accessor, else ``None``.
+def _parallel_on(config: dict | None) -> ParallelDegree | None:
+    """The run's process-group sizes, when the regime recorded them."""
+    regime = (config or {}).get(RUNTIME_REGIME_KEY)
+    parallel = getattr(regime, "parallel", None)
+    return parallel if isinstance(parallel, ParallelDegree) else None
 
-    Covers both call shapes seen across engines: SGLang's group-object style
-    (``get_parallel().attn_tp_size``/``.attn_tp_rank``) and vLLM's standalone
-    functions (``get_tensor_model_parallel_world_size()``/``_rank()``). See
-    ``_PARALLEL_GROUP_GETTER_NAMES`` for why world size resolves to 1, rank to 0.
+
+def _parallel_group_of(node: ast.AST) -> tuple[str, bool] | None:
+    """``(group name, is_rank)`` for a parallelism accessor, else ``None``.
+
+    ``get_parallel().moe_ep_size`` is ``("moe_ep", False)``. A vLLM
+    ``get_data_parallel_rank()`` is ``("dp", True)``.
     """
     if (
         isinstance(node, ast.Attribute)
@@ -6761,26 +6904,60 @@ def _distributed_degree_value(node: ast.AST) -> int | None:
         and node.value.func.id in _PARALLEL_GROUP_GETTER_NAMES
     ):
         if node.attr.endswith("_size"):
-            return 1
+            return node.attr[: -len("_size")], False
         if node.attr.endswith("_rank"):
-            return 0
+            return node.attr[: -len("_rank")], True
         return None
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        if node.func.id in _PARALLEL_WORLD_SIZE_FUNCS:
-            return 1
-        if node.func.id in _PARALLEL_RANK_FUNCS:
-            return 0
+        group = _PARALLEL_FUNC_GROUPS.get(node.func.id)
+        if group is None:
+            return None
+        return group, node.func.id in _PARALLEL_RANK_FUNCS
     return None
 
 
-def _distributed_single_rank_predicate(node: ast.AST) -> bool | None:
-    """``True`` for a pipeline-parallel single-rank attribute read, else ``None``.
+def _distributed_degree_value(
+    node: ast.AST, parallel: ParallelDegree | None = None
+) -> int | None:
+    """Size or rank of a distributed-parallelism accessor, else ``None``.
 
-    See ``_PP_SINGLE_RANK_ATTRS``.
+    Covers both call shapes seen across engines: SGLang's group-object style
+    (``get_parallel().attn_tp_size``/``.moe_ep_size``/``.moe_dp_size``/
+    ``.attn_cp_size``/``.pp_size``) and vLLM's standalone functions
+    (``get_tensor_model_parallel_world_size()``, and the pipeline, expert,
+    data, and context equivalents). With no recorded degree every size is 1.
+    A recorded :class:`ParallelDegree` supplies the size of the named group.
+    The drawing is rank 0, so a rank accessor is 0.
     """
-    if isinstance(node, ast.Attribute) and node.attr in _PP_SINGLE_RANK_ATTRS:
-        return True
-    return None
+    found = _parallel_group_of(node)
+    if found is None:
+        return None
+    name, is_rank = found
+    if is_rank:
+        return 0
+    if parallel is None:
+        return 1
+    return parallel.size(name)
+
+
+def _distributed_single_rank_predicate(
+    node: ast.AST, parallel: ParallelDegree | None = None
+) -> bool | None:
+    """A pipeline-parallel single-rank predicate, else ``None``.
+
+    See ``_PP_SINGLE_RANK_ATTRS``. Rank 0 of a degree-1 pipeline is first,
+    last, and only. A larger recorded ``pp`` size leaves it first only.
+    """
+    if not (isinstance(node, ast.Attribute) and node.attr in _PP_SINGLE_RANK_ATTRS):
+        return None
+    size = 1 if parallel is None else parallel.size("pp")
+    last = size <= 1
+    return {
+        "is_first_rank": True,
+        "is_last_rank": last,
+        "is_only_rank": last,
+        "is_last_or_only_rank": last,
+    }[node.attr]
 
 
 def _config_value(
@@ -6790,10 +6967,11 @@ def _config_value(
     param_values: dict[str, Any] | None = None,
 ) -> Any:
     """Evaluate the small literal/config expression subset used by model constructors."""
-    degree = _distributed_degree_value(node)
+    parallel = _parallel_on(config)
+    degree = _distributed_degree_value(node, parallel)
     if degree is not None:
         return degree
-    single_rank = _distributed_single_rank_predicate(node)
+    single_rank = _distributed_single_rank_predicate(node, parallel)
     if single_rank is not None:
         return single_rank
     if isinstance(node, ast.Constant):
@@ -6802,7 +6980,12 @@ def _config_value(
         if node.id == "config":
             return config
         if param_values is not None and node.id in param_values:
-            return param_values[node.id]
+            got = param_values[node.id]
+            # The module passed into a free function (``eager(self)`` binds
+            # ``module`` to this marker). It is not a scalar a branch can test.
+            if got is _MODULE_REF:
+                return _UNKNOWN
+            return got
         # A constructor commonly settles a scalar through a local before storing
         # it on ``self`` (``sparse_cfg = config.sparse_attention_config;
         # self.idx_head_dim = sparse_cfg["sparse_index_dim"]``). ``self_values``
@@ -6972,30 +7155,36 @@ def _config_value(
         values = [left, *comparators]
         for index, op in enumerate(node.ops):
             a, b = values[index], values[index + 1]
-            if isinstance(op, ast.Eq) and not (a == b):
+            try:
+                ordered = None
+                if isinstance(op, ast.Eq):
+                    ordered = a == b
+                elif isinstance(op, ast.NotEq):
+                    ordered = a != b
+                elif isinstance(op, ast.Gt):
+                    ordered = a > b
+                elif isinstance(op, ast.GtE):
+                    ordered = a >= b
+                elif isinstance(op, ast.Lt):
+                    ordered = a < b
+                elif isinstance(op, ast.LtE):
+                    ordered = a <= b
+                elif isinstance(op, ast.Is):
+                    ordered = a is b
+                elif isinstance(op, ast.IsNot):
+                    ordered = a is not b
+                elif isinstance(op, (ast.In, ast.NotIn)):
+                    if not isinstance(b, (tuple, list, set, frozenset, str)):
+                        return _UNKNOWN
+                    ordered = a in b
+                    if isinstance(op, ast.NotIn):
+                        ordered = not ordered
+            except TypeError:
+                # None compared with an int, and the other orderings Python
+                # refuses. The branch is not decided by a value we do not have.
+                return _UNKNOWN
+            if ordered is False:
                 return False
-            if isinstance(op, ast.NotEq) and not (a != b):
-                return False
-            if isinstance(op, ast.Gt) and not (a > b):
-                return False
-            if isinstance(op, ast.GtE) and not (a >= b):
-                return False
-            if isinstance(op, ast.Lt) and not (a < b):
-                return False
-            if isinstance(op, ast.LtE) and not (a <= b):
-                return False
-            if isinstance(op, ast.Is) and not (a is b):
-                return False
-            if isinstance(op, ast.IsNot) and not (a is not b):
-                return False
-            if isinstance(op, (ast.In, ast.NotIn)):
-                if not isinstance(b, (tuple, list, set, frozenset, str)):
-                    return _UNKNOWN
-                inside = a in b
-                if isinstance(op, ast.NotIn):
-                    inside = not inside
-                if not inside:
-                    return False
         return True
     return _UNKNOWN
 
@@ -7538,7 +7727,9 @@ class _RegimeDecider:
         self.self_values = dict(self_values or {})
         self.param_values = dict(param_values or {})
 
-    def outcome(self, test: ast.expr) -> bool | None:
+    def outcome(
+        self, test: ast.expr, _resolving: frozenset[str] = frozenset()
+    ) -> bool | None:
         """How the RUN being depicted answers *test*, or ``None`` if it does not.
 
         Answering here, at the branch, is what makes the choice reach
@@ -7547,7 +7738,7 @@ class _RegimeDecider:
         """
         facts = self.facts
         if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-            inner = self.outcome(test.operand)
+            inner = self.outcome(test.operand, _resolving)
             return None if inner is None else not inner
         if isinstance(test, ast.BoolOp):
             # Short-circuit, like the language does: one False part settles an
@@ -7558,7 +7749,7 @@ class _RegimeDecider:
             # cache both groups are False and so is the whole test, but
             # demanding that every part be known left it undecided and drew a
             # phi over a branch that cannot run.
-            parts = [self.outcome(value) for value in test.values]
+            parts = [self.outcome(value, _resolving) for value in test.values]
             settles = isinstance(test.op, ast.Or)
             if any(part is settles for part in parts):
                 return settles
@@ -7567,14 +7758,18 @@ class _RegimeDecider:
             return not settles
         if isinstance(test, ast.Name) and test.id in facts.value_locals:
             # The test is a name; what it was bound to is the real question.
-            return self.outcome(facts.value_locals[test.id])
+            # A binding that mentions its own name (``ready = cond and ready``)
+            # is not that question. Following it walks the same test forever.
+            if test.id in _resolving:
+                return None
+            return self.outcome(facts.value_locals[test.id], _resolving | {test.id})
         device_check = self._device_check_outcome(test)
         if device_check is not None:
             return device_check
         if isinstance(test, ast.IfExp):
-            chosen = self.outcome(test.test)
+            chosen = self.outcome(test.test, _resolving)
             if chosen is not None:
-                return self.outcome(test.body if chosen else test.orelse)
+                return self.outcome(test.body if chosen else test.orelse, _resolving)
         if ast.unparse(test).strip() in facts.layout_tests:
             return self._regime.is_packed
         if (
@@ -10399,14 +10594,20 @@ class _ForwardOperationExtractor:
                 bound = _schema_arguments(call_name, node)
                 for name in ("dim", "keepdim"):
                     if name in bound:
-                        details.append(f"{name}: {ast.unparse(bound[name])}")
+                        details.append(
+                            f"{name}: {_rendered_dim_expr(bound[name], self.param_values)}"
+                        )
             else:
                 # No schema to consult: keep the long-standing reading.
                 if node.args:
-                    details.append(f"dim: {ast.unparse(node.args[0])}")
+                    details.append(
+                        f"dim: {_rendered_dim_expr(node.args[0], self.param_values)}"
+                    )
                 for keyword in node.keywords:
                     if keyword.arg in {"dim", "keepdim"}:
-                        details.append(f"{keyword.arg}: {ast.unparse(keyword.value)}")
+                        details.append(
+                            f"{keyword.arg}: {_rendered_dim_expr(keyword.value, self.param_values)}"
+                        )
         if call_name == "topk":
             # ``x.topk(k, dim=...)`` / ``torch.topk(x, k, dim=...)``: this call's own
             # k sets the output width. A MoE gate picks experts-per-token with one
@@ -11083,17 +11284,17 @@ class _ForwardOperationExtractor:
             and inner.id in self.shape_slice_tokens
         ):
             token = self.shape_slice_tokens[inner.id]
-            if token.endswith(_WHOLE_SHAPE_SUFFIX):
-                # A local bound from a tensor's WHOLE shape, spread back over a
-                # reshape: GLM's experts flatten to ``[B*S, H]``, accumulate, and
-                # close with ``.view(*orig_shape)``. Mark it a snapshot so the
-                # resolver reads the tensor it NAMES rather than the one being
-                # reshaped -- and here that is certain rather than merely likely,
-                # because restoring a tensor's entire shape onto itself would do
-                # nothing at all, which is not what the call is for.
-                snapshots = getattr(self, "_pending_shape_snapshots", None)
-                if snapshots is not None and token not in snapshots:
-                    snapshots.append(token)
+            # The local was bound earlier, so it records the tensor it was read
+            # from, which is not necessarily the one this view reshapes. A
+            # whole-shape restore (GLM's experts flatten, then
+            # ``.view(*orig_shape)``) and a leading-axes slice
+            # (``input_shape = hidden_states.shape[:-1]`` reused on the query)
+            # are the same kind of read. An inline ``x.shape[:-1]`` written in
+            # the call itself never lands here, so marking the local does not
+            # make that form look up a different tensor.
+            snapshots = getattr(self, "_pending_shape_snapshots", None)
+            if snapshots is not None and token not in snapshots:
+                snapshots.append(token)
             return ["*" + token]
         return [self._render_shape_dim(arg)]
 
@@ -11117,7 +11318,9 @@ class _ForwardOperationExtractor:
             if snapshots is not None and token not in snapshots:
                 snapshots.append(token)
             return token
-        resolved = _config_value(elt, {}, self.self_values)
+        resolved = _config_value(
+            elt, {}, self.self_values, getattr(self, "param_values", None)
+        )
         if isinstance(resolved, int) and not isinstance(resolved, bool):
             return str(resolved)
         return ast.unparse(elt)
