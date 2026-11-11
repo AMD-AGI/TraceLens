@@ -45,6 +45,7 @@ from TraceLens.Agent.PerfModel.perf_model_generate.scan_framework_ops import (
 )
 
 RUNTIME_COLUMNS = ("Kernel Time (µs)_sum", "total_duration_us")
+MODEL_OUTPUT_COLUMNS = ("GFLOPS", "Data Moved (MB)")
 # Newer TraceLens embeds the call stack in the summary CSV; prefer the full one.
 CALL_STACK_COLUMNS = ("call_stack_full", "call_stack", "trunc_call_stack")
 REPO_HINTS = (
@@ -107,7 +108,11 @@ def load_rows(path: Path) -> Tuple[List[Row], str]:
 
 
 def row_has_perf_model(row: Row) -> bool:
-    return (row.get("has_perf_model") or "").strip().lower() in ("true", "1", "yes")
+    """A mapped perf model counts only if it produced FLOPs or bytes for this row."""
+    if (row.get("has_perf_model") or "").strip().lower() not in ("true", "1", "yes"):
+        return False
+    metrics = [row[c] for c in MODEL_OUTPUT_COLUMNS if c in row]
+    return not metrics or any(_float(v) > 0 for v in metrics)
 
 
 def missing_perf_model_share(rows: List[Row]) -> float:

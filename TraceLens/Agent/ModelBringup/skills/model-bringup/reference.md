@@ -31,13 +31,16 @@ Derived:
 |---|---|---|
 | `<magpie_prefix>` | `ssh <node> "cd <magpie_dir> && PYTHONPATH=<magpie_dir> {CMD}"` | 0 |
 | `<container>` | `bringup_<basename of <bringup_dir>>` | 0 |
-| `<prefix>` | `ssh <node> "docker exec <container> bash -c '{CMD}'"` | 0 |
+| `<prefix>` | `ssh <node> "docker exec -i -w /tmp <container> bash -c '{CMD}'"`. `-i` lets heredoc writes reach the container; `-w /tmp` keeps the image's working dir (for example SGLang's `/sgl-workspace/sglang` checkout) from shadowing the installed framework package | 0 |
 | `<tl_extension>`, `<framework_src>`, `<gfx_arch>`, `<gpu_count>`, `<platform>` | printed in Step 0 | 0 |
 | `<profile_dir>` | `<bringup_dir>/profile/attempt_<n>`, `<n>` from 1 | 1 |
 | `<bench_dir>`, `<mixed_split>`, `<capture_folder>` | printed by `prepare` | 2 |
 | `<analysis_dir>` | `<bringup_dir>/analysis` | 3 |
 | `<op>`, `<op_slug>` | `ops[]` in `<bringup_dir>/gaps.json` | 5 |
 | `<op_worktree>`, `<op_dir>` | `<bringup_dir>/worktrees/pm_<op_slug>`, `<bringup_dir>/perf_models/<op_slug>` | 6 |
+
+When `<node>` is the machine you run on (`localhost` or its hostname), drop every
+`ssh <node> "..."` wrapper and run the inner command directly.
 
 Read `<bringup_dir>/cache/cmd_prefix.txt` and substitute the command for `{CMD}`, escaping
 quotes for the `ssh` and `bash -c` layers. `<prefix> <command>` below means that. `G` stands
@@ -71,7 +74,9 @@ To stop at any step: `<prefix> G summary --bringup-dir <bringup_dir> --stop-reas
          -v <tracelens_internal_dir>:<tracelens_internal_dir> -e HF_HOME=<hf_home> -e TL_EXTENSION=<tl_extension> \
          -e PYTHONDONTWRITEBYTECODE=1 --entrypoint tail <serving_image> -f /dev/null"
 
-4. **TraceLens.** `<prefix> pip install --no-deps -e <tracelens_dir> -e <tracelens_internal_dir>`.
+4. **TraceLens.** `<prefix> pip install -e <tracelens_dir> && pip install --no-deps -e <tracelens_internal_dir>`.
+   TraceLens has no torch dependency, so its dependencies install safely; TraceLens-internal
+   pins TraceLens from git, so it needs `--no-deps`.
    On `No module named <m>` later, `<prefix> pip install <m>` and retry.
 5. **GPU.**
 
@@ -140,7 +145,9 @@ Do not edit `gaps.json`. An empty `ops` list goes to Step 8.
        git -C <tracelens_dir> fetch origin main
        git -C <tracelens_dir> worktree add -b perf_model/<op_slug> <op_worktree> origin/main
 
-   On a rerun, reuse `<op_worktree>`; if only the branch exists, add the worktree from it.
+   On a rerun, reuse `<op_worktree>`; if only the branch exists, add the worktree from it. If
+   another bringup already has `perf_model/<op_slug>` checked out (same op on another
+   model), use that worktree as `<op_worktree>`, so one branch and one PR cover the op.
 2. Launch one subagent per op, at most `<gpu_count>` at once, each with its own `<k>`:
 
        Read and follow the FULL instructions in:

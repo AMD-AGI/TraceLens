@@ -1,0 +1,44 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+# AgentX benchmark: Magpie owns the server, InferenceX replays the agentic corpus.
+# Capture starts start_seconds after AIPerf's measured phase begins.
+# Magpie sets the framework profiler flags itself; do not add --profiler-config or profiler envs.
+# <ifx> is the InferenceX project Magpie mounts; copy TraceLens' kernel_shape_tool into it.
+
+benchmark:
+  framework: <vllm | sglang | atom>
+  model: <hf model id or absolute model dir>
+  precision: <bf16 | fp8 | fp4>
+  docker_image: <serving image; stock is fine, Step 1b patches it if needed>
+  hf_cache_path: <HF_HOME on the node, contains hub/>
+  timeout_seconds: 10800
+
+  agentx:
+    enabled: true
+    mode: fast # measured phase of 1200 s
+    launch_overrides: # the TraceLens kernel shape tool; Magpie does not pass envs to the AgentX server
+      version: 1
+      env:
+        TRACELENS_SHAPE_DISCOVERY: "1"
+        PYTHONPATH: <ifx>/kernel_shape_tool
+
+  envs:
+    TP: 8
+    EP_SIZE: 1
+    CONC: 32
+    MAX_MODEL_LEN: 262144 # at least the corpus cap
+
+  profiler:
+    torch_profiler:
+      enabled: true
+      num_steps: 256
+      num_profiles: 1
+      interval_seconds: 900 # only between captures
+      start_seconds: 300
+      detailed_annotations: true # Magpie checks the server supports them
+      capture_timeout_seconds: 300
+      flush_timeout_seconds: 1800
+    tracelens:
+      enabled: false # analysis runs in the TraceLens agent, not in Magpie

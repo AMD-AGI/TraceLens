@@ -51,12 +51,21 @@ If it fails, stop: this Magpie cannot run the AgentX capture below.
 
 ### Unattended mode
 
-When the caller (for example the model-bringup skill) asks for unattended mode, ask nothing. Where a step would ask, stop with that question as the reason. Use the computed window values without confirmation, run Step 1b with the rule below, edit only the copy of the YAML the caller names, keep the cleanup's script restores but skip the YAML restore, run Magpie and the AgentX check through the caller's command prefix instead of the conda activation shown in Steps 0 and 3 (no conda env is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log`, and stop after the Step 5 check. Do not print the TraceLens command.
+When the caller (for example the model-bringup skill) asks for unattended mode, ask nothing. Where a step would ask, stop with that question as the reason. Use the computed window values without confirmation, run Step 1b with the rule below, edit only the copy of the YAML the caller names, keep the cleanup's script restores but skip the YAML restore, run Magpie and the AgentX check through the caller's command prefix instead of the conda activation shown in Steps 0 and 3 (no conda env is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log`, and stop after the Step 5 check. Do not print the TraceLens command. Set `inferencex_path` to `<output_dir>/InferenceX` and create it as described under **Common SGLang flags**, so parallel runs never share patched InferenceX scripts.
 
 Step 1b without asking:
 
-1. Read the framework version from the image: `docker run --rm --entrypoint python3 <image> -c "import <framework>; print(<framework>.__version__)"`. If that fails, stop.
-2. A vLLM v0.26.0+ image, or an ATOM nightly from 2026-07-22 onward (date from the `nightly_<YYYYMMDD…>` tag), is used as is. Every other image is patched.
+1. Read the framework version from the image without a GPU: `docker run --rm --network=host --entrypoint python3 <image> -c "import importlib.metadata as m; print(m.version('<framework>'))"`. If that fails, stop.
+2. These images are used as is:
+   - vLLM v0.26.0+;
+   - an ATOM nightly from 2026-07-22 onward (date from the `nightly_<YYYYMMDD…>` tag);
+   - SGLang whose source already has the options (true for 0.5.21 and 0.5.22). Check without a GPU; exit 0 means ready:
+
+     ```bash
+     docker run --rm --network=host --entrypoint bash <image> -c 'f=$(find / -path /proc -prune -o -path "*sglang/srt/managers/io_struct.py" -print 2>/dev/null | head -1); [ -n "$f" ] && grep -q detailed_annotations "$f" && grep -rq enable_profile_cuda_graph "${f%/managers/io_struct.py}"'
+     ```
+
+   Every other image is patched.
 3. Build it with the build script's arm for that version (for SGLang, with the `--gpu-type` from the node's GPU: `gfx942` is `mi300`, `gfx950` is `mi355`). Tag it `tracelens-<framework>:<version>`, and skip the build if `docker image inspect` finds that tag. If the script has no arm for the version, or the build fails, stop.
 4. Set `docker_image` in the YAML copy to the image used.
 
@@ -228,7 +237,7 @@ The flags below must be applied **regardless** of whether the user chooses targe
 
 > **Before setting `EXTRA_VLLM_ARGS` or `EXTRA_SGLANG_ARGS`:** check which script will run. If `benchmark_script` is not set in the YAML, Magpie looks for an InferenceX native script named `gptoss_{precision}_{runner}.sh` (for vLLM) or `dsr1_{precision}_{runner}.sh` (for SGLang) and selects it if found. SSH to the node and check:
 > ```bash
-> ssh <node> "find <magpie_repo>/InferenceX/benchmarks -name 'gptoss_*' -o -name 'dsr1_*' | head -5"
+> ssh <node> "find <ifx>/benchmarks -name 'gptoss_*' -o -name 'dsr1_*' | head -5"
 > ```
 > If a native script is found (or if `benchmark_script` is explicitly set to an InferenceX native script), `EXTRA_VLLM_ARGS`/`EXTRA_SGLANG_ARGS` will be silently ignored. In that case, **stop and ask the user to set `benchmark_script` in their YAML to the appropriate Magpie generic script** (e.g. `vllm_mi300x.sh`) before proceeding.
 
@@ -251,11 +260,11 @@ Apply **four** edits regardless of profiling mode. Kernel shapes come from the T
 
 **1. Make the kernel shape tool visible inside the container.**
 
-Magpie only bind-mounts the HF cache, the workspace, the model directory and the InferenceX checkout (at `/opt/InferenceX`), so copy the tool into the InferenceX checkout. That checkout is `<magpie_repo>/InferenceX` unless the YAML sets `inferencex_path`:
+Magpie only bind-mounts the HF cache, the workspace, the model directory and the InferenceX project (at `/opt/InferenceX`), so copy the tool into it. `<ifx>` is that project: the InferenceX checkout (`<magpie_repo>/InferenceX` unless the YAML sets `inferencex_path`), or its `inferencex-e2e/` subdirectory when that is where `benchmarks/benchmark_lib.sh` lives, as in the InferenceX commit Magpie pins. `<bench_serving>` is `<ifx>/infx/bench_serving/benchmark_serving.py` when it exists, else `<ifx>/utils/bench_serving/benchmark_serving.py`. If the checkout does not exist yet, create it at Magpie's pinned commit before patching, with Magpie importable: `python3 -c "from Magpie.modes.benchmark.inferencex import ensure_inferencex_available as e; print(e('<path>'))"` clones it and prints `<ifx>`.
 
 ```bash
 ssh <node> "cp -r <TraceLens_repo>/TraceLens/TraceUtils/kernel_shape_tool \
-  <magpie_repo>/InferenceX/kernel_shape_tool"
+  <ifx>/kernel_shape_tool"
 ```
 
 The tool wraps Triton/aiter/FlashInfer kernel launchers as `sglang_profiler::*` custom ops while the torch profiler is running, so they carry `Input Dims` / `Input type` / `Input Strides` in the trace. It patches no SGLang source and works on stock and TraceLens-patched images alike.
@@ -302,11 +311,10 @@ The graph-capture traces are also where graph-replayed kernels get their shapes:
 
 **4. Patch `benchmark_serving.py` to enable roofline annotations in the profile request body.**
 
-The file is at `<magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict. Add the `detailed_annotations` flag:
+The file is `<bench_serving>`. The existing code has `"num_steps": 1` hardcoded in the `extra_body` dict (one key per line in newer InferenceX). Add the `detailed_annotations` flag:
 
 ```bash
-ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"detailed_annotations\": True, \"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/' \
-  <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
+ssh <node> "sed -i 's/\"num_steps\": 1,/\"detailed_annotations\": True, \"num_steps\": 1,/' <bench_serving>"
 ```
 
 - `detailed_annotations: True` — adds FLOPs and memory bandwidth annotations needed for roofline analysis.
@@ -345,7 +353,18 @@ ATOM is **single-node only** in Magpie — the cross-node Ray branch logs and sk
 
 #### AgentX workload
 
-AgentX has no targeted window or full-run choice: Magpie starts each capture after AIPerf's measured phase begins, so skip **Profiling mode** below and the `num_prompts` patch. Magpie also owns the AgentX profiler configuration: with `detailed_annotations: true` it sets the annotation, shape, stack and graph-capture options itself and rejects `--profiler-config` in `EXTRA_<FRAMEWORK>_ARGS`, so skip the **Common profiler flags** too. Set these under `benchmark.profiler.torch_profiler` (the template has them). Traces land in `torch_trace/<capture_id>/`:
+AgentX has no targeted window or full-run choice: Magpie starts each capture after AIPerf's measured phase begins, so skip **Profiling mode** below and the `num_prompts` patch. Magpie also owns the AgentX profiler configuration: with `detailed_annotations: true` it sets the annotation, shape, stack and graph-capture options itself and rejects `--profiler-config` in `EXTRA_<FRAMEWORK>_ARGS`, so skip the **Common profiler flags** too, except the TraceLens kernel shape tool. Magpie does not pass `envs` to the AgentX server, so copy the tool to `<ifx>/kernel_shape_tool` (as in **Common SGLang flags**, step 1) and enable it through the AgentX launch overrides; the server container mounts `<ifx>` at the same path:
+
+```yaml
+agentx:
+  launch_overrides:
+    version: 1
+    env:
+      TRACELENS_SHAPE_DISCOVERY: "1"
+      PYTHONPATH: "<ifx>/kernel_shape_tool"
+```
+
+Without it, kernels launched outside a torch op (for example paged attention) show up as `(Synthetic Op)` rows with no shapes. Set these under `benchmark.profiler.torch_profiler` (the template has them). Traces land in `torch_trace/<capture_id>/`:
 
 ```yaml
 num_steps: 256
@@ -423,7 +442,7 @@ If the YAML already has an `EXTRA_VLLM_ARGS` field with existing flags, **append
 
 ```bash
 ssh <node> "sed -i 's/num_prompts=\"\$max_concurrency\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
-  <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
+  <ifx>/benchmarks/benchmark_lib.sh"
 ```
 
 Replace `10` with a different multiplier if the user requests it.
@@ -439,8 +458,9 @@ SGLang profiling is controlled **client-side** via the `/start_profile` HTTP end
 The common section already patched `benchmark_serving.py` to add `detailed_annotations`. Now apply a second sed to set the targeted window parameters:
 
 ```bash
-ssh <node> "sed -i 's/\"num_steps\": 1, \"merge_profiles\": True, \"profile_by_stage\": True/\"start_step\": <DELAY>, \"num_steps\": <MAX>, \"merge_profiles\": False, \"profile_by_stage\": False/' \
-  <magpie_repo>/InferenceX/utils/bench_serving/benchmark_serving.py"
+ssh <node> "sed -i -e 's/\"num_steps\": 1,/\"start_step\": <DELAY>, \"num_steps\": <MAX>,/' \
+  -e 's/\"merge_profiles\": True,/\"merge_profiles\": False,/' \
+  -e 's/\"profile_by_stage\": True,/\"profile_by_stage\": False,/' <bench_serving>"
 ```
 
 Where `<DELAY>` is the computed `delay_iters` and `<MAX>` is the computed `max_iters`. This maps to SGLang's `/start_profile` API:
@@ -455,7 +475,7 @@ This is the same patch as for vLLM — `benchmark_lib.sh` is shared between both
 
 ```bash
 ssh <node> "sed -i 's/num_prompts=\"\$max_concurrency\"/num_prompts=\"\$((max_concurrency * 10))\"/' \
-  <magpie_repo>/InferenceX/benchmarks/benchmark_lib.sh"
+  <ifx>/benchmarks/benchmark_lib.sh"
 ```
 
 Replace `10` with a different multiplier if the user requests it. Without this fix, the benchmark finishes before the `start_step` window is reached, and no steady-state trace is captured.
@@ -490,14 +510,14 @@ All edits in Step 2b are temporary.
 **For vLLM:** The YAML config was modified (to add/update `EXTRA_VLLM_ARGS`). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up `benchmark_lib.sh` before patching:
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceX && \
+ssh <node> "cd <ifx> && \
   cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak"
 ```
 
 After the benchmark completes, restore `benchmark_lib.sh` and remove the `EXTRA_VLLM_ARGS` profiler flags from the YAML config (or revert to the original YAML):
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceX && \
+ssh <node> "cd <ifx> && \
   mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh"
 ```
 
@@ -506,17 +526,17 @@ Then edit the user's YAML config to remove the profiler flags from `EXTRA_VLLM_A
 **For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`), the kernel shape tool was copied into the InferenceX checkout, and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the remote files before patching:
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceX && \
+ssh <node> "cd <ifx> && \
   cp benchmarks/benchmark_lib.sh benchmarks/benchmark_lib.sh.bak && \
-  cp utils/bench_serving/benchmark_serving.py utils/bench_serving/benchmark_serving.py.bak"
+  cp <bench_serving> <bench_serving>.bak"
 ```
 
 After the benchmark completes, restore the remote files:
 
 ```bash
-ssh <node> "cd <magpie_repo>/InferenceX && \
+ssh <node> "cd <ifx> && \
   mv benchmarks/benchmark_lib.sh.bak benchmarks/benchmark_lib.sh && \
-  mv utils/bench_serving/benchmark_serving.py.bak utils/bench_serving/benchmark_serving.py && \
+  mv <bench_serving>.bak <bench_serving> && \
   rm -rf kernel_shape_tool"
 ```
 
@@ -615,7 +635,7 @@ ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> &
     --CONC <conc> --OSL <osl> --R <r>"
 ```
 
-For AgentX, use `--num-steps <num_steps>` and drop `--OSL`/`--R`.
+For AgentX, keep `--num-steps 32` (the analysis window, not the capture length) and drop `--OSL`/`--R`. The AgentX trace is under `torch_trace/<capture_id>/`, so write the split next to it.
 
 Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
 

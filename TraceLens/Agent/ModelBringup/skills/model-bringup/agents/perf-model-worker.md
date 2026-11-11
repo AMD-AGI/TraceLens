@@ -50,7 +50,9 @@ The Execution Context gives `<op>`, `<op_slug>`, `<op_worktree>`, `<op_dir>`,
        <prefix> cd <op_worktree> && PYTHONPATH=<op_worktree> python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates cases --report-dir <op_dir>/report/perf_report_csvs --out <op_dir>/cases.json
        <prefix> cd <op_worktree> && HIP_VISIBLE_DEVICES=<k> PYTHONPATH=<op_worktree> python3 $PM/validate-perf-model/validate_perf_model.py --cases <op_dir>/cases.json --only-ops <op> --arch <gfx_arch> --output-dir <op_dir>/validation
 
-   Exit 1 means a row failed.
+   Exit 1 means a row failed. If `rocprofv3` aborts torch processes (some ROCm SDK images
+   load two LLVM copies), pass `--rocprofv3-path` pointing at the SDK's
+   `_rocm_sdk_core/bin/rocprofv3`.
 5. **Draft.** Commit on `perf_model/<op_slug>`, then write `<op_dir>/pr.md`; its first line
    is the title. It states what the op is and which class or mapping was added, then one
    row per shape from these validation columns only: `predicted_flops`, `predicted_bytes`,

@@ -451,8 +451,8 @@ def check_trace(torch_trace, framework, speculative, expected_steps):
     checks.append(
         Check(
             "step count",
-            "PASS" if steps == expected_steps else "FAIL",
-            f"{steps} step(s) in {trace_path.name}, expected {expected_steps}",
+            "PASS" if steps >= expected_steps else "FAIL",
+            f"{steps} step(s) in {trace_path.name}, expected at least {expected_steps}",
         )
     )
 

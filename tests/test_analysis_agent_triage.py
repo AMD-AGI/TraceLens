@@ -3011,6 +3011,6 @@ def test_profile_checks_clean_bench(tmp_path):
 
 
 def test_profile_checks_flag_split_stack_and_steps(tmp_path):
-    bench = _make_bench(tmp_path, steps=3, stacks=False, aborted=True)
+    bench = _make_bench(tmp_path, steps=1, stacks=False, aborted=True)
     found = {f.sublabel for f in run_triage(bench, specs=PROFILE_CHECKS)}
     assert found == {"2d", "2k", "2l"}
