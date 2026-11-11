@@ -8,7 +8,7 @@
 
 TraceLens authors the human-readable ``analysis.md`` perf report; this module
 reads only that md and emits a structured, operation-grouped ``analysis.json``
-beside it (compute and fusion tiers, standalone only, v1). The parse anchors on the ``MarkerValidator``
+beside it (compute, fusion and system tiers, standalone only). The parse anchors on the ``MarkerValidator``
 marker grammar so the renderer moves in lockstep with the writer. Byte-identical
 on rerun. Fallback and agentic single-trace variants share one parser; the only
 mode-conditional is the deterministic-fallback grouping key.
@@ -21,25 +21,30 @@ from pathlib import Path
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     HEURISTIC_FRACTION_MID,
-    _arg_pairs,
-    _kernel_name_list,
+    NO_VALUE,
+    SystemFindings,
+    arg_pairs,
+    kernel_name_list,
     node_field,
 )
 from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
     ComputeTask,
+    SystemTask,
     TaskMember,
 )
-from TraceLens.Agent.Analysis.utils.classify_kernels import TAXONOMY
-from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionForms, _efficiency_parts
+from TraceLens.Agent.Analysis.utils.config_utils import SCOPE_STANDALONE
+from TraceLens.Agent.Analysis.utils.kernel_fusion import efficiency_parts
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     EXEC_TOTAL_COL,
     PCT_OF_NODE_COL,
     TIER_COMPUTE,
     TIER_FUSION,
+    TIER_SYSTEM,
     MarkerValidator,
-    _find_data_table,
-    _iter_candidate_blocks,
-    _marker_attrs,
+    PRIORITY_PREFIX_RE,
+    find_data_table,
+    iter_candidate_blocks,
+    marker_attrs,
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
@@ -47,9 +52,10 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_TASKS = 100
-IDENTIFICATION_CAP = 2000
-REASONING_CAP = 2000
-RESOLUTION_CAP = 2000
+PROSE_CAP = 2000
+# Emission order of the prose fields, which sets their JSON key order.
+PROSE_FIELDS = ("identification", "reasoning", "resolution")
+FALLBACK_MODE = "deterministic-fallback"
 # Raw perf-report columns a caller passes as ``extra_fields`` to
 # ``build_operation_metrics`` so ``compute_tasks`` can build task members.
 TASK_SOURCE_COLUMNS = ("Input Dims", "Input type", "call_stack_full")
@@ -60,22 +66,18 @@ _LABEL_RE = re.compile(
     r"(?=\n\s*\n|\n\*\*|\Z)",
     re.DOTALL,
 )
-_KIND_RE = re.compile(r"surfaced as\s+`(\w+)`", re.IGNORECASE)
-_FUSION_KINDS = FusionForms(TAXONOMY).kinds
 _EFFICIENCY_RE = re.compile(r"([\d.]+)%\s*of\s*([\d.]+)\s*(\S+)")
 _LIBRARY_PARENS_RE = re.compile(r"\(([^()]+)\)\s*$")
 _FLOAT_RE = re.compile(r"-?\d+(?:\.\d+)?")
-_PRIORITY_PREFIX_RE = re.compile(r"^(?:[🔴🟡🟢]\s*)?(?:P\d+:\s*)?")
 _TOTAL_TIME_RE = re.compile(
     r"^\|\s*Total Time\s*\|\s*(\d+(?:\.\d+)?) ms\s*\|", re.MULTILINE
 )
-_NULL_CELLS = {"", "-", "—", "–"}
+_NULL_CELLS = {"", "-", NO_VALUE, "–"}
 _TRAILING_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*$", re.DOTALL)
-
-
-def _strip_trailing_comment(text: str) -> str:
-    """Remove one trailing HTML comment, including a multiline comment."""
-    return _TRAILING_COMMENT_RE.sub("", text)
+_BLOCKQUOTE_PREFIX_RE = re.compile(r"^\s*>\s?")
+_KERNEL_PREFIX_RE = re.compile(r"^\s*Kernel\s+\d+:\s*")
+_ARGS_PIECE_RE = re.compile(r"^(\(.*?\))\s*(.*)$")
+_BULLET_RE = re.compile(r"^\s*-\s*\*\*(.+?)\*\*\s*:\s*(.*)$")
 
 
 # Data-table header labels, normalized (lowercased, stripped) -> logical field.
@@ -121,13 +123,13 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
     Reads ONLY the md, anchors on the ``MarkerValidator`` grammar, writes the
     grouped JSON and returns the written path. Byte-identical on rerun. Handles
     both the agentic and deterministic-fallback variants; comparative md is out
-    of scope for v1.
+    of scope.
     """
     md_path = Path(analysis_md)
     parser = AnalysisMdParser(md_path.read_text())
 
     report_info = parser.report_info()
-    mode = report_info["mode"]
+    is_fallback = report_info["mode"] == FALLBACK_MODE
 
     report: dict = {"report_info": report_info, "title": parser.title()}
 
@@ -141,8 +143,10 @@ def render_analysis_json(analysis_md: "str | Path") -> Path:
 
     for tier in (TIER_COMPUTE, TIER_FUSION):
         report[f"{tier}_optimizations"] = TaskGrouper(
-            parser.findings(tier), tier, mode
+            parser.findings(tier), tier, is_fallback
         ).group()
+
+    report["system_optimizations"] = system_tasks(parser.findings(TIER_SYSTEM))
 
     appendix = parser.appendix()
     if appendix is not None:
@@ -164,22 +168,37 @@ def compute_tasks(op_metrics: list[dict]) -> list[ComputeTask]:
     empty field.
     """
     return TaskGrouper(
-        [_op_finding(op) for op in op_metrics], TIER_COMPUTE, "non-llm"
+        [_op_finding(op) for op in op_metrics], TIER_COMPUTE, is_fallback=False
     ).group()
+
+
+def system_tasks(findings: list) -> list[SystemTask]:
+    """One task per ``tier=system`` finding, in md order, prioritized by its block rank."""
+    return [
+        {
+            "operation": finding["title"],
+            NODE_COL: finding["node"],
+            "members": finding["members"],
+            "impact": None,
+            **accumulate_prose([finding]),
+            "priority": finding["block_rank"],
+        }
+        for finding in findings
+    ]
 
 
 def _op_finding(op: dict) -> dict:
     """One op-metrics row as a single-member finding for ``TaskGrouper``."""
     eff = op["efficiency"]
-    pct, peak, unit, bound = _efficiency_parts(eff)
-    args = _arg_pairs(op.get("Input Dims"), op.get("Input type"))
+    pct, peak, unit, bound = efficiency_parts(eff)
+    args = arg_pairs(op.get("Input Dims"), op.get("Input type"))
     member = {
         "operation_cell": op["name"],
         "kernel_launcher_path": op["launcher_path"],
         "library": op["library"],
         "category": None,
         "analysis_md_rank": None,
-        "kernel_name": _kernel_name_list(op.get("call_stack_full")),
+        "kernel_name": kernel_name_list(op.get("call_stack_full")),
         "args_shapes": [shape for shape, _ in args] or None,
         "args_datatypes": [kind or None for _, kind in args] or None,
         "time_ms": op["time_ms"],
@@ -197,6 +216,17 @@ def _op_finding(op: dict) -> dict:
         "prose": {},
         "node": op.get(NODE_COL),
     }
+
+
+def _strip_trailing_comment(text: str) -> str:
+    """Remove one trailing HTML comment, including a multiline comment."""
+    return _TRAILING_COMMENT_RE.sub("", text)
+
+
+def _cell_or_null(cell: "str | None") -> "str | None":
+    if cell is None or cell.strip() in _NULL_CELLS:
+        return None
+    return cell.strip()
 
 
 class AnalysisMdParser:
@@ -235,10 +265,8 @@ class AnalysisMdParser:
 
         info: dict = {
             "mode": mode,
-            "comparison_scope": "standalone",
-            "trace_quality": (
-                "poor" if (mode == "deterministic-fallback" or warnings) else "ok"
-            ),
+            "comparison_scope": SCOPE_STANDALONE,
+            "trace_quality": "poor" if (mode == FALLBACK_MODE or warnings) else "ok",
         }
         if warnings:
             info["warnings"] = warnings
@@ -261,7 +289,7 @@ class AnalysisMdParser:
                     field = _METRIC_FIELDS.get(cells[0].strip().lower())
                     if field:
                         metrics[field] = self._first_float(cells[1])
-                        for name, cell in zip(node_metrics, cells[2:]):
+                        for name, cell in zip(node_metrics, cells[2:], strict=False):
                             node_metrics[name][field] = self._first_float(cell)
             elif (
                 stripped
@@ -303,13 +331,13 @@ class AnalysisMdParser:
                 rows.append(
                     {
                         "rank": int(self._first_float(fields.get("rank")) or 0),
-                        "category": self._cell_or_null(fields.get("category")),
+                        "category": _cell_or_null(fields.get("category")),
                         "time_ms": self._first_float(fields.get("time_ms")),
                         "pct_of_compute": self._first_float(
                             fields.get("pct_of_compute")
                         ),
                         "ops": self._int_or_null(fields.get("ops")),
-                        "potential_improvement_md": self._cell_or_null(
+                        "potential_improvement_md": _cell_or_null(
                             fields.get("potential_improvement_md")
                         ),
                         **node_field(attrs.get(NODE_COL)),
@@ -322,7 +350,7 @@ class AnalysisMdParser:
         attrs_by_rank = self._card_attrs(tier)
         return [
             self._parse_finding(start, end, rank, tier, attrs_by_rank)
-            for start, end, rank in _iter_candidate_blocks(self.text, tier)
+            for start, end, rank in iter_candidate_blocks(self.text, tier)
         ]
 
     def appendix(self) -> "dict | None":
@@ -363,7 +391,7 @@ class AnalysisMdParser:
             lib_m = _LIBRARY_PARENS_RE.search(heading) if heading else None
             library = lib_m.group(1).strip() if lib_m else None
         elif heading:
-            title = _PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
+            title = PRIORITY_PREFIX_RE.sub("", heading.lstrip("#").strip())
 
         prose = {"identification": None, "reasoning": None, "resolution": None}
         for label, body in _LABEL_RE.findall(block):
@@ -375,16 +403,14 @@ class AnalysisMdParser:
             else:
                 prose["resolution"] = cleaned
 
-        kind_m = _KIND_RE.search(prose["identification"] or "")
-        kind = kind_m.group(1).lower() if kind_m else None
-        if kind not in _FUSION_KINDS:
-            kind = None
-
-        members = self._parse_data_table(start, end)
-        for member in members:
-            member["category"] = category
-            member["library"] = library
-            member["analysis_md_rank"] = md_rank
+        if tier == TIER_SYSTEM:
+            members = self._parse_system_members(start, end)
+        else:
+            members = self._parse_data_table(start, end)
+            for member in members:
+                member["category"] = category
+                member["library"] = library
+                member["analysis_md_rank"] = md_rank
         impacts = self._parse_op_row_marker(block)
         low, mid, high = self._parse_finding_range(block)
         return {
@@ -392,17 +418,25 @@ class AnalysisMdParser:
             "impacts": impacts,
             "prose": prose,
             "rank": md_rank,
+            "block_rank": rank,
             "title": title,
-            "kind": kind,
             "low": low,
             "mid": mid,
             "high": high,
             "node": node,
         }
 
+    def _parse_system_members(self, start: int, end: int) -> list:
+        """Parse the block's **Data:** table into system rows, dropping non-contract rows."""
+        table = find_data_table(self.lines, start, end)
+        if table is None:
+            return []
+        rows = (SystemFindings.from_cells(cells) for _, cells in table[2])
+        return [row for row in rows if row is not None]
+
     def _parse_data_table(self, start: int, end: int) -> list:
         """Parse the block's **Data:** table into per-row member dicts."""
-        table = _find_data_table(self.lines, start, end)
+        table = find_data_table(self.lines, start, end)
         if table is None:
             return []
         _, header_cols, row_iter = table
@@ -416,37 +450,34 @@ class AnalysisMdParser:
         members = []
         for _, cells in row_iter:
 
-            def get(field: str) -> "str | None":
-                idx = col.get(field)
-                return cells[idx] if idx is not None and idx < len(cells) else None
-
-            operation_cell = get("operation")
-            eff_pct, eff_peak, eff_unit = self._parse_efficiency(get("efficiency"))
-            args_shapes, args_datatypes = self._split_args(get("args"))
-            time_ms = self._first_float(get("time_ms"))
+            row = {field: cells[i] for field, i in col.items() if i < len(cells)}
+            operation_cell = row.get("operation")
+            eff_pct, eff_peak, eff_unit = self._parse_efficiency(row.get("efficiency"))
+            args_shapes, args_datatypes = self._split_args(row.get("args"))
+            time_ms = self._first_float(row.get("time_ms"))
             pct_e2e = (
                 round(time_ms / total_ms * 100, 2)
                 if total_ms and time_ms is not None
-                else self._first_float(get("pct_e2e"))
+                else self._first_float(row.get("pct_e2e"))
             )
             members.append(
                 {
                     "operation_cell": operation_cell,
-                    "kernel_name": self._split_kernel_cell(get("kernel_name")),
-                    "kernel_launcher_path": self._cell_or_null(get("kernel_path")),
+                    "kernel_name": self._split_kernel_cell(row.get("kernel_name")),
+                    "kernel_launcher_path": _cell_or_null(row.get("kernel_path")),
                     "library": None,
                     "category": None,
                     "analysis_md_rank": None,
                     "args_shapes": args_shapes,
                     "args_datatypes": args_datatypes,
                     "time_ms": time_ms,
-                    "count": self._int_or_null(get("count")),
+                    "count": self._int_or_null(row.get("count")),
                     "pct_e2e": pct_e2e,
-                    "flops_per_byte": self._first_float(get("flops_per_byte")),
+                    "flops_per_byte": self._first_float(row.get("flops_per_byte")),
                     "efficiency_percent": eff_pct,
                     "efficiency_peak_value": eff_peak,
                     "efficiency_peak_unit": eff_unit,
-                    "bound": self._cell_or_null(get("bound")),
+                    "bound": _cell_or_null(row.get("bound")),
                 }
             )
         return members
@@ -462,7 +493,7 @@ class AnalysisMdParser:
         """
         anchor_re = re.compile(rf"#detailed-analysis-{tier}-[pP](\d+)")
         mapping: dict = {}
-        for m, attrs in _marker_attrs(self.text, "p_item"):
+        for m, attrs in marker_attrs(self.text, "p_item"):
             end = MarkerValidator.END_RE.search(self.text, m.end())
             if not end:
                 continue
@@ -500,7 +531,7 @@ class AnalysisMdParser:
         Fallback reports carry no card anchors, so the node rides on the p_item
         marker inside the reasoning-candidate block instead.
         """
-        for _, attrs in _marker_attrs(block, "p_item"):
+        for _, attrs in marker_attrs(block, "p_item"):
             return attrs.get(NODE_COL)
         return None
 
@@ -540,7 +571,8 @@ class AnalysisMdParser:
     def _unwrap_blockquote(block: str) -> str:
         """Flatten a ``> …`` markdown blockquote into a single prose string."""
         lines = [
-            re.sub(r"^\s*>\s?", "", ln).strip() for ln in block.strip().splitlines()
+            _BLOCKQUOTE_PREFIX_RE.sub("", ln).strip()
+            for ln in block.strip().splitlines()
         ]
         return " ".join(ln for ln in lines if ln).strip()
 
@@ -564,7 +596,7 @@ class AnalysisMdParser:
     def _marker_blocks(self, kind: str):
         """Yield (attrs, text) between each ``impact-begin kind=<kind>`` and its end."""
         text = self.text
-        for m, attrs in _marker_attrs(text, kind):
+        for m, attrs in marker_attrs(text, kind):
             end = MarkerValidator.END_RE.search(text, m.end())
             yield attrs, text[m.end() : end.start()] if end else text[m.end() :]
 
@@ -584,7 +616,7 @@ class AnalysisMdParser:
                 continue
             if all(set(c) <= {"-", ":", " "} for c in cells):
                 continue
-            yield dict(zip(header, cells))
+            yield dict(zip(header, cells, strict=False))
 
     @staticmethod
     def _split_row(row: str) -> list:
@@ -600,9 +632,9 @@ class AnalysisMdParser:
             return []
         names = []
         for piece in cell.split("<br>"):
-            piece = re.sub(r"^\s*Kernel\s+\d+:\s*", "", piece).strip()
-            if piece and piece not in _NULL_CELLS:
-                names.append(piece)
+            name = _KERNEL_PREFIX_RE.sub("", piece).strip()
+            if name and name not in _NULL_CELLS:
+                names.append(name)
         return names
 
     @staticmethod
@@ -612,15 +644,15 @@ class AnalysisMdParser:
             return None, None
         shapes, dtypes = [], []
         for piece in cell.split("<br>"):
-            piece = piece.strip()
-            if not piece:
+            text = piece.strip()
+            if not text:
                 continue
-            m = re.match(r"^(\(.*?\))\s*(.*)$", piece)
+            m = _ARGS_PIECE_RE.match(text)
             if m:
                 shapes.append(m.group(1))
                 dtypes.append(m.group(2).strip() or None)
             else:
-                shapes.append(piece)
+                shapes.append(text)
                 dtypes.append(None)
         if not shapes:
             return None, None
@@ -642,16 +674,10 @@ class AnalysisMdParser:
             return {}
         out: dict = {}
         for ln in section.splitlines():
-            m = re.match(r"^\s*-\s*\*\*(.+?)\*\*\s*:\s*(.*)$", ln)
+            m = _BULLET_RE.match(ln)
             if m:
                 out[m.group(1).strip()] = m.group(2).strip()
         return out
-
-    @staticmethod
-    def _cell_or_null(cell: "str | None") -> "str | None":
-        if cell is None or cell.strip() in _NULL_CELLS:
-            return None
-        return cell.strip()
 
     @staticmethod
     def _first_float(cell: "str | None") -> "float | None":
@@ -679,10 +705,10 @@ class TaskGrouper:
     order) and cap at 100.
     """
 
-    def __init__(self, findings: list, tier: str, mode: str):
+    def __init__(self, findings: list, tier: str, is_fallback: bool):
         self.findings = findings
         self.tier = tier
-        self.is_fallback = mode == "deterministic-fallback"
+        self.is_fallback = is_fallback
 
     def group(self) -> list:
         buckets = self._bucket()
@@ -709,7 +735,7 @@ class TaskGrouper:
                     key = member["kernel_name"][0] if member["kernel_name"] else ""
                     operation = None
                 else:
-                    operation = AnalysisMdParser._cell_or_null(member["operation_cell"])
+                    operation = _cell_or_null(member["operation_cell"])
                     key = operation or ""
 
                 bucket = buckets.setdefault(
@@ -755,12 +781,15 @@ class TaskGrouper:
         else:
             mid = sum(m["impact_score"] for m in members)
 
-        prose = self._accumulate_prose(ordered_fi, bucket["findings"])
+        prose = accumulate_prose([bucket["findings"][fi] for fi in ordered_fi])
 
-        task = {"operation": bucket["operation"], NODE_COL: bucket["node"]}
-        if self.tier == TIER_FUSION:
-            task["kind"] = bucket["findings"][ordered_fi[0]]["kind"]
-        return {**task, "members": members, "impact": {"mid": mid}, **prose}
+        return {
+            "operation": bucket["operation"],
+            NODE_COL: bucket["node"],
+            "members": members,
+            "impact": {"mid": mid},
+            **prose,
+        }
 
     def _finalize(self, tasks: list) -> list:
         # Python's sort is stable, so fusion ties keep block order.
@@ -790,46 +819,41 @@ class TaskGrouper:
             "".join(task["members"][0]["kernel_name"]) if task["members"] else "",
         )
 
-    @staticmethod
-    def _accumulate_prose(ordered_fi: list, findings: dict) -> dict:
-        """Concatenate per-finding prose under fixed caps; prefix ``[P<rank>]`` only when merged."""
-        caps = {
-            "identification": IDENTIFICATION_CAP,
-            "reasoning": REASONING_CAP,
-            "resolution": RESOLUTION_CAP,
-        }
-        label = len(ordered_fi) > 1
-        out: dict = {}
-        truncated = False
-        for field, cap in caps.items():
-            blocks = []
-            for fi in ordered_fi:
-                body = findings[fi]["prose"].get(field)
-                if not body:
-                    continue
-                rank = findings[fi]["rank"]
-                blocks.append(f"[{rank}] {body}" if (label and rank) else body)
-            if not blocks:
-                out[field] = None
-                continue
-            value, clipped = TaskGrouper._clip_blocks(blocks, cap)
-            out[field] = value
-            truncated = truncated or clipped
-        out["prose_truncated"] = truncated
-        return out
 
-    @staticmethod
-    def _clip_blocks(blocks: list, cap: int) -> tuple:
-        """Join blocks with blank lines, dropping whole trailing blocks past ``cap``."""
-        kept: list = []
-        clipped = False
-        for block in blocks:
-            candidate = "\n\n".join(kept + [block])
-            if len(candidate) <= cap:
-                kept.append(block)
-            else:
-                clipped = True
-                break
-        if not kept:
-            return blocks[0][:cap], True
-        return "\n\n".join(kept), clipped
+def accumulate_prose(findings: list) -> dict:
+    """Concatenate per-finding prose under fixed caps; prefix ``[P<rank>]`` only when merged."""
+    label = len(findings) > 1
+    out: dict = {}
+    truncated = False
+    for field in PROSE_FIELDS:
+        blocks = []
+        for finding in findings:
+            body = finding["prose"].get(field)
+            if not body:
+                continue
+            rank = finding["rank"]
+            blocks.append(f"[{rank}] {body}" if (label and rank) else body)
+        if not blocks:
+            out[field] = None
+            continue
+        value, clipped = _clip_blocks(blocks, PROSE_CAP)
+        out[field] = value
+        truncated = truncated or clipped
+    out["prose_truncated"] = truncated
+    return out
+
+
+def _clip_blocks(blocks: list, cap: int) -> tuple:
+    """Join blocks with blank lines, dropping whole trailing blocks past ``cap``."""
+    kept: list = []
+    clipped = False
+    for block in blocks:
+        candidate = "\n\n".join(kept + [block])
+        if len(candidate) <= cap:
+            kept.append(block)
+        else:
+            clipped = True
+            break
+    if not kept:
+        return blocks[0][:cap], True
+    return "\n\n".join(kept), clipped

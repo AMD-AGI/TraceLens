@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
+from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -413,6 +414,36 @@ def add_truncated_kernel_details(
     return df[cols]
 
 
+def _idle_analysis_sheets(
+    tree,
+    profile_json_path,
+    enable_idle_analysis,
+    micro_idle_thresh_us,
+    include_call_stack,
+    enable_augmented_trace,
+    idle_launch_latency_us,
+):
+    """Idle sheets for the report, and the augmented trace if asked; {} when disabled."""
+    if not enable_idle_analysis:
+        return {}
+    thresholds = IdleThresholds()
+    if idle_launch_latency_us is not None:
+        thresholds = IdleThresholds(launch_latency_us=idle_launch_latency_us)
+    analyser = IdleTimeAnalyser(
+        tree,
+        thresholds,
+        micro_thresh_us=micro_idle_thresh_us,
+        include_call_stack=include_call_stack,
+    )
+    idle_dfs = analyser.get_dataframes()
+    print(f"Added idle time analysis sheets: {list(idle_dfs.keys())}")
+    if enable_augmented_trace:
+        aug_path = profile_json_path.rsplit(".json", 1)[0] + "_idle_augmented.json.gz"
+        analyser.write_augmented_trace(profile_json_path, aug_path)
+        print(f"Wrote augmented trace for Perfetto: {aug_path}")
+    return idle_dfs
+
+
 def generate_perf_report_pytorch(
     profile_json_path: str,
     output_xlsx_path: Optional[str] = None,
@@ -453,6 +484,10 @@ def generate_perf_report_pytorch(
     # activation recompute detection
     detect_recompute: bool = False,
     include_call_stack: bool = False,
+    # idle time analysis
+    enable_idle_analysis: bool = False,
+    enable_augmented_trace: bool = False,
+    idle_launch_latency_us: float = None,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -1033,6 +1068,18 @@ def generate_perf_report_pytorch(
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
 
+    dict_name2df.update(
+        _idle_analysis_sheets(
+            perf_analyzer.tree,
+            profile_json_path,
+            enable_idle_analysis,
+            micro_idle_thresh_us,
+            include_call_stack,
+            enable_augmented_trace,
+            idle_launch_latency_us,
+        )
+    )
+
     # Get additional DataFrames from extension if available
     if extension_file:
         extension_path = os.path.abspath(extension_file)
@@ -1060,6 +1107,30 @@ def generate_perf_report_pytorch(
     )
 
     return dict_name2df
+
+
+def _add_idle_cli_args(parser):
+    parser.add_argument(
+        "--enable_idle_analysis",
+        action="store_true",
+        default=False,
+        help="Add GPU idle time classification sheets (idle_overview, idle_groups, "
+        "idle_intervals) to the report.",
+    )
+    parser.add_argument(
+        "--enable_augmented_trace",
+        action="store_true",
+        default=False,
+        help="Write an augmented trace JSON with idle time annotations for visual "
+        "analysis in Perfetto. Requires --enable_idle_analysis.",
+    )
+    parser.add_argument(
+        "--idle_launch_latency_us",
+        type=float,
+        default=None,
+        help="Idle analysis: normal launch return -> GPU op start in microseconds "
+        "(default 15). An op launched more than this before a gap counts as queued.",
+    )
 
 
 def main():
@@ -1241,8 +1312,11 @@ def main():
         "--include_call_stack",
         action="store_true",
         default=False,
-        help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
+        help="Add entry_point and call_stack_full columns to unified_perf_summary, and "
+        "sync_entry_point, sync_call_stack_full and covering_call_stack_full to "
+        "idle_intervals.",
     )
+    _add_idle_cli_args(parser)
 
     args = parser.parse_args()
     if args.comparison_json_path and args.precomputed_diff_stats:
@@ -1278,6 +1352,9 @@ def main():
         detect_recompute=args.detect_recompute,
         inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
+        enable_idle_analysis=args.enable_idle_analysis,
+        enable_augmented_trace=args.enable_augmented_trace,
+        idle_launch_latency_us=args.idle_launch_latency_us,
     )
 
 

@@ -54,7 +54,7 @@ echo "  Discovery:    ${DISCOVERY_GLOB:-<auto: dirs containing perf_report_csvs/
 echo ""
 
 # ---------------------------------------------------------------
-# Step 1: Discover and run triage in parallel
+# Discover and run triage in parallel
 # ---------------------------------------------------------------
 echo "Step 1: Discovering tracelens folders..."
 
@@ -79,18 +79,19 @@ fi
 echo "  Found $N_DIRS tracelens folders."
 echo "  Running triage (--detailed) with parallelism=$PARALLELISM..."
 
-cat "$REPORT_DIR/run_dirs.txt" | xargs -P "$PARALLELISM" -I {} bash -c '
-  SAFE=$(echo "{}" | tr "/" "_")
-  python -m TraceLens.Agent.Analysis.triage.runner --run-dir "{}" --detailed \
-      > "'"$REPORT_DIR"'/logs/${SAFE}.log" 2>&1 || true
-'
+# NUL-delimited so quotes, spaces and $ in paths reach bash as plain arguments.
+tr '\n' '\0' < "$REPORT_DIR/run_dirs.txt" | xargs -0 -P "$PARALLELISM" -n 1 bash -c '
+  SAFE=$(printf "%s" "$2" | tr "/" "_")
+  python -m TraceLens.Agent.Analysis.triage.runner --run-dir "$2" --detailed \
+      > "$1/logs/${SAFE}.log" 2>&1 || true
+' _ "$REPORT_DIR"
 
 N_LOGS=$(find "$REPORT_DIR/logs" -name "*.log" -size +0c | wc -l)
 echo "  Triage complete. $N_LOGS non-empty log files."
 echo ""
 
 # ---------------------------------------------------------------
-# Step 2: Post-process
+# Post-process
 # ---------------------------------------------------------------
 echo "Step 2: Aggregating and building report..."
 

@@ -26,10 +26,12 @@ geometry onto the node's ``details`` attr (``conv_weight=[...]``); the
 input/output shapes alone cannot recover the weight's kernel size or groups.
 A depthwise short conv packed inside a fused attention leaf is the exception:
 its kernel comes from the checkpoint (``sconv_kernel_size`` /
-``conv_kernel_size``) because that leaf has no conv node of its own. Anything
-else (embeddings, a conv with no threaded geometry and no declared short-conv
-kernel) is reported as "unmodeled" rather than silently dropped, so the
-projection's coverage is always visible instead of assumed.
+``conv_kernel_size``) because that leaf has no conv node of its own. An
+embedding lookup is a gather: zero FLOPs, and bytes for the gathered rows,
+their write, and the index vector. Anything else (a conv with no threaded
+geometry and no declared short-conv kernel) is reported as "unmodeled"
+rather than silently dropped, so the projection's coverage is always visible
+instead of assumed.
 
 Convolutional models are handled separately. The graph expands a non-uniform
 stage once (one conv node per stage, plus the stem and each stage's leading
@@ -108,6 +110,7 @@ from TraceLens.PerfModel.perf_model import (
     SDPA,
     BinaryElementwise,
     GroupedGemm,
+    IndexedCopy,
     Normalization,
     Reduce,
     Softmax,
@@ -212,10 +215,11 @@ _SOFTMAX_COMPUTATION = "Softmax"
 
 # Pointwise/reduction computation labels mapped to UnaryElementwise/
 # BinaryElementwise/Reduce. Shape-shuffling ops (reshape/transpose/concat/
-# index/...) are deliberately left out of these sets -- they are usually free
+# slice/...) are deliberately left out of these sets -- they are usually free
 # views or fused into a neighboring kernel, and PerfModel has no formula for
 # them; they fall into "unmodeled" rather than being charged a cost they may
-# not actually incur.
+# not actually incur. Tensor indexing (``Indexing``, ``Index select``,
+# ``aten::index``) is a gather and is costed with the embedding lookup.
 _UNARY_POINTWISE_COMPUTATIONS = frozenset(
     {
         "sigmoid",
@@ -1859,6 +1863,8 @@ def _is_leaf_computation(computation: str) -> bool:
         return True
     if _classify_normalization(computation) is not None:
         return True
+    if _is_embedding_lookup(computation):
+        return True
     return _is_short_conv(computation, "") or bool(
         re.search(r"(?:causal_)?conv(?:transpose)?[123]d", computation, re.I)
     )
@@ -3423,7 +3429,60 @@ def _dispatch_op_cost(
         return _binary_elementwise_cost(input_shapes, output_shape, bpe)
     if label in _UNARY_POINTWISE_COMPUTATIONS:
         return _unary_elementwise_cost(output_shape, bpe)
+    if _is_embedding_lookup(computation):
+        return _embedding_lookup_cost(input_shapes, output_shape, bpe)
     return None
+
+
+def _is_embedding_lookup(computation: str) -> bool:
+    """True for an embedding gather or a tensor index that copies those rows.
+
+    Matches module labels (``Embedding``, ``Token Embedding``, ``EmbeddingBag``)
+    and the graph's indexing labels (``Indexing``, ``Index select``,
+    ``aten::index``). A general ``Gather`` stays unmodeled: on a graph that
+    name is overloaded and is often one element per index, which this row
+    formula does not describe. Traces still cost ``aten::gather`` directly.
+    """
+    text = computation.lower().replace("_", " ").strip()
+    labels = {
+        "embedding",
+        "tokenembedding",
+        "embeddingbag",
+        "indexing",
+        "indexselect",
+        "index",
+    }
+    squashed = text.replace(" ", "")
+    if squashed in labels:
+        return True
+    leaf = squashed.split("::")[-1]
+    return leaf in labels
+
+
+def _embedding_lookup_cost(
+    input_shapes: list[tuple[int, ...] | None],
+    output_shape: tuple[int, ...],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """Bytes for the rows the lookup gathers. The lookup itself is not a GEMM."""
+    if not output_shape or bpe is None:
+        return None
+    gathered = prod(output_shape)
+    tokens = None
+    for shape in input_shapes:
+        if not shape or len(shape) >= len(output_shape):
+            continue
+        candidate = prod(shape)
+        if candidate and gathered % candidate == 0:
+            tokens = candidate
+            break
+    if not tokens:
+        tokens = prod(output_shape[:-1]) if len(output_shape) > 1 else 1
+    hidden = gathered // tokens if tokens else 0
+    index_bpe = 8
+    flops = IndexedCopy.flops_func(tokens, hidden)
+    bytes_moved = IndexedCopy.bytes_func(tokens, hidden, bpe, index_bpe)
+    return IndexedCopy.category, "vector", flops, bytes_moved
 
 
 def _linear_has_bias(details: str) -> bool:

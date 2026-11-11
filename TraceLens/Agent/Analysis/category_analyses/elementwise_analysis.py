@@ -11,23 +11,26 @@ Computes metrics for elementwise operations and outputs JSON for subagent proces
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    PEAK_MEM_BW_KEY,
+    run_category_analysis,
+)
 
-from analysis_utils import get_peak_mem_bw_tbs, run_category_analysis
 
-
-def extract_category_specific(ops_df, metadata) -> dict:
+def extract_category_specific(_ops_df, metadata) -> dict:
     """Extract elementwise-specific aggregate metrics."""
-    return {"peak_mem_bw_tbs": get_peak_mem_bw_tbs(metadata)}
+    return {PEAK_MEM_BW_KEY: metadata[PEAK_MEM_BW_KEY]}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze elementwise operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
-
+    parser.add_argument(
+        "--category",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
+    )
     parser.add_argument(
         "--comparison_scope",
         choices=("standalone", "comparative"),
@@ -40,7 +43,7 @@ def main():
     args = parser.parse_args()
 
     run_category_analysis(
-        category="elementwise",
+        category=args.category,
         output_dir=args.output_dir,
         config={"extra_fields": ["Input Dims", "Input type", "FLOPS/Byte"]},
         extract_fn=extract_category_specific,
