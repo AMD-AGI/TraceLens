@@ -42,6 +42,7 @@ Derived:
 | `<analysis_dir>` | `<bringup_dir>/analysis` | 3 |
 | `<op>`, `<op_slug>` | `ops[]` in `<bringup_dir>/gaps.json` | 5 |
 | `<gpu_index>` | a free index in 0..`<gpu_count>`-1, one per running sub-agent | 6 |
+| `<op_branch>` | `feat/perfmodel/<op_slug>` | 6 |
 | `<op_worktree>`, `<op_dir>` | `<bringup_dir>/worktrees/pm_<op_slug>`, `<bringup_dir>/perf_models/<op_slug>` | 6 |
 
 When `<node>` is the machine you run on (`localhost` or its hostname), drop every
@@ -102,6 +103,8 @@ To stop at any step after Step 0: `<prefix> <bringup_gates> summary --bringup-di
    ```bash
    <prefix> python3 -c "import os, torch, <framework> as f; from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms; p = torch.cuda.get_device_properties(0); print(dict(framework_src=os.path.dirname(f.__file__), gfx_arch=p.gcnArchName.split(chr(58))[0], platform=next((x for x in list_platforms() if x in p.name), None)))"
    ```
+
+   Append `platform` to `cache/bringup_config.yaml`.
 
 **Gate:** every command succeeds, `<gpu_devices>` and `platform` are set, and every GPU index pinned in `<benchmark_yaml>` is below `<gpu_count>` (Magpie numbers your GPUs from 0). Otherwise end with `[DIAG:bringup:STEP0_ENV_CHECK_FAILED]` and the failure; Step 8 does not run.
 
@@ -191,11 +194,11 @@ Pass `--threshold` only when `min_share` is set. Do not edit `gaps.json`. An emp
 
 1. In your own shell, one at a time:
 
-       git -C <tracelens_dir> worktree add -b perf_model/<op_slug> <op_worktree> <base_branch>
+       git -C <tracelens_dir> worktree add -b <op_branch> <op_worktree> <base_branch>
        mkdir -p <op_dir>/scratch
 
    On a rerun, reuse `<op_worktree>`; if only the branch exists, add the worktree from it. If
-   another bringup already has `perf_model/<op_slug>` checked out (same op on another
+   another bringup already has `<op_branch>` checked out (same op on another
    model), use that worktree as `<op_worktree>`, so one branch and one PR cover the op.
 
 2. Launch one sub-agent per op, at most `<gpu_count>` at once, each with its own `<gpu_index>`:
@@ -205,7 +208,8 @@ Pass `--threshold` only when `min_share` is set. Do not edit `gaps.json`. An emp
 
        **Execution Context:**
        - Op: <op>, op slug: <op_slug>
-       - Op worktree (branch perf_model/<op_slug>, already created): <op_worktree>
+       - Op worktree (already created): <op_worktree>
+       - Categorize only: <categorize_only from gaps.json>
        - Op output dir: <op_dir>; bringup dir: <bringup_dir>; baseline analysis dir: <analysis_dir>
        - Baseline job: <job>
        - GPU arch: <gfx_arch>; GPU index: <gpu_index>
@@ -216,17 +220,17 @@ Pass `--threshold` only when `min_share` is set. Do not edit `gaps.json`. An emp
 
        Execute every step in the sub-agent file. Return "DONE" when complete.
 
-**Gate:** `<prefix> <bringup_gates> op-result --result <op_dir>/result.json` exits 0 for each
+**Gate:** `<prefix> <bringup_gates> op-result --bringup-dir <bringup_dir> --result <op_dir>/result.json` exits 0 for each
 op. Otherwise relaunch that sub-agent once; if it fails again, the op is excluded.
 
 ## Step 7: Coverage
 
-Skip when no op has outcome `pr_draft`.
+Skip when no op has outcome `modeled`.
 
-1. In your own shell, merge each `pr_draft` branch in `gaps.json` order:
+1. In your own shell, merge each `modeled` op's `<op_branch>` in `gaps.json` order:
 
        git -C <tracelens_dir> worktree add --detach <bringup_dir>/worktrees/pm_integration <base_branch>
-       git -C <bringup_dir>/worktrees/pm_integration merge --no-edit perf_model/<op_slug>
+       git -C <bringup_dir>/worktrees/pm_integration merge --no-edit <op_branch>
 
    On a conflict, `merge --abort` and continue.
 2. Rerun only the perf report from the merged tree:
@@ -254,14 +258,15 @@ Runs only on a prompt that says publish, names `<bringup_dir>`, and lists op slu
 everything in your own shell. For each named op, read `<op_dir>/result.json`; skip it if
 `<op_dir>/published_url.txt` exists.
 
-- `pr_draft`:
+- `modeled`:
 
-      git -C <op_worktree> push -u origin perf_model/<op_slug>
-      gh pr create --repo AMD-AGI/TraceLens --base <base_branch> --head perf_model/<op_slug> \
-        --title "$(head -n 1 <op_dir>/pr.md)" --body "$(tail -n +2 <op_dir>/pr.md)"
+      git -C <op_worktree> push -u origin <op_branch>
+      gh pr create --repo AMD-AGI/TraceLens --base <base_branch> --head <op_branch> --label perf_model \
+        --title "$(git -C <op_worktree> log -1 --format=%s)" --body-file <op_dir>/perf_model_pr.md
 
-- `issue_draft`:
+- `blocked`:
 
-      gh issue create --repo AMD-AGI/TraceLens --title "$(head -n 1 <op_dir>/issue.md)" --body "$(tail -n +2 <op_dir>/issue.md)"
+      gh issue create --repo AMD-AGI/TraceLens --label perf_model \
+        --title "Missing Performance Model for <op>" --body-file <op_dir>/perf_model_issue.md
 
-Write the URL `gh` prints to `<op_dir>/published_url.txt`.
+`<op>` is the `op` field of `<op_dir>/result.json`. Write the URL `gh` prints to `<op_dir>/published_url.txt`.

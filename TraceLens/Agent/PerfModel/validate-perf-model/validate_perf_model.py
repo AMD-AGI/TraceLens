@@ -45,12 +45,16 @@ from pathlib import Path
 from perf_model_harnesses import (
     OP_REGISTRY,
     TRACE_NAME_TO_OP,
-    ensure_tracelens_importable,
     model_source,
     run_perf_model_from_event,
     tuple_to_list,
 )
 from tests._runner import INT_FLAGS, STR_FLAGS
+from TraceLens.Agent.PerfModel.ratio_bands import (
+    BAND_COLUMNS,
+    RATIO_MATCH,
+    ratio_band,
+)
 
 # Constants
 
@@ -162,6 +166,7 @@ CSV_COLUMNS = [
     "measured_tb_s",
     "flops_ratio",
     "bytes_ratio",
+    *BAND_COLUMNS.values(),
     "status",
     "comment",
 ]
@@ -175,6 +180,7 @@ def run_rocprofv3(
     ``runner_argv`` is the full argv list to execute inside rocprofv3 (e.g.
     ``[python, /abs/tests/_runner.py, --op, gemm_a8w8_blockscale, --M, ...]``).
     """
+    out_dir = os.path.abspath(out_dir)
     counter_dir = os.path.join(out_dir, out_name)
     os.makedirs(counter_dir, exist_ok=True)
     cmd = [rocprofv3_path, "--pmc"]
@@ -197,7 +203,7 @@ def run_rocprofv3(
     print(f'{"============================================================"}')
     with open(stdout_log, "w") as f_out, open(stderr_log, "w") as f_err:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=out_dir
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -237,6 +243,7 @@ def discover_kernel_name(
     rocprofv3_path, runner_argv, num_warmup_iters, out_dir, timeout=120
 ):
     """Trace one execution of ``runner_argv`` to auto-discover the target kernel."""
+    out_dir = os.path.abspath(out_dir)
     disc_dir = os.path.join(out_dir, "kernel_discovery")
     os.makedirs(disc_dir, exist_ok=True)
     cmd = [
@@ -261,7 +268,7 @@ def discover_kernel_name(
     print(f'{"============================================================"}')
     with open(stdout_log, "w") as f_out, open(stderr_log, "w") as f_err:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=out_dir
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -1365,7 +1372,6 @@ def print_batch_summary(results):
 
 def discover_missing_coverage():
     """Scan TraceLens perf model mappings for aiter:: and vllm:: ops and report coverage."""
-    ensure_tracelens_importable()
     try:
         from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
             get_pseudo_op_mappings,
@@ -1651,6 +1657,8 @@ def main():
         "restrict the run to those ops (useful for targeted re-runs).",
     )
     args = parser.parse_args()
+    if os.sep in args.rocprofv3_path:
+        args.rocprofv3_path = os.path.abspath(args.rocprofv3_path)
 
     if args.discover:
         discover_missing_coverage()
@@ -2090,10 +2098,12 @@ def _generate_comment(row):
     parts = []
     fr = row.get("flops_ratio")
     br = row.get("bytes_ratio")
+    fr_low, fr_high = RATIO_MATCH["flops_ratio"]
+    br_low, br_high = RATIO_MATCH["bytes_ratio"]
     if fr is not None:
-        if 0.95 <= fr <= 1.05:
+        if fr_low <= fr <= fr_high:
             parts.append("FLOPs: exact match")
-        elif 0.8 <= fr < 0.95:
+        elif 0.8 <= fr < fr_low:
             parts.append(
                 f"FLOPs {fr:.2f}x: minor under-count, likely rounding or tile residuals"
             )
@@ -2105,7 +2115,7 @@ def _generate_comment(row):
             parts.append(
                 f"FLOPs {fr:.2f}x: possible mixed-precision or partial tile usage"
             )
-        elif 1.05 < fr <= 1.5:
+        elif fr_high < fr <= 1.5:
             parts.append(
                 f"FLOPs {fr:.2f}x: minor over-count from tile padding or epilogue"
             )
@@ -2116,11 +2126,11 @@ def _generate_comment(row):
         else:
             parts.append(f"FLOPs {fr:.2f}x: moderate over-count, check tile dimensions")
     if br is not None:
-        if 0.9 <= br <= 1.2:
+        if br_low <= br <= br_high:
             parts.append("Bytes: good match")
-        elif br < 0.9:
+        elif br < br_low:
             parts.append(f"Bytes {br:.2f}x: model may over-estimate (caching?)")
-        elif 1.2 < br <= 2:
+        elif br_high < br <= 2:
             parts.append(f"Bytes {br:.2f}x: L2 replay or scale tensor overhead")
         elif br > 2:
             parts.append(
@@ -2146,6 +2156,8 @@ def _enrich_results(results):
         r["source_file"] = src_file
         r["source_line"] = src_line
         r["comment"] = _generate_comment(r)
+        for ratio_col, band_col in BAND_COLUMNS.items():
+            r[band_col] = ratio_band(ratio_col, r.get(ratio_col))
     return results
 
 

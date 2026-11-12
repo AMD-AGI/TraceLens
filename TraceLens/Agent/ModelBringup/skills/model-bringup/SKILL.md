@@ -43,9 +43,7 @@ Read [reference.md](reference.md) before Step 0 and run every step from it.
 - Stop means: run Step 8 with the stop's step and code, end. Step 0 failures end without Step 8.
 - Never push, run `gh`, or open an issue or PR during a run. Only Publish does, and only
   on `AMD-AGI/TraceLens` for the op slugs its prompt names.
-- PRs and issues report only TFLOPs and bytes moved per shape (predicted, measured,
-  ratio). No runtime numbers.
-- Never commit in `<tracelens_dir>`. Commits go only on `perf_model/<op_slug>` in `<op_worktree>`.
+- Never commit in `<tracelens_dir>`. Commits go only on `<op_branch>` in `<op_worktree>`.
 - Run git in your own shell, never through `<prefix>`.
 - Read only the files each step names, such as `result.json`, `gates/*.json` and `gaps.json`, never the instruction file of a skill or sub-agent a step launches, or a PerfModel guide.
 - Never analyze a trace or author or validate a perf model by hand to work around a failed step.

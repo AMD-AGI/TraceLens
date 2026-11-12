@@ -19,11 +19,14 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 from TraceLens.Agent.Analysis.triage.checks import (
     ALL_CHECKS,
     PROFILE_CHECKS,
     rank_of,
 )
+from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Agent.ModelBringup.utils.unified_perf_ops import (
     DEFAULT_THRESHOLD,
     compute_top_ops,
@@ -31,6 +34,7 @@ from TraceLens.Agent.ModelBringup.utils.unified_perf_ops import (
     missing_perf_model_share,
     validation_cases,
 )
+from TraceLens.Agent.PerfModel.ratio_bands import BAND_COLUMNS
 from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
     CustomCollective,
 )
@@ -60,7 +64,14 @@ BLOCKING_CHECKS = {
     ),
 }
 CAPTURE_DIRS = ("capture_traces", "graph_capture_profile")
-USABLE_OUTCOMES = ("pr_draft", "issue_draft")
+DRAFT_FILES = {"modeled": "perf_model_pr.md", "blocked": "perf_model_issue.md"}
+EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
+LEAK_KEYS = ("node", "platform", "docker_image")
+GFX_TARGET = re.compile(r"\bgfx\d+\w*", re.I)
+VALIDATION_HEADER = "| Shape | Predicted FLOPs | Predicted Bytes | Measured Read Bytes | Measured Write Bytes | FLOPs Ratio | Bytes Ratio |"
+SYNTHETIC_MARKER = "(Synthetic Op)"
+MIN_TOKEN = 4
+MIN_PATH_PARTS = 3
 RESULT_KEYS = ("op", "op_slug", "outcome")
 SLUG_MAX = 48
 STOP_TAG = "[DIAG:bringup:STEP{step}_{code}]"
@@ -170,6 +181,7 @@ def gaps(args):
                 "op_slug": slug,
                 "pct_global": round(op["pct_global"], 2),
                 "op_category": op["op_category"],
+                "categorize_only": SYNTHETIC_MARKER in op["name"],
             }
         )
     out = {"ops": ops, "comm_excluded": sorted(comm)}
@@ -188,7 +200,7 @@ def cases(args):
 
 
 def op_result(args):
-    """Check a perf-model sub-agent's result.json: schema, and pr_draft implies a commit and all-OK validation rows."""
+    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and all-OK validation rows; the draft leaks no run input, has the validation header and explains every ratio deviation."""
     path = Path(args.result)
     if not path.is_file():
         print(f"missing {path}", file=sys.stderr)
@@ -200,14 +212,31 @@ def op_result(args):
         return 1
     problems = [f"missing key: {k}" for k in RESULT_KEYS if k not in result]
     outcome = result.get("outcome")
-    if outcome not in USABLE_OUTCOMES:
+    if outcome not in DRAFT_FILES:
         problems.append(f"outcome is {outcome}: {result.get('reason')}")
     else:
-        if not result.get("draft") or not Path(result["draft"]).is_file():
+        draft = path.parent / DRAFT_FILES[outcome]
+        text = draft.read_text() if draft.is_file() else None
+        if text is None:
             problems.append("draft file missing")
-        if outcome == "issue_draft" and not result.get("reason"):
+        else:
+            flat = _norm(text)
+            problems += [
+                f"draft names {name}"
+                for token, name in _leak_tokens(args.bringup_dir).items()
+                if token in flat
+            ]
+            problems += [
+                f"draft names {target}"
+                for target in sorted(set(GFX_TARGET.findall(text)))
+            ]
+            if (outcome == "modeled" or "## Validation" in text) and (
+                VALIDATION_HEADER not in text
+            ):
+                problems.append("validation table header is not the canonical header")
+        if outcome == "blocked" and not result.get("reason"):
             problems.append("reason missing")
-        if outcome == "pr_draft":
+        if outcome == "modeled":
             if not result.get("commit"):
                 problems.append("commit missing")
             csv_path = result.get("validation_csv")
@@ -215,6 +244,8 @@ def op_result(args):
                 problems.append("validation CSV missing")
             elif not _all_rows_ok(csv_path):
                 problems.append("validation CSV has a row that is not OK")
+            elif text is not None:
+                problems += _unexplained_ratios(csv_path, text)
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0
@@ -245,7 +276,7 @@ def analysis_result(args):
 
 
 def coverage(args):
-    """Every pr_draft op is covered after the merge and validated with all rows OK."""
+    """Every modeled op is covered after the merge and validated with all rows OK."""
     after_rows, _ = load_rows(Path(args.after))
     covered = {
         op["name"]: op["covered"]
@@ -253,7 +284,7 @@ def coverage(args):
     }
     failing = []
     for result in _results(args.bringup_dir):
-        if result.get("outcome") != "pr_draft":
+        if result.get("outcome") != "modeled":
             continue
         if not covered.get(result["op"]) or not _all_rows_ok(result["validation_csv"]):
             failing.append(result["op"])
@@ -283,12 +314,12 @@ def summary(args):
         status = json.loads(path.read_text())["status"] if path.is_file() else "not_run"
         lines.append(f"| {name} | {status} |")
     results = _results(root)
-    lines += ["", "| Op | Outcome | Draft | Reason |", "|---|---|---|---|"]
+    lines += ["", "| Op | Outcome | Reason |", "|---|---|---|"]
     lines += [
-        f"| {r['op_slug']} | {r['outcome']} | {r.get('draft') or ''} | {r.get('reason') or ''} |"
+        f"| {r['op_slug']} | {r['outcome']} | {r.get('reason') or ''} |"
         for r in results
     ]
-    drafted = [r["op_slug"] for r in results if r.get("draft")]
+    drafted = [r["op_slug"] for r in results if r["outcome"] in DRAFT_FILES]
     if drafted:
         lines += [
             "",
@@ -303,6 +334,48 @@ def summary(args):
 def _all_rows_ok(csv_path):
     with open(csv_path, newline="") as f:
         return {r.get("status") for r in csv.DictReader(f)} == {"OK"}
+
+
+def _norm(text):
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _leak_tokens(bringup_dir):
+    """Normalized run-specific names (and their raw form) a public draft must not carry."""
+    config = yaml.safe_load((Path(bringup_dir) / EFFECTIVE_CONFIG).read_text())
+    names = [
+        Path(bringup_dir).name,
+        (config.get("model") or "").rsplit("/", 1)[-1],
+        *list_platforms(),
+        *(str(config[k]) for k in LEAK_KEYS if config.get(k)),
+        *(
+            v
+            for v in config.values()
+            if isinstance(v, str)
+            and Path(v).is_absolute()
+            and len(Path(v).parts) >= MIN_PATH_PARTS
+        ),
+    ]
+    tokens = {_norm(n): n for n in names}
+    return {t: n for t, n in tokens.items() if len(t) >= MIN_TOKEN}
+
+
+def _unexplained_ratios(csv_path, text):
+    """Problems for each deviation ratio in the CSV missing from the draft's Ratio Deviations section."""
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    if not set(BAND_COLUMNS.values()) <= set(reader.fieldnames):
+        return ["validation CSV has no band columns"]
+    found = re.search(r"^## Ratio Deviations\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    section = found.group(1) if found else ""
+    return [
+        f"ratio {row[ratio]} not explained"
+        for row in rows
+        for ratio, band in BAND_COLUMNS.items()
+        if row[band] == "deviation"
+        and not re.search(rf"(?<![\d.]){re.escape(row[ratio])}(?!\d)", section)
+    ]
 
 
 def _results(bringup_dir):
@@ -337,7 +410,7 @@ def main(argv=None):
     for name, (fn, required) in commands.items():
         p = sub.add_parser(name, help=fn.__doc__)
         p.set_defaults(fn=fn)
-        if name not in ("cases", "op-result"):
+        if name != "cases":
             p.add_argument("--bringup-dir", required=True)
         for flag in required:
             p.add_argument(flag, required=True)
