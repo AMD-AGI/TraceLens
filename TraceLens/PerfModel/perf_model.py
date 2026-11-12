@@ -288,8 +288,8 @@ class aten_scaled_mm(GEMM):
                 f"Data sizes of A and B are different: {dtype_A_B} for aten_scaled_mm. "
             )
         self.bpe = bpeA  # or bpeB, they are the same
-        # fp8 (1 byte) and mxfp4 (half a byte) write an fp16/bf16 result.
-        # fp16, bf16, and fp32 keep the input width.
+        # fp8 and a packed FP4 element are one byte, and both write an
+        # fp16/bf16 result. fp16, bf16, and fp32 keep the input width.
         if self.bpe is not None and self.bpe <= 1:
             out_bpe = 2
         elif self.bpe in (2, 4):
@@ -6232,14 +6232,15 @@ class hipblaslt_gemm_fp4(GEMM):
         assert (
             bpeA is not None and bpeB is not None
         ), f"Data types of A and B are not supported: {dtype_A_B}"
-        # K is the logical element count. name2bpe counts one FP4 value, so
-        # M*K*bpe is the packed storage. GEMM.bytes_func cannot fold in the
-        # E8M0 block scales, which add about 3% to the operand bandwidth.
+        # K is the unpacked element count. A traced Float4 element is one
+        # byte, so operand bytes use the packed shape (K_packed = K/2).
+        # GEMM.bytes_func cannot fold in the E8M0 block scales, which add
+        # about 3% to the operand bandwidth.
         M, N, K = self.M, self.N, self.K
         block = self.MXFP4_BLOCK_SIZE
         scales_per_row = (K + block - 1) // block
-        bytes_A = M * K * bpeA
-        bytes_B = N * K * bpeB
+        bytes_A = M * (K // 2) * bpeA
+        bytes_B = N * (K // 2) * bpeB
         bpe_scaleA = name2bpe(self.param_details.get("dtype_scaleA")) or 1
         bpe_scaleB = name2bpe(self.param_details.get("dtype_scaleB")) or 1
         bytes_scaleA = M * scales_per_row * bpe_scaleA

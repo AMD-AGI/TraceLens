@@ -2065,7 +2065,8 @@ class TestUtilsCoverage:
         [
             ("double", 8),
             ("c10::float8_e5m2", 1),
-            ("c10::float4_e2m1fn_x2", 0.5),
+            ("c10::float4_e2m1fn_x2", 1),
+            ("fp4", 0.5),
             (None, None),
         ],
     )
@@ -2216,7 +2217,7 @@ class TestGemmVariantsCoverage:
             }
         }
         model = perf_model.aten_scaled_mm(event)
-        assert model.bytes() == 4 * 8 * 0.5 + 8 * 16 * 0.5 + 4 * 16 * 2
+        assert model.bytes() == 4 * 8 * 1 + 8 * 16 * 1 + 4 * 16 * 2
 
     def test_aten_baddbmm(self):
         event = {

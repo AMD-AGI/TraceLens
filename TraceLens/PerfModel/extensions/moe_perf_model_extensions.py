@@ -19,6 +19,22 @@ from TraceLens.PerfModel.utils import (
 from TraceLens.TraceUtils.utils.annotation_utils import add_logical_batch_size
 
 
+def _weight_bpe_on_unpacked_k(dtype):
+    """Bytes per logical weight element when K has been unpacked.
+
+    ``name2bpe`` counts one traced ``Float4_e2m1fn_x2`` element: one byte,
+    two values. These models multiply by the unpacked K, so the logical
+    width is half of that.
+    """
+    bpe = name2bpe(dtype)
+    if bpe is None:
+        return None
+    key = str(dtype).strip().lower().split("::")[-1]
+    if key == "float4_e2m1fn_x2":
+        return bpe / 2
+    return bpe
+
+
 def _wider_compute_precision(input_dtype, weight_dtype):
     """
     Compute precision of a GEMM whose activations and weights differ in width.
@@ -225,7 +241,7 @@ class moe_aiter_fused_1stage(FusedMoE):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = input_bpe
@@ -350,7 +366,7 @@ class moe_aiter_fused_blockscale(FusedMoE):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 1
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = name2bpe(self.param_details["output_dtype"])
@@ -665,7 +681,7 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
         weight_dtype = self.param_details["weight_dtype"]
 
         input_bpe = name2bpe(input_dtype)
-        weight_bpe = name2bpe(weight_dtype)
+        weight_bpe = _weight_bpe_on_unpacked_k(weight_dtype)
         if input_bpe is None:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
         if weight_bpe is None:
@@ -798,7 +814,7 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
         weight_dtype = self.param_details["weight_dtype"]
 
         input_bpe = name2bpe(input_dtype)
-        weight_bpe = name2bpe(weight_dtype)
+        weight_bpe = _weight_bpe_on_unpacked_k(weight_dtype)
         if input_bpe is None:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
         if weight_bpe is None:
@@ -906,7 +922,7 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = name2bpe(self.param_details["output_dtype"])
@@ -1010,7 +1026,7 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = name2bpe(self.param_details["output_dtype"])
@@ -1122,7 +1138,7 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = input_bpe
@@ -1228,7 +1244,7 @@ class moe_opus_stage1_a8w4(UnfusedMoE_Up):
         if self.param_details.get("_no_perf"):
             return None
         input_bpe = name2bpe(self.param_details["input_dtype"])
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         output_bpe = name2bpe(self.param_details["output_dtype"])
         scale_bpe = name2bpe(self.param_details["scale_dtype"])
         if None in {input_bpe, weight_bpe, output_bpe, scale_bpe}:
@@ -1338,7 +1354,7 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = input_bpe
@@ -1453,7 +1469,7 @@ class moe_flydsl_stage1(UnfusedMoE_Up):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = input_bpe
@@ -1518,7 +1534,7 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
         input_bpe = name2bpe(self.param_details["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
-        weight_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1
         output_bpe = input_bpe
@@ -1645,6 +1661,7 @@ class moe_triton_invoke_grouped_gemm:
         input_bpe = name2bpe(p["input_dtype"])
         if input_bpe is None:
             input_bpe = 2
+        # K is the traced weight dimension, already K_packed for Float4.
         weight_bpe = name2bpe(p["weight_dtype"])
         if weight_bpe is None:
             weight_bpe = 1

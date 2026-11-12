@@ -141,10 +141,11 @@ def dense_counted_tensor(event, indexes):
     return True
 
 
-# Bytes per value of each ``c10::ScalarType``, keyed by the type's own name.
-# ``Float4_e2m1fn_x2`` stores two FP4 values in one byte, so one value is
-# half a byte. Callers that already hold a packed element count (K/2) are
-# counting containers, not values.
+# Bytes per traced element of each ``c10::ScalarType``, keyed by the type's
+# own name. ``Float4_e2m1fn_x2`` packs two FP4 values into one byte, and a
+# traced shape already counts those packed elements (K_packed), the same way
+# ``QUInt4x2`` and ``Bits4x2`` do. Callers that count unpacked logical
+# elements divide by two themselves.
 _DTYPE_BPE = {
     "Byte": 1,
     "Char": 1,
@@ -177,7 +178,7 @@ _DTYPE_BPE = {
     "UInt32": 4,
     "UInt64": 8,
     "Float8_e8m0fnu": 1,
-    "Float4_e2m1fn_x2": 0.5,
+    "Float4_e2m1fn_x2": 1,
     "BComplex32": 4,
 }
 
@@ -195,13 +196,16 @@ _DTYPE_NAME_ALIASES = {
     "fp64": "Double",
     "bf16": "BFloat16",
     "fp8": "Float8_e4m3fn",
-    "fp4": "Float4_e2m1fn_x2",
+    # One logical FP4 value. gemm_afp4wfp4 and the roofline count unpacked
+    # elements, so this width stays half a byte. The traced container
+    # Float4_e2m1fn_x2 is one byte.
+    "fp4": 0.5,
     "scalar": 4,
 }
 
 _NAME_TO_BPE = {name.lower(): bpe for name, bpe in _DTYPE_BPE.items()}
 for _alias, _target in _DTYPE_NAME_ALIASES.items():
-    _NAME_TO_BPE[_alias] = _target if isinstance(_target, int) else _DTYPE_BPE[_target]
+    _NAME_TO_BPE[_alias] = _DTYPE_BPE[_target] if isinstance(_target, str) else _target
 
 # ``aten::to`` records the destination dtype as a ``ScalarType`` ordinal in
 # ``Concrete Inputs``, not as a name. This is the ordinal order of
@@ -248,8 +252,9 @@ def name2bpe(name):
 
     Accepts a ``c10::ScalarType`` name (``BFloat16`` or ``c10::BFloat16``),
     a profiler spelling (``long int``, ``unsigned char``), and a simulation
-    name (``bf16``, ``fp32``). ``Float4_e2m1fn_x2`` and ``fp4`` are one FP4
-    value, half a byte.
+    name (``bf16``, ``fp32``). ``Float4_e2m1fn_x2`` is one byte per traced
+    element (two FP4 values). ``fp4`` is one logical value, half a byte, for
+    callers that have already unpacked K.
     """
     if name is None:
         return None
