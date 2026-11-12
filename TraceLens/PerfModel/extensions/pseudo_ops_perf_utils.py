@@ -57,6 +57,7 @@ def get_pseudo_op_mappings():
         "sglang_profiler::moe_sorting_small__run_small_sort": moe_perf_model_extensions.SglangMoeSortingSmall,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
+        "vllm::rocm_aiter_sparse_attn_indexer": attention_perf_model_extensions.rocm_aiter_sparse_attn_indexer,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         # Prefer the annotation-aware inference extension when annotations are
         # present; it falls back to the core SDPA model for plain training rows.
@@ -151,6 +152,7 @@ def get_pseudo_op_mappings():
         ## KV cache ops
         "sglang::store_cache": perf_model_extensions.sglang_store_cache,
         "aiter::fused_qk_rope_cat_and_cache_mla": perf_model_extensions.aiter_fused_qk_rope_cat_and_cache_mla,
+        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla": perf_model_extensions.fused_fp8_bmm_rope_cat_and_cache_mla,
         "sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts": moe_perf_model_extensions.sglang_fused_append_shared_experts,
         "sglang_profiler::quant_dynamic_mxfp4_quant": perf_model_extensions.sglang_quant_dynamic_mxfp4_quant,
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,

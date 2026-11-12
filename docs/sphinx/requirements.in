@@ -1,7 +1,8 @@
 rocm-docs-core @ git+https://github.com/ROCm/rocm-docs-core.git@develop
 
 # Floors for transitive dependencies flagged by Dependabot.
-gitpython>=3.1.62
+certifi>=2026.10.18
+gitpython>=3.2.1
 pyjwt>=2.15.0
-tornado>=6.5.9
+tornado>=6.6
 urllib3>=2.8.0
