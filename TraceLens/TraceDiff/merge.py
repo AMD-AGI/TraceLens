@@ -7,9 +7,9 @@
 """Tree merging: Wagner-Fischer alignment, name disambiguation, and the
 merged-event builder."""
 
+from ..util import GRAPH_LAUNCH_NAMES
 from .util import (
     _CATEGORY,
-    _GRAPH_LAUNCH_NAMES,
     _KERNEL_DISPATCH_CATEGORIES,
     _NAME,
     _ROOT_DESCENT_STOP_CATEGORIES,
@@ -225,7 +225,7 @@ def _descend_single_wrapper_child(tree, node):
         child = tree.get_UID2event(children[0])
         if (
             child.get(_CATEGORY) in _ROOT_DESCENT_STOP_CATEGORIES
-            and child.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+            and child.get(_NAME) not in GRAPH_LAUNCH_NAMES
         ):
             return current
         current = child
@@ -245,7 +245,7 @@ def _is_skipped_dispatch(node):
         return False
     if node.get(_CATEGORY) not in _WRAPPER_SKIP_CATEGORIES:
         return False
-    return node.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+    return node.get(_NAME) not in GRAPH_LAUNCH_NAMES
 
 
 def _gpu_path_children(tree, node):
@@ -270,7 +270,7 @@ def _subtree_contains_cuda_runtime(node):
     """Return True if this node is a cuda_runtime node. Graph launch events are exempt."""
     if not node:
         return False
-    if node.get(_NAME) in _GRAPH_LAUNCH_NAMES:
+    if node.get(_NAME) in GRAPH_LAUNCH_NAMES:
         return False
     cat = node.get(_CATEGORY)
     return cat in _KERNEL_DISPATCH_CATEGORIES
@@ -289,7 +289,7 @@ def _collapse_single_gpu_child(uid, uid2node, tree_obj):
         node = uid2node.get(current)
         if not node or (
             tree_obj.event_to_category(node) in _KERNEL_DISPATCH_CATEGORIES
-            and node.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+            and node.get(_NAME) not in GRAPH_LAUNCH_NAMES
         ):
             break
         child_nodes = tree_obj.get_children_events(node)
@@ -297,7 +297,7 @@ def _collapse_single_gpu_child(uid, uid2node, tree_obj):
         if cat == "cpu_op":
             has_cr_child = any(
                 tree_obj.event_to_category(c) in _KERNEL_DISPATCH_CATEGORIES
-                and c.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+                and c.get(_NAME) not in GRAPH_LAUNCH_NAMES
                 for c in child_nodes
             )
             if has_cr_child:

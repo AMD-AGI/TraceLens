@@ -11,7 +11,6 @@ import re
 import pandas as pd
 
 from ..Trace2Tree.trace_to_tree import TraceToTree
-from ..util import TraceEventUtils
 from .cpu_op_map import (
     _build_rename_map,
     _cpu_op_kernel_map,
@@ -33,13 +32,6 @@ from .util import (
     _UID,
 )
 from ..util import normalize_name_for_comparison
-
-_TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
-_GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
-_KERNEL_DISPATCH_CATEGORIES = ("cuda_runtime", "cuda_driver")
-_WRAPPER_SKIP_CATEGORIES = ("kernel", *_KERNEL_DISPATCH_CATEGORIES)
-_ROOT_DESCENT_STOP_CATEGORIES = ("cpu_op", *_KERNEL_DISPATCH_CATEGORIES)
-_DUR = TraceEventUtils.TraceKeys.Duration
 
 
 def _write_json(path, payload):

@@ -67,6 +67,38 @@ UNIQUE_ARGS_GROUPING_COLS = (
 )
 # Prefix of the perf-model parameter columns that roofline sheets group by.
 PERF_PARAM_PREFIX = "param: "
+# Group key for the stacks stored on kernel_details. Dropped after the groupby.
+_CALL_STACK_GROUP_KEY = "_call_stack_identity_str_repr_for_grouping"
+
+
+def call_stack_identity(details) -> str:
+    """Parent stacks of the kernels on one launch.
+
+    A summary grouped only on the op and its arguments keeps the first
+    launch's stack. A decode replay that shares a captured op's arguments
+    with a prefill launch then inherits the prefill runner. The identity is
+    part of the group key so each runner stays on its own row. Launches with
+    no recorded stack still share a row.
+    """
+    if not isinstance(details, list):
+        return ""
+    stacks = []
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        stack = item.get("call_stack")
+        if not isinstance(stack, (list, tuple)) or not stack:
+            continue
+        stacks.append("\n".join(str(frame) for frame in stack))
+    return "\n\n".join(stacks)
+
+
+def _append_call_stack_group_key(df, keys) -> None:
+    """Split rows whose kernels were reached through different call stacks."""
+    if "kernel_details" not in df.columns:
+        return
+    df[_CALL_STACK_GROUP_KEY] = df["kernel_details"].map(call_stack_identity)
+    keys.append(_CALL_STACK_GROUP_KEY)
 
 
 def normalize_dtype_to_precision(dtype_str):
@@ -178,7 +210,7 @@ class TreePerfAnalyzer:
     @staticmethod
     def from_file(
         profile_filepath,
-        capture_trace_filepath=None,
+        capture_folder=None,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
@@ -187,7 +219,7 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
-        data = DataLoader.load_data(profile_filepath)
+        #
         # PyTorch Chrome traces carry run metadata as top-level JSON fields.
         # Field presence varies by profiler version, profiler options, and backend, e.g.
         # {
@@ -226,11 +258,12 @@ class TreePerfAnalyzer:
         #   "hip_driver_version": 70253211,  # optional; ROCm traces only
         #   "traceEvents": [...]             # required event payload
         # }
-        # Keep these trace-level fields separate from Chrome "M" metadata events.
-        trace_metadata = {
-            key: value for key, value in data.items() if key != "traceEvents"
-        }
-        data = data["traceEvents"]
+        # load_trace_events separates these from the Chrome "M" metadata events.
+        data, trace_metadata = DataLoader.load_trace_events(
+            profile_filepath,
+            capture_folder=capture_folder,
+            framework="jax" if jax else "pytorch",
+        )
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -245,12 +278,10 @@ class TreePerfAnalyzer:
         )
 
         # Optionally merge capture trace into graph tree
-        if capture_trace_filepath is not None:
-            metadata_json_path = os.path.join(
-                capture_trace_filepath, "execution_details.json"
-            )
+        if capture_folder is not None:
+            metadata_json_path = os.path.join(capture_folder, "execution_details.json")
             tree = merge_capture_trace_into_graph(
-                capture_trace_filepath,
+                capture_folder,
                 metadata_json_path,
                 profile_filepath,
                 graph_tree=tree,
@@ -1460,6 +1491,7 @@ class TreePerfAnalyzer:
             str_col_name = f"{col}_str_repr_for_grouping"
             df_filtered[str_col_name] = df_filtered[col].apply(str)
             str_col_names.append(str_col_name)
+        _append_call_stack_group_key(df_filtered, str_col_names)
         if not str_col_names:
             raise ValueError("No valid columns found to group by.")
 
@@ -2284,6 +2316,7 @@ class TreePerfAnalyzer:
             str_col_name = f"{col}_str_repr_for_grouping"
             df_temp[str_col_name] = df_temp[col].apply(str)
             str_col_names.append(str_col_name)
+        _append_call_stack_group_key(df_temp, str_col_names)
 
         if not str_col_names:
             raise ValueError("No valid grouping columns found.")
@@ -2382,6 +2415,8 @@ class TreePerfAnalyzer:
             df_summary = df_summary.reset_index()
         else:
             df_summary = df_summary.reset_index(drop=True)
+        if _CALL_STACK_GROUP_KEY in df_summary.columns:
+            df_summary = df_summary.drop(columns=[_CALL_STACK_GROUP_KEY])
 
         # Rename columns for clarity
         rename_map = {
@@ -2988,15 +3023,15 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     @staticmethod
     def from_file(
         profile_filepath,
-        capture_trace_filepath=None,
+        capture_folder=None,
         jax=True,
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
         *args,
         **kwargs,
     ) -> "JaxTreePerfAnalyzer":
-        data = DataLoader.load_data(profile_filepath)
-        data_pb = data["traceEvents"]
+        data_pb, _ = DataLoader.load_trace_events(profile_filepath, framework="jax")
+
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         metadata_events, events = TraceEventUtils.split_event_list(data_pb)
         linking_key = "correlation_id"

@@ -18,7 +18,6 @@ _TS = _TraceKeys.TimeStamp
 _DUR = _TraceKeys.Duration
 
 _TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
-_GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
 _KERNEL_DISPATCH_CATEGORIES = ("cuda_runtime", "cuda_driver")
 _WRAPPER_SKIP_CATEGORIES = ("kernel", *_KERNEL_DISPATCH_CATEGORIES)
 _ROOT_DESCENT_STOP_CATEGORIES = ("cpu_op", *_KERNEL_DISPATCH_CATEGORIES)
