@@ -221,58 +221,6 @@ class a6w4_mm_qa_prequant_w(GEMM):
         return torch_dtype_map("mxfp4")
 
 
-class a6w4_act_dual(UnaryElementwise):
-    """
-    Performance model for primus_flux::a6w4_act_dual.
-
-    Fused dual activation quantization for the A6W4 mixed-precision pipeline:
-    quantizes a BF16 activation tensor into two 6-bit representations
-    (for the forward GEMM and its paired backward GEMM path).
-
-    Roofline calculation -- FLOPs:
-        ~4 FLOPs per element (abs, max-reduction per group, scale, quantize)
-        applied twice (dual output).
-
-    Roofline calculation -- Bytes:
-        read  x:         M * C * bpe_in              # BF16 -> 2 bytes
-        write quant_1:   M * C * 1                   # u8 (6-bit padded)
-        write quant_2:   M * C * 1                   # u8 (6-bit padded)
-        write scales:    2 * M * (C // 32) * 1       # u8 per-group scales
-
-    Expected Input Dims from trace:
-        [[M, C]]
-
-    Expected Input type from trace:
-        [BFloat16]
-    """
-
-    category = "GroupQuant"
-
-    @staticmethod
-    def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, dtype_in),
-            "stride_input": stride_input,
-            "stride_output": None,
-        }
-
-    def flops(self):
-        return 4 * self.nelems * 2
-
-    def bytes(self):
-        if self.bpe_in is None:
-            return None
-        M, C = self.param_details["op_shape"]
-        bytes_read = M * C * self.bpe_in
-        bytes_write_quant = 2 * M * C * 1  # two u8 quantized outputs
-        bytes_write_scales = 2 * M * (C // _MXFP4_GROUP_SIZE) * 1
-        return bytes_read + bytes_write_quant + bytes_write_scales
-
-
 class _QuantizeMxfp4Base(UnaryElementwise):
     """Base class for primus_flux MXFP4 quantization variants."""
 
@@ -337,188 +285,148 @@ class quantize_mxfp4_h16_dual(_QuantizeMxfp4Base):
         return bytes_read + bytes_write_fp4 + bytes_write_scales
 
 
-class quantize_mxfp4_h16_dual_bias_gate(UnaryElementwise):
+# ── Tree postprocess: fwd/bwd pseudo-op labeling ──────────────────────────
+
+import collections
+
+_GEMM_OP_NAMES = frozenset(
+    {
+        "primus_turbo::gemm_fp4_impl",
+        "primus_flux::a6w4_mm_qa",
+        "primus_flux::a6w4_mm_qa_prequant_w",
+    }
+)
+
+
+def _suffix_for_op(name):
+    if "a6w4" in name:
+        return "a6w4"
+    return "gemm"
+
+
+def _set_bookkeeping(tree, event):
+    uid = len(tree.events)
+    event["UID"] = uid
+    tree.events.append(event)
+    tree.events_by_uid[uid] = event
+    seq_num = event["args"].get("Sequence number")
+    if seq_num is not None and seq_num in tree.seq_num2event_uids_map:
+        tree.seq_num2event_uids_map[seq_num].append(uid)
+
+
+def _inject_pseudo_op(tree, orig_event, pseudo_name):
+    """Wrap *orig_event* in a pseudo CPU op named *pseudo_name*."""
+    parent_uid = orig_event.get("parent")
+    if parent_uid is None:
+        return
+    parent_event = tree.get_UID2event(parent_uid)
+
+    pseudo_evt = {
+        "ph": "X",
+        "name": pseudo_name,
+        "cat": "cpu_op",
+        "pid": orig_event["pid"],
+        "tid": orig_event["tid"],
+        "ts": orig_event["ts"],
+        "dur": orig_event.get("dur", 0),
+        "args": {
+            "Input Dims": orig_event["args"].get("Input Dims", []),
+            "Input type": orig_event["args"].get("Input type", []),
+            "Input Strides": orig_event["args"].get("Input Strides", []),
+            "Concrete Inputs": orig_event["args"].get("Concrete Inputs", []),
+            "Sequence number": orig_event["args"].get("Sequence number", 0),
+            "External id": orig_event["args"].get("External id", 0),
+            "Pseudo op": True,
+        },
+        "parent": parent_uid,
+        "children": [orig_event["UID"]],
+        "gpu_events": orig_event.get("gpu_events", []),
+    }
+    _set_bookkeeping(tree, pseudo_evt)
+
+    children = parent_event.get("children", [])
+    if orig_event["UID"] in children:
+        idx = children.index(orig_event["UID"])
+        children[idx] = pseudo_evt["UID"]
+    else:
+        children.append(pseudo_evt["UID"])
+
+    orig_event["parent"] = pseudo_evt["UID"]
+
+
+def _get_bwd_ops(tree, fwd_event):
+    bwd_uids = fwd_event.get("bwd_events") or tree.get_subtree_bwd_events(
+        fwd_event["UID"]
+    )
+    return [tree.get_UID2event(uid) for uid in bwd_uids]
+
+
+def _collect_gemm_children(tree, parent_event):
+    result = []
+    for child_uid in parent_event.get("children", []):
+        child = tree.get_UID2event(child_uid)
+        if child.get("name") in _GEMM_OP_NAMES:
+            result.append(child)
+    result.sort(key=lambda e: e["ts"])
+    return result
+
+
+def _collect_gemm_descendants(tree, parent_event):
+    result = []
+    queue = collections.deque(parent_event.get("children", []))
+    while queue:
+        uid = queue.popleft()
+        evt = tree.get_UID2event(uid)
+        if evt.get("name") in _GEMM_OP_NAMES:
+            result.append(evt)
+        queue.extend(evt.get("children", []))
+    result.sort(key=lambda e: e["ts"])
+    return result
+
+
+def tree_postprocess_extension(trace_tree):
+    """Create fwd/bwd pseudo ops for MXFP4 GEMM events.
+
+    Wraps each ``primus_turbo::gemm_fp4_impl`` / ``primus_flux::a6w4_mm_qa*``
+    inside ``_MXFP4*Function`` (forward) or ``_MXFP4*FunctionBackward``
+    (backward) in a pseudo op named e.g. ``_MXFP4Linear_yfwd_gemm``,
+    ``_MXFP4LinearBackward_xgrad_gemm``, or ``_MXFP4LinearBackward_wgrad_gemm``.
     """
-    Performance model for primus_flux::quantize_mxfp4_h16_dual_bias_gate.
+    fwd_names = [
+        name
+        for name in trace_tree.name2event_uids
+        if name.startswith("_MXFP4") and "Backward" not in name
+    ]
+    if not fwd_names:
+        return
 
-    Fused bias-add + gate activation (SiLU) + dual MXFP4 quantization.
-    Reads two BF16 inputs (x and gate) and their biases, applies
-    x = x + bias; gate = silu(gate + gate_bias); out = x * gate,
-    then quantizes the result into two MXFP4 outputs.
+    processed_uids = set()
 
-    Roofline calculation -- FLOPs:
-        bias-add: 2 * M * N (add bias to x and gate)
-        SiLU:     3 * M * N (neg, exp, add, rcp, mul on gate)
-        gate-mul: M * N
-        quant:    2 * M * N per output * 2 = 4 * M * N
-        Total:    ~10 * M * N
+    for fwd_name in fwd_names:
+        prefix = fwd_name.removesuffix("Function")
 
-    Roofline calculation -- Bytes:
-        read  x[M, N], bias[1, N], gate[M, N], gate_bias[N]
-        write 2 * (FP4 packed + E8M0 scales)
+        for fwd_uid in list(trace_tree.name2event_uids[fwd_name]):
+            fwd_event = trace_tree.get_UID2event(fwd_uid)
 
-    Expected Input Dims from trace:
-        [[M, N], [1, N], [M, N], [N], [out1_scale_shape], [out2_scale_shape]]
+            fwd_gemms = _collect_gemm_children(trace_tree, fwd_event)
+            for gemm_evt in fwd_gemms:
+                if gemm_evt["UID"] in processed_uids:
+                    continue
+                processed_uids.add(gemm_evt["UID"])
+                suffix = _suffix_for_op(gemm_evt["name"])
+                _inject_pseudo_op(trace_tree, gemm_evt, f"{prefix}_yfwd_{suffix}")
 
-    Expected Input type from trace:
-        [BFloat16, BFloat16, BFloat16, BFloat16, Float8_e8m0fnu, Float8_e8m0fnu]
-    """
-
-    category = "GroupQuant"
-
-    @staticmethod
-    def get_param_details(event):
-        dims = event["args"]["Input Dims"]
-        op_shape = tuple(dims[0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, dtype_in),
-            "stride_input": stride_input,
-            "stride_output": None,
-        }
-
-    def flops(self):
-        return 10 * self.nelems
-
-    def bytes(self):
-        if self.bpe_in is None:
-            return None
-        M, N = self.param_details["op_shape"]
-        bytes_read = (2 * M * N + N + N) * self.bpe_in  # x, gate, bias, gate_bias
-        bytes_write_fp4 = 2 * M * N * _MXFP4_BPE
-        bytes_write_scales = 2 * max(1, M * N // _MXFP4_GROUP_SIZE) * _E8M0_BPE
-        return bytes_read + bytes_write_fp4 + bytes_write_scales
-
-
-class quantize_mxfp4_h16_dual_bias_packed(UnaryElementwise):
-    """
-    Performance model for primus_flux::quantize_mxfp4_h16_dual_bias_packed.
-
-    Fused bias-add + dual MXFP4 quantization with packed output layout.
-    The input BF16 tensor (from a preceding concat/chunk) is split into
-    sub-tensors, each bias-added and quantized to MXFP4.
-
-    Roofline calculation -- FLOPs:
-        ~4 FLOPs per element (bias-add + dual quant)
-
-    Roofline calculation -- Bytes:
-        read  x[M, N] in BF16
-        write 2 * (FP4 packed + E8M0 scales)
-
-    Expected Input Dims from trace:
-        [[M, N], [], [out_scale1_shape], [out_scale2_shape]]
-
-    Expected Input type from trace:
-        [BFloat16, Scalar, Float8_e8m0fnu, Float8_e8m0fnu]
-    """
-
-    category = "GroupQuant"
-
-    @staticmethod
-    def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, dtype_in),
-            "stride_input": stride_input,
-            "stride_output": None,
-        }
-
-    def flops(self):
-        return 4 * self.nelems
-
-    def bytes(self):
-        if self.bpe_in is None:
-            return None
-        bytes_read = self.nelems * self.bpe_in
-        bytes_write_fp4 = 2 * self.nelems * _MXFP4_BPE
-        bytes_write_scales = 2 * max(1, self.nelems // _MXFP4_GROUP_SIZE) * _E8M0_BPE
-        return bytes_read + bytes_write_fp4 + bytes_write_scales
-
-
-class quantize_mxfp4_h16_dual_bias_dgelu(UnaryElementwise):
-    """
-    Performance model for primus_flux::quantize_mxfp4_h16_dual_bias_dgelu.
-
-    Backward dGELU activation derivative fused with dual MXFP4 quantization.
-    Reads two BF16 inputs (grad_output and activation cache), computes
-    dGELU, and quantizes the result into two MXFP4 outputs.
-
-    Roofline calculation -- FLOPs:
-        dGELU:   ~8 FLOPs per element (GELU derivative involves erf)
-        quant:   2 * 2 per element (dual)
-        Total:   ~12 * M * N
-
-    Roofline calculation -- Bytes:
-        read  grad_out[M, N], act_cache[M, N] in BF16
-        write 2 * (FP4 packed + E8M0 scales)
-
-    Expected Input Dims from trace:
-        [[M, N], [M, N]]
-
-    Expected Input type from trace:
-        [BFloat16, BFloat16]
-    """
-
-    category = "GroupQuant"
-
-    @staticmethod
-    def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, dtype_in),
-            "stride_input": stride_input,
-            "stride_output": None,
-        }
-
-    def flops(self):
-        return 12 * self.nelems
-
-    def bytes(self):
-        if self.bpe_in is None:
-            return None
-        bytes_read = 2 * self.nelems * self.bpe_in  # two BF16 inputs
-        bytes_write_fp4 = 2 * self.nelems * _MXFP4_BPE
-        bytes_write_scales = 2 * max(1, self.nelems // _MXFP4_GROUP_SIZE) * _E8M0_BPE
-        return bytes_read + bytes_write_fp4 + bytes_write_scales
-
-
-class quantize_mxfp4_h16_col(_QuantizeMxfp4Base):
-    """
-    Performance model for primus_flux::quantize_mxfp4_h16_col.
-
-    Column-major MXFP4 quantization: quantizes a BF16 [M, N] tensor to
-    MXFP4 along the column dimension (groups of 32 elements along M).
-
-    Roofline calculation -- FLOPs:
-        ~2 FLOPs per element (max-abs + scale per group)
-
-    Roofline calculation -- Bytes:
-        read  x[M, N] in BF16
-        write FP4 packed + E8M0 scales
-
-    Expected Input Dims from trace:
-        [[M, N], []]
-
-    Expected Input type from trace:
-        [BFloat16, Scalar]
-    """
-
-    @staticmethod
-    def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][0])
-        dtype_in = event["args"]["Input type"][0]
-        stride_input = tuple(event["args"]["Input Strides"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (dtype_in, dtype_in),
-            "stride_input": stride_input,
-            "stride_output": None,
-        }
+            bwd_ops = _get_bwd_ops(trace_tree, fwd_event)
+            for bwd_op in bwd_ops:
+                bwd_gemms = _collect_gemm_descendants(trace_tree, bwd_op)
+                for i, gemm_evt in enumerate(bwd_gemms):
+                    if gemm_evt["UID"] in processed_uids:
+                        continue
+                    processed_uids.add(gemm_evt["UID"])
+                    suffix = _suffix_for_op(gemm_evt["name"])
+                    label = "xgrad" if i == 0 else "wgrad"
+                    _inject_pseudo_op(
+                        trace_tree,
+                        gemm_evt,
+                        f"{prefix}Backward_{label}_{suffix}",
+                    )
