@@ -6420,7 +6420,9 @@ class gemm_fp4_impl(GEMM):
         return bytes_A + bytes_B + bytes_output + bytes_bias + bytes_b_scale
 
     def get_compute_precision(self):
-        return torch_dtype_map("mxfp4") # Compute precision not in trace; determined by GPU MFMA instruction selection.
+        return torch_dtype_map(
+            "mxfp4"
+        )  # Compute precision not in trace; determined by GPU MFMA instruction selection.
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

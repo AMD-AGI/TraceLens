@@ -10,8 +10,9 @@ Performance models for Primus Flux operations.
 
 from math import prod
 
-from TraceLens.PerfModel.perf_model import GEMM, UnaryElementwise, gemm_fp4_impl
+from TraceLens.PerfModel.perf_model import GEMM, UnaryElementwise
 from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
+
 
 class a6w4_mm_qa(GEMM):
     """
@@ -80,7 +81,7 @@ class a6w4_mm_qa(GEMM):
         return base_bytes
 
     def get_compute_precision(self):
-        return torch_dtype_map("mxfp4") # Compute precision not in trace
+        return torch_dtype_map("mxfp4")  # Compute precision not in trace
 
 
 class a6w4_mm_qa_prequant_w(GEMM):
@@ -136,7 +137,7 @@ class a6w4_mm_qa_prequant_w(GEMM):
         dtype_A_B = self.param_details["dtype_A_B"]
         self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
-        
+
         self.bpe_output = name2bpe(dtype_A_B[2])
         self.bpe_bias = name2bpe(dtype_A_B[2])
         return super().bytes(
@@ -147,7 +148,7 @@ class a6w4_mm_qa_prequant_w(GEMM):
         )
 
     def get_compute_precision(self):
-        return torch_dtype_map("mxfp4") # Compute precision not in trace
+        return torch_dtype_map("mxfp4")  # Compute precision not in trace
 
 
 class _QuantizeMxfp4Base(UnaryElementwise):
@@ -165,7 +166,9 @@ class _QuantizeMxfp4Base(UnaryElementwise):
         # Output dtype (FP4) not in trace args (return value)
         bytes_write_fp4 = self.nelems * name2bpe("fp4")
         # Scale dtype: one E8M0 byte per 32-element block
-        bytes_write_scales = max(1, self.nelems // MXFP4_GROUP_SIZE) * name2bpe("c10::Float8_e8m0fnu")
+        bytes_write_scales = max(1, self.nelems // MXFP4_GROUP_SIZE) * name2bpe(
+            "c10::Float8_e8m0fnu"
+        )
         return bytes_read + bytes_write_fp4 + bytes_write_scales
 
 
@@ -214,7 +217,11 @@ class quantize_mxfp4_h16_dual(_QuantizeMxfp4Base):
         # Output dtype (FP4) not in trace args (return value)
         bytes_write_fp4 = 2 * self.nelems * name2bpe("fp4")
         # Scale dtype: one E8M0 byte per 32-element block
-        bytes_write_scales = 2 * max(1, self.nelems // MXFP4_GROUP_SIZE) * name2bpe("c10::Float8_e8m0fnu")
+        bytes_write_scales = (
+            2
+            * max(1, self.nelems // MXFP4_GROUP_SIZE)
+            * name2bpe("c10::Float8_e8m0fnu")
+        )
         return bytes_read + bytes_write_fp4 + bytes_write_scales
 
 
@@ -336,9 +343,7 @@ def _label_bwd_gemms(tree, fwd_event, prefix, processed_uids):
             processed_uids.add(gemm_evt["UID"])
             suffix = _suffix_for_op(gemm_evt["name"])
             label = "xgrad" if i == 0 else "wgrad"
-            _inject_pseudo_op(
-                tree, gemm_evt, f"{prefix}Backward_{label}_{suffix}"
-            )
+            _inject_pseudo_op(tree, gemm_evt, f"{prefix}Backward_{label}_{suffix}")
 
 
 def tree_postprocess_extension(trace_tree):

@@ -13,7 +13,6 @@ Tests for Primus Turbo / Flux MXFP4 ops:
   - tree_postprocess_extension (fwd/bwd pseudo-op labeling)
 """
 
-from math import prod
 
 from TraceLens.PerfModel.perf_model import gemm_fp4_impl, GEMM
 from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
@@ -21,12 +20,7 @@ from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
     a6w4_mm_qa_prequant_w,
     quantize_mxfp4_h16_dual,
     _QuantizeMxfp4Base,
-    _label_fwd_gemms,
-    _label_bwd_gemms,
     _suffix_for_op,
-    _inject_pseudo_op,
-    _collect_gemm_children,
-    _collect_gemm_descendants,
     tree_postprocess_extension,
 )
 from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
@@ -41,20 +35,20 @@ def _gemm_fp4_impl_event(M=3072, N=3072, K=3072, has_bias=False):
     K_packed = K // 2
     K_scale = K // MXFP4_GROUP_SIZE
     dims = [
-        [M, K_packed],      # A (FP4 packed)
-        [M, K_scale],       # A scales (E8M0)
-        [],                 # Scalar
-        [N, K_packed],      # B (FP4 packed)
-        [N, K_scale],       # B scales (E8M0)
-        [],                 # Scalar
-        [],                 # out_dtype
-        [],                 # bias_flag
-        [],                 # granularity
-        [],                 # backend
-        [],                 # preshuffled
+        [M, K_packed],  # A (FP4 packed)
+        [M, K_scale],  # A scales (E8M0)
+        [],  # Scalar
+        [N, K_packed],  # B (FP4 packed)
+        [N, K_scale],  # B scales (E8M0)
+        [],  # Scalar
+        [],  # out_dtype
+        [],  # bias_flag
+        [],  # granularity
+        [],  # backend
+        [],  # preshuffled
         [N] if has_bias else [],  # bias
-        [],                 # out_scale_A (optional)
-        [],                 # out_scale_B (optional)
+        [],  # out_scale_A (optional)
+        [],  # out_scale_B (optional)
     ]
     types = [
         "c10::Float4_e2m1fn_x2",
@@ -89,9 +83,9 @@ def _a6w4_mm_qa_event(M=3072, N=3072, K=3072, has_bias=True):
         "name": "primus_flux::a6w4_mm_qa",
         "args": {
             "Input Dims": [
-                [M, K],             # aq (u8 activation)
-                [scale_elems],      # sa (activation scales)
-                [N, K],             # b (BF16 weight)
+                [M, K],  # aq (u8 activation)
+                [scale_elems],  # sa (activation scales)
+                [N, K],  # b (BF16 weight)
                 [N] if has_bias else [],  # bias
             ],
             "Input type": [
@@ -114,11 +108,11 @@ def _a6w4_mm_qa_prequant_w_event(M=3072, N=3072, K=3072, has_bias=True):
         "name": "primus_flux::a6w4_mm_qa_prequant_w",
         "args": {
             "Input Dims": [
-                [M, K],             # aq (u8 activation)
-                [scale_elems],      # sa (activation scales)
-                [N, K_packed],      # wq (FP4 packed weight)
-                [N, K_scale],       # sb (weight scales)
-                [],                 # Scalar (n)
+                [M, K],  # aq (u8 activation)
+                [scale_elems],  # sa (activation scales)
+                [N, K_packed],  # wq (FP4 packed weight)
+                [N, K_scale],  # sb (weight scales)
+                [],  # Scalar (n)
                 [N] if has_bias else [],  # bias
             ],
             "Input type": [
@@ -164,18 +158,35 @@ def test_a6w4_mm_qa_registered():
 
 def test_a6w4_mm_qa_prequant_w_registered():
     assert "primus_flux::a6w4_mm_qa_prequant_w" in op_to_perf_model_class_map
-    assert op_to_perf_model_class_map["primus_flux::a6w4_mm_qa_prequant_w"] is a6w4_mm_qa_prequant_w
+    assert (
+        op_to_perf_model_class_map["primus_flux::a6w4_mm_qa_prequant_w"]
+        is a6w4_mm_qa_prequant_w
+    )
 
 
 def test_quantize_mxfp4_h16_dual_registered():
     assert "primus_flux::quantize_mxfp4_h16_dual" in op_to_perf_model_class_map
-    assert op_to_perf_model_class_map["primus_flux::quantize_mxfp4_h16_dual"] is quantize_mxfp4_h16_dual
+    assert (
+        op_to_perf_model_class_map["primus_flux::quantize_mxfp4_h16_dual"]
+        is quantize_mxfp4_h16_dual
+    )
 
 
 def test_pseudo_ops_registered():
-    for prefix in ["_MXFP4Linear", "_MXFP4GatedLinear", "_MXFP4LinearGelu", "_MXFP4LinearGeluLegs"]:
-        for role in ["_yfwd_gemm", "Backward_xgrad_gemm", "Backward_wgrad_gemm",
-                     "_yfwd_a6w4", "Backward_xgrad_a6w4", "Backward_wgrad_a6w4"]:
+    for prefix in [
+        "_MXFP4Linear",
+        "_MXFP4GatedLinear",
+        "_MXFP4LinearGelu",
+        "_MXFP4LinearGeluLegs",
+    ]:
+        for role in [
+            "_yfwd_gemm",
+            "Backward_xgrad_gemm",
+            "Backward_wgrad_gemm",
+            "_yfwd_a6w4",
+            "Backward_xgrad_a6w4",
+            "Backward_wgrad_a6w4",
+        ]:
             name = f"{prefix}{role}"
             assert name in op_to_perf_model_class_map, f"missing: {name}"
 
@@ -218,10 +229,10 @@ def test_gemm_fp4_impl_bytes_includes_scales():
     K_packed = K // 2
     K_scale = K // MXFP4_GROUP_SIZE
     expected = (
-        M * K_packed * bpe_fp4_packed +  # A
-        N * K_packed * bpe_fp4_packed +  # B
-        M * N * bpe_out +                # Y
-        N * K_scale * bpe_scale          # B scales
+        M * K_packed * bpe_fp4_packed  # A
+        + N * K_packed * bpe_fp4_packed  # B
+        + M * N * bpe_out  # Y
+        + N * K_scale * bpe_scale  # B scales
     )
     assert model.bytes() == expected
 
@@ -235,17 +246,18 @@ def test_gemm_fp4_impl_bytes_with_bias():
     K_packed = K // 2
     K_scale = K // MXFP4_GROUP_SIZE
     expected = (
-        M * K_packed * bpe_fp4_packed +
-        N * K_packed * bpe_fp4_packed +
-        M * N * bpe_out +
-        N * bpe_out +                    # bias (BF16)
-        N * K_scale * bpe_scale
+        M * K_packed * bpe_fp4_packed
+        + N * K_packed * bpe_fp4_packed
+        + M * N * bpe_out
+        + N * bpe_out  # bias (BF16)
+        + N * K_scale * bpe_scale
     )
     assert model.bytes() == expected
 
 
 def test_gemm_fp4_impl_compute_precision():
     from TraceLens.PerfModel.utils import torch_dtype_map
+
     model = gemm_fp4_impl(_gemm_fp4_impl_event())
     assert model.get_compute_precision() == torch_dtype_map("mxfp4")
 
@@ -278,11 +290,11 @@ def test_a6w4_mm_qa_bytes():
     bpe_bf16 = 2
     scale_elems = M * (K // MXFP4_GROUP_SIZE)
     expected = (
-        M * K * bpe_u8 +       # activation
-        N * K * bpe_bf16 +     # weight
-        M * N * bpe_bf16 +     # output
-        N * bpe_bf16 +         # bias
-        scale_elems * bpe_u8   # activation scales
+        M * K * bpe_u8  # activation
+        + N * K * bpe_bf16  # weight
+        + M * N * bpe_bf16  # output
+        + N * bpe_bf16  # bias
+        + scale_elems * bpe_u8  # activation scales
     )
     assert model.bytes() == expected
 
@@ -294,10 +306,7 @@ def test_a6w4_mm_qa_no_bias():
     bpe_bf16 = 2
     scale_elems = M * (K // MXFP4_GROUP_SIZE)
     expected = (
-        M * K * bpe_u8 +
-        N * K * bpe_bf16 +
-        M * N * bpe_bf16 +
-        scale_elems * bpe_u8
+        M * K * bpe_u8 + N * K * bpe_bf16 + M * N * bpe_bf16 + scale_elems * bpe_u8
     )
     assert model.bytes() == expected
 
@@ -329,10 +338,10 @@ def test_a6w4_mm_qa_prequant_w_bytes():
     bpe_u8 = 1
     bpe_bf16 = 2
     expected = (
-        M * K * bpe_u8 +       # activation (u8)
-        N * K * bpe_u8 +       # weight (u8 packed, bpe from trace = unsigned char = 1)
-        M * N * bpe_bf16 +     # output
-        N * bpe_bf16           # bias
+        M * K * bpe_u8  # activation (u8)
+        + N * K * bpe_u8  # weight (u8 packed, bpe from trace = unsigned char = 1)
+        + M * N * bpe_bf16  # output
+        + N * bpe_bf16  # bias
     )
     assert model.bytes() == expected
 
@@ -359,9 +368,9 @@ def test_quantize_mxfp4_dual_bytes():
     bpe_fp4 = 0.5
     bpe_scale = 1
     expected = (
-        M * N * bpe_in +                                              # read
-        2 * M * N * bpe_fp4 +                                         # write FP4 (dual)
-        2 * max(1, M * N // MXFP4_GROUP_SIZE) * bpe_scale             # write scales (dual)
+        M * N * bpe_in  # read
+        + 2 * M * N * bpe_fp4  # write FP4 (dual)
+        + 2 * max(1, M * N // MXFP4_GROUP_SIZE) * bpe_scale  # write scales (dual)
     )
     assert model.bytes() == expected
 
@@ -439,7 +448,12 @@ def _make_tree_with_fwd_bwd():
     # Forward parent
     fwd_parent = {
         "name": "_MXFP4LinearFunction",
-        "ph": "X", "cat": "cpu_op", "pid": 0, "tid": 0, "ts": 100, "dur": 50,
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 100,
+        "dur": 50,
         "args": {"Sequence number": 1},
         "children": [],
         "bwd_events": [],
@@ -449,13 +463,45 @@ def _make_tree_with_fwd_bwd():
     # Forward GEMM child
     fwd_gemm = {
         "name": "primus_turbo::gemm_fp4_impl",
-        "ph": "X", "cat": "cpu_op", "pid": 0, "tid": 0, "ts": 110, "dur": 20,
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 110,
+        "dur": 20,
         "args": {
-            "Input Dims": [[1024, 512], [1024, 32], [], [2048, 512], [2048, 32],
-                           [], [], [], [], [], [], [], [], []],
-            "Input type": ["c10::Float4_e2m1fn_x2", "c10::Float8_e8m0fnu", "Scalar",
-                           "c10::Float4_e2m1fn_x2", "c10::Float8_e8m0fnu", "Scalar",
-                           "", "", "", "", "", "", "", ""],
+            "Input Dims": [
+                [1024, 512],
+                [1024, 32],
+                [],
+                [2048, 512],
+                [2048, 32],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+            ],
+            "Input type": [
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float8_e8m0fnu",
+                "Scalar",
+                "c10::Float4_e2m1fn_x2",
+                "c10::Float8_e8m0fnu",
+                "Scalar",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
             "Input Strides": [[] for _ in range(14)],
             "Concrete Inputs": [""] * 14,
             "Sequence number": 1,
@@ -471,7 +517,12 @@ def _make_tree_with_fwd_bwd():
     # Backward parent
     bwd_parent = {
         "name": "_MXFP4LinearFunctionBackward",
-        "ph": "X", "cat": "cpu_op", "pid": 0, "tid": 0, "ts": 200, "dur": 80,
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 200,
+        "dur": 80,
         "args": {"Sequence number": 2},
         "children": [],
     }
@@ -481,7 +532,12 @@ def _make_tree_with_fwd_bwd():
     # Backward xgrad GEMM
     bwd_xgrad = {
         "name": "primus_turbo::gemm_fp4_impl",
-        "ph": "X", "cat": "cpu_op", "pid": 0, "tid": 0, "ts": 210, "dur": 20,
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 210,
+        "dur": 20,
         "args": dict(fwd_gemm["args"]),
         "parent": bwd_uid,
         "children": [],
@@ -493,7 +549,12 @@ def _make_tree_with_fwd_bwd():
     # Backward wgrad GEMM
     bwd_wgrad = {
         "name": "primus_turbo::gemm_fp4_impl",
-        "ph": "X", "cat": "cpu_op", "pid": 0, "tid": 0, "ts": 240, "dur": 20,
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 240,
+        "dur": 20,
         "args": dict(fwd_gemm["args"]),
         "parent": bwd_uid,
         "children": [],
