@@ -288,12 +288,11 @@ class aten_scaled_mm(GEMM):
                 f"Data sizes of A and B are different: {dtype_A_B} for aten_scaled_mm. "
             )
         self.bpe = bpeA  # or bpeB, they are the same
-        # assumption:
-        # for fp8 the output dtype is fp16
-        # for fp16, bf16, fp32 the output dtype is the same as the input dtype
-        if self.bpe == 1:
+        # fp8 (1 byte) and mxfp4 (half a byte) write an fp16/bf16 result.
+        # fp16, bf16, and fp32 keep the input width.
+        if self.bpe is not None and self.bpe <= 1:
             out_bpe = 2
-        elif self.bpe in [2, 4]:
+        elif self.bpe in (2, 4):
             out_bpe = self.bpe
         else:
             out_bpe = None

@@ -2208,6 +2208,16 @@ class TestGemmVariantsCoverage:
         assert model.param_details["bias"] is True
         assert model.bytes() > 0
 
+    def test_aten_scaled_mm_mxfp4_writes_a_two_byte_result(self):
+        event = {
+            "args": {
+                "Input Dims": [[4, 8], [8, 16]],
+                "Input type": ["c10::Float4_e2m1fn_x2", "c10::Float4_e2m1fn_x2"],
+            }
+        }
+        model = perf_model.aten_scaled_mm(event)
+        assert model.bytes() == 4 * 8 * 0.5 + 8 * 16 * 0.5 + 4 * 16 * 2
+
     def test_aten_baddbmm(self):
         event = {
             "args": {
