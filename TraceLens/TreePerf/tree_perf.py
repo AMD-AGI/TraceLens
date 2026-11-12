@@ -210,7 +210,7 @@ class TreePerfAnalyzer:
     @staticmethod
     def from_file(
         profile_filepath,
-        capture_trace_filepath=None,
+        capture_folder=None,
         jax: bool = False,
         enable_pseudo_ops: bool = False,
         tree_postprocess_extension=None,
@@ -219,7 +219,7 @@ class TreePerfAnalyzer:
     ) -> "TreePerfAnalyzer":
         # Creates a TreePerfAnalyzer from the trace in the provided filepath.
         # *args, **kwargs are passed to the TreePerfAnalyzer constructor.
-        data = DataLoader.load_data(profile_filepath)
+        #
         # PyTorch Chrome traces carry run metadata as top-level JSON fields.
         # Field presence varies by profiler version, profiler options, and backend, e.g.
         # {
@@ -258,11 +258,12 @@ class TreePerfAnalyzer:
         #   "hip_driver_version": 70253211,  # optional; ROCm traces only
         #   "traceEvents": [...]             # required event payload
         # }
-        # Keep these trace-level fields separate from Chrome "M" metadata events.
-        trace_metadata = {
-            key: value for key, value in data.items() if key != "traceEvents"
-        }
-        data = data["traceEvents"]
+        # load_trace_events separates these from the Chrome "M" metadata events.
+        data, trace_metadata = DataLoader.load_trace_events(
+            profile_filepath,
+            capture_folder=capture_folder,
+            framework="jax" if jax else "pytorch",
+        )
 
         categorizer = (
             TraceToTree.default_categorizer
@@ -277,12 +278,10 @@ class TreePerfAnalyzer:
         )
 
         # Optionally merge capture trace into graph tree
-        if capture_trace_filepath is not None:
-            metadata_json_path = os.path.join(
-                capture_trace_filepath, "execution_details.json"
-            )
+        if capture_folder is not None:
+            metadata_json_path = os.path.join(capture_folder, "execution_details.json")
             tree = merge_capture_trace_into_graph(
-                capture_trace_filepath,
+                capture_folder,
                 metadata_json_path,
                 profile_filepath,
                 graph_tree=tree,
@@ -3024,15 +3023,15 @@ class JaxTreePerfAnalyzer(TreePerfAnalyzer):
     @staticmethod
     def from_file(
         profile_filepath,
-        capture_trace_filepath=None,
+        capture_folder=None,
         jax=True,
         enable_pseudo_ops=False,
         tree_postprocess_extension=None,
         *args,
         **kwargs,
     ) -> "JaxTreePerfAnalyzer":
-        data = DataLoader.load_data(profile_filepath)
-        data_pb = data["traceEvents"]
+        data_pb, _ = DataLoader.load_trace_events(profile_filepath, framework="jax")
+
         categorizer = TraceEventUtils.prepare_event_categorizer(data_pb)
         metadata_events, events = TraceEventUtils.split_event_list(data_pb)
         linking_key = "correlation_id"
