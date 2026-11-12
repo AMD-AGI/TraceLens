@@ -33,7 +33,8 @@ Derived:
 | `<container>` | `bringup_<basename of <bringup_dir>>` | 0 |
 | `<prefix>` | `ssh <node> "docker exec -i -w /tmp <container> bash -c '{CMD}'"` | 0 |
 | `<bringup_gates>` | `python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates` | 0 |
-| `<tl_extension>`, `<framework_src>`, `<gfx_arch>`, `<gpu_count>`, `<platform>` | printed in Step 0 | 0 |
+| `<tl_extension>`, `<gpu_devices>`, `<framework_src>`, `<gfx_arch>`, `<platform>` | printed in Step 0 | 0 |
+| `<gpu_count>` | the number of `<gpu_devices>` | 0 |
 | `<base_branch>` | `git -C <tracelens_dir> rev-parse --abbrev-ref HEAD` | 6, Publish |
 | `<profile_dir>` | `<bringup_dir>/profile/attempt_<n>`, `<n>` from 1 | 1 |
 | `<bench_dir>`, `<mixed_split>`, `<capture_folder>` | printed by `prepare` | 2 |
@@ -63,23 +64,25 @@ To stop at any step after Step 0: `<prefix> <bringup_gates> summary --bringup-di
    ```bash
    <magpie_prefix> python3 -c "import yaml, numpy, Magpie"
    ssh <node> "set -o pipefail; mkdir -p <bringup_dir>/cache && ls -d <tracelens_internal_dir>/*/Agent/Analysis/utils/arch | sed 's|.*/\([^/]*\)/Agent/Analysis/utils/arch|tl_extension=\1|'"
+   ssh <node> "grep -ls '^simd_count [1-9]' /sys/class/kfd/kfd/topology/nodes/*/properties | xargs -r grep -h '^drm_render_minor' | sed 's|drm_render_minor |/dev/dri/renderD|'"
    ```
+
+   The last command prints `<gpu_devices>`, your job's GPUs on `<node>`.
 
    Write `<magpie_prefix>` and `<prefix>` to `cache/magpie_prefix.txt` and `cache/cmd_prefix.txt`, and the effective inputs to `cache/bringup_config.yaml`.
 
 3. **Container.**
 
    ```bash
-   ssh <node> "docker inspect -f '{{.Config.Image}} {{.State.Running}}' <container> 2>/dev/null"
+   ssh <node> "docker inspect -f '{{.Config.Image}} {{.State.Running}} {{range .HostConfig.Devices}}{{.PathOnHost}} {{end}}' <container> 2>/dev/null"
    ```
 
-   No output: start it.
-   Stopped with `<serving_image>`: `docker start` it.
-   Running with `<serving_image>`: reuse it.
-   Any other image: end with `[DIAG:bringup:STEP0_CONTAINER_IMAGE_MISMATCH]` and the image; Step 8 does not run.
+   No output: start it as below, with one `--device=<path>` per `<gpu_devices>` entry.
+   Image `<serving_image>`, devices `/dev/kfd` plus exactly `<gpu_devices>`: `docker start` it if stopped, else reuse it.
+   Anything else: end with `[DIAG:bringup:STEP0_CONTAINER_MISMATCH]`, the inspect output and `ssh <node> "docker rm -f <container>"`; Step 8 does not run.
 
    ```bash
-   ssh <node> "docker run -d --name <container> --device=/dev/kfd --device=/dev/dri --group-add video \
+   ssh <node> "docker run -d --name <container> --device=/dev/kfd --device=<path> --group-add video \
      --ipc=host --network=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
      -v <bringup_dir>:<bringup_dir> -v <hf_home>:<hf_home> -v <tracelens_dir>:<tracelens_dir> \
      -v <tracelens_internal_dir>:<tracelens_internal_dir> -e HF_HOME=<hf_home> -e TL_EXTENSION=<tl_extension> \
@@ -97,10 +100,10 @@ To stop at any step after Step 0: `<prefix> <bringup_gates> summary --bringup-di
 5. **GPU.**
 
    ```bash
-   <prefix> python3 -c "import os, torch, <framework> as f; from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms; p = torch.cuda.get_device_properties(0); print(dict(framework_src=os.path.dirname(f.__file__), gfx_arch=p.gcnArchName.split(chr(58))[0], gpu_count=torch.cuda.device_count(), platform=next((x for x in list_platforms() if x in p.name), None)))"
+   <prefix> python3 -c "import os, torch, <framework> as f; from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms; p = torch.cuda.get_device_properties(0); print(dict(framework_src=os.path.dirname(f.__file__), gfx_arch=p.gcnArchName.split(chr(58))[0], platform=next((x for x in list_platforms() if x in p.name), None)))"
    ```
 
-**Gate:** every command succeeds and `platform` is not `None`. Otherwise end with `[DIAG:bringup:STEP0_ENV_CHECK_FAILED]` and the failing command; Step 8 does not run.
+**Gate:** every command succeeds, `<gpu_devices>` and `platform` are set, and every GPU index pinned in `<benchmark_yaml>` is below `<gpu_count>` (Magpie numbers your GPUs from 0). Otherwise end with `[DIAG:bringup:STEP0_ENV_CHECK_FAILED]` and the failure; Step 8 does not run.
 
 ## Step 1: Profile
 
@@ -189,6 +192,7 @@ Pass `--threshold` only when `min_share` is set. Do not edit `gaps.json`. An emp
 1. In your own shell, one at a time:
 
        git -C <tracelens_dir> worktree add -b perf_model/<op_slug> <op_worktree> <base_branch>
+       mkdir -p <op_dir>/scratch
 
    On a rerun, reuse `<op_worktree>`; if only the branch exists, add the worktree from it. If
    another bringup already has `perf_model/<op_slug>` checked out (same op on another

@@ -56,10 +56,10 @@ Build, validate and draft the perf model for one op that has none. The model-bri
 
 ## Guardrails
 
-- Exactly one op. Write only under `<op_worktree>` and `<op_dir>`; commit only on `perf_model/<op_slug>`.
+- Exactly one op. Write only under `<op_worktree>` and `<op_dir>`; temp files and tool caches (such as `BLACK_CACHE_DIR`) go in `<op_dir>/scratch`. Commit only on `perf_model/<op_slug>`.
 - Never push, run `gh`, or ask the user. Answer every guide question per its Unattended use section; a choice that needs the user becomes an issue draft.
 - Run worktree code as `cd <op_worktree> && PYTHONPATH=<op_worktree> python3 ...` through the prefix.
-- Run git in your own shell, never through the prefix.
+- Run git in your own shell as `git -C <op_worktree> ...`, one git command per call, never through the prefix.
 
 ---
 
@@ -104,7 +104,14 @@ If `rocprofv3` aborts torch processes (some ROCm SDK images load two LLVM copies
 
 ### Step 5: Draft
 
-If every validation row is `OK`, commit on `perf_model/<op_slug>`, then write `<op_dir>/pr.md`; its first line is the title. It states what the op is and which class or mapping was added, then one row per shape from these validation columns only: `predicted_flops`, `predicted_bytes`, `rocprof_read_bytes`, `rocprof_write_bytes`, `flops_ratio`, `bytes_ratio`. Leave out `kernel_runtime_*`, `*_tflops_s` and `*_tb_s`.
+If every validation row is `OK`, commit on `perf_model/<op_slug>`:
+
+```bash
+git -C <op_worktree> add <each file you changed>
+git -C <op_worktree> commit -m "<title>"
+```
+
+Then write `<op_dir>/pr.md`: `<title>`, what was added, and one row per shape with only the validation columns `predicted_flops`, `predicted_bytes`, `rocprof_read_bytes`, `rocprof_write_bytes`, `flops_ratio` and `bytes_ratio`.
 
 If any row is not `OK`, the op is categorize-only (no validation rows), or Step 2 (Decide) needs the user, write `<op_dir>/issue.md` instead: the op record from Step 1 (Record) and the failure, same columns.
 
