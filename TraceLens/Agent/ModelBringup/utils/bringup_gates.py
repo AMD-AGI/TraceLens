@@ -64,6 +64,11 @@ USABLE_OUTCOMES = ("pr_draft", "issue_draft")
 RESULT_KEYS = ("op", "op_slug", "outcome")
 SLUG_MAX = 48
 STOP_TAG = "[DIAG:bringup:STEP{step}_{code}]"
+ANALYSIS_OUTPUTS = (
+    "analysis.md",
+    "perf_report_csvs/unified_perf_summary.csv",
+    "perf_report.log",
+)
 
 
 def prepare(args):
@@ -215,6 +220,30 @@ def op_result(args):
     return 1 if problems else 0
 
 
+def analysis_result(args):
+    """Check the analysis sub-agent's result.json and the outputs later steps read."""
+    root = Path(args.analysis_dir)
+    problems = []
+    try:
+        result = json.loads((root / "result.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        problems.append(f"result.json unreadable: {e}")
+    else:
+        if not isinstance(result, dict):
+            problems.append("result.json is not an object")
+        elif result.get("outcome") != "analyzed":
+            problems.append(
+                f"outcome is {result.get('outcome')}: {result.get('reason')}"
+            )
+    for name in ANALYSIS_OUTPUTS:
+        path = root / name
+        if not path.is_file() or path.stat().st_size == 0:
+            problems.append(f"missing or empty {name}")
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    return _gate(args, "analysis", not problems, problems=problems)
+
+
 def coverage(args):
     """Every pr_draft op is covered after the merge and validated with all rows OK."""
     after_rows, _ = load_rows(Path(args.after))
@@ -249,7 +278,7 @@ def summary(args):
     if stop:
         lines += [f"**Stopped:** {stop} {args.reason or ''}".rstrip(), ""]
     lines += ["| Gate | Status |", "|---|---|"]
-    for name in ("prepare", "profile_health", "report_health", "coverage"):
+    for name in ("prepare", "profile_health", "analysis", "report_health", "coverage"):
         path = root / "gates" / f"{name}.json"
         status = json.loads(path.read_text())["status"] if path.is_file() else "not_run"
         lines.append(f"| {name} | {status} |")
@@ -301,6 +330,7 @@ def main(argv=None):
         "gaps": (gaps, ("--unified-csv",)),
         "cases": (cases, ("--report-dir", "--out")),
         "op-result": (op_result, ("--result",)),
+        "analysis-result": (analysis_result, ("--analysis-dir",)),
         "coverage": (coverage, ("--before", "--after")),
         "summary": (summary, ()),
     }

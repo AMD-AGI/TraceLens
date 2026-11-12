@@ -29,7 +29,7 @@ Read [reference.md](reference.md) before Step 0 and run every step from it.
 | 0 | Environment and Input Sanity Checks | every command succeeds |
 | 1 | Profile (Magpie sub-agent) | `result.json` reports outcome `profiled` |
 | 2 | Profile health | `prepare` and `report-health --phase profile` exit 0 |
-| 3 | Baseline analysis (orchestrator, inline) | `analysis.md`, unified CSV, `perf_report.log` non-empty |
+| 3 | Baseline analysis (orchestrator sub-agent) | `analysis-result` exits 0; a failure is relaunched once |
 | 4 | Report health | `report-health --phase report` exits 0 |
 | 5 | Find gaps | `gaps` exits 0 |
 | 6 | Perf-model sub-agents | `op-result` exits 0 per op; a failing op is relaunched once, then excluded |
@@ -47,7 +47,7 @@ Read [reference.md](reference.md) before Step 0 and run every step from it.
   ratio). No runtime numbers.
 - Never commit in `<tracelens_dir>`. Commits go only on `perf_model/<op_slug>` in `<op_worktree>`.
 - Run git in your own shell, never through `<prefix>`.
-- Read only the files each step names, such as `result.json`, `gates/*.json` and `gaps.json`, never a sub-agent's instruction file, the Magpie reference or a PerfModel guide. The one exception is Step 3, which runs the orchestrator inline, so read the orchestrator skill there.
+- Read only the files each step names, such as `result.json`, `gates/*.json` and `gaps.json`, never the instruction file of a skill or sub-agent a step launches, or a PerfModel guide.
 - Never analyze a trace or author or validate a perf model by hand to work around a failed step.
 
 ## Primary outputs

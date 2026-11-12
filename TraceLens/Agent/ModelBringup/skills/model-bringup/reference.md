@@ -146,12 +146,27 @@ Ignore the runner's exit code.
       --output_dir <analysis_dir> --job <job>
     <prefix> cp <analysis_dir>/cache/run_config.yaml <bringup_dir>/cache/analysis_run.yaml
 
-Then follow inline:
+Then launch one sub-agent:
 
-    Follow the analysis orchestrator installed with TraceLens and run the full agentic analysis workflow from config <bringup_dir>/cache/analysis_run.yaml, standalone, node <node>, container <container>, TraceLens repo <tracelens_dir>, output to <analysis_dir>. Ask nothing. Run the orchestrator Step 1 perf report command through the prefix with `{CMD}` set to `set -o pipefail; <command> 2>&1 | tee <analysis_dir>/perf_report.log | tail -n 40`.
+    Read and follow the FULL instructions in:
+      TraceLens/Agent/Analysis/skills/analysis-orchestrator/reference.md
 
-**Gate:** `analysis.md`, `perf_report_csvs/unified_perf_summary.csv` and `perf_report.log`
-under `<analysis_dir>` are non-empty. Otherwise stop with `ANALYSIS_OUTPUT_MISSING`.
+    **Execution Context:**
+    - Mode: YAML, from config <bringup_dir>/cache/analysis_run.yaml, scope standalone
+    - Environment: cluster; node <node>; container <container>; TraceLens repo <tracelens_dir>
+    - Never ask or wait for user input. Where a step would ask, stop.
+    - If a sub-agent tool is not available, run the sub-agent steps in order.
+    - Step 1 perf report: run it through the prefix with `{CMD}` set to
+      `set -o pipefail; <command> 2>&1 | tee <analysis_dir>/perf_report.log | tail -n 40`
+    - Output file: <analysis_dir>/result.json, written also on a stop:
+      {"outcome": "analyzed | stop", "reason": "<required for stop: the question or the failing command and the tail of its output>"}
+      - analyzed: analysis.md is written.
+
+    Execute every step in the skill. Return "DONE" when complete.
+
+**Gate:** `<prefix> <bringup_gates> analysis-result --bringup-dir <bringup_dir> --analysis-dir <analysis_dir>` exits 0.
+Otherwise relaunch the sub-agent once. If the gate fails again, stop with `ANALYSIS_FAILED`
+and the first line the gate printed as the reason.
 
 ## Step 4: Report health
 

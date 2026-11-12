@@ -156,3 +156,26 @@ def test_op_result_gates_pr_draft(tmp_path):
     path.write_text(json.dumps(result))
     (tmp_path / "pr.md").unlink()
     assert bringup_gates.main(args) == 1
+
+
+def test_analysis_result_gates_outcome_and_outputs(tmp_path):
+    analysis = tmp_path / "analysis"
+    for name in bringup_gates.ANALYSIS_OUTPUTS:
+        (analysis / name).parent.mkdir(parents=True, exist_ok=True)
+        (analysis / name).write_text("x")
+    args = ["analysis-result", "--bringup-dir", str(tmp_path)]
+    args += ["--analysis-dir", str(analysis)]
+    assert bringup_gates.main(args) == 1
+
+    result = analysis / "result.json"
+    result.write_text(json.dumps({"outcome": "stop", "reason": "reason a"}))
+    assert bringup_gates.main(args) == 1
+    assert "reason a" in _gate(tmp_path, "analysis")["problems"][0]
+
+    result.write_text(json.dumps({"outcome": "analyzed"}))
+    assert bringup_gates.main(args) == 0
+    bringup_gates.main(["summary", "--bringup-dir", str(tmp_path)])
+    assert "| analysis | pass |" in (tmp_path / "bringup_summary.md").read_text()
+
+    (analysis / "perf_report.log").write_text("")
+    assert bringup_gates.main(args) == 1
