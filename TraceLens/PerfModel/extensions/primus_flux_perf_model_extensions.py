@@ -317,6 +317,30 @@ def _collect_gemm_descendants(tree, parent_event):
     return result
 
 
+def _label_fwd_gemms(tree, fwd_event, prefix, processed_uids):
+    """Wrap forward GEMM children in yfwd pseudo ops."""
+    for gemm_evt in _collect_gemm_children(tree, fwd_event):
+        if gemm_evt["UID"] in processed_uids:
+            continue
+        processed_uids.add(gemm_evt["UID"])
+        suffix = _suffix_for_op(gemm_evt["name"])
+        _inject_pseudo_op(tree, gemm_evt, f"{prefix}_yfwd_{suffix}")
+
+
+def _label_bwd_gemms(tree, fwd_event, prefix, processed_uids):
+    """Wrap backward GEMM descendants in xgrad/wgrad pseudo ops."""
+    for bwd_op in _get_bwd_ops(tree, fwd_event):
+        for i, gemm_evt in enumerate(_collect_gemm_descendants(tree, bwd_op)):
+            if gemm_evt["UID"] in processed_uids:
+                continue
+            processed_uids.add(gemm_evt["UID"])
+            suffix = _suffix_for_op(gemm_evt["name"])
+            label = "xgrad" if i == 0 else "wgrad"
+            _inject_pseudo_op(
+                tree, gemm_evt, f"{prefix}Backward_{label}_{suffix}"
+            )
+
+
 def tree_postprocess_extension(trace_tree):
     """Create fwd/bwd pseudo ops for MXFP4 GEMM events.
 
@@ -337,29 +361,7 @@ def tree_postprocess_extension(trace_tree):
 
     for fwd_name in fwd_names:
         prefix = fwd_name.removesuffix("Function")
-
         for fwd_uid in list(trace_tree.name2event_uids[fwd_name]):
             fwd_event = trace_tree.get_UID2event(fwd_uid)
-
-            fwd_gemms = _collect_gemm_children(trace_tree, fwd_event)
-            for gemm_evt in fwd_gemms:
-                if gemm_evt["UID"] in processed_uids:
-                    continue
-                processed_uids.add(gemm_evt["UID"])
-                suffix = _suffix_for_op(gemm_evt["name"])
-                _inject_pseudo_op(trace_tree, gemm_evt, f"{prefix}_yfwd_{suffix}")
-
-            bwd_ops = _get_bwd_ops(trace_tree, fwd_event)
-            for bwd_op in bwd_ops:
-                bwd_gemms = _collect_gemm_descendants(trace_tree, bwd_op)
-                for i, gemm_evt in enumerate(bwd_gemms):
-                    if gemm_evt["UID"] in processed_uids:
-                        continue
-                    processed_uids.add(gemm_evt["UID"])
-                    suffix = _suffix_for_op(gemm_evt["name"])
-                    label = "xgrad" if i == 0 else "wgrad"
-                    _inject_pseudo_op(
-                        trace_tree,
-                        gemm_evt,
-                        f"{prefix}Backward_{label}_{suffix}",
-                    )
+            _label_fwd_gemms(trace_tree, fwd_event, prefix, processed_uids)
+            _label_bwd_gemms(trace_tree, fwd_event, prefix, processed_uids)

@@ -20,33 +20,22 @@ from . import (
 )
 
 
-def get_pseudo_op_mappings():
-    """
-    Return a dictionary mapping pseudo-op names to their performance model classes.
 
-    Returns:
-        dict: Mapping of pseudo-op names to performance model classes
-    """
 
-    pseudo_op_mappings = {
-        # MoE pseudo ops - Fused
+def _get_moe_mappings():
+    """MoE op registrations."""
+    return {
         "pseudo_op::moe_aiter_fused_1stage": moe_perf_model_extensions.moe_aiter_fused_1stage,
-        # MoE aiter 2 stage (cktile)
         "aiter::moe_cktile2stages_gemm1_ck": moe_perf_model_extensions.moe_aiter_unfused_up,
         "aiter::moe_cktile2stages_gemm2_ck": moe_perf_model_extensions.moe_aiter_unfused_down,
-        # MoE aiter 2 stage (ck)
         "aiter::ck_moe_stage1": moe_perf_model_extensions.moe_aiter_ck_stage1,
         "aiter::ck_moe_stage2": moe_perf_model_extensions.moe_aiter_ck_stage2,
-        # MoE - AITER FP8 block-scale fused (direct CPU op, no pseudo-op needed)
         "aiter::fmoe_fp8_blockscale_g1u1": moe_perf_model_extensions.moe_aiter_fused_blockscale,
         "aiter::fmoe_g1u1": moe_perf_model_extensions.moe_aiter_fused_blockscale,
-        # MoE pseudo ops - Unfused Triton (2-stage: up and down)
         "pseudo_op::moe_triton_unfused_up": moe_perf_model_extensions.moe_triton_unfused_up,
         "pseudo_op::moe_triton_unfused_down": moe_perf_model_extensions.moe_triton_unfused_down,
-        # MoE - GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
         "pseudo_op::moe_gptq_awq_up": moe_perf_model_extensions.moe_gptq_awq_up,
         "pseudo_op::moe_gptq_awq_down": moe_perf_model_extensions.moe_gptq_awq_down,
-        # MoE flydsl two-stage (under aiter::fused_moe_)
         "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
@@ -55,12 +44,21 @@ def get_pseudo_op_mappings():
         "aiter::moe_sorting_fwd": moe_perf_model_extensions.MoeSortScatterGather,
         "aiter::mxfp4_moe_sort_hip": moe_perf_model_extensions.MoeSortScatterGather,
         "sglang_profiler::moe_sorting_small__run_small_sort": moe_perf_model_extensions.SglangMoeSortingSmall,
-        # Attention pseudo ops
+        "sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts": moe_perf_model_extensions.sglang_fused_append_shared_experts,
+        "aiter::_opus_moe_stage1_a8w4_fwd_raw": moe_perf_model_extensions.moe_opus_stage1_a8w4,
+        "aiter::moe_sorting_opus_fwd": moe_perf_model_extensions.moe_sorting_opus_fwd,
+        "aiter::topk_softplus": perf_model_extensions.topk_softplus,
+        "aiter::topk_gating_fwd": perf_model_extensions.topk_gating_fwd,
+        "_moe_C::topk_softplus_sqrt": perf_model_extensions.topk_softplus_sqrt,
+    }
+
+
+def _get_attention_mappings():
+    """Attention op registrations."""
+    return {
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "vllm::rocm_aiter_sparse_attn_indexer": attention_perf_model_extensions.rocm_aiter_sparse_attn_indexer,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
-        # Prefer the annotation-aware inference extension when annotations are
-        # present; it falls back to the core SDPA model for plain training rows.
         "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
         "aiter::mha_batch_prefill": attention_perf_model_extensions.aiter_mha_batch_prefill,
         "sglang_profiler::attention_paged_attention_ragged": attention_perf_model_extensions.aiter_paged_attention_ragged,
@@ -69,19 +67,21 @@ def get_pseudo_op_mappings():
         "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
         "aiter::mla_decode_v4_asm": attention_perf_model_extensions.mla_decode_v4_asm,
         "pseudo_vllm_sparse_attn_decode": attention_perf_model_extensions.vllm_sparse_attn_decode,
-        # DeepSeek-V4 sparse paged decode (mode-specific pseudo ops)
         "pseudo_v4_paged_decode_swa": attention_perf_model_extensions.pseudo_v4_paged_decode_swa,
         "pseudo_v4_paged_decode_csa": attention_perf_model_extensions.pseudo_v4_paged_decode_csa,
         "pseudo_v4_paged_decode_hca": attention_perf_model_extensions.pseudo_v4_paged_decode_hca,
         "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
-        ## Misc ops
+        "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
+        "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,
+    }
+
+
+def _get_gemm_mappings():
+    """GEMM and quantized GEMM op registrations."""
+    return {
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
-        "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
-        "aiter::dynamic_per_group_scaled_quant": perf_model_extensions.per_group_quant,
-        "aiter::fused_add_rmsnorm_pad_": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
-        "aiter::mixed_sample_outer_exponential": perf_model_extensions.mixed_sample_outer_exponential,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
         "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_preshuffle": perf_model_extensions.gemm_a8w8_blockscale_preshuffle,
@@ -97,91 +97,18 @@ def get_pseudo_op_mappings():
         "aiter::gemm_a8w8_bpreshuffle_ck": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::gemm_a8w8_bpreshuffle": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::_rocm_aiter_preshuffled_per_token_w8a8_gemm": perf_model_extensions.gemm_a8w8_blockscale,
+        "aiter::_gemm_a8w8_blockscale_bpreshuffle_asm": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16": perf_model_extensions.gemm_a16w16,
-        "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
-        "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip_bounded,
-        "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
-        "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_asm,
         "sglang_profiler::gemm_kernels_flydsl_hgemm": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::gemm_afp4wfp4_": perf_model_extensions.gemm_afp4wfp4,
+        "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
-        ## Quantization ops
-        "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
-        "sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant": perf_model_extensions.fused_flatten_mxfp4_quant,
-        "aiter::dynamic_per_tensor_quant": perf_model_extensions.per_group_quant,
-        ## RoPE ops
-        "aiter::rope_cached_positions_2c_fwd_impl": perf_model_extensions.aiter_rope_cached_positions_2c_fwd_impl,
-        "sgl_kernel::rotary_embedding": perf_model_extensions.sgl_kernel_rotary_embedding,
-        ## Activation ops
-        "aiter::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
-        "_C::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
-        "sgl_kernel::silu_and_mul": perf_model_extensions.sgl_kernel_silu_and_mul,
-        "aiter::gelu_and_mul": perf_model_extensions.aiter_gelu_and_mul,
-        "aiter::gelu_tanh_and_mul": perf_model_extensions.aiter_gelu_tanh_and_mul,
-        ## RMSNorm ops
-        "aiter::rms_norm": rmsnorm_perf_model_extensions.aiter_rms_norm,
-        "aiter::rmsnorm": rmsnorm_perf_model_extensions.aiter_rmsnorm,
-        "aiter::rmsnorm2d_fwd_ck": rmsnorm_perf_model_extensions.aiter_rms_norm,
-        "aiter::rmsnorm2d_fwd_with_add_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
-        "aiter::add_rmsnorm": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
-        "aiter::rmsnorm2d_fwd_with_dynamicquant_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
-        "aiter::_fused_qk_rmsnorm_kernel": rmsnorm_perf_model_extensions.aiter_fused_qk_rmsnorm,
-        "vllm::rocm_aiter_rmsnorm_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_fp8_group_quant,
-        "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
-        "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
-        "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
-        "aiter::_fuse_rmsnorm_fp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
-        ## Collective ops
-        "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
-        "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
-        "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
-        "vllm::rocm_aiter_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
-        "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
-        "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
-        "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,
-        "sgl_kernel::all_reduce_reg": custom_collectives_perf_model_extensions.sgl_kernel_all_reduce_reg,
-        "sgl_kernel::qr_all_reduce": custom_collectives_perf_model_extensions.sgl_kernel_qr_all_reduce,
-        "sglang::reg_all_gather_into_tensor": custom_collectives_perf_model_extensions.sgl_kernel_reg_all_gather_into_tensor,
-        "_C_custom_ar::qr_all_reduce": custom_collectives_perf_model_extensions.custom_ar_qr_all_reduce,
-        ## GDN attention ops
-        "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
-        "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,
-        ## KV cache ops
-        "sglang::store_cache": perf_model_extensions.sglang_store_cache,
-        "aiter::fused_qk_rope_cat_and_cache_mla": perf_model_extensions.aiter_fused_qk_rope_cat_and_cache_mla,
-        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla": perf_model_extensions.fused_fp8_bmm_rope_cat_and_cache_mla,
-        "sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts": moe_perf_model_extensions.sglang_fused_append_shared_experts,
-        "sglang_profiler::quant_dynamic_mxfp4_quant": perf_model_extensions.sglang_quant_dynamic_mxfp4_quant,
-        "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
-        "aiter::dynamic_per_group_scaled_quant_fp4": perf_model_extensions.aiter_dynamic_per_group_scaled_quant_fp4,
-        "aiter::_gemm_a8w8_blockscale_bpreshuffle_asm": perf_model_extensions.gemm_a8w8_blockscale,
-        "aiter::mhc_post": perf_model_extensions.mhc_post,
-        "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
-        "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
-        "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
-        "aiter::topk_softplus": perf_model_extensions.topk_softplus,
-        "aiter::topk_gating_fwd": perf_model_extensions.topk_gating_fwd,
-        "_moe_C::topk_softplus_sqrt": perf_model_extensions.topk_softplus_sqrt,
-        "aiter::_opus_moe_stage1_a8w4_fwd_raw": moe_perf_model_extensions.moe_opus_stage1_a8w4,
-        "aiter::moe_sorting_opus_fwd": moe_perf_model_extensions.moe_sorting_opus_fwd,
-        "vllm::all_reduce": custom_collectives_perf_model_extensions.vllm_all_reduce,
-        ## Fused RMSNorm + per-group dynamic FP8 quant.
-        "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
-        ## AITER GroupNorm (same math as aten::group_norm, different event layout)
-        "aiter::_groupnorm_run": _core_perf_model.GroupNorm,
-        ## gsplat 3DGS autograd ops (carry tensor shapes in the trace);
-        # projection/intersect kernels are matched by substring in torch_op_mapping.
-        "_SphericalHarmonics": gsplat_perf_model_extensions.gsplat_spherical_harmonics,
-        "_RasterizeToPixels": gsplat_perf_model_extensions.gsplat_rasterize_to_pixels,
-        ## Primus Turbo / Flux ops
         "primus_turbo::gemm_fp4_impl": _core_perf_model.gemm_fp4_impl,
         "primus_flux::a6w4_mm_qa": primus_flux_perf_model_extensions.a6w4_mm_qa,
         "primus_flux::a6w4_mm_qa_prequant_w": primus_flux_perf_model_extensions.a6w4_mm_qa_prequant_w,
-        "primus_flux::quantize_mxfp4_h16_dual": primus_flux_perf_model_extensions.quantize_mxfp4_h16_dual,
-        ## Primus Flux fwd/bwd pseudo ops (created by tree_postprocess_extension)
         "_MXFP4Linear_yfwd_gemm": _core_perf_model.gemm_fp4_impl,
         "_MXFP4Linear_yfwd_a6w4": primus_flux_perf_model_extensions.a6w4_mm_qa,
         "_MXFP4LinearBackward_xgrad_gemm": _core_perf_model.gemm_fp4_impl,
@@ -208,6 +135,95 @@ def get_pseudo_op_mappings():
         "_MXFP4LinearGeluLegsBackward_wgrad_a6w4": primus_flux_perf_model_extensions.a6w4_mm_qa,
     }
 
+
+def _get_norm_mappings():
+    """RMSNorm and normalization op registrations."""
+    return {
+        "aiter::rms_norm": rmsnorm_perf_model_extensions.aiter_rms_norm,
+        "aiter::rmsnorm": rmsnorm_perf_model_extensions.aiter_rmsnorm,
+        "aiter::rmsnorm2d_fwd_ck": rmsnorm_perf_model_extensions.aiter_rms_norm,
+        "aiter::rmsnorm2d_fwd_with_add_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
+        "aiter::add_rmsnorm": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_add_ck,
+        "aiter::rmsnorm2d_fwd_with_dynamicquant_ck": rmsnorm_perf_model_extensions.aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
+        "aiter::_fused_qk_rmsnorm_kernel": rmsnorm_perf_model_extensions.aiter_fused_qk_rmsnorm,
+        "vllm::rocm_aiter_rmsnorm_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_fp8_group_quant,
+        "vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant": rmsnorm_perf_model_extensions.vllm_rocm_aiter_rmsnorm_with_add_fp8_group_quant,
+        "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
+        "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
+        "aiter::_fuse_rmsnorm_fp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
+        "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
+        "aiter::fused_add_rmsnorm_pad_": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
+        "aiter::_groupnorm_run": _core_perf_model.GroupNorm,
+    }
+
+
+def _get_collective_mappings():
+    """Collective communication op registrations."""
+    return {
+        "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
+        "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "vllm::rocm_aiter_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
+        "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
+        "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,
+        "sgl_kernel::all_reduce_reg": custom_collectives_perf_model_extensions.sgl_kernel_all_reduce_reg,
+        "sgl_kernel::qr_all_reduce": custom_collectives_perf_model_extensions.sgl_kernel_qr_all_reduce,
+        "sglang::reg_all_gather_into_tensor": custom_collectives_perf_model_extensions.sgl_kernel_reg_all_gather_into_tensor,
+        "_C_custom_ar::qr_all_reduce": custom_collectives_perf_model_extensions.custom_ar_qr_all_reduce,
+        "vllm::all_reduce": custom_collectives_perf_model_extensions.vllm_all_reduce,
+    }
+
+
+def _get_misc_mappings():
+    """Quantization, RoPE, activation, KV cache, and other op registrations."""
+    return {
+        "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
+        "aiter::dynamic_per_group_scaled_quant": perf_model_extensions.per_group_quant,
+        "aiter::mixed_sample_outer_exponential": perf_model_extensions.mixed_sample_outer_exponential,
+        "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
+        "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip_bounded,
+        "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
+        "vllm::triton_per_token_group_quant_fp8": perf_model_extensions.vllm_triton_per_token_group_quant_fp8,
+        "sglang_profiler::fused_mxfp4_quant_fused_flatten_mxfp4_quant": perf_model_extensions.fused_flatten_mxfp4_quant,
+        "aiter::dynamic_per_tensor_quant": perf_model_extensions.per_group_quant,
+        "aiter::rope_cached_positions_2c_fwd_impl": perf_model_extensions.aiter_rope_cached_positions_2c_fwd_impl,
+        "sgl_kernel::rotary_embedding": perf_model_extensions.sgl_kernel_rotary_embedding,
+        "aiter::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
+        "_C::silu_and_mul": perf_model_extensions.aiter_silu_and_mul,
+        "sgl_kernel::silu_and_mul": perf_model_extensions.sgl_kernel_silu_and_mul,
+        "aiter::gelu_and_mul": perf_model_extensions.aiter_gelu_and_mul,
+        "aiter::gelu_tanh_and_mul": perf_model_extensions.aiter_gelu_tanh_and_mul,
+        "sglang::store_cache": perf_model_extensions.sglang_store_cache,
+        "aiter::fused_qk_rope_cat_and_cache_mla": perf_model_extensions.aiter_fused_qk_rope_cat_and_cache_mla,
+        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla": perf_model_extensions.fused_fp8_bmm_rope_cat_and_cache_mla,
+        "sglang_profiler::quant_dynamic_mxfp4_quant": perf_model_extensions.sglang_quant_dynamic_mxfp4_quant,
+        "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
+        "aiter::dynamic_per_group_scaled_quant_fp4": perf_model_extensions.aiter_dynamic_per_group_scaled_quant_fp4,
+        "aiter::mhc_post": perf_model_extensions.mhc_post,
+        "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
+        "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
+        "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
+        "_SphericalHarmonics": gsplat_perf_model_extensions.gsplat_spherical_harmonics,
+        "_RasterizeToPixels": gsplat_perf_model_extensions.gsplat_rasterize_to_pixels,
+        "primus_flux::quantize_mxfp4_h16_dual": primus_flux_perf_model_extensions.quantize_mxfp4_h16_dual,
+    }
+
+
+def get_pseudo_op_mappings():
+    """
+    Return a dictionary mapping pseudo-op names to their performance model classes.
+
+    Returns:
+        dict: Mapping of pseudo-op names to performance model classes
+    """
+    pseudo_op_mappings = {}
+    pseudo_op_mappings.update(_get_moe_mappings())
+    pseudo_op_mappings.update(_get_attention_mappings())
+    pseudo_op_mappings.update(_get_gemm_mappings())
+    pseudo_op_mappings.update(_get_norm_mappings())
+    pseudo_op_mappings.update(_get_collective_mappings())
+    pseudo_op_mappings.update(_get_misc_mappings())
     return pseudo_op_mappings
 
 
