@@ -38,11 +38,15 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     _embedding_lookup_cost,
     _expert_loop_multiplier,
     _is_leaf_computation,
+    _is_padding_mask_body,
     _parse_conv_details,
     _engine_boundary_cost,
     _engine_head_cost,
     _introspect_weight_bpe,
     _finish_op,
+    _experts_touched,
+    _formula_quant_rows,
+    _quant_matrix_rows,
     _graph_contains_draft,
     _mla_attention_ops,
     _moe_boundary_owns_routing,
@@ -595,6 +599,168 @@ def test_moe_cost_uses_introspected_weight_bpe():
     assert bytes_fp4 < bytes_bf16
 
 
+def test_fp8_kv_cache_halves_only_the_key_and_value_bytes():
+    # Q and the output stay bf16. An fp8 cache stores K and V at one byte,
+    # so a long decode moves about half the bytes a bf16 cache would.
+    from TraceLens.PerfModel.perf_model import SDPA
+
+    bf16 = SDPA.bytes_func(1, 1, 24, 327554, 4, 256, 256, False, 2)
+    fp8 = SDPA.bytes_func(
+        1, 1, 24, 327554, 4, 256, 256, False, 2, kv_bytes_per_element=1
+    )
+    q_and_out = 2 * (1 * 1 * 24 * 256) * 2
+    kv = 2 * (1 * 327554 * 4 * 256)
+    assert bf16 == q_and_out + kv * 2
+    assert fp8 == q_and_out + kv * 1
+    assert fp8 < bf16 / 2 * 1.01
+
+
+def test_gated_delta_cost_ignores_the_kv_cache():
+    # Qwen3.5's linear layers are a recurrent delta rule. One layer, one token,
+    # 48 value heads of 128: 48 * 7 * 128 * 128 = 5,505,024 FLOPs, whether the
+    # softmax cache is empty or hundreds of thousands of tokens long.
+    inputs = [
+        ["B", "S", "16", "128"],
+        ["B", "S", "16", "128"],
+        ["B", "S", "48", "128"],
+        ["B", "S", "48"],
+    ]
+
+    def project(past: int) -> RooflineOp:
+        return _project_op(
+            "decoder/linear_attn/@attention",
+            "decoder",
+            "torch_recurrent_gated_delta_rule",
+            "AttentionOp",
+            "",
+            "[B, S, 16, 128]",
+            inputs,
+            {"B": 1, "S": 1, "past_len": past},
+            48,
+            None,
+            None,
+            None,
+            role="attention",
+        )
+
+    short = project(0)
+    long = project(327680)
+    assert short.modeled and short.category == "Attention"
+    assert short.total_flops == pytest.approx(48 * 5_505_024)
+    assert long.total_flops == short.total_flops
+
+    # Prefill draws the packed qkv projection ahead of q, k, v. The value
+    # heads are the wider rank-4 tensor, and the sequence is B * S, not the
+    # packed width.
+    packed = _project_op(
+        "decoder/linear_attn/@attention",
+        "decoder",
+        "torch_chunk_gated_delta_rule",
+        "AttentionOp",
+        "",
+        "[B, S, 48, 128]",
+        [
+            ["B", "10240", "S"],
+            ["B", "S", "16", "128"],
+            ["B", "S", "16", "128"],
+            ["B", "S", "48", "128"],
+            ["B", "S", "48"],
+        ],
+        {"B": 1, "S": 64, "past_len": 0},
+        48,
+        None,
+        None,
+        None,
+        role="attention",
+    )
+    # The chunked prefill kernel is not the recurrent update, and it has no
+    # performance model of its own.
+    assert packed.modeled is False
+    assert packed.flops is None
+
+
+def test_fp8_matrix_quantizes_the_activation_and_not_the_weight():
+    # An fp8 GEMM reads the packed weight. Dequantizing it into bf16 first is a
+    # pass the block-scale kernel does not run. The activation quant does.
+    _RT.reset()
+    try:
+        _RT.weight_bpe = 1
+        rows = _quant_matrix_rows(
+            "decoder/mlp", "decoder", 1, [(8, 32, 16)], 2.0, "bfloat16", None
+        )
+    finally:
+        _RT.reset()
+    names = [row.computation for row in rows]
+    assert names == ["act_quant"]
+    # One activation in, one packed activation out.
+    assert rows[0].bytes == 8 * 16 * 2 + 8 * 16 * 1
+
+
+def test_swiglu_down_proj_quant_reads_both_branches():
+    _RT.reset()
+    try:
+        _RT.weight_bpe = 1
+        rows = _quant_matrix_rows(
+            "decoder/mlp/down_proj:down_proj:0",
+            "decoder",
+            1,
+            [(8, 32, 16)],
+            2.0,
+            "bfloat16",
+            None,
+        )
+    finally:
+        _RT.reset()
+    # gate and up, then the packed write the down GEMM reads.
+    assert rows[0].bytes == 2 * (8 * 16) * 2 + (8 * 16) * 1
+
+
+def test_padding_mask_body_is_recognized():
+    assert _is_padding_mask_body(
+        "decoder/linear_attn/@fn_l555_apply_mask_to_padding_states:@op_l242_multiply:1"
+    )
+    assert not _is_padding_mask_body("decoder/mlp/down_proj:down_proj:0")
+
+
+def test_causal_conv1d_label_is_the_short_conv(_reset_rt):
+    _RT.reset()
+    _RT.sconv_kernel = 4
+    op = _project_op(
+        "decoder/linear_attn/causal_conv1d",
+        "decoder",
+        "Causal Conv1D",
+        "CausalConv1d",
+        "",
+        "[B, S, 10240] bfloat16",
+        [],
+        {"B": 1, "S": 8},
+        instances=1,
+        gpu_arch=None,
+        moe_top_k=None,
+        moe_intermediate_size=None,
+    )
+    assert op.modeled and op.category == "Conv1d"
+    assert op.flops == 2 * 8 * 10240 * 4
+
+
+def test_routed_experts_get_no_weight_dequant_row():
+    # A grouped expert GEMM reads packed MXFP4 weights itself, so it emits no
+    # separate dequant pass even when the weight dtype is fp4.
+    dims = {"B": 1, "S": 10, "H": 4096}
+    _RT.reset()
+    try:
+        _RT.weight_bpe = 0.53125
+        _RT.moe_top_k = 2
+        _RT.moe_intermediate = 1024
+        _RT.moe_num_experts = 8
+        rows = _formula_quant_rows(
+            "decoder/mlp/experts", "decoder", 1, "MoE", "moe", dims, 2, "bfloat16", None
+        )
+    finally:
+        _RT.reset()
+    assert rows == []
+
+
 def test_moe_cost_grouped_gemm_scales_weight_bytes_by_experts_touched():
     # active_tokens = B*S*top_k = 1*10*2 = 20.
     dims = {"B": 1, "S": 10, "H": 4096}
@@ -611,6 +777,19 @@ def test_moe_cost_grouped_gemm_scales_weight_bytes_by_experts_touched():
     assert flops_g == flops_g1
     # Reading G=20 expert weight matrices moves far more than a single one.
     assert bytes_g > bytes_g1
+
+
+def test_experts_touched_is_the_expected_distinct_experts():
+    # 256 routed rows over 128 experts leave 128 * (127/128) ** 256 unselected.
+    assert _experts_touched(128, 256) == pytest.approx(110.9, abs=0.1)
+    # A few rows reach about one expert each; many rows reach them all.
+    assert _experts_touched(256, 1) == pytest.approx(1.0)
+    assert _experts_touched(256, 20) == pytest.approx(19.25, abs=0.05)
+    assert _experts_touched(128, 1_000_000) == pytest.approx(128.0)
+    assert _experts_touched(128, 0) == 0.0
+    # Never more than the rows or the experts there are.
+    for experts, rows in ((128, 256), (8, 100), (64, 10)):
+        assert _experts_touched(experts, rows) <= min(experts, rows)
 
 
 def test_moe_cost_adds_dispatch_combine_allreduce_only_when_ep():
@@ -2476,6 +2655,68 @@ def _find_block(node, class_name):
         if found is not None:
             return found
     return None
+
+
+_NORM_STOP_SOURCE = """
+import torch
+import torch.nn as nn
+
+
+class QwenRMSNorm(nn.Module):
+    def __init__(self, dim):
+        self.weight = nn.Parameter(torch.empty(dim))
+        self.eps = 1e-6
+
+    def forward(self, x):
+        variance = x.float().pow(2).mean(-1, keepdim=True)
+        return (x * torch.rsqrt(variance + self.eps) * self.weight).type_as(x)
+
+
+class RMSNormGated(nn.Module):
+    def forward(self, hidden_states, gate):
+        hidden_states = hidden_states.float()
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + 1e-6)
+        return hidden_states * torch.nn.functional.silu(gate)
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.input_layernorm = QwenRMSNorm(8)
+        self.norm = RMSNormGated()
+
+    def forward(self, x, gate):
+        return self.norm(self.input_layernorm(x), gate)
+"""
+
+
+def test_roofline_stops_on_a_norm_subclass_instead_of_its_eager_body():
+    from TraceLens.ModelUtils.ast_analyze import analyze_source
+    from TraceLens.ModelUtils.block_tree import build_block_node
+
+    analysis = analyze_source(_NORM_STOP_SOURCE, all_tensor_ops=True)
+    roofline = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_roofline(),
+    )
+    norms = {child.attr_name: child for child in roofline.children}
+    assert set(norms) >= {"input_layernorm", "norm"}
+    assert norms["input_layernorm"].class_name == "QwenRMSNorm"
+    assert not norms["input_layernorm"].children
+    assert norms["norm"].class_name == "RMSNormGated"
+    assert not norms["norm"].children
+
+    detailed = build_block_node(
+        attr_name="block",
+        class_name="Block",
+        registry=analysis.class_registry,
+        basic_ops=BasicOpFilter.for_detailed(),
+    )
+    opened = {child.attr_name: child for child in detailed.children}
+    assert opened["input_layernorm"].children
 
 
 def test_roofline_stops_at_the_grouped_expert_forward():

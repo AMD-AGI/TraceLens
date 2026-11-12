@@ -8919,6 +8919,10 @@ def _quant_storage_dtype(quant: dict[str, Any]) -> str | None:
             return "int8"
         qtype = str(quant.get("bnb_4bit_quant_type") or "").lower()
         return qtype if qtype in {"nf4", "fp4"} else "int4"
+    # OpenAI's MXFP4 checkpoints (gpt-oss) store expert weights as fp4 e2m1
+    # elements with one e8m0 scale per 32; the storage width is fp4.
+    if method == "mxfp4":
+        return "fp4"
     bits = quant.get("bits")
     if method in {"gptq", "awq"} or bits in {4, 8}:
         return "int8" if bits == 8 else "int4"

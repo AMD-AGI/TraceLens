@@ -40,11 +40,14 @@ ROOFLINE_LEAF_PATTERNS: tuple[str, ...] = (
     r"(?i)^Identity$",
     r"(?i)^Parameter$",
     r"(?i)^Conv\d*d$",
-    r"(?i)^RMSNorm$",
-    r"(?i)^LayerNorm$",
-    r"(?i)^GroupNorm$",
-    r"(?i)^BatchNorm\d*d$",
-    r"(?i)^InstanceNorm\d*d$",
+    # Subclasses (Qwen3_5RMSNorm, LlamaRMSNorm, RMSNormGated) are the same
+    # formula. An exact ``^RMSNorm$`` lets the eager mean/rsqrt/cast chain
+    # through, and that chain is not the kernel's HBM traffic.
+    r"(?i)rmsnorm",
+    r"(?i)layernorm",
+    r"(?i)groupnorm",
+    r"(?i)batchnorm",
+    r"(?i)instancenorm",
     r"(?i)^Softmax$",
 )
 

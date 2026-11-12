@@ -1644,6 +1644,26 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
         for nested, options in (comp.init_assignment_options or {}).items():
             if len(options) > 1:
                 varying.append((comp_attr, comp, nested, nested))
+    # An attr with a single constructor is still a variant when the layer
+    # index decides whether it is built at all. Qwen3.5's decoder assigns
+    # ``self.linear_attn`` or ``self.self_attn`` from ``layer_types[layer_idx]``;
+    # each name has one class, so the options-count test above never sees it,
+    # and the graph would draw both attentions in every layer.
+    covered = {attr for attr, _owner, _path, _nested in varying}
+    for attr in decoder.init_assignments or {}:
+        if attr in covered:
+            continue
+        answers: list[Any] = []
+        for layer_idx in range(depth):
+            picked = instance_submodule_class(
+                decoder, attr, resolve_config, {"layer_idx": layer_idx}
+            )
+            if picked is None:
+                answers = []
+                break
+            answers.append(picked)
+        if answers and len(set(answers)) > 1:
+            varying.append((attr, decoder, attr, ""))
     if not varying:
         return []
 
@@ -1688,13 +1708,18 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
             ffn_label=labels[-1] if len(labels) > 1 else "FFN",
             layer_indices=list(layers),
         )
+        omitted: set[str] = set()
         for comp_attr, rel_overrides in sorted(overrides.items()):
             # A ``""`` override swaps the component's OWN class (``self.mlp`` is
             # Dense here, MoE there). That is a top-level swap the merge renders
             # from ``ffn_class``/``attention_class`` by role -- set those; the
             # prebuilt-tree path below is for NESTED (deep-submodule) swaps only.
             swapped = rel_overrides.get("")
-            if isinstance(swapped, str) and swapped != SUBMODULE_OMITTED:
+            if swapped is SUBMODULE_OMITTED:
+                # The other arm of the init switch built this component. Drawing
+                # it would count an attention the layer does not have.
+                omitted.add(comp_attr)
+            elif isinstance(swapped, str):
                 role = comp_roles.get(comp_attr)
                 if role in ("ffn", "moe"):
                     variant.ffn_class = swapped
@@ -1716,6 +1741,8 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
             )
             if built is not None:
                 variant.component_trees[comp_attr] = built
+        if omitted:
+            variant.omitted_components = frozenset(omitted)
         variants.append(variant)
     return variants
 

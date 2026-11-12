@@ -84,6 +84,7 @@ This installs the `TraceLens.ModelUtils` and `TraceLens.Visualizer.model_explore
 
 - `visualize_model_in_explorer` (alias: `TraceLens_visualize_model_in_explorer`), the Model Explorer export
 - `TraceLens_model_roofline_projection`, the trace-free roofline projection
+- `TraceLens_e2e_roofline_plot`, the end-to-end roofline figure from a projection and a profile
 
 See `TraceLens/Visualizer/README.md` for the export CLI. The
 model visualizer agent that drives this command is

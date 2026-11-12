@@ -2530,6 +2530,7 @@ def _config_vlm(
     mapping (version-independent) and returns a spec whose registry holds the
     derived tower class plus a wrapper binding it to ``attr``.
     """
+    pytest.importorskip("transformers")
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
     monkeypatch.setitem(CONFIG_MAPPING_NAMES, model_type, config_class)
@@ -2581,6 +2582,7 @@ def test_find_vision_tower_none_when_tower_class_absent_from_registry(
 ):
     # `vision_config` present, but no modeling source was parsed for the derived
     # tower class, so there is nothing to build a detail tree from.
+    pytest.importorskip("transformers")
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
     monkeypatch.setitem(CONFIG_MAPPING_NAMES, "foo_vision", "FooVisionConfig")

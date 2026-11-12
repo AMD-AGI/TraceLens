@@ -1600,13 +1600,32 @@ class SDPA:
         return "matrix"
 
     @staticmethod
-    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
+    def bytes_func(
+        B,
+        N_Q,
+        H_Q,
+        N_KV,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        causal,
+        bytes_per_element,
+        kv_bytes_per_element=None,
+    ):
+        # Q and the output move at the activation width. K and V are the cache,
+        # which an fp8 KV cache stores at one byte even when Q is bfloat16.
+        kv_bpe = (
+            bytes_per_element
+            if kv_bytes_per_element is None
+            else kv_bytes_per_element
+        )
         elems_q_read = B * N_Q * H_Q * d_h_qk
         elems_k_read = B * N_KV * H_KV * d_h_qk
         elems_v_read = B * N_KV * H_KV * d_h_v
         elems_out_write = B * N_Q * H_Q * d_h_v
-        total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
-        return total_elems_moved * bytes_per_element
+        return (elems_q_read + elems_out_write) * bytes_per_element + (
+            elems_k_read + elems_v_read
+        ) * kv_bpe
 
     # TODO make bytes_per_element based on profile info
     def bytes(self, bytes_per_element=2):
