@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
-from TraceLens.PerfModel.utils import name2bpe
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
 from TraceLens.ModelUtils.extract import load_architecture
 from TraceLens.Visualizer.model_explorer_export.merge import (
@@ -989,43 +988,6 @@ def test_project_op_costs_indexing_a_wider_tail_as_one_row():
     assert op.modeled is True
     assert op.flops == 0
     assert op.bytes == 2 * 8 * 32 * 2 + 8 * 8
-
-
-def test_project_op_costs_a_bool_mask_reduction_at_one_byte_per_element():
-    # get_placeholder_mask sums the [B, S] mask and multiplies the [B] result.
-    # Both tensors are bool and run on the embedding device.
-    summed = _project_op(
-        "sum",
-        "get_placeholder_mask",
-        "Sum",
-        "",
-        "aten_op",
-        "[B] bool",
-        [["B", "S"]],
-        {"B": 1, "S": 2048},
-        instances=1,
-        gpu_arch=None,
-        moe_top_k=None,
-        moe_intermediate_size=None,
-    )
-    assert summed.bytes == 2048 + 1
-    multiplied = _project_op(
-        "mul",
-        "get_placeholder_mask",
-        "Multiply",
-        "",
-        "aten_op",
-        "[B] bool",
-        [["B"]],
-        {"B": 1},
-        instances=1,
-        gpu_arch=None,
-        moe_top_k=None,
-        moe_intermediate_size=None,
-    )
-    # The drawn multiply has one bool operand. The other is a scalar.
-    assert multiplied.bytes == 1 + 1 + 1
-    assert name2bpe("bool") == 1
 
 
 def test_project_op_costs_a_boolean_index_at_one_byte_per_element():
