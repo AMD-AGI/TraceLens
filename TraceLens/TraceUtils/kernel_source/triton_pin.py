@@ -166,13 +166,15 @@ def _resolve_triton_by_symbol(
 
     The stage-2 fallback for traces with no ``kernel_file``: normalize the device
     symbol, look it up against the indexed ``@triton.jit`` def names (exact match
-    preferred, else substring), and pick the shortest editable path. Returns
-    ``None`` when nothing matches confidently.
+    preferred, else a config-suffix prefix, else substring), and pick the shortest
+    editable path. Returns ``None`` when nothing matches confidently.
 
-    ``exact`` drops the substring tier entirely: only a rank-0 exact
-    normalized-name match counts. This keeps the lookup a definite answer rather
-    than a guess, so it is safe to run on a native ``unresolved`` miss where a
-    mangled symbol could otherwise substring-match an unrelated ``.py`` def.
+    ``exact`` drops the loose substring tier. A device symbol that is a def name
+    plus a ``_`` config suffix still matches when that suffix contains a digit,
+    and the longest such def wins. That accepts a constexpr repr
+    (``kernel_GROUP_K_128_...``) and rejects a longer identifier such as
+    ``add_kernel_variant``. A mangled symbol still cannot substring-match an
+    unrelated ``.py`` def.
     """
     core = _normalize_symbol(symbol)
     if not core:
@@ -181,18 +183,25 @@ def _resolve_triton_by_symbol(
     roots = search_paths if search_paths is not None else index.discover_python_paths()
     idx = index.load_or_build_triton(roots)
 
-    # Rank candidates: exact normalized-name match (rank 0) beats substring
-    # (rank 1); within a rank, the shortest path wins (mirrors the native ranker).
-    best: tuple[int, int, str, int | None] | None = None
+    # Rank: exact name, then def plus a ``_`` config suffix (longest def), then a
+    # loose substring. ``exact`` skips only the loose tier. Within a tier and def
+    # length, the shortest path wins.
+    best: tuple[int, int, int, str, int | None] | None = None
     for name, records in idx.symbol_index.items():
         low = name.lower()
-        # Rank 0 compares normalized identities on both sides: a Triton def name
-        # keeps its leading ``_`` in the index, while ``core`` had it stripped, so
-        # a raw ``low == core`` would miss genuine ``_..._kernel`` defs.
-        if _normalize_symbol(name) == core:
-            rank = 0
+        # Compare normalized identities on both sides: a Triton def name keeps its
+        # leading ``_`` in the index, while ``core`` had it stripped, so a raw
+        # ``low == core`` would miss genuine ``_..._kernel`` defs.
+        def_core = _normalize_symbol(name)
+        suffix = core[len(def_core) :] if def_core and core.startswith(def_core) else ""
+        if def_core == core:
+            tier = 0
+        elif suffix.startswith("_") and any(ch.isdigit() for ch in suffix):
+            # ``make_kernel_repr`` appends ``KEY_value`` pairs, which carry tile
+            # sizes. A digit keeps ``add_kernel_variant`` from matching ``add_kernel``.
+            tier = 1
         elif not exact and (core in low or low in core):
-            rank = 1
+            tier = 2
         else:
             continue
         for rec in records:
@@ -201,13 +210,13 @@ def _resolve_triton_by_symbol(
                 continue
             line_val = rec.get("line")
             line_no = line_val if isinstance(line_val, int) and line_val > 0 else None
-            cand = (rank, len(file_path), file_path, line_no)
-            if best is None or cand[:2] < best[:2]:
+            cand = (tier, -len(def_core), len(file_path), file_path, line_no)
+            if best is None or cand[:3] < best[:3]:
                 best = cand
 
     if best is None:
         return None
-    return SourceLocation(source_file=best[2], line=best[3])
+    return SourceLocation(source_file=best[3], line=best[4])
 
 
 def resolve_triton_source(
