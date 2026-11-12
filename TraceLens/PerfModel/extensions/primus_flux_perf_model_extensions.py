@@ -5,7 +5,7 @@
 ###############################################################################
 
 """
-Performance models for Primus Turbo operations.
+Performance models for Primus Flux operations.
 """
 
 from math import prod
