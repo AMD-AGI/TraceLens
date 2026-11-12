@@ -1,9 +1,3 @@
-<!--
-Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-See LICENSE for license information.
--->
-
 ---
 name: magpie-benchmark-profiling
 description: >-
@@ -12,6 +6,7 @@ description: >-
   verifies trace quality, and splits traces for TraceLens inference analysis. Use when
   the user asks to follow the Magpie Benchmark + Profiling skill, profile LLM inference,
   collect vLLM, SGLang, or ATOM traces, or prepare traces for the analysis orchestrator.
+license: MIT
 ---
 
 <!--
@@ -36,7 +31,7 @@ Follow **[reference.md](reference.md)** for every step (SSH/conda prompts, `buil
 2. Ensure torch profiler enabled; apply common graph/capture flags (SGLang: kernel shape tool, not shape discovery); fixed_seq: targeted vs full profiling; agentx: capture settings
 3. Run: python -m Magpie benchmark --benchmark-config <yaml> (long-running; monitor via docker)
 4. Monitor container / logs on the remote node
-5. After Step 6: triage.runner --bench-dir profile checks
+5. After Step 6: triage.runner --bench-dir profile checks (skipped in unattended mode)
 6. split_trace.main on rank-0 trace; print (do not run) generate_perf_report_pytorch_inference.py command
 ```
 

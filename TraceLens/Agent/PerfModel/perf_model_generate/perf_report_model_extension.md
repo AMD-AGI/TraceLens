@@ -2,7 +2,7 @@
 name: unified-perf-report-postprocess
 description: >-
   Authors TraceLens perf models for cpu_ops missing coverage.  Driven from
-  three entry points: (1) CSV >4% triage from a unified_perf_summary.csv,
+  three entry points: (1) CSV top-ops ranking from a unified_perf_summary.csv,
   (2) manual op + optional kernel/callstack, (3) static scan of a vendor
   framework repo (aiter/vLLM/SGLang/ATOM) with optional filter.  For each op the
   user picks full perf model or categorization-only, and either integrates the
@@ -13,7 +13,40 @@ description: >-
   events, and any model-specific config the trace does not contain.
 ---
 
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # Unified perf-model authoring
+
+## Inputs
+
+- An op: its profiler `name`, kernel names and call stack, from a `unified_perf_summary.csv` (EP1), the user (EP2) or a framework scan (EP3).
+- The vendor framework source the op comes from.
+- A TraceLens checkout to edit, and a Python environment that imports it.
+
+## Outputs
+
+The perf model for the op in the chosen depth and mode (see "Per-op choices"), and a regenerated report in which the op has `has_perf_model` true.
+
+## Error handling
+
+- The kernel source cannot be found: stop and report the op and the paths searched. Do not guess FLOPs or bytes.
+- The wrapper, the kernel and the vendor formula disagree and the cause is unresolved: stop and report the disagreement.
+
+## Unattended use
+
+A caller without a user, such as the model-bringup skill, supplies the op and the paths. Ask nothing and answer as below. Where an answer needs information the caller did not give, stop and report that question as the reason.
+
+| Ask | Answer |
+|---|---|
+| Confirm the candidate list (EP1, EP3) | The caller's op is the candidate |
+| Name, kernel and call stack (EP2) | The op's rows in the caller's CSV |
+| Depth and output mode (Per-op choices) | full and integrate; categorize-only for a `(Synthetic Op)` name |
+| Python environment | The caller's command prefix |
+| Validate with hardware counters | Always validate |
 
 ## Entry points — pick one to begin
 
@@ -22,23 +55,23 @@ description: >-
 Use when a `unified_perf_summary.csv` is available and you want to prioritize by
 runtime impact.  Newer TraceLens embeds the full call stack inline in this CSV
 (`call_stack_full` column), so no companion `unified_perf_callstacks.csv` is
-needed; the triage script reads the call stack directly from the summary.
+needed; the top-ops ranking reads the call stack directly from the summary.
 
-**Run the triage script** (it lives with the model-bringup skill, which owns the
+**Run the top-ops ranking** (it lives with the model-bringup skill, which owns the
 CSV-driven flow):
 ```bash
 python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops \
     /path/to/unified_perf_summary.csv \
-    --mode top-ops --threshold 0.04
+    --mode top-ops
 ```
 
 This groups rows by `name`, sums runtime across all shapes, keeps names whose
-summed runtime is **> 4% of the global total** and `has_perf_model == False`,
+summed runtime is at least `--threshold` of the global total and `has_perf_model == False`,
 and prints a confirmable candidate table.  Add `--emit-extension` to write a
 starter `<csv_stem>_triage_extension.py` beside the CSV.
 
 Also run the legacy `other-bucket` mode (default) to catch ops in the "other"
-category even if they are individually below the 4% threshold:
+category even if they are individually below `--threshold`:
 ```bash
 python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops \
     /path/to/unified_perf_summary.csv --also-global-pareto
@@ -68,7 +101,7 @@ Use when the user asks to enumerate cpu_ops for a whole framework (aiter, vLLM,
 SGLang, or ATOM), optionally filtered (e.g. "attention kernels").
 
 ```bash
-python3 <skill-dir>/scan_framework_ops.py \
+python3 -m TraceLens.Agent.PerfModel.perf_model_generate.scan_framework_ops \
     --aiter /path/to/aiter \
     --filter attention
 ```
@@ -87,12 +120,12 @@ For each matched op it outputs: registered name, source file, reconstructed
 call chain to kernel, and any sibling `test_<op>` / `benchmark_<op>` files
 (roofline reference).
 
-For deep or ambiguous chains, instruct an explore subagent to traverse the
+For deep or ambiguous chains, instruct an explore sub-agent to traverse the
 repo (same technique used to map FlyDSL ops).
 
 **Confirm the candidate table with the user before proceeding.**
 
-The scanner covers aiter, vLLM, and SGLang. For ATOM, use an explore subagent
+The scanner covers aiter, vLLM, and SGLang. For ATOM, use an explore sub-agent
 on `atom/model_ops/` and the model files: ATOM mostly calls aiter ops, so the
 trace names are usually `aiter::*`, but it also has its own wrappers and
 FlyDSL kernels. When one kernel is shared, look in all of these frameworks
@@ -176,13 +209,13 @@ the binding can emit, not only the dtype in this trace.
 
 | Op kind | Base class | File |
 |---------|-----------|------|
-| Dense GEMM (any dtype) | `GEMM` | `perf_model.py:22` |
-| RMSNorm / LayerNorm | `RMSNorm` (subclass of `Normalization`) | `perf_model.py:4856` |
-| Elementwise unary | `UnaryElementwise` | `perf_model.py:3225` |
-| Elementwise binary | `BinaryElementwise` | `perf_model.py:3294` |
-| Reduction | `Reduce` | `perf_model.py:3433` |
-| Per-group quantization | `GroupQuant` | `perf_model_extensions.py:378` |
-| Inference attention | `InferenceAttention` | `attention_perf_model_extensions.py:15` |
+| Dense GEMM (any dtype) | `GEMM` | `perf_model.py` |
+| RMSNorm / LayerNorm | `RMSNorm` (subclass of `Normalization`) | `perf_model.py` |
+| Elementwise unary | `UnaryElementwise` | `perf_model.py` |
+| Elementwise binary | `BinaryElementwise` | `perf_model.py` |
+| Reduction | `Reduce` | `perf_model.py` |
+| Per-group quantization | `GroupQuant` | `perf_model_extensions.py` |
+| Inference attention | `InferenceAttention` | `attention_perf_model_extensions.py` |
 | MoE | `moe_aiter_*` family | `moe_perf_model_extensions.py` |
 
 **Reuse-first**: before writing a new class, check if an existing one already
@@ -488,7 +521,7 @@ Optional module-level hooks the report generator will call if present:
 Pass it to the report generator via `--extension_file`.
 
 **Do not** edit `torch_op_mapping.py` or `agentic_perf_model_extensions.py`
-for triage work — those are product code / legacy stubs.
+for perf-model authoring — those are product code / legacy stubs.
 
 ---
 
@@ -544,25 +577,3 @@ FlashAttention does not use `TL_MODEL` or `TL_TP`.
 | Unset `TL_MODEL` on a DeepSeek-V4-Pro trace | Fallback is DeepSeek-V4-Flash (wrong top-k and head count) |
 | Pseudo op for an op that already has a stable cpu_op | Register that name directly |
 | Pseudo-op rule tied to one UID or timestamp | Detect from op name, call stack, or kernel family |
-
----
-
-## Checklist
-
-- [ ] Entry point chosen (EP1 / EP2 / EP3)
-- [ ] Candidate list confirmed with user
-- [ ] Per-op depth (full / categorize-only) confirmed
-- [ ] Output mode (integrate / extension-only) confirmed
-- [ ] Vendor `test_*` / `benchmark_*` roofline checked and documented in class docstring
-- [ ] FLOPs derived from actual kernel MFMA ops (not output buffer)
-- [ ] Bytes account for all read/write tensors with correct bpe per role
-- [ ] `get_compute_precision()` matches dominant MFMA dtype, and the math type (matrix vs vector) is set
-- [ ] Supported dtypes are covered, not only the dtype in this trace
-- [ ] Model-specific values that are not in the trace are stamped on the event; no env read inside `flops()` / `bytes()`
-- [ ] Pseudo op added only when no single profiler event has both runtime and arguments; detection is stable and injection cost was checked
-- [ ] Attention: trace has a detailed annotation that `IterationAnnotation` parses with sq/sk sums
-- [ ] Attention: annotation propagated to the op (built-in `apply_annotation` list or a `tree_postprocess_extension`), with graceful no-perf fallback when absent
-- [ ] Attention: FP8 KV cache modeled with the cache dtype's bpe in `bytes()`
-- [ ] Class docstring follows template (all headings present)
-- [ ] `py_compile` clean; report regenerated; `has_perf_model` / `op category` correct
-- [ ] User asked whether to run `validate-perf-model` HW-counter validation

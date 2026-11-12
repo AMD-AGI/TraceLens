@@ -1,6 +1,8 @@
+###############################################################################
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
+###############################################################################
 
 # Fixed-sequence benchmark: random prompts at a fixed ISL/OSL.
 # Step 2 and 2b add the framework profiler flags and the targeted window.

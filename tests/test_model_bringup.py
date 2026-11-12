@@ -71,10 +71,13 @@ def test_report_health_blocks_and_accepts(tmp_path):
     assert _gate(tmp_path, "report_health")["other"] == [
         "DIAG:trace_quality:2j_RUNTIME_INSTABILITY"
     ]
-    assert bringup_gates.main(args + ["--accept", "3i"]) == 0
+    assert bringup_gates.main(args + ["--accept", "CAPTURE_RANK_MISMATCH"]) == 0
     empty = tmp_path / "empty"
     empty.mkdir()
     assert bringup_gates.main(args[:-1] + [str(empty)]) == 2
+    assert "missing" in _gate(tmp_path, "report_health")["error"]
+    (empty / "triage_details.csv").write_text("DIAG Tag,Evidence,Remedy\n")
+    assert bringup_gates.main(args[:-1] + [str(empty), "--phase", "profile"]) == 0
 
 
 def test_coverage_needs_all_rows_ok_and_summary(tmp_path):
@@ -101,3 +104,78 @@ def test_coverage_needs_all_rows_ok_and_summary(tmp_path):
     text = (tmp_path / "bringup_summary.md").read_text()
     assert "| prepare | not_run |" in text and "| coverage | fail |" in text
     assert "for ops op_a" in text
+    assert _gate(tmp_path, "summary")["stop"] is None
+    stop = [
+        "summary",
+        "--bringup-dir",
+        str(tmp_path),
+        "--step",
+        "4",
+        "--code",
+        "CODE_A",
+        "--reason",
+        "reason a",
+    ]
+    assert bringup_gates.main(stop) == 0
+    tag = "[DIAG:bringup:STEP4_CODE_A]"
+    assert _gate(tmp_path, "summary")["stop"] == tag
+    assert (
+        f"**Stopped:** {tag} reason a" in (tmp_path / "bringup_summary.md").read_text()
+    )
+
+
+def test_op_result_gates_pr_draft(tmp_path):
+    (tmp_path / "pr.md").write_text("title\n")
+    csv = tmp_path / "validation.csv"
+    result = {
+        "op": "op_a",
+        "op_slug": "op_a",
+        "outcome": "pr_draft",
+        "commit": "abc123",
+        "draft": str(tmp_path / "pr.md"),
+        "validation_csv": str(csv),
+    }
+    path = tmp_path / "result.json"
+    args = ["op-result", "--result", str(path)]
+    assert bringup_gates.main(args) == 2
+
+    csv.write_text("status\nOK\n")
+    path.write_text(json.dumps(result))
+    assert bringup_gates.main(args) == 0
+
+    csv.write_text("status\nOK\nMODEL_ONLY\n")
+    assert bringup_gates.main(args) == 1
+
+    csv.write_text("status\nOK\n")
+    path.write_text(json.dumps({**result, "commit": None}))
+    assert bringup_gates.main(args) == 1
+
+    path.write_text(json.dumps({**result, "outcome": "error", "reason": "cmd failed"}))
+    assert bringup_gates.main(args) == 1
+
+    path.write_text(json.dumps(result))
+    (tmp_path / "pr.md").unlink()
+    assert bringup_gates.main(args) == 1
+
+
+def test_analysis_result_gates_outcome_and_outputs(tmp_path):
+    analysis = tmp_path / "analysis"
+    for name in bringup_gates.ANALYSIS_OUTPUTS:
+        (analysis / name).parent.mkdir(parents=True, exist_ok=True)
+        (analysis / name).write_text("x")
+    args = ["analysis-result", "--bringup-dir", str(tmp_path)]
+    args += ["--analysis-dir", str(analysis)]
+    assert bringup_gates.main(args) == 1
+
+    result = analysis / "result.json"
+    result.write_text(json.dumps({"outcome": "stop", "reason": "reason a"}))
+    assert bringup_gates.main(args) == 1
+    assert "reason a" in _gate(tmp_path, "analysis")["problems"][0]
+
+    result.write_text(json.dumps({"outcome": "analyzed"}))
+    assert bringup_gates.main(args) == 0
+    bringup_gates.main(["summary", "--bringup-dir", str(tmp_path)])
+    assert "| analysis | pass |" in (tmp_path / "bringup_summary.md").read_text()
+
+    (analysis / "perf_report.log").write_text("")
+    assert bringup_gates.main(args) == 1
