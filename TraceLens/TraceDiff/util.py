@@ -6,6 +6,8 @@
 
 """Shared constants and pure utility functions for TraceDiff."""
 
+import os
+
 from ..util import TraceEventUtils, normalize_name_for_comparison
 
 _TraceKeys = TraceEventUtils.TraceKeys
@@ -13,6 +15,13 @@ _UID = _TraceKeys.UID
 _NAME = _TraceKeys.Name
 _CATEGORY = _TraceKeys.Category
 _TS = _TraceKeys.TimeStamp
+_DUR = _TraceKeys.Duration
+
+_TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
+_GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
+_KERNEL_DISPATCH_CATEGORIES = ("cuda_runtime", "cuda_driver")
+_WRAPPER_SKIP_CATEGORIES = ("kernel", *_KERNEL_DISPATCH_CATEGORIES)
+_ROOT_DESCENT_STOP_CATEGORIES = ("cpu_op", *_KERNEL_DISPATCH_CATEGORIES)
 
 
 def _sort_by_ts(nodes):
