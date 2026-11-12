@@ -35,6 +35,7 @@ larger shapes or multiples of the tile size.
 ## Outputs
 
 `validation_report_<timestamp>.csv` with one row per op or shape, whose `status` is `OK`, `MODEL_ONLY` or `FAIL: <reason>`, and a directory per op. The run exits 1 when any row fails.
+The CSV also has `flops_band` and `bytes_band`, `match` or `deviation`, from the ranges in `TraceLens/Agent/PerfModel/ratio_bands.py`.
 
 ## Error handling
 
@@ -162,6 +163,16 @@ Comparisons in the report:
 - **FLOPs ratio**: measured ops from whichever counter above is largest,
   divided by predicted FLOPs.
 - **Bytes ratio**: (read + write bytes) / predicted bytes.
+- **Known ratio sources**: the usual cause when a ratio is outside its range.
+
+  | Op family | Ratio | Usual cause |
+  |---|---|---|
+  | MoE (fused or two-stage) | FLOPs above 1 | each active expert's rows are padded to `block_m`; worst at small M |
+  | MoE, GEMM | Bytes above 1 | weights or activations re-read once per M or N tile when they do not stay in L2 |
+  | GEMM, attention | FLOPs slightly above 1 | M, N or K padded to the macro tile |
+  | Block-scaled FP8 or FP4 | Bytes above 1 | scale tensors, often left out of the model |
+  | Causal attention | FLOPs above 1 | masked tiles computed in full |
+  | Any | Bytes below 1 | L2 hits, which the read counter does not see |
 - **Precision check**: the dominant MFMA counter (or the largest ops counter
   if no MFMA ran) must be one expected for the model's compute precision:
 

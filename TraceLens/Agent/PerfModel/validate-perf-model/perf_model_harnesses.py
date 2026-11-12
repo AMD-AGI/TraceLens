@@ -58,6 +58,8 @@ _PARENTS = Path(__file__).resolve().parents
 # <repo>/TraceLens/Agent/PerfModel/validate-perf-model/; staging copies of the
 # skill may sit fewer than five levels deep.
 REPO_ROOT = str(_PARENTS[4] if len(_PARENTS) > 4 else _PARENTS[-1])
+if importlib.util.find_spec("TraceLens") is None:
+    sys.path.insert(0, REPO_ROOT)
 
 _BF16 = "c10::BFloat16"
 _FP8 = "c10::Float8_e4m3fn"
@@ -243,7 +245,6 @@ def resolve_model_class(source, name):
         module = _load_extension(source)
         mapping = getattr(module, "perf_model_extension", {})
     else:
-        ensure_tracelens_importable()
         module = importlib.import_module(source)
         mapping = getattr(module, "op_to_perf_model_class_map", {})
     if name in mapping:
@@ -293,7 +294,6 @@ def run_perf_model_from_event(
     TraceLens's ``op_to_perf_model_class_map``, then from the
     ``perf_model_extension`` map of every extension whose env var is set.
     """
-    ensure_tracelens_importable()
     event = {
         "name": trace_name,
         "args": {
@@ -332,13 +332,6 @@ def run_perf_model_from_event(
     return (model.flops(), model.bytes(), model.get_compute_precision())
 
 
-def ensure_tracelens_importable():
-    """Add the TraceLens repo root to ``sys.path`` unless TraceLens is installed."""
-    if importlib.util.find_spec("TraceLens") is None and REPO_ROOT not in sys.path:
-        sys.path.insert(0, REPO_ROOT)
-    return None
-
-
 def _evaluate(key, args):
     """Build op ``key``'s event from ``args`` and score it with its perf model."""
     entry = OP_REGISTRY[key]
@@ -360,7 +353,6 @@ def _load_extension(env_var):
             f"{env_var} is not set. Point it at {_EXTENSION_HINTS[env_var]}."
         )
     if path not in _EXTENSION_CACHE:
-        ensure_tracelens_importable()
         spec = importlib.util.spec_from_file_location(env_var.lower(), path)
         if spec is None or spec.loader is None:
             raise ImportError(f"Could not load the {env_var} extension from '{path}'.")
