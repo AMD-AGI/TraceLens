@@ -9,16 +9,19 @@
 Usage:
     python -m TraceLens.Agent.Analysis.triage.runner \
         --run-dir <analysis_output/> [--stream-file <stream.ndjson>]
+    python -m TraceLens.Agent.Analysis.triage.runner \
+        --bench-dir <magpie benchmark dir> [--out-dir <dir>]
 """
 
 import argparse
 import csv
 import glob
+import json
 import os
 import sys
 from pathlib import Path
 
-from .checks import ALL_CHECKS, Finding
+from .checks import ALL_CHECKS, PROFILE_CHECKS, Finding, summarize_graph_merge
 
 _GEAK_SPECS = [s for s in ALL_CHECKS if s.category == "geak_interface"]
 
@@ -55,7 +58,7 @@ def _finding(spec, draft):
     )
 
 
-def run_triage(run_dir, stream_file=None, detailed=False):
+def run_triage(run_dir, stream_file=None, detailed=False, specs=None):
     """Run all checks and return a list of Findings.
 
     When ``detailed`` is False (the default), checks marked
@@ -78,7 +81,7 @@ def run_triage(run_dir, stream_file=None, detailed=False):
 
     findings = []
     findings_by_sublabel = {}
-    for spec in ALL_CHECKS:
+    for spec in specs or ALL_CHECKS:
         if spec.detailed_only and not detailed:
             continue
         try:
@@ -138,6 +141,14 @@ def write_detail_csv(findings, run_dir):
             )
 
 
+def write_graph_merge_json(stream_file, run_dir):
+    summary = summarize_graph_merge(stream_file)
+    if summary is None:
+        return
+    with open(os.path.join(run_dir, "graph_merge_check.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+
+
 def run_geak_triage(session_dir):
     """Run GEAK interface checks against a Hyperloom session directory."""
     if not os.path.isdir(session_dir):
@@ -163,6 +174,16 @@ def main():
         "--run-dir", default=None, help="Path to analysis_output/ directory"
     )
     parser.add_argument(
+        "--bench-dir",
+        default=None,
+        help="Magpie benchmark directory; runs only the profile checks",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        help="Where --bench-dir writes triage_details.csv (default: the bench dir)",
+    )
+    parser.add_argument(
         "--session-dir",
         default=None,
         help="Path to a Hyperloom session directory (runs GEAK interface checks)",
@@ -179,8 +200,8 @@ def main():
     )
     args = parser.parse_args()
 
-    if not args.run_dir and not args.session_dir:
-        parser.error("one of --run-dir or --session-dir is required")
+    if not (args.run_dir or args.bench_dir or args.session_dir):
+        parser.error("one of --run-dir, --bench-dir or --session-dir is required")
 
     all_findings = []
     writable = bool(args.run_dir) and os.access(args.run_dir, os.W_OK | os.X_OK)
@@ -199,11 +220,20 @@ def main():
         if writable:
             write_detail_csv(findings, args.run_dir)
             write_diag_txt(findings, args.run_dir)
+            write_graph_merge_json(args.stream_file, args.run_dir)
         else:
             print(
                 f"Warning: run dir is not writable; triage_details.csv / "
                 f"triage_diags.txt were not written: {args.run_dir}"
             )
+        all_findings.extend(findings)
+
+    if args.bench_dir:
+        findings = run_triage(args.bench_dir, specs=PROFILE_CHECKS)
+        out_dir = args.out_dir or args.bench_dir
+        os.makedirs(out_dir, exist_ok=True)
+        write_detail_csv(findings, out_dir)
+        write_diag_txt(findings, out_dir)
         all_findings.extend(findings)
 
     if args.session_dir:

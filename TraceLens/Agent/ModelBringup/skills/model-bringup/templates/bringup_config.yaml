@@ -1,0 +1,35 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Model bringup inputs. With benchmark_yaml set, model, framework, image, HF cache and workload come from it; otherwise set them below.
+
+node: <gpu node>
+magpie_dir: <abs path>
+tracelens_dir: <abs path>
+tracelens_internal_dir: <abs path>
+bringup_dir: <abs path>
+
+benchmark_yaml: <abs path or empty>
+
+# model: <hf model id>
+# framework: sglang # sglang | vllm | atom
+# docker_image: <serving image>
+# hf_cache_path: <HF_HOME on node>
+# workload: fixed_seq # fixed_seq | agentx
+# workload_params:
+#   tp: 8
+#   conc: 32
+#   isl: 1024 # fixed_seq only
+#   osl: 1024 # fixed_seq only
+#   num_steps: 256 # agentx only
+#   num_profiles: 1 # agentx only
+#   interval_seconds: 900 # agentx only
+#   start_seconds: 300 # agentx only
+
+# options:
+#   min_share: <fraction of total kernel time; default: the gaps --threshold default>
+#   max_profile_retries: 2
+#   accept_triage: []

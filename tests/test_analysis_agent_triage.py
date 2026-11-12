@@ -33,6 +33,7 @@ import pytest
 
 from TraceLens.Agent.Analysis.triage import checks, postprocess, runner
 from TraceLens.Agent.Analysis.triage.checks import (
+    PROFILE_CHECKS,
     ALL_CHECKS,
     CheckSpec,
     Finding,
@@ -51,6 +52,7 @@ from TraceLens.Agent.Analysis.triage.checks import (
     _violator_evidence,
     check_capture_graph_merge_fail,
     check_capture_missing,
+    check_capture_rank_mismatch,
     check_corrupt_json,
     check_disk_full,
     check_docker_missing,
@@ -91,6 +93,7 @@ from TraceLens.Agent.Analysis.triage.checks import (
     stream_contains,
     stream_find,
     stream_lines,
+    summarize_graph_merge,
 )
 from TraceLens.Agent.Analysis.triage.postprocess import (
     TriageFinding,
@@ -394,7 +397,7 @@ def make_triage_csv(run_dir, rows):
 
 # Registry size is load-bearing: the reserved-stub and sublabel checks below
 # depend on it not drifting silently.
-_EXPECTED_CHECK_COUNT = 35
+_EXPECTED_CHECK_COUNT = 36
 
 _PARSE_FLOAT_CASES = [
     (None, None),
@@ -537,12 +540,79 @@ def test_implies_failures_resolve_to_real_sublabels():
 
 
 def test_reserved_stubs_return_none(tmp_path):
-    # 2d / 3a / 3c are intentional reserved-slot stubs; deleting them would force
+    # 2d / 3a are intentional reserved-slot stubs; deleting them would force
     # a sublabel renumber. They must stay inert.
     run_dir = str(tmp_path)
     assert check_split_incorrect(run_dir, None) is None
     assert check_perf_report_command_incorrect(run_dir, None) is None
-    assert check_capture_graph_merge_fail(run_dir, None) is None
+
+
+# ---------------------------------------------------------------------------
+# Graph capture merge (3c / 3i)
+# ---------------------------------------------------------------------------
+
+
+def _merge_log(tmp_path, replay, root_lines):
+    lines = [f"[1/1] report: /traces/{replay} -> /out"]
+    for capture, tail in root_lines:
+        lines.append("Processing execution root: step[DECODE bs=12]")
+        if capture:
+            lines.append(
+                "Capture trace for execution root step[DECODE bs=12]: "
+                f"{capture} (12_FULL)"
+            )
+        lines.append(tail)
+    return write_stream(tmp_path / "step1_perf_report.log", lines)
+
+
+_PAIRED = "Found 1 capture roots and 1 graph roots"
+
+
+def test_graph_merge_clean_same_rank(tmp_path):
+    log = _merge_log(
+        tmp_path, "run-TP-0.trace.json.gz", [("bs_12_rank0.json.gz", _PAIRED)] * 2
+    )
+    summary = summarize_graph_merge(log)
+    assert summary["merged"] == 2 and summary["unmerged"] == 0
+    assert summary["mapping"][0]["roots"] == 2
+    assert summary["mapping"][0]["rank_mismatch"] is False
+    assert check_capture_graph_merge_fail(str(tmp_path), log) is None
+    assert check_capture_rank_mismatch(str(tmp_path), log) is None
+
+
+def test_graph_merge_rank_mismatch(tmp_path):
+    log = _merge_log(
+        tmp_path, "run-TP-0.trace.json.gz", [("bs_12_rank7.json.gz", _PAIRED)]
+    )
+    draft = check_capture_rank_mismatch(str(tmp_path), log)
+    assert draft is not None and "bs_12_rank7.json.gz" in draft.evidence
+    assert check_capture_graph_merge_fail(str(tmp_path), log) is None
+
+
+def test_graph_merge_failures_and_abort(tmp_path):
+    log = _merge_log(
+        tmp_path,
+        "run-TP-0.trace.json.gz",
+        [
+            (
+                "bs_12_rank0.json.gz",
+                "Graph capture merge failed: multistream graph root has "
+                "capture kernel names are absent",
+            ),
+            (None, "Warning: could not determine batch size for root"),
+        ],
+    )
+    write_stream(log, [*open(log), "Graph capture merge failed; returning None"])
+    summary = summarize_graph_merge(log)
+    assert summary["merge_aborted"] is True
+    assert summary["unmerged"] == 2
+    draft = check_capture_graph_merge_fail(str(tmp_path), log)
+    assert draft is not None and "merge aborted" in draft.evidence
+
+
+def test_graph_merge_absent_log(tmp_path):
+    assert summarize_graph_merge(None) is None
+    assert check_capture_graph_merge_fail(str(tmp_path), None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2884,3 +2954,56 @@ def test_main_no_findings_healthy(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["triage", "--session-dir", str(session)])
     main()
     assert "No failures detected" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Profile mode (--bench-dir)
+# ---------------------------------------------------------------------------
+
+_STEP = "execute_1_context_1(sq1sk1sqsq1sqsk1)_generation_1(sq1sk1sqsq1sqsk1)"
+
+
+def _make_bench(tmp_path, *, steps=2, stacks=True, aborted=False):
+    bench = tmp_path / "benchmark_vllm_1"
+    events = [{"ph": "X", "cat": "user_annotation", "name": _STEP}] * steps
+    events += [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "aten::mm",
+            "args": {"Input Dims": [[2, 2]]},
+        },
+        {"ph": "X", "cat": "kernel", "name": "k"},
+        {"ph": "X", "cat": "cuda_runtime", "name": "hipGraphLaunch"},
+    ]
+    if stacks:
+        events.append({"ph": "X", "cat": "python_function", "name": "f"})
+    trace = bench / "torch_trace" / "dp0_pp0_tp0_dcp0_ep0_rank0.1.pt.trace.json.gz"
+    write_json_gz(trace, {"traceEvents": events})
+    write_json_gz(
+        bench / "torch_trace" / "capture_traces" / "graph_capture_rank_0.json.gz", {}
+    )
+    write_text(
+        bench / "config.yaml",
+        "framework: vllm\nagentx:\n  enabled: true\nprofiler:\n  torch_profiler:\n    num_steps: 2\n",
+    )
+    split = bench / "torch_trace" / "trace_split"
+    write_json(
+        split / "split_manifest.json",
+        {"status": 0, "phase_confidence": "high", "aborted": aborted},
+    )
+    write_json_gz(
+        split / "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs4_x.json.gz",
+        {},
+    )
+    return str(bench)
+
+
+def test_profile_checks_clean_bench(tmp_path):
+    assert run_triage(_make_bench(tmp_path), specs=PROFILE_CHECKS) == []
+
+
+def test_profile_checks_flag_split_stack_and_steps(tmp_path):
+    bench = _make_bench(tmp_path, steps=1, stacks=False, aborted=True)
+    found = {f.sublabel for f in run_triage(bench, specs=PROFILE_CHECKS)}
+    assert found == {"2d", "2k", "2l"}

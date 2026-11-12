@@ -155,6 +155,10 @@ For ATOM, the equivalent knobs are the `ATOM_ENABLE_DETAILED_ANNOTATION` environ
 | **Cluster + container** (default) | Commands wrapped with `ssh <node>`; Magpie launches a `--rm` container and bind-mounts the workspace at `/workspace` |
 | **Local** (`--run-mode local`) | Commands run directly; profiler-config paths use the host trace directory |
 
+## Trace Quality Check
+
+`python -m TraceLens.Agent.Analysis.triage.runner --bench-dir <benchmark-dir> [--out-dir <dir>]` checks a Magpie run before analysis. It verifies that the traces exist and include GPU kernels, CPU call stacks, inference annotations, the expected step count (AgentX: `num_steps`) and, when there are captures, graph launches. It checks the trace split through `split_manifest.json`, and reports the `benchmark_report.json` result, including the root-cause line when the benchmark failed. See the [triage README](../Analysis/triage/README.md).
+
 ## Trace Splitting and Handoff to Analysis
 
 Step 6 produces split traces in `torch_trace/trace_split/` via `TraceLens.TraceUtils.split_trace.main`. The skill then prints (but does **not** run) a `generate_perf_report_pytorch_inference.py` command that the user can launch to feed the split traces into the [TraceLens Agent](../Analysis/README.md). See [Generate a PyTorch inference performance report](../../../docs/how-to/generate-perf-report-pytorch-inference.md) for splitting heuristics and prefill/decode mix selection.
