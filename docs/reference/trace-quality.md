@@ -10,8 +10,8 @@ See LICENSE for license information.
 :keywords: TraceLens, trace check, trace quality, validation, dropped kernels, call stack, graph mode, with_stack, capture trace, TRACELENS_SKIP_QUALITY_CHECK, TRACELENS_DETAILED_QUALITY_CHECKS, ROCm, AMD Instinct
 ```
 
-Collecting a trace can be difficult. Profilers require specific flags and settings to capture the data that
-downstream analysis needs: call stacks, kernel correlation IDs, graph-capture
+Collecting a trace for detailed performance analysis requires certain profiler configs to capture the data that
+downstream analysis needs: call stacks, kernel correlation IDs, HIP/CUDA-graph capture-phase
 traces, etc. On top of this profilers can be buggy and drop crucial information needed for analysis. Without early detection these traces can lead
 to incomplete reports, misleading roofline numbers, or hard-to-diagnose inaccuracies in the analysis.
 
@@ -43,21 +43,30 @@ Checks are organized into four stages:
 
 ## Complete check reference
 
-| Check | Phase | Detailed | Framework | Level | Description |
-|-------|-------|----------|-----------|-------|-------------|
-| `_check_trace_file_size` | pre-load | no | all | warn | Flags traces too large to load cheaply, measured before trace parsing. Compressed traces over 300 MB, or uncompressed traces over 4.5 GB are flagged. |
-| `_check_kernels_present` | pre-report | no | PyTorch | error | Verifies at least one GPU kernel event exists. Analysis cannot proceed without GPU work. |
-| `_check_call_stack` | pre-report | no | all | warn | Checks for python events indicating call-stack data was captured. Missing call stacks limit call-stack-based analysis and may affect cross-trace comparisons. |
-| `_check_graph_mode` | pre-report | no | all | warn | Detects `cudaGraphLaunch` or `hipGraphLaunch` events without a corresponding capture trace. Pass `--capture_folder` to the inference report generator for full graph-mode analysis. |
-| `_check_cpu_op_shapes_basic` | pre-report | no | PyTorch | warn | Checks whether CPU operations carry `Input Dims` in their args. Warns if fewer than 10 have shapes. Re-profile with `record_shapes=True`. |
-| `_check_cpu_op_shapes_detailed` | pre-report | yes | PyTorch | warn | Computes shape coverage as a percentage across all `cpu_op` events. Warns below 80% coverage, flags below 40%. |
-| `_check_cpu_gpu_ratio` | pre-report | yes | PyTorch | warn | Computes the ratio of CPU events to GPU events. Flags ratios outside the 0.2–50 range as suspicious, indicating the profiler may not have captured both CPU and GPU sides properly. |
-| `_check_runtime_variability` | pre-report | yes | all | warn | Groups kernels by (name, grid, block) and computes the coefficient of variation of durations per group. Warns when more than 10% of eligible groups exceed CV of 0.75, indicating profiler timing jitter or workload instability. |
-| `_check_jax_metadata_richness` | pre-report | yes | JAX | warn | Checks coverage of `hlo_op`, `hlo_module`, and `tf_op` metadata fields on GPU events. Flags when minimum coverage is below 40%. |
-| `_check_kernels_dropped_correlation` | post-report | no | all | warn | Checks each CUDA runtime launch event for a matching GPU kernel via correlation ID after tree building. Reports the count of launches with no corresponding kernel. |
-| `_check_gpu_idle` | post-report | yes | all | info | Reads the `idle_time` percent from the report's `gpu_timeline` sheet. Flags at 30% idle. Idle time is expected for CPU-bound or graph-replay workloads, but could be worth looking into otherwise. |
-| `_check_ops_have_shapes` | post-report | yes | all | warn | Checks `Input Dims` coverage in the `ops_unique_args` sheet. Flags below 40% — shape data did not survive through the analysis pipeline. |
-| `_check_attention_kernel_count` | post-report | yes | JAX | warn | Validates observed attention kernel launches against a model config formula: `num_gpus * num_steps * num_layers * calls * unique_kernels`, computed separately for forward and backward passes. Requires `AttnCountConfig` with `num_layers` and `num_steps` set. |
+### `TRACELENS_DETAILED_QUALITY_CHECKS=0` (default)
+
+| Check | Phase | Framework | Level | Description |
+|-------|-------|-----------|-------|-------------|
+| `_check_trace_file_size` | pre-load | all | warn | Flags traces too large to load cheaply, measured before trace parsing. Compressed traces over 300 MB, or uncompressed traces over 4.5 GB are flagged. |
+| `_check_kernels_present` | pre-report | PyTorch | error | Verifies at least one GPU kernel event exists. Analysis cannot proceed without GPU work. |
+| `_check_call_stack` | pre-report | all | warn | Checks for python events indicating call-stack data was captured. Missing call stacks limit call-stack-based analysis and may affect cross-trace comparisons. |
+| `_check_graph_mode` | pre-report | all | warn | Detects `cudaGraphLaunch` or `hipGraphLaunch` events without a corresponding capture trace. Pass `--capture_folder` to the inference report generator for full graph-mode analysis. |
+| `_check_cpu_op_shapes_basic` | pre-report | PyTorch | warn | Checks whether CPU operations carry `Input Dims` in their args. Warns if fewer than 10 have shapes. Re-profile with `record_shapes=True`. |
+| `_check_kernels_dropped_correlation` | post-report | all | warn | Checks each CUDA runtime launch event for a matching GPU kernel via correlation ID after tree building. Reports the count of launches with no corresponding kernel. |
+
+### `TRACELENS_DETAILED_QUALITY_CHECKS=1`
+
+Runs in addition to the checks above.
+
+| Check | Phase | Framework | Level | Description |
+|-------|-------|-----------|-------|-------------|
+| `_check_cpu_op_shapes_detailed` | pre-report | PyTorch | warn | Computes shape coverage as a percentage across all `cpu_op` events. Warns below 80% coverage, flags below 40%. |
+| `_check_cpu_gpu_ratio` | pre-report | PyTorch | warn | Computes the ratio of CPU events to GPU events. Flags ratios outside the 0.2–50 range as suspicious, indicating the profiler may not have captured both CPU and GPU sides properly. |
+| `_check_runtime_variability` | pre-report | all | warn | Groups kernels by (name, grid, block) and computes the coefficient of variation of durations per group. Warns when more than 10% of eligible groups exceed CV of 0.75, indicating profiler timing jitter or workload instability. |
+| `_check_jax_metadata_richness` | pre-report | JAX | warn | Checks coverage of `hlo_op`, `hlo_module`, and `tf_op` metadata fields on GPU events. Flags when minimum coverage is below 40%. |
+| `_check_gpu_idle` | post-report | all | info | Reads the `idle_time` percent from the report's `gpu_timeline` sheet. Flags at 30% idle. Idle time is expected for CPU-bound or graph-replay workloads, but could be worth looking into otherwise. |
+| `_check_ops_have_shapes` | post-report | all | warn | Checks `Input Dims` coverage in the `ops_unique_args` sheet. Flags below 40% — shape data did not survive through the analysis pipeline. |
+| `_check_attention_kernel_count` | post-report | JAX | warn | Validates observed attention kernel launches against a model config formula: `num_gpus * num_steps * num_layers * calls * unique_kernels`, computed separately for forward and backward passes. Requires `AttnCountConfig` with `num_layers` and `num_steps` set. |
 
 ## Severity levels
 
