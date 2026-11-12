@@ -6158,10 +6158,6 @@ class hipblaslt_gemm_fp4(GEMM):
         assert (
             bpeA is not None and bpeB is not None
         ), f"Data types of A and B are not supported: {dtype_A_B}"
-        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
-        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
-        # bypass it and compute bytes explicitly so we can fold in the
-        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
         M, N, K = self.M, self.N, self.K
         block = self.MXFP4_BLOCK_SIZE
         scales_per_row = (K + block - 1) // block
@@ -6384,7 +6380,8 @@ class gemm_fp4_impl(GEMM):
         dims = event["args"]["Input Dims"]
         types = event["args"].get("Input type", []) or []
         M = dims[0][0]
-        K = int(dims[0][1] / name2bpe(types[0]))
+        K_packed = dims[0][1]
+        K = K_packed * 2  # Float4_e2m1fn_x2 packs two FP4 values per byte
         N = dims[3][0]
         has_bias = len(dims[11]) > 0
         return {
@@ -6409,20 +6406,18 @@ class gemm_fp4_impl(GEMM):
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
-        self.bpe_mat1 = name2bpe(dtype_A_B[0])
-        self.bpe_mat2 = name2bpe(dtype_A_B[1])
-        self.bpe_output = name2bpe(dtype_A_B[2])
+        M, N, K = self.M, self.N, self.K
+        bpe_A = name2bpe(dtype_A_B[0])
+        bpe_B = name2bpe(dtype_A_B[1])
+        bpe_output = name2bpe(dtype_A_B[2])
+        bytes_A = M * (K // 2) * bpe_A
+        bytes_B = N * (K // 2) * bpe_B
+        bytes_output = M * N * bpe_output
         bias_dtype = self.param_details["bias_dtype"] or dtype_A_B[2]
-        self.bpe_bias = name2bpe(bias_dtype)
-        base_bytes = super().bytes(
-            bpe_mat1=self.bpe_mat1,
-            bpe_mat2=self.bpe_mat2,
-            bpe_bias=self.bpe_bias,
-            bpe_output=self.bpe_output,
-        )
+        bytes_bias = N * name2bpe(bias_dtype) if self.param_details["bias"] else 0
         bpe_scale = name2bpe(self.param_details["scale_dtype"])
-        base_bytes += prod(self.param_details["b_scale_shape"]) * bpe_scale
-        return base_bytes
+        bytes_b_scale = prod(self.param_details["b_scale_shape"]) * bpe_scale
+        return bytes_A + bytes_B + bytes_output + bytes_bias + bytes_b_scale
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4") # Compute precision not in trace; determined by GPU MFMA instruction selection.

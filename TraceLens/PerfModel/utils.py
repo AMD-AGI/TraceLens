@@ -161,9 +161,9 @@ def name2bpe(name):
             "unsigned char",
             "signed char",
             "fp8",
+            "c10::float4_e2m1fn_x2",
         ],
         0.5: [
-            "c10::float4_e2m1fn_x2",
             "fp4",
         ],
     }
