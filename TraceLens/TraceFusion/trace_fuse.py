@@ -28,10 +28,10 @@ def _process_single_rank(
     Standalone function to load and process trace data for a single rank.
     Must be at module level to be picklable for ProcessPoolExecutor.
     """
-    data = DataLoader.load_data(filepath)
+    events, _ = DataLoader.load_trace_events(filepath)
 
     processed_events = []
-    for event in data["traceEvents"]:
+    for event in events:
         if event["ph"] == "M" and event["name"] in (
             "process_name",
             "process_sort_index",
@@ -99,8 +99,7 @@ class TraceFuse:
 
         # get the first file to set the linking key and offset multiplier
         filename = next(iter(self.rank2filepath.values()))
-        data = DataLoader.load_data(filename)
-        events = data["traceEvents"]
+        events, _ = DataLoader.load_trace_events(filename)
         self._set_linking_key(events)
 
         self.fields_to_adjust_offset = ["id", "pid", self.linking_key]

@@ -11,7 +11,13 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from ..util import JaxProfileProcessor, TraceEventUtils
+from ..TraceUtils.utils.annotation_utils import IterationAnnotation
+from ..util import (
+    GRAPH_LAUNCH_NAMES,
+    TIMESTAMP_TOLERANCE_US,
+    JaxProfileProcessor,
+    TraceEventUtils,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +163,7 @@ class BaseTraceToTree(ABC):
             # Event bleed: the event starts inside the stack top but ends
             # after it. Small bleeds (< tolerance) pop the sibling; larger
             # ones discard the event.
-            bleed_tolerance_us = 1.0
+            bleed_tolerance_us = TIMESTAMP_TOLERANCE_US
             if stack and (
                 event[TraceEventUtils.TraceKeys.TimeEnd]
                 > stack[-1][TraceEventUtils.TraceKeys.TimeEnd] + bleed_tolerance_us
@@ -645,6 +651,44 @@ class JaxTraceToTree(BaseTraceToTree):
                                             )
 
 
+def covering_user_annotation(event, annotation_events) -> str:
+    """The annotation whose span contains ``event``.
+
+    A replay sits inside several ranges. ``scheduler.run_batch`` starts
+    before the step and carries no sq/sk record, so the earliest range
+    leaves ``kv_mode`` unset and the MLA roofline prices the reserved index
+    buffer. The tightest range that parses as an iteration annotation is
+    the step this launch belongs to. A launch that ends on the annotation
+    boundary is still inside it.
+    """
+    start = event.get("ts")
+    if start is None:
+        return "NA"
+    end = start + (event.get("dur") or 0)
+    containing = []
+    for ann in annotation_events:
+        ann_start = ann.get("ts")
+        if ann_start is None:
+            continue
+        ann_end = ann_start + (ann.get("dur") or 0)
+        if ann_start <= start and end <= ann_end:
+            containing.append(ann)
+    if not containing:
+        return "NA"
+
+    parsed = []
+    with_sqsk = []
+    for ann in containing:
+        record = IterationAnnotation(str(ann.get("name") or ""))
+        if not record.matched:
+            continue
+        parsed.append(ann)
+        if record.has_sqsk:
+            with_sqsk.append(ann)
+    chosen = min(with_sqsk or parsed or containing, key=lambda ann: ann.get("dur") or 0)
+    return chosen.get("name") or "NA"
+
+
 class TraceToTree(BaseTraceToTree):
     """Chrome-trace (PyTorch) tree with CUDA runtime / driver linking and host stack."""
 
@@ -761,10 +805,9 @@ class TraceToTree(BaseTraceToTree):
         Name = TraceEventUtils.TraceKeys.Name
         events_by_uid = self.events_by_uid
         name2event_uids = self.name2event_uids
-        graph_launch_names = {"cudaGraphLaunch", "hipGraphLaunch"}
         for runtime_uid in self.runtime_event_uids:
             runtime_event = events_by_uid[runtime_uid]
-            if runtime_event["name"] in graph_launch_names:
+            if runtime_event["name"] in GRAPH_LAUNCH_NAMES:
                 corresponding_gpu_events = self._get_graph_gpu_events(runtime_event)
             else:
                 gpu_evt = self._find_corresponding_output_event(runtime_event)
@@ -828,24 +871,18 @@ class TraceToTree(BaseTraceToTree):
         return None
 
     def apply_annotation(self, name_filters=[]) -> None:
+        """Stamp each filtered op with the step annotation that contains it."""
         events = self.events
         annotation_events = [
             e for e in events if "user_annotation" in (e.get("cat") or "")
         ]
-        annotation_events.sort(key=lambda x: x.get("ts", 0))
         filtered_events = []
         for i in name_filters:
             filtered_events += [e for e in events if e.get("name", "").startswith(i)]
         for e in filtered_events:
-            annotation = "NA"
-            for ann in annotation_events:
-                if (
-                    ann["ts"] <= e["ts"]
-                    and (e["ts"] + e["dur"]) < ann["ts"] + ann["dur"]
-                ):
-                    annotation = ann.get("name")
-                    break
-            self.events[e[TraceEventUtils.TraceKeys.UID]]["annotation"] = annotation
+            self.events[e[TraceEventUtils.TraceKeys.UID]]["annotation"] = (
+                covering_user_annotation(e, annotation_events)
+            )
 
     def traverse_subtree_and_print(
         self,

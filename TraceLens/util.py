@@ -70,6 +70,11 @@ def suppress_native_hlo_logs():
         tmp.close()
 
 
+def parse_bool_string(value) -> bool:
+    """Parse a string value as a boolean."""
+    return str(value if value is not None else "").lower() in ("1", "true")
+
+
 def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """Merge a list of ``(start, end)`` intervals into a union of non-overlapping ones.
 
@@ -127,6 +132,15 @@ def get_filename(filepath: str) -> str:
             print(f"  Reading {json_file} from zip...")
             return json_file
     return filepath
+
+
+_RANK_RE = re.compile(r"(?:^|[^A-Za-z])rank[-_]?(\d+)(?:[^0-9]|$)", re.IGNORECASE)
+
+
+def extract_rank(path) -> Optional[int]:
+    """Return the rank number embedded in a trace path (``rank_3``, ``rank-3``), or None."""
+    match = _RANK_RE.search(str(path).replace("\\", "/"))
+    return int(match.group(1)) if match else None
 
 
 def _load_xplane_converter():
@@ -451,6 +465,38 @@ class DataLoader:
             with open(out_path, "w") as writefile:
                 json.dump(parsed, writefile)
         return parsed
+
+    @staticmethod
+    def load_trace_events(
+        filepath,
+        save_preprocessed=False,
+        capture_folder=None,
+        framework=None,
+    ):
+        run_checks = not parse_bool_string(
+            os.environ.get("TRACELENS_SKIP_QUALITY_CHECK")
+        )
+        if run_checks:
+            from .TraceUtils.utils import trace_check
+
+            # Pre-parse: flag oversized traces before paying the parse cost.
+            trace_check.run_pre_load_checks(filepath).log_findings()
+
+        data = DataLoader.load_data(filepath, save_preprocessed=save_preprocessed)
+        if isinstance(data, list):
+            return data, {}
+        metadata = {k: v for k, v in data.items() if k != "traceEvents"}
+        events = data.get("traceEvents", [])
+
+        if run_checks:
+            trace_check.run_trace_checks(
+                events,
+                capture_folder=capture_folder,
+                filepath=filepath,
+                framework=framework,
+            ).log_findings()
+
+        return events, metadata
 
 
 class JaxProfileProcessor:
@@ -1032,6 +1078,46 @@ class TraceEventUtils:
         return ({pid: dict(tid_dict) for pid, tid_dict in metadata.items()}, rest)
 
     @staticmethod
+    def _agreed_device_int(metadata: dict | None, field: str) -> int | None:
+        """One ``deviceProperties`` integer when every visible GPU agrees.
+
+        A missing field, an empty device list, or a node whose GPUs disagree
+        returns ``None``.
+        """
+        if not metadata:
+            return None
+        devices = metadata.get("deviceProperties")
+        if not isinstance(devices, list) or not devices:
+            return None
+        values = set()
+        for device in devices:
+            if not isinstance(device, dict) or field not in device:
+                return None
+            values.add(int(device[field]))
+        if len(values) != 1:
+            return None
+        value = values.pop()
+        return value if value > 0 else None
+
+    @staticmethod
+    def num_cus_from_trace(metadata: dict | None) -> int | None:
+        """Compute units from ``deviceProperties``.
+
+        ``numSms`` is the compute-unit count
+        """
+        return TraceEventUtils._agreed_device_int(metadata, "numSms")
+
+    @staticmethod
+    def lds_capacity_from_trace(metadata: dict | None) -> int | None:
+        """Per-CU LDS capacity in bytes.
+
+        ``maxSharedMemoryPerMultiProcessor`` is the shared memory capacity
+        """
+        return TraceEventUtils._agreed_device_int(
+            metadata, "maxSharedMemoryPerMultiProcessor"
+        )
+
+    @staticmethod
     def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:
         return TraceEventUtils.split_event_list(events)[0]
 
@@ -1243,6 +1329,12 @@ class TraceEventUtils:
 GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
 GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
 GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
+GRAPH_LAUNCH_NAMES = frozenset({"cudaGraphLaunch", "hipGraphLaunch"})
+
+# Tolerance (µs) for timestamp imprecision when comparing event times — e.g.
+# event-boundary "bleed" during tree building, or kernel-vs-computation time
+# coverage, where differences below this are profiler/floating-point noise.
+TIMESTAMP_TOLERANCE_US = 1.0
 
 
 class RocprofParser:

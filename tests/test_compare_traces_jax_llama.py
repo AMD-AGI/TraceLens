@@ -175,9 +175,10 @@ def test_pid_map_and_extract_gpu_events(tmp_path):
     path = _write_synthetic_gz_trace(tmp_path)
     with gzip.open(path, "rt", encoding="utf-8") as f:
         trace = json.load(f)
-    mp = pid_map(trace)
+    trace_events = trace["traceEvents"]
+    mp = pid_map(trace_events)
     assert "/device:GPU:0" in mp.values()
-    events = extract_gpu_events(trace, gpu_index=0)
+    events = extract_gpu_events(trace_events, gpu_index=0)
     assert len(events) > 0
     assert all(isinstance(e, Event) for e in events)
 
@@ -186,7 +187,7 @@ def test_token_start_times_and_compute_stage_table(tmp_path):
     path = _write_synthetic_gz_trace(tmp_path)
     with gzip.open(path, "rt", encoding="utf-8") as f:
         trace = json.load(f)
-    gpu_events = extract_gpu_events(trace, gpu_index=0)
+    gpu_events = extract_gpu_events(trace["traceEvents"], gpu_index=0)
     stream = sorted(gpu_events, key=lambda e: e.ts)
     starts = token_start_times(stream, block0_norm_hint="te_layernorm_forward")
     assert len(starts) == 2

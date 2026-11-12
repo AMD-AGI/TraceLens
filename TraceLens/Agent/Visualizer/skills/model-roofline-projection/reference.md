@@ -74,7 +74,7 @@ When the checkout is not the current directory, install the package extra instea
 pip install "TraceLens[Visualizer]"
 ```
 
-Python 3.10 or newer. The extra pulls `torch`, `transformers`, and `huggingface_hub`. Do not `pip install` those yourself, and do not install a ROCm or CUDA wheel: the meta-device shape pass allocates no real tensors and the roofline projection itself makes no device calls at all.
+Python 3.10 or newer. The extra pulls the CPU-only PyTorch wheel, `transformers`, and `huggingface_hub`. Do not `pip install` those yourself, and do not install a ROCm or CUDA wheel: the meta-device shape pass allocates no real tensors and the roofline projection itself makes no device calls at all.
 
 Confirm the console script:
 

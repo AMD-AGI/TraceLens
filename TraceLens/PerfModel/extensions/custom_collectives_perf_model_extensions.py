@@ -38,7 +38,7 @@ class aiter_fused_allreduce_rmsnorm(CustomCollective):
     Bytes: memory traffic per GPU (read inp+res_inp+weight, write res_out+out).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -128,7 +128,7 @@ class custom_ar_all_reduce(CustomCollective):
     Bytes: memory traffic per GPU (read inp + write out).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -302,7 +302,7 @@ class aiter_reduce_scatter(CustomCollective):
     Bytes: memory traffic per GPU (read inp + write out).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -349,7 +349,7 @@ class aiter_all_gather_reg(CustomCollective):
     Bytes: memory traffic per GPU (read inp shard + write full out).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)
@@ -415,7 +415,7 @@ class sgl_kernel_reg_all_gather_into_tensor(CustomCollective):
         for the per-rank `op_shape` (shard). dtype is taken from Input type[0].
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
         self.param_details = self.get_param_details(event)

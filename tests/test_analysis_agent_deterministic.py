@@ -19,12 +19,14 @@ import re
 
 import pytest
 
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    KERNEL_NAME_TRUNC_LEN,
+)
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 from TraceLens.Agent.Analysis.utils.deterministic_fallback import (
     GRAPH_REPLAY_FRACTION_MAX,
     MAX_PITEM_COUNT,
     MIN_PITEM_PERCENT_E2E,
-    _KERNEL_NAME_TRUNC_LEN,
     _normalize_kernel_name,
     check_graph_replay_coverage,
     main,
@@ -607,7 +609,7 @@ def test_writer_degraded_banner(tmp_path):
 
     # Visible call-out with the fraction rendered as a percent.
     assert "> **⚠ Degraded (deterministic fallback) report.**" in md
-    assert "graph-replay fraction 95%" in md
+    assert "graph-replay fraction 95.0% > 10.0%)" in md
 
     # The banner is INERT: stripping it must not change any parsed candidate count.
     stripped = _strip_banner(md)
@@ -628,7 +630,7 @@ def test_normalizer_bare_triton_identity():
 def test_normalizer_clean_aiter_identity():
     # A real ~50-char aiter config passes through untouched (< the 75 cap).
     name = "aiter::f4gemm_bf16_per1x32Fp4_BpreShuffle_192x128"
-    assert len(name) < _KERNEL_NAME_TRUNC_LEN
+    assert len(name) < KERNEL_NAME_TRUNC_LEN
     assert _normalize_kernel_name(name) == name
 
 
@@ -638,30 +640,30 @@ def test_normalizer_void_template_truncated_void_kept():
         "void at::native::elementwise_kernel<128, 2, "
         "at::native::gpu_kernel_impl<at::native::BinaryFunctor>>(int, char*)"
     )
-    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
+    assert len(raw) > KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
     assert out.startswith("void ")
-    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
-    assert len(out) == _KERNEL_NAME_TRUNC_LEN + 3
+    assert out == raw[:KERNEL_NAME_TRUNC_LEN] + "..."
+    assert len(out) == KERNEL_NAME_TRUNC_LEN + 3
 
 
 def test_normalizer_tensile_truncated():
     raw = "Cijk_Ailk_Bljk_HHS_BH_Bias_AS_MT128x160x16_MI16x16x16x1_SN_WG32_8_1_ABCD"
     raw = raw + "_extra_tokens_pushing_well_past_the_cap"
-    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
+    assert len(raw) > KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
-    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    assert out == raw[:KERNEL_NAME_TRUNC_LEN] + "..."
 
 
 def test_normalizer_mangled_zn_truncated_not_demangled():
     # Locks in the no-demangle decision: the symbol stays mangled, just shorter.
     raw = "_ZN5aiter24add_rmsnorm_quant_kernelIN3std10bfloat16_tES2_Li256ELb1EEEvPT_"
     raw = raw + "PKS1_iiffb"
-    assert len(raw) > _KERNEL_NAME_TRUNC_LEN
+    assert len(raw) > KERNEL_NAME_TRUNC_LEN
     out = _normalize_kernel_name(raw)
     assert out.startswith("_ZN")
     assert out.endswith("...")
-    assert out == raw[:_KERNEL_NAME_TRUNC_LEN] + "..."
+    assert out == raw[:KERNEL_NAME_TRUNC_LEN] + "..."
 
 
 def test_normalizer_never_returns_empty():
@@ -671,8 +673,8 @@ def test_normalizer_never_returns_empty():
 
 
 def test_normalizer_length_boundary():
-    at_cap = "a" * _KERNEL_NAME_TRUNC_LEN
-    over_cap = "a" * (_KERNEL_NAME_TRUNC_LEN + 1)
+    at_cap = "a" * KERNEL_NAME_TRUNC_LEN
+    over_cap = "a" * (KERNEL_NAME_TRUNC_LEN + 1)
     assert _normalize_kernel_name(at_cap) == at_cap  # len 75 -> identity
     assert _normalize_kernel_name(over_cap) == at_cap + "..."  # len 76 -> truncates
 
@@ -896,5 +898,5 @@ def test_main_derives_fraction_when_omitted(tmp_path, monkeypatch):
 
     # 90% graph-replay fraction is recovered from the gate and rendered in the banner.
     md = (out_dir / "analysis.md").read_text(encoding="utf-8")
-    assert "90%" in md
+    assert "90.0%" in md
     assert "#### P1:" in md

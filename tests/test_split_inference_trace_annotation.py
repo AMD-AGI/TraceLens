@@ -1076,7 +1076,8 @@ def _write_trace(trace, path):
     return path
 
 
-def test_main_no_gpu_work_is_skipped(tmp_path, capsys):
+def test_main_no_gpu_work_is_skipped(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("TRACELENS_SKIP_QUALITY_CHECK", "1")
     # A trace with no GPU kernels has nothing to split.
     trace = {
         "traceEvents": [
@@ -1093,8 +1094,8 @@ def test_main_no_gpu_work_is_skipped(tmp_path, capsys):
     }
     out_dir = tmp_path / "out"
     _invoke_main(_write_trace(trace, tmp_path / "t.json"), out_dir)
-    assert "No GPU work" in capsys.readouterr().out
-    assert not (out_dir / "execution_details.json").exists()
+    # Splitter finds no iteration roots and refuses to split
+    assert "NOT_SPLITTABLE" in capsys.readouterr().out
 
 
 def _force_status(monkeypatch, events, status):
@@ -1252,9 +1253,9 @@ class TestCaptureMergePush95:
         (tmp_path / "ok.json.gz").write_bytes(
             b"\x1f\x8b"
         )  # invalid gzip; load may skip
-        result, batch_sizes = load_capture_folder(str(tmp_path), str(meta))
+        result, batch_sizes, _ = load_capture_folder(str(tmp_path), str(meta))
         assert isinstance(result, dict)
-        assert 32 in batch_sizes or batch_sizes == []
+        assert batch_sizes == {"target": [32]}
 
     def test_find_closest_batch_size(self):
         assert find_closest_batch_size(30, [16, 32, 64]) == 32

@@ -17,6 +17,7 @@ logging.basicConfig(
     format="[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s",
 )
 
+from TraceLens.TraceUtils.utils import trace_check
 from TraceLens.TreePerf import JaxTreePerfAnalyzer
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -136,7 +137,7 @@ def perf_analysis(
         )
         op_cat_name = "_".join(op_cat.lower().split())
         dict_name2df[f"op_{op_cat_name}"] = df_op
-    return dict_name2df
+    return dict_name2df, perf_analyzer
 
 
 def generate_perf_report_jax(
@@ -147,7 +148,7 @@ def generate_perf_report_jax(
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
-    enable_origami: bool = False,
+    enable_origami_gemm: bool = False,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -155,17 +156,21 @@ def generate_perf_report_jax(
         gpu_arch=gpu_arch,
     )
     # Analyze trace profile
-    dict_name2df = perf_analysis(
+    dict_name2df, perf_analyzer = perf_analysis(
         profile_path,
         kernel_metadata_keyword_filters=kernel_metadata_keyword_filters,
         arch=gpu_arch_json,
-        enable_origami=enable_origami,
+        enable_origami_gemm=enable_origami_gemm,
     )
 
     # Write all DataFrames to separate sheets in an Excel workbook
     if not output_csvs_dir and output_xlsx_path is None:
         base_path = profile_path.rsplit(".xplane.pb", 1)[0]
         output_xlsx_path = base_path + "_perf_report.xlsx"
+    trace_check.run_trace_checks(
+        pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="jax"
+    ).log_findings()
+
     write_report_outputs(
         dict_name2df,
         xlsx_path=output_xlsx_path,
@@ -214,10 +219,10 @@ def main():
     )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
-        "--enable-origami",
+        "--enable-origami-gemm",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+        help="Add Origami GEMM times (Origami columns) when a GPU arch is given",
     )
 
     args = parser.parse_args()
@@ -229,7 +234,7 @@ def main():
         kernel_metadata_keyword_filters=args.kernel_metadata_keyword_filters,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
-        enable_origami=args.enable_origami,
+        enable_origami_gemm=args.enable_origami_gemm,
     )
 
 

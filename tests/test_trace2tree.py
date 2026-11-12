@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from copy import deepcopy
 from typing import Dict, List
@@ -33,11 +35,16 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     find_execution_details,
     get_subtree_events,
     is_multistream,
+    load_capture_folder,
     make_connections,
     update_subtree_uids_and_timestamps,
     verify_subtree_events,
 )
-from TraceLens.Trace2Tree.trace_to_tree import JaxTraceToTree, TraceToTree
+from TraceLens.Trace2Tree.trace_to_tree import (
+    JaxTraceToTree,
+    TraceToTree,
+    covering_user_annotation,
+)
 from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
     apply_pseudo_op_extensions,
 )
@@ -826,6 +833,64 @@ class TestTraceToTreeExtended:
         tree.apply_annotation(name_filters=["gpu_op"])
         assert tree.events[gpu_op_evt["UID"]]["annotation"] == "phase_a"
 
+    def test_apply_annotation_prefers_the_step_inside_run_batch(self):
+        # The graph launch fills the step. run_batch starts earlier and
+        # contains the launch too. The step is the one with the sq/sk record.
+        step = "step[DECODE bs=3 g_sq=3 g_sk=86591 g_sqsq=3 g_sqsk=86591]"
+        events = [
+            _mk_event(
+                "user_annotation",
+                "scheduler.run_batch",
+                ts=0,
+                dur=1000,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+            _mk_event(
+                "user_annotation",
+                "step[DECODE bs=1 g_sq=1 g_sk=51424 g_sqsq=1 g_sqsk=51424]",
+                ts=0,
+                dur=800,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+            _mk_event("user_annotation", step, ts=400, dur=100, pid=1, tid=1, args={}),
+            _mk_event(
+                "cpu_op",
+                "aiter::mla_decode_v4_asm",
+                ts=400,
+                dur=100,
+                pid=1,
+                tid=1,
+                args={},
+            ),
+        ]
+        tree = _build_tree(events)
+        tree.apply_annotation(name_filters=["aiter::mla_decode_v4_asm"])
+        op = next(e for e in tree.events if e["name"] == "aiter::mla_decode_v4_asm")
+        assert tree.events[op["UID"]]["annotation"] == step
+
+    def test_covering_annotation_ignores_ranges_that_do_not_apply(self):
+        # A launch with no timestamp, an annotation with no timestamp, and a
+        # launch that sits outside every range each leave the stamp unset.
+        assert covering_user_annotation({"dur": 10}, []) == "NA"
+        assert (
+            covering_user_annotation(
+                {"ts": 50, "dur": 10},
+                [{"name": "step[DECODE bs=1 g_sq=1 g_sk=1 g_sqsq=1 g_sqsk=1]"}],
+            )
+            == "NA"
+        )
+        assert (
+            covering_user_annotation(
+                {"ts": 50, "dur": 10},
+                [{"name": "phase_a", "ts": 0, "dur": 20}],
+            )
+            == "NA"
+        )
+
     def test_link_fwd_bwd_and_subtree_bwd_events(self):
         events = [
             _mk_event(
@@ -1007,6 +1072,41 @@ class TestTraceCaptureMergeHelpers:
         tree = make_connections(tree, graph_filtered, capture_filtered)
         assert kernel["parent"] == updated[0]["UID"]
         assert capture_filtered[0]["args"]["correlation"] == 99
+
+    def test_load_capture_folder_keys_by_role_and_rank(self, tmp_path):
+        entries = [
+            ("DecodeCudaGraphRunner_bs_8_dense_rank0.json.gz", 8, None),
+            ("DecodeCudaGraphRunner_bs_8_sparse_rank0.json.gz", 8, None),
+            ("EAGLEDraftCudaGraphRunner_bs_8_rank0.json.gz", 8, "drafter"),
+            ("DecodeCudaGraphRunner_bs_8_rank1.json.gz", 8, None),
+        ]
+        metadata = []
+        for name, bs, role in entries:
+            (tmp_path / name).write_text("")
+            entry = {"file": name, "batch_size": bs, "mode": "FULL"}
+            if role:
+                entry["capture_type"] = role
+            metadata.append(entry)
+        metadata_path = tmp_path / "execution_details.json"
+        metadata_path.write_text(json.dumps(metadata))
+
+        capture_map, batch_sizes, _ = load_capture_folder(
+            str(tmp_path), str(metadata_path), replay_rank=0
+        )
+        assert capture_map == {
+            "target_8_FULL": [
+                str(tmp_path / entries[0][0]),
+                str(tmp_path / entries[1][0]),
+            ],
+            "drafter_8_FULL": [str(tmp_path / entries[2][0])],
+        }
+        assert batch_sizes == {"target": [8, 8], "drafter": [8]}
+
+        # No capture of the replay rank: fall back to all ranks.
+        capture_map, _, _ = load_capture_folder(
+            str(tmp_path), str(metadata_path), replay_rank=5
+        )
+        assert str(tmp_path / entries[3][0]) in capture_map["target_8_FULL"]
 
     def test_align_streams_multistream(self):
         graph_events = [

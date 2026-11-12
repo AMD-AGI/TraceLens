@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 
 from TraceLens import NcclAnalyser, TraceDiff, TreePerfAnalyzer
+from TraceLens.TraceUtils.utils import trace_check
+from TraceLens.IdleTimeAnalyser import IdleThresholds, IdleTimeAnalyser
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.reporting_utils import (
     add_gpu_arch_cli_args,
@@ -288,6 +290,23 @@ def apply_extension(perf_analyzer, extension_path):
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
 
+    if hasattr(extension, "external_op_projection"):
+        print(f"Applying external op projection from {extension_path}")
+        perf_analyzer.set_external_op_projection(extension.external_op_projection)
+
+    for attr, register in (
+        ("op_projections", "register_op_projection"),
+        ("kernel_filters", "register_kernel_filter"),
+    ):
+        if not hasattr(extension, attr):
+            continue
+        print(f"Applying {attr} from {extension_path}")
+        entries = getattr(extension, attr)
+        if not isinstance(entries, dict):
+            raise TypeError(f"Expected {attr} to be a dict, got {type(entries)}")
+        for label, fn in entries.items():
+            getattr(perf_analyzer, register)(label, fn)
+
     if hasattr(extension, "tree_postprocess_extension"):
         print(f"Applying tree postprocess extension from {extension_path}")
         tree_postprocess_extension = getattr(extension, "tree_postprocess_extension")
@@ -396,6 +415,36 @@ def add_truncated_kernel_details(
     return df[cols]
 
 
+def _idle_analysis_sheets(
+    tree,
+    profile_json_path,
+    enable_idle_analysis,
+    micro_idle_thresh_us,
+    include_call_stack,
+    enable_augmented_trace,
+    idle_launch_latency_us,
+):
+    """Idle sheets for the report, and the augmented trace if asked; {} when disabled."""
+    if not enable_idle_analysis:
+        return {}
+    thresholds = IdleThresholds()
+    if idle_launch_latency_us is not None:
+        thresholds = IdleThresholds(launch_latency_us=idle_launch_latency_us)
+    analyser = IdleTimeAnalyser(
+        tree,
+        thresholds,
+        micro_thresh_us=micro_idle_thresh_us,
+        include_call_stack=include_call_stack,
+    )
+    idle_dfs = analyser.get_dataframes()
+    print(f"Added idle time analysis sheets: {list(idle_dfs.keys())}")
+    if enable_augmented_trace:
+        aug_path = profile_json_path.rsplit(".json", 1)[0] + "_idle_augmented.json.gz"
+        analyser.write_augmented_trace(profile_json_path, aug_path)
+        print(f"Wrote augmented trace for Perfetto: {aug_path}")
+    return idle_dfs
+
+
 def generate_perf_report_pytorch(
     profile_json_path: str,
     output_xlsx_path: Optional[str] = None,
@@ -426,17 +475,20 @@ def generate_perf_report_pytorch(
     # enrich the report. Mutually exclusive with comparison_json_path.
     precomputed_diff_stats: Optional[str] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
-    python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
     inductor_cache_dir: Optional[str] = None,
     group_by_num_kernels: bool = False,
-    enable_origami: bool = False,
+    enable_origami_gemm: bool = False,
+    enable_origami_sdpa_tile: bool = False,
     # activation recompute detection
     detect_recompute: bool = False,
     include_call_stack: bool = False,
+    # idle time analysis
+    enable_idle_analysis: bool = False,
+    enable_augmented_trace: bool = False,
+    idle_launch_latency_us: float = None,
 ) -> Dict[str, pd.DataFrame]:
     gpu_arch_json = resolve_gpu_arch(
         gpu_arch_json_path=gpu_arch_json_path,
@@ -447,13 +499,13 @@ def generate_perf_report_pytorch(
     perf_analyzer = TreePerfAnalyzer.from_file(
         profile_filepath=profile_json_path,
         arch=gpu_arch_json,
-        python_path=python_path,
         include_unlinked_kernels=include_unlinked_kernels,
         enable_pseudo_ops=enable_pseudo_ops,
         add_python_func=add_python_func,
         detect_recompute=detect_recompute,
-        enable_origami=enable_origami,
+        enable_origami_gemm=enable_origami_gemm,
         inductor_cache_dir=inductor_cache_dir,
+        enable_origami_sdpa_tile=enable_origami_sdpa_tile,
     )
 
     ## Apply annotation for vLLM eager and replay phase
@@ -810,7 +862,6 @@ def generate_perf_report_pytorch(
         if comparison_json_path and not df_unified_perf.empty:
             perf_analyzer2 = TreePerfAnalyzer.from_file(
                 profile_filepath=comparison_json_path,
-                python_path=perf_analyzer.python_path,
                 include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
                 enable_pseudo_ops=enable_pseudo_ops,
                 add_python_func=perf_analyzer.add_python_func,
@@ -1013,10 +1064,26 @@ def generate_perf_report_pytorch(
 
     # Skip collective analysis for GPU-only traces (no CPU ops means no collectives)
     if collective_analysis and not perf_analyzer.gpu_only:
-        nccl_analyser = NcclAnalyser([profile_json_path], None)
+        nccl_analyser = NcclAnalyser(
+            [profile_json_path],
+            None,
+            preloaded_events={0: perf_analyzer.tree.events},
+        )
         df_nccl_summary = nccl_analyser.build_df_summary_long()
         if not df_nccl_summary.empty:
             dict_name2df["coll_analysis"] = df_nccl_summary
+
+    dict_name2df.update(
+        _idle_analysis_sheets(
+            perf_analyzer.tree,
+            profile_json_path,
+            enable_idle_analysis,
+            micro_idle_thresh_us,
+            include_call_stack,
+            enable_augmented_trace,
+            idle_launch_latency_us,
+        )
+    )
 
     # Get additional DataFrames from extension if available
     if extension_file:
@@ -1040,11 +1107,39 @@ def generate_perf_report_pytorch(
     if output_xlsx_path is None and output_csvs_dir is None:
         base_path = profile_json_path.rsplit(".json", 1)[0]
         output_xlsx_path = base_path + "_perf_report.xlsx"
+    trace_check.run_trace_checks(
+        pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="pytorch"
+    ).log_findings()
+
     write_report_outputs(
         dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
     )
 
     return dict_name2df
+
+
+def _add_idle_cli_args(parser):
+    parser.add_argument(
+        "--enable_idle_analysis",
+        action="store_true",
+        default=False,
+        help="Add GPU idle time classification sheets (idle_overview, idle_groups, "
+        "idle_intervals) to the report.",
+    )
+    parser.add_argument(
+        "--enable_augmented_trace",
+        action="store_true",
+        default=False,
+        help="Write an augmented trace JSON with idle time annotations for visual "
+        "analysis in Perfetto. Requires --enable_idle_analysis.",
+    )
+    parser.add_argument(
+        "--idle_launch_latency_us",
+        type=float,
+        default=None,
+        help="Idle analysis: normal launch return -> GPU op start in microseconds "
+        "(default 15). An op launched more than this before a gap counts as queued.",
+    )
 
 
 def main():
@@ -1168,15 +1263,10 @@ def main():
         "--extension_file",
         type=str,
         default=None,
-        help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
+        help="Python file with custom hooks: tree post-processing, perf models, "
+        "op categories, op projections (op_projections, external_op_projection), and kernel filters.",
     )
 
-    parser.add_argument(
-        "--python_path",
-        type=str,
-        default=None,
-        help="Path to the python executable for gemm simulator",
-    )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
         "--group_by_num_kernels",
@@ -1185,10 +1275,17 @@ def main():
         help="Group by number of kernels in summary tables.",
     )
     parser.add_argument(
-        "--enable-origami",
+        "--enable-origami-gemm",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+        help="Add Origami GEMM times (Origami columns) when a GPU arch is given.",
+    )
+    parser.add_argument(
+        "--enable-origami-sdpa-tile",
+        action="store_true",
+        default=False,
+        help="Add attention times from TraceLens's SDPA tile model, with Origami "
+        "timing each tile GEMM (SDPA Tile Origami columns), when a GPU arch is given.",
     )
     parser.add_argument(
         "--inductor_cache_dir",
@@ -1224,8 +1321,11 @@ def main():
         "--include_call_stack",
         action="store_true",
         default=False,
-        help="Add call_stack_trimmed and call_stack_full columns to unified_perf_summary.",
+        help="Add entry_point and call_stack_full columns to unified_perf_summary, and "
+        "sync_entry_point, sync_call_stack_full and covering_call_stack_full to "
+        "idle_intervals.",
     )
+    _add_idle_cli_args(parser)
 
     args = parser.parse_args()
     if args.comparison_json_path and args.precomputed_diff_stats:
@@ -1253,14 +1353,17 @@ def main():
         comparison_json_path=args.comparison_json_path,
         precomputed_diff_stats=args.precomputed_diff_stats,
         extension_file=args.extension_file,
-        python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
         group_by_num_kernels=args.group_by_num_kernels,
-        enable_origami=args.enable_origami,
+        enable_origami_gemm=args.enable_origami_gemm,
+        enable_origami_sdpa_tile=args.enable_origami_sdpa_tile,
         detect_recompute=args.detect_recompute,
         inductor_cache_dir=args.inductor_cache_dir,
         include_call_stack=args.include_call_stack,
+        enable_idle_analysis=args.enable_idle_analysis,
+        enable_augmented_trace=args.enable_augmented_trace,
+        idle_launch_latency_us=args.idle_launch_latency_us,
     )
 
 

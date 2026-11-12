@@ -47,17 +47,26 @@ def _auto_detect_log(run_dir):
     return None
 
 
+def _finding(spec, draft):
+    return Finding(
+        tag=spec.build_tag(),
+        sublabel=spec.sublabel,
+        category=spec.category,
+        failure_mode=draft.failure_mode,
+        evidence=draft.evidence,
+        remedy=draft.remedy,
+    )
+
+
 def run_triage(run_dir, stream_file=None, detailed=False, specs=None):
     """Run all checks and return a list of Findings.
 
     When ``detailed`` is False (the default), checks marked
-    ``detailed_only=True`` in their CheckSpec are skipped.
+    ``detailed_only=True`` in their CheckSpec are skipped. Raises
+    ``NotADirectoryError`` if ``run_dir`` is not a directory.
     """
     if not os.path.isdir(run_dir):
-        print(
-            f"[DIAG:tracelens_agent_workflow:OUTPUT_INCOMPLETE] Run directory does not exist: {run_dir}"
-        )
-        sys.exit(1)
+        raise NotADirectoryError(run_dir)
 
     if stream_file and not os.path.isfile(stream_file):
         print(
@@ -77,22 +86,14 @@ def run_triage(run_dir, stream_file=None, detailed=False, specs=None):
             continue
         try:
             draft = spec.fn(run_dir, stream_file)
-        except Exception as e:
+        except Exception as e:  # one crashing check must not lose the others
             print(f"Warning: check {spec.fn.__name__} raised {e}")
             continue
         if not draft:
             continue
-        finding = Finding(
-            tag=spec.build_tag(),
-            sublabel=spec.sublabel,
-            category=spec.category,
-            failure_mode=draft.failure_mode,
-            evidence=draft.evidence,
-            remedy=draft.remedy,
-        )
+        finding = _finding(spec, draft)
         findings.append(finding)
-        if spec.sublabel:
-            findings_by_sublabel[spec.sublabel] = finding
+        findings_by_sublabel[spec.sublabel] = finding
 
     # Second pass: annotate downstream findings with the sublabels of the
     # upstream checks that listed them in `implies_failures` and also failed.
@@ -159,16 +160,7 @@ def run_geak_triage(session_dir):
         draft = spec.fn(session_dir)
         if not draft:
             continue
-        findings.append(
-            Finding(
-                tag=spec.build_tag(),
-                sublabel=spec.sublabel,
-                category=spec.category,
-                failure_mode=draft.failure_mode,
-                evidence=draft.evidence,
-                remedy=draft.remedy,
-            )
-        )
+        findings.append(_finding(spec, draft))
 
     for finding in findings:
         print(finding.diag_line())
@@ -212,11 +204,20 @@ def main():
         parser.error("one of --run-dir, --bench-dir or --session-dir is required")
 
     all_findings = []
+    writable = bool(args.run_dir) and os.access(args.run_dir, os.W_OK | os.X_OK)
 
     if args.run_dir:
-        findings = run_triage(args.run_dir, args.stream_file, detailed=args.detailed)
+        try:
+            findings = run_triage(
+                args.run_dir, args.stream_file, detailed=args.detailed
+            )
+        except NotADirectoryError:
+            print(
+                f"[DIAG:tracelens_agent_workflow:OUTPUT_INCOMPLETE] Run directory does not exist: {args.run_dir}"
+            )
+            sys.exit(1)
         # Handling permission issues
-        if os.access(args.run_dir, os.W_OK | os.X_OK):
+        if writable:
             write_detail_csv(findings, args.run_dir)
             write_diag_txt(findings, args.run_dir)
             write_graph_merge_json(args.stream_file, args.run_dir)
@@ -245,7 +246,7 @@ def main():
         for f in all_findings:
             print(f.diag_line())
         print(f"\n{len(all_findings)} failure(s) detected.")
-        if args.run_dir and os.access(args.run_dir, os.W_OK | os.X_OK):
+        if writable:
             print(f"Details: {os.path.join(args.run_dir, 'triage_details.csv')}")
         sys.exit(1)
     else:

@@ -60,10 +60,9 @@ class InferenceAttention:
         "g_sqsk",
     )
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
         self.B = self.param_details["B"]
         self.N_Q = self.param_details["N_Q"]
@@ -650,10 +649,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
     category = "SDPA_fwd"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None, enable_origami=False):
-        self.enable_origami = enable_origami
-        super().__init__(event, arch, python_path)
-
     @staticmethod
     def _core_param_details(event):
         params = perf_model.aiter__fmha_v3_varlen_fwd.get_param_details(event).copy()
@@ -664,8 +659,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
         return perf_model.aiter__fmha_v3_varlen_fwd(
             self.event,
             self.arch,
-            self.python_path,
-            enable_origami=self.enable_origami,
         )
 
     @staticmethod
@@ -698,11 +691,6 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
         if self.param_details.get("_fallback_core"):
             return self._core_model().get_compute_precision()
         return super().get_compute_precision()
-
-    def get_simulation_time(self):
-        if self.param_details.get("_fallback_core"):
-            return self._core_model().get_simulation_time()
-        return None
 
 
 class aiter_paged_attention_ragged(InferenceAttention):
@@ -938,8 +926,8 @@ class gdn_attention_core(InferenceAttention):
         total:           7 * d_v * d_k
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.H_V = self.param_details["H_V"]
         self.d_k = self.param_details["d_h_qk"]
         self.d_v = self.param_details["d_h_v"]
@@ -1298,3 +1286,104 @@ class sgl_kernel_fast_topk_transform_fused:
 
     def get_maf_type(self):
         return "vector"
+
+
+class rocm_aiter_sparse_attn_indexer(InferenceAttention):
+    """
+    Performance model for vllm::rocm_aiter_sparse_attn_indexer (DeepSeek sparse
+    attention "lightning indexer": fp8 MQA index-score + top-k selection).
+
+    Scores each query token against its context keys (single shared MQA key)
+    and writes a top-k index list; no value aggregation, so only the QK score
+    term is counted.
+
+    Expected Input Dims from trace:
+        [2] k cache (num_slots, 1, cache_row); cache_row = head_dim + block scales
+        [3] q       (N_Q, H, head_dim)
+        [4] k current-chunk (N_Q, head_dim)
+    Expected Input type from trace:
+        [2] unsigned char (fp8 k cache), [3] Float8_e4m3fn (q), [4] BFloat16 (k)
+    Expected Concrete Inputs from trace:
+        [8] index_topk
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
+            dims = event["args"]["Input Dims"]
+            types = event["args"].get("Input type", []) or []
+            N_Q, H, head_dim = dims[3][0], dims[3][1], dims[3][2]
+            # Cache row width (fp8 key + per-block e8m0 scales), 1 B/elem.
+            cache_row = dims[2][-1] if len(dims) > 2 and dims[2] else head_dim
+
+            concrete = event["args"].get("Concrete Inputs", []) or []
+            index_topk = 0
+            if len(concrete) > 8 and str(concrete[8]).strip().isdigit():
+                index_topk = int(concrete[8])
+
+            params = {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H,
+                "H_KV": 1,  # MQA: single shared key per token
+                "N_KV": stats["c_sk"] + stats["g_sk"],
+                "d_h_qk": head_dim,
+                "d_h_v": head_dim,
+                "dropout": 0.0,
+                "causal": True,
+                "flash_impl": True,
+                "index_topk": index_topk,
+                "cache_row": cache_row,
+                "dtype_Q": types[3] if len(types) > 3 else "c10::Float8_e4m3fn",
+                "dtype_KV": types[2] if len(types) > 2 else "unsigned char",
+                "dtype_Kcur": types[4] if len(types) > 4 else "c10::BFloat16",
+            }
+            params.update(stats)
+            return params
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf") or p.get("_no_flops"):
+            return None
+        if p["c_sq"] == 0 and p["g_sq"] == 0:
+            raise NotImplementedError(
+                "sparse_attn_indexer perf model requires sq/sk annotations"
+            )
+        H, d = self.H_Q, self.d_h_qk
+        ctx_qk = H * (2 * p["c_sqsk"] - p["c_sqsq"]) * d  # prefill (causal)
+        gen_qk = H * (2 * p["g_sqsk"]) * d  # decode
+        return ctx_qk + gen_qk
+
+    def bytes(self, bytes_per_element=None):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_q = name2bpe(p.get("dtype_Q")) or 1
+        bpe_kcur = name2bpe(p.get("dtype_Kcur")) or 2
+        N_Q, H, d = self.N_Q, self.H_Q, self.d_h_qk
+        total_sk = p["c_sk"] + p["g_sk"]
+        cached_sk = max(total_sk - N_Q, 0)
+        # MQA: keys read once (shared across the H index heads), not per head.
+        read_q = N_Q * H * d * bpe_q
+        read_k_cached = cached_sk * p["cache_row"]  # fp8 key + scales, 1 B/elem
+        read_k_current = N_Q * d * bpe_kcur
+        read_weights = N_Q * H * 4  # fp32 per-head weights
+        # Sole HBM output is the top-k index list (int32); logits are streamed.
+        avg_ctx = total_sk / N_Q if N_Q else 0
+        topk = min(p["index_topk"], avg_ctx) if p["index_topk"] else avg_ctx
+        write_topk = N_Q * topk * 4
+        return read_q + read_k_cached + read_k_current + read_weights + write_topk
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        dtype = self.param_details.get("dtype_Q")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"

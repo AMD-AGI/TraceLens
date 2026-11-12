@@ -15,13 +15,14 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
-import collections
-import gzip
+
+
 import re
 import zipfile
 
 from TraceLens import NcclAnalyser, TraceToTree, TraceDiff, TreePerfAnalyzer
-from TraceLens.util import most_common_first_dim
+from TraceLens.TraceUtils.utils import trace_check
+from TraceLens.util import DataLoader, most_common_first_dim
 from TraceLens.PerfModel.torch_op_mapping import build_sheet_category_to_op_names
 from TraceLens.Reporting.generate_perf_report_pytorch import _find_entry_point
 from TraceLens.Reporting.reporting_utils import (
@@ -29,10 +30,12 @@ from TraceLens.Reporting.reporting_utils import (
     resolve_gpu_arch,
     write_report_outputs,
 )
-from TraceLens.util import TraceEventUtils
 from TraceLens.TraceUtils.utils.annotation_utils import (
     CAPTURE_PATTERN,
+    CAPTURE_ROLE_PATTERNS,
+    SPEC_ROLE_TARGET,
     CaptureAnnotation,
+    filename_request_bs,
 )
 from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     merge_capture_trace_into_graph,
@@ -40,6 +43,7 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
 
 _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "vllm::unified_attention_with_output",
+    "vllm::rocm_aiter_sparse_attn_indexer",
     "aiter::mha_varlen_fwd",
     "pseudo_mla_decode_fwd",
     "pseudo_mla_prefill_fwd",
@@ -68,148 +72,6 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
 ]
 
 
-def perf_report_sanity_check(
-    events,
-    df_gpu_timeline,
-    df_kernel_launchers,
-    df_unified_perf,
-    include_nccl=False,
-):
-    """
-    Sanity checks on the performance report DataFrames.
-
-    1) Total kernel time accounted by df_kernel_launchers and df_unified_perf
-       should each be >= the computation_time reported in df_gpu_timeline.
-    2) Total GPU events in tree events should equal the number of kernels
-       accounted by df_kernel_launchers and df_unified_perf.
-    """
-    use_time = "busy_time" if include_nccl else "computation_time"
-
-    computation_time_us = (
-        df_gpu_timeline.loc[df_gpu_timeline["type"] == use_time, "time ms"].values[0]
-        * 1e3
-    )
-
-    # --- Check 1: kernel time coverage ---
-    kl_time_col = (
-        "total_direct_kernel_time_sum"
-        if "total_direct_kernel_time_sum" in df_kernel_launchers.columns
-        else "total_direct_kernel_time"
-    )
-    up_time_col = (
-        "Kernel Time (µs)_sum"
-        if "Kernel Time (µs)_sum" in df_unified_perf.columns
-        else "Kernel Time (µs)"
-    )
-
-    kl_total_us = df_kernel_launchers[kl_time_col].sum()
-    up_total_us = df_unified_perf[up_time_col].sum()
-
-    print(f"\n{'='*60}")
-    print("Perf Report Sanity Check")
-    print(f"{'='*60}")
-    print(f"  {use_time} (gpu_timeline):     {computation_time_us:.2f} µs")
-    print(f"  Kernel time (kernel_launchers):       {kl_total_us:.2f} µs")
-    print(f"  Kernel time (unified_perf):           {up_total_us:.2f} µs")
-
-    kl_pass = kl_total_us >= computation_time_us
-    up_pass = up_total_us >= computation_time_us
-    print(f"  kernel_launchers >= computation_time: {'PASS' if kl_pass else 'FAIL'}")
-    print(f"  unified_perf     >= computation_time: {'PASS' if up_pass else 'FAIL'}")
-
-    # --- Check 2: per-kernel-name count verification ---
-    # Build {kernel_name: count} from tree events (ground truth)
-    tree_kernel_counts = dict(
-        collections.Counter(
-            e["name"]
-            for e in events
-            if e.get("cat") in {"kernel", "gpu_memcpy", "gpu_memset"}
-            and (
-                not TraceEventUtils.is_communication_string(e.get("name", ""))
-                or include_nccl
-            )
-        )
-    )
-
-    def _extract_kernel_counts(df, label):
-        """Extract {kernel_name: count} from a DataFrame's kernel_details column."""
-        if "kernel_details_summary" in df.columns:
-            col = "kernel_details_summary"
-        elif "kernel_details" in df.columns:
-            col = "kernel_details"
-        else:
-            print(f"  WARNING: no kernel_details column in {label}")
-            return {}
-        counts = collections.Counter()
-        for kd in df[col]:
-            if isinstance(kd, list):
-                for d in kd:
-                    counts[d["name"]] += d.get("count", 1)
-        return dict(counts)
-
-    def _print_per_kernel_check(tree_counts, df_counts, label):
-        """Compare per-kernel counts and print mismatches."""
-        df_total = sum(df_counts.values())
-        tree_total = sum(tree_counts.values())
-        total_pass = tree_total == df_total
-        print(f"\n  --- {label} ---")
-        print(f"  Total GPU events in tree:  {tree_total}")
-        print(f"  Kernels accounted:         {df_total}")
-        print(f"  Total count match:         {'PASS' if total_pass else 'FAIL'}")
-
-        all_names = sorted(set(tree_counts) | set(df_counts))
-        mismatches = []
-        for name in all_names:
-            t = tree_counts.get(name, 0)
-            d = df_counts.get(name, 0)
-            if t != d:
-                mismatches.append((name, t, d))
-
-        if mismatches:
-            print(f"  Per-kernel mismatches ({len(mismatches)}):")
-            for name, t, d in mismatches:
-                trunc = name[:80] + "..." if len(name) > 80 else name
-                print(f"    {trunc}")
-                print(f"      tree={t}  {label}={d}  diff={t - d}")
-        else:
-            print(f"  Per-kernel detail check:   PASS (all match)")
-
-        return df_total, total_pass, mismatches
-
-    # Build {kernel_name: count} from each source
-    kl_kernel_counts = _extract_kernel_counts(df_kernel_launchers, "kernel_launchers")
-    up_kernel_counts = _extract_kernel_counts(df_unified_perf, "unified_perf")
-
-    total_gpu_events = sum(tree_kernel_counts.values())
-
-    kl_kernel_count, kl_count_pass, kl_mismatches = _print_per_kernel_check(
-        tree_kernel_counts, kl_kernel_counts, "kernel_launchers"
-    )
-    up_kernel_count, up_count_pass, up_mismatches = _print_per_kernel_check(
-        tree_kernel_counts, up_kernel_counts, "unified_perf"
-    )
-
-    print(f"{'='*60}\n")
-
-    return {
-        "computation_time_us": computation_time_us,
-        "kl_total_us": kl_total_us,
-        "up_total_us": up_total_us,
-        "kl_time_pass": kl_pass,
-        "up_time_pass": up_pass,
-        "total_gpu_events": total_gpu_events,
-        "kl_kernel_count": kl_kernel_count,
-        "up_kernel_count": up_kernel_count,
-        "kl_count_pass": kl_count_pass,
-        "up_count_pass": up_count_pass,
-        "tree_kernel_counts": dict(tree_kernel_counts),
-        "kl_kernel_counts": dict(kl_kernel_counts),
-        "up_kernel_counts": dict(up_kernel_counts),
-        "kl_mismatches": kl_mismatches,
-        "up_mismatches": up_mismatches,
-    }
-
-
 def find_capture_annotation_events(events):
     return sorted(
         [
@@ -224,7 +86,8 @@ def find_capture_annotation_events(events):
 
 def classify_graph_capture_trace(input_folder: str):
     """
-    Return {file, batch_size, mode} for a single graph-capture trace file.
+    Return {file, batch_size, mode, capture_type, request_bs, token, num_captures}
+    for one capture file.
     Supports .json, .json.gz, and .zip (containing a .json).
     """
     execution_details_path = os.path.join(input_folder, "execution_details.json")
@@ -248,11 +111,10 @@ def classify_graph_capture_trace(input_folder: str):
                     raise ValueError(f"No .json file found inside {path}")
                 with zf.open(json_files[0]) as f:
                     return json.load(f)
-        if path.endswith(".json.gz"):
-            with gzip.open(path, "rt") as f:
-                return json.load(f)
-        with open(path, "r") as f:
-            return json.load(f)
+        events, metadata = DataLoader.load_trace_events(path)
+        result = dict(metadata)
+        result["traceEvents"] = events
+        return result
 
     def find_dummy_run_roots(events):
         roots = [e for e in events if dummy_run_pattern.match(e.get("name", ""))]
@@ -293,24 +155,49 @@ def classify_graph_capture_trace(input_folder: str):
         dummy_roots = find_dummy_run_roots(events)
         annotation_roots = find_capture_annotation_events(events)
         basename = os.path.basename(filepath)
+        role = next(
+            (r for p, r in CAPTURE_ROLE_PATTERNS if p.search(basename)),
+            SPEC_ROLE_TARGET,
+        )
+        request_bs = filename_request_bs(basename)
+        token = most_common_first_dim(events)
+        num_captures = count_stream_begin_captures(events)
 
         if annotation_roots and len(annotation_roots) == len(dummy_roots):
             cap = CaptureAnnotation(annotation_roots[0]["name"])
             batch_size, mode = cap.batch_size, cap.mode
             print(
-                f"batch_size: {batch_size}, mode: {mode} parsed from annotation, num_captures: {count_stream_begin_captures(events)}"
+                f"batch_size: {batch_size}, request_bs: {request_bs}, token: {token}, mode: {mode} parsed from annotation, num_captures: {num_captures}"
             )
-            results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+            results.append(
+                {
+                    "file": basename,
+                    "batch_size": batch_size,
+                    "mode": mode,
+                    "capture_type": role,
+                    "request_bs": request_bs,
+                    "token": token,
+                    "num_captures": num_captures,
+                }
+            )
             continue
 
-        num_captures = count_stream_begin_captures(events)
         mode = infer_mode_from_captures(num_captures)
-        batch_size = most_common_first_dim(events)
+        batch_size = token
         print(
-            f"batch_size: {batch_size}, mode: {mode} inferred, num_captures: {num_captures}"
+            f"batch_size: {batch_size}, request_bs: {request_bs}, token: {token}, mode: {mode}, capture_type: {role} inferred, num_captures: {num_captures}"
         )
-
-        results.append({"file": basename, "batch_size": batch_size, "mode": mode})
+        results.append(
+            {
+                "file": basename,
+                "batch_size": batch_size,
+                "mode": mode,
+                "capture_type": role,
+                "request_bs": request_bs,
+                "token": token,
+                "num_captures": num_captures,
+            }
+        )
     with open(f"{input_folder}/execution_details.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults written to {input_folder}/execution_details.json")
@@ -424,6 +311,23 @@ def apply_extension(perf_analyzer, extension_path):
     spec = importlib.util.spec_from_file_location(extension_name, extension_path)
     extension = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(extension)
+
+    if hasattr(extension, "external_op_projection"):
+        print(f"Applying external op projection from {extension_path}")
+        perf_analyzer.set_external_op_projection(extension.external_op_projection)
+
+    for attr, register in (
+        ("op_projections", "register_op_projection"),
+        ("kernel_filters", "register_kernel_filter"),
+    ):
+        if not hasattr(extension, attr):
+            continue
+        print(f"Applying {attr} from {extension_path}")
+        entries = getattr(extension, attr)
+        if not isinstance(entries, dict):
+            raise TypeError(f"Expected {attr} to be a dict, got {type(entries)}")
+        for label, fn in entries.items():
+            getattr(perf_analyzer, register)(label, fn)
 
     if hasattr(extension, "tree_postprocess_extension"):
         print(f"Applying tree postprocess extension from {extension_path}")
@@ -563,12 +467,11 @@ def generate_perf_report_pytorch(
     precomputed_diff_stats: Optional[str] = None,
     comparison_augmented_tree: Optional[TraceToTree] = None,
     extension_file: Optional[str] = None,
-    # for gemm simulator / Origami (Origami requires --enable_origami when arch is set)
-    python_path: Optional[str] = None,
     gpu_arch_json_path: Optional[str] = None,
     gpu_arch_platform: Optional[str] = None,
     gpu_arch: Optional[dict] = None,
-    enable_origami: bool = False,
+    enable_origami_gemm: bool = False,
+    enable_origami_sdpa_tile: bool = False,
     group_by_parent_module: bool = False,
     group_by_num_kernels: bool = False,
     include_call_stack: bool = False,
@@ -592,20 +495,22 @@ def generate_perf_report_pytorch(
         perf_analyzer = TreePerfAnalyzer(
             tree=augmented_tree,
             arch=gpu_arch_json,
-            python_path=python_path,
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
             rebuild_tree=False,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
     else:
         perf_analyzer = TreePerfAnalyzer.from_file(
             profile_filepath=profile_json_path,
             arch=gpu_arch_json,
-            python_path=python_path,
             include_unlinked_kernels=include_unlinked_kernels,
             add_python_func=add_python_func,
             enable_pseudo_ops=enable_pseudo_ops,
+            enable_origami_gemm=enable_origami_gemm,
+            enable_origami_sdpa_tile=enable_origami_sdpa_tile,
         )
 
         graph_launch_events = [
@@ -941,7 +846,6 @@ def generate_perf_report_pytorch(
                 perf_analyzer2 = TreePerfAnalyzer(
                     tree=comparison_augmented_tree,
                     arch=gpu_arch_json,
-                    python_path=python_path,
                     include_unlinked_kernels=include_unlinked_kernels,
                     add_python_func=add_python_func,
                     enable_pseudo_ops=enable_pseudo_ops,
@@ -950,7 +854,6 @@ def generate_perf_report_pytorch(
             else:
                 perf_analyzer2 = TreePerfAnalyzer.from_file(
                     profile_filepath=comparison_json_path,
-                    python_path=perf_analyzer.python_path,
                     include_unlinked_kernels=perf_analyzer.include_unlinked_kernels,
                     enable_pseudo_ops=enable_pseudo_ops,
                     add_python_func=perf_analyzer.add_python_func,
@@ -1054,13 +957,6 @@ def generate_perf_report_pytorch(
 
         # update this dict with the perf_metrics_dfs
         dict_name2df.update(perf_metrics_dfs)
-        perf_report_sanity_check(
-            perf_analyzer.tree.events,
-            df_gpu_timeline,
-            df_kernel_launchers,
-            df_unified_perf,
-            include_nccl=collective_analysis,
-        )
 
     # Kernel summary: aggregate per-kernel durations and counts
     if kernel_summary:
@@ -1187,6 +1083,9 @@ def generate_perf_report_pytorch(
     if output_xlsx_path is None and output_csvs_dir is None:
         base_path = profile_json_path.rsplit(".json", 1)[0]
         output_xlsx_path = base_path + "_perf_report.xlsx"
+    trace_check.run_trace_checks(
+        pre_report=False, tree=perf_analyzer.tree, dfs=dict_name2df, framework="pytorch"
+    ).log_findings()
     write_report_outputs(
         dict_name2df, xlsx_path=output_xlsx_path, csvs_dir=output_csvs_dir
     )
@@ -1323,21 +1222,23 @@ def main():
         "--extension_file",
         type=str,
         default=None,
-        help="Path to the extension file containing custom extensions for TraceTree and PerfModel.",
+        help="Python file with custom hooks: tree post-processing, perf models, "
+        "op categories, op projections (op_projections, external_op_projection), and kernel filters.",
     )
 
-    parser.add_argument(
-        "--python_path",
-        type=str,
-        default=None,
-        help="Path to the python executable for gemm simulator",
-    )
     add_gpu_arch_cli_args(parser)
     parser.add_argument(
-        "--enable-origami",
+        "--enable-origami-gemm",
         action="store_true",
         default=False,
-        help="Use Origami for simulated GEMM/SDPA times when a GPU arch JSON is provided",
+        help="Add Origami GEMM times (Origami columns) when a GPU arch is given.",
+    )
+    parser.add_argument(
+        "--enable-origami-sdpa-tile",
+        action="store_true",
+        default=False,
+        help="Add attention times from TraceLens's SDPA tile model, with Origami "
+        "timing each tile GEMM (SDPA Tile Origami columns), when a GPU arch is given.",
     )
 
     parser.add_argument(
@@ -1426,10 +1327,10 @@ def main():
         precomputed_diff_stats=args.precomputed_diff_stats,
         comparison_augmented_tree=comparison_graph_tree,
         extension_file=args.extension_file,
-        python_path=args.python_path,
         gpu_arch_json_path=args.gpu_arch_json_path,
         gpu_arch_platform=args.gpu_arch_platform,
-        enable_origami=args.enable_origami,
+        enable_origami_gemm=args.enable_origami_gemm,
+        enable_origami_sdpa_tile=args.enable_origami_sdpa_tile,
         group_by_parent_module=args.group_by_parent_module,
         group_by_num_kernels=args.group_by_num_kernels,
         include_call_stack=args.include_call_stack,

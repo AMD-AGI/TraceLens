@@ -19,13 +19,13 @@ op shapes from the model config, at one or more runtime regimes (decode/prefill,
 batch, context). It maps the dominant unmodeled kernel of each roofline category
 (Attention, MoE, ...) to the matching orchestrator finding by kernel name, then:
 
-- writes ``metadata/roofline_augmentation.json`` (the full record), and
+- writes ``cache/roofline_augmentation.json`` (the full record), and
 - merges an additive ``roofline`` block onto the matching
   ``priority_data.json::findings[]`` entry (:func:`merge_into_priority_data`),
   leaving every existing field untouched.
 
 The orchestrator does not invent the regime. A sub-agent writes
-``metadata/roofline_augment_args.json`` from the trace artifacts, and this
+``cache/roofline_augment_args.json`` from the trace artifacts, and this
 script projects each phase in that file. A direct CLI remains for a single
 regime. Must run after Step 8.5 (``generate_priority_data``), which regenerates
 ``priority_data.json``.
@@ -34,7 +34,7 @@ CLI::
 
     python -m TraceLens.Visualizer.model_explorer_export.roofline_augment \\
       --output-dir <orchestrator_output_dir> \\
-      --args-json <orchestrator_output_dir>/metadata/roofline_augment_args.json
+      --args-json <orchestrator_output_dir>/cache/roofline_augment_args.json
 """
 
 from __future__ import annotations
@@ -409,9 +409,9 @@ def augment_phases(output_dir: Path, projections: list[dict]) -> dict:
         ),
         "entries": entries,
     }
-    meta = output_dir / "metadata"
-    meta.mkdir(parents=True, exist_ok=True)
-    (meta / "roofline_augmentation.json").write_text(
+    cache = output_dir / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "roofline_augmentation.json").write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
     )
     payload["merged_findings"] = merge_into_priority_data(output_dir, entries)
@@ -513,7 +513,7 @@ def merge_into_priority_data(output_dir: Path, entries: list[dict]) -> int:
 def report_notes(output_dir: Path) -> dict[str, str]:
     """``{kernel_name: markdown_note}`` for report generation to inject beside
     each kernel in the Detailed Analysis. Empty if augmentation was not run."""
-    path = Path(output_dir) / "metadata" / "roofline_augmentation.json"
+    path = Path(output_dir) / "cache" / "roofline_augmentation.json"
     if not path.is_file():
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -621,7 +621,7 @@ def _report(output_dir: Path, payload: dict) -> None:
     if not n_categories:
         n_categories = len({e["roofline_category"] for e in payload["entries"]})
     print(
-        f"Wrote {output_dir / 'metadata' / 'roofline_augmentation.json'}: "
+        f"Wrote {output_dir / 'cache' / 'roofline_augmentation.json'}: "
         f"{len(payload['entries'])} kernel(s) augmented across "
         f"{n_categories} roofline categor(ies)."
     )
@@ -647,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     pre.add_argument(
         "--output-dir",
         required=True,
-        help="Orchestrator output directory (holds category_data/, metadata/).",
+        help="Orchestrator output directory (holds category_data/, cache/).",
     )
     pre.add_argument(
         "--args-json",
