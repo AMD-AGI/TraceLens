@@ -470,7 +470,7 @@ class DataLoader:
     def load_trace_events(
         filepath,
         save_preprocessed=False,
-        capture_trace_filepath=None,
+        capture_folder=None,
         framework=None,
     ):
         run_checks = not parse_bool_string(
@@ -491,7 +491,7 @@ class DataLoader:
         if run_checks:
             trace_check.run_trace_checks(
                 events,
-                capture_trace_filepath=capture_trace_filepath,
+                capture_folder=capture_folder,
                 filepath=filepath,
                 framework=framework,
             ).log_findings()

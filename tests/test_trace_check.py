@@ -268,7 +268,7 @@ class TestGraphMode:
 
     def test_graph_launch_without_capture_warns(self):
         events = [_kernel(i * 100) for i in range(20)] + [_graph_launch(500)]
-        report = trace_check.run_trace_checks(events, capture_trace_filepath=None)
+        report = trace_check.run_trace_checks(events, capture_folder=None)
         assert any(
             "graph launch" in f.message and f.status == Status.WARN
             for f in report.findings
@@ -276,9 +276,7 @@ class TestGraphMode:
 
     def test_graph_launch_with_capture_ok(self):
         events = [_kernel(i * 100) for i in range(20)] + [_graph_launch(500)]
-        report = trace_check.run_trace_checks(
-            events, capture_trace_filepath="/some/path"
-        )
+        report = trace_check.run_trace_checks(events, capture_folder="/some/path")
         assert not any("graph launch" in f.message for f in report.findings)
 
 

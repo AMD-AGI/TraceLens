@@ -2075,7 +2075,7 @@ class TestTreePerfFromFileCapture:
         metadata = os.path.join(capture, "execution_details.json")
         analyzer = TreePerfAnalyzer.from_file(
             profile_filepath=os.path.join(case, trace_gz),
-            capture_trace_filepath=capture,
+            capture_folder=capture,
             rebuild_tree=True,
         )
         assert analyzer.tree is not None

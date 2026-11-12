@@ -224,7 +224,7 @@ def _check_call_stack(ctx) -> List[TraceCheck]:
 def _check_graph_mode(ctx) -> List[TraceCheck]:
     events = ctx["events"]
     has_graph_launch = any(e.get("name") in GRAPH_LAUNCH_NAMES for e in events)
-    if has_graph_launch and ctx.get("capture_trace_filepath") is None:
+    if has_graph_launch and ctx.get("capture_folder") is None:
         return [
             TraceCheck(
                 Status.WARN,
@@ -764,7 +764,7 @@ CHECK_REGISTRY = [
 
 def run_trace_checks(
     events: Sequence[Dict[str, Any]] = (),
-    capture_trace_filepath: Optional[str] = None,
+    capture_folder: Optional[str] = None,
     filepath: Optional[str] = None,
     framework: Optional[str] = None,
     pre_report: bool = True,
@@ -791,7 +791,7 @@ def run_trace_checks(
     sheets = _SHEETS.get(framework or "pytorch", _SHEETS["pytorch"])
     ctx = {
         "events": events,
-        "capture_trace_filepath": capture_trace_filepath,
+        "capture_folder": capture_folder,
         "filepath": filepath,
         "thr": thr,
         "tree": tree,
