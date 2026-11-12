@@ -11,12 +11,9 @@ Performance models for Primus Turbo / Flux pseudo-op extensions.
 from math import prod
 
 from TraceLens.PerfModel.perf_model import GEMM, UnaryElementwise
-from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
+from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
 
 # Constants
-_MXFP4_GROUP_SIZE = 32
-_MXFP4_BPE = 0.5  # FP4 E2M1: 4 bits = 0.5 bytes per element
-_E8M0_BPE = 1  # E8M0 scale: 1 byte per element
 
 
 class gemm_fp4_impl(GEMM):
@@ -41,7 +38,8 @@ class gemm_fp4_impl(GEMM):
         bytes_B      = N * K * 0.5                # FP4 packed
         bytes_output = M * N * bpe(output)         # BF16 -> 2 bytes
         bytes_bias   = N * bpe(bias) if bias
-        Scale tensors and output scales are negligible and omitted.
+        bytes_A_scale = dims[1] elems * bpe(types[1])   # E8M0 per-group scales
+        bytes_B_scale = dims[4] elems * bpe(types[4])   # E8M0 per-group scales
 
     Compute precision:
         MXFP4 -> mapped via torch_dtype_map("mxfp4").
@@ -60,9 +58,9 @@ class gemm_fp4_impl(GEMM):
         dims = event["args"]["Input Dims"]
         types = event["args"].get("Input type", []) or []
         M = dims[0][0]
-        K = dims[0][1] * 2  # FP4 packed: two values per byte
+        K = int(dims[0][1] / name2bpe(types[0]))
         N = dims[3][0]
-        has_bias = len(dims) > 11 and dims[11] and len(dims[11]) > 0
+        has_bias = len(dims[11]) > 0
         return {
             "B": 1,
             "M": M,
@@ -70,28 +68,40 @@ class gemm_fp4_impl(GEMM):
             "K": K,
             "bias": has_bias,
             "dtype_A_B": (
-                types[0] if len(types) > 0 else "",
-                types[3] if len(types) > 3 else "",
+                types[0],
+                types[3],
+                # Output dtype is not in Input type (it is a return value).
+                # Concrete Inputs[6] holds the ScalarType enum (15 = bfloat16),
+                # ref: https://github.com/pytorch/pytorch/blob/main/torch/_inductor/lowering.py (DTYPE_ID_LOOKUP)
                 "c10::bfloat16",
             ),
+            "bias_dtype": types[11] if has_bias else None,
+            "a_scale_shape": tuple(dims[1]),
+            "b_scale_shape": tuple(dims[4]),
+            "scale_dtype": types[1],
             "has_out_scales": (len(dims) > 12 and dims[12] and len(dims[12]) > 0),
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
-        self.bpe_mat1 = _MXFP4_BPE
-        self.bpe_mat2 = _MXFP4_BPE
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_output = name2bpe(dtype_A_B[2])
-        bias_dtype = "c10::bfloat16" if self.param_details["bias"] else dtype_A_B[2]
+        bias_dtype = self.param_details["bias_dtype"] or dtype_A_B[2]
         self.bpe_bias = name2bpe(bias_dtype)
-        return super().bytes(
+        base_bytes = super().bytes(
             bpe_mat1=self.bpe_mat1,
             bpe_mat2=self.bpe_mat2,
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+        bpe_scale = name2bpe(self.param_details["scale_dtype"])
+        base_bytes += prod(self.param_details["b_scale_shape"]) * bpe_scale
+        return base_bytes
 
     def get_compute_precision(self):
+        # Compute precision not in trace; determined by GPU MFMA instruction selection.
+        # Validated: rocprofv3 SQ_INSTS_VALU_MFMA_MOPS_F6F4 matched at 0.9998x.
         return torch_dtype_map("mxfp4")
 
 
@@ -127,7 +137,7 @@ class a6w4_mm_qa(GEMM):
         types = event["args"].get("Input type", []) or []
         M, K = dims[0]
         N = dims[2][0]
-        has_bias = len(dims) > 3 and dims[3] and len(dims[3]) > 0
+        has_bias = len(dims[3]) > 0
         return {
             "B": 1,
             "M": M,
@@ -135,27 +145,37 @@ class a6w4_mm_qa(GEMM):
             "K": K,
             "bias": has_bias,
             "dtype_A_B": (
-                types[0] if len(types) > 0 else "unsigned char",
-                types[2] if len(types) > 2 else "c10::bfloat16",
+                types[0],
+                types[2],
+                # Output dtype is not in Input type (it is a return value).
+                # Concrete Inputs[6] holds the ScalarType enum (15 = bfloat16),
+                # ref: https://github.com/pytorch/pytorch/blob/main/torch/_inductor/lowering.py (DTYPE_ID_LOOKUP)
                 "c10::bfloat16",
             ),
+            "scale_shape": tuple(dims[1]),
+            "scale_dtype": types[1],
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         dtype_A_B = self.param_details["dtype_A_B"]
-        self.bpe_mat1 = 1  # unsigned char: 1 byte/elem
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
         self.bpe_mat2 = name2bpe(dtype_A_B[1])
         self.bpe_output = name2bpe(dtype_A_B[2])
         self.bpe_bias = name2bpe(dtype_A_B[2])
-        return super().bytes(
+        base_bytes = super().bytes(
             bpe_mat1=self.bpe_mat1,
             bpe_mat2=self.bpe_mat2,
             bpe_bias=self.bpe_bias,
             bpe_output=self.bpe_output,
         )
+        bpe_scale = name2bpe(self.param_details["scale_dtype"])
+        base_bytes += prod(self.param_details["scale_shape"]) * bpe_scale
+        return base_bytes
 
     def get_compute_precision(self):
-        return torch_dtype_map("c10::bfloat16")
+        # Compute precision not in trace; determined by GPU MFMA instruction selection.
+        # Validated: rocprofv3 SQ_INSTS_VALU_MFMA_MOPS_F6F4 matched at 0.9998x.
+        return torch_dtype_map("mxfp4")
 
 
 class a6w4_mm_qa_prequant_w(GEMM):
@@ -191,7 +211,7 @@ class a6w4_mm_qa_prequant_w(GEMM):
         types = event["args"].get("Input type", []) or []
         M, K = dims[0]
         N = dims[2][0]
-        has_bias = len(dims) > 5 and dims[5] and len(dims[5]) > 0
+        has_bias = len(dims[5]) > 0
         return {
             "B": 1,
             "M": M,
@@ -199,17 +219,22 @@ class a6w4_mm_qa_prequant_w(GEMM):
             "K": K,
             "bias": has_bias,
             "dtype_A_B": (
-                types[0] if len(types) > 0 else "unsigned char",
-                types[2] if len(types) > 2 else "unsigned char",
+                types[0],
+                types[2],
+                # Output dtype is not in Input type (it is a return value).
+                # Concrete Inputs[6] holds the ScalarType enum (15 = bfloat16),
+                # ref: https://github.com/pytorch/pytorch/blob/main/torch/_inductor/lowering.py (DTYPE_ID_LOOKUP)
                 "c10::bfloat16",
             ),
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
-        self.bpe_mat1 = 1  # u8 activation: 1 byte/elem
-        self.bpe_mat2 = _MXFP4_BPE  # FP4 packed weight: 0.5 byte/elem
-        self.bpe_output = name2bpe("c10::bfloat16")
-        self.bpe_bias = name2bpe("c10::bfloat16")
+        dtype_A_B = self.param_details["dtype_A_B"]
+        self.bpe_mat1 = name2bpe(dtype_A_B[0])
+        self.bpe_mat2 = name2bpe(dtype_A_B[1])
+        
+        self.bpe_output = name2bpe(dtype_A_B[2])
+        self.bpe_bias = name2bpe(dtype_A_B[2])
         return super().bytes(
             bpe_mat1=self.bpe_mat1,
             bpe_mat2=self.bpe_mat2,
@@ -218,6 +243,8 @@ class a6w4_mm_qa_prequant_w(GEMM):
         )
 
     def get_compute_precision(self):
+        # Compute precision not in trace; determined by GPU MFMA instruction selection.
+        # Validated: rocprofv3 SQ_INSTS_VALU_MFMA_MOPS_F6F4 matched at 0.9998x.
         return torch_dtype_map("mxfp4")
 
 
@@ -233,8 +260,10 @@ class _QuantizeMxfp4Base(UnaryElementwise):
         if self.bpe_in is None:
             return None
         bytes_read = self.nelems * self.bpe_in
-        bytes_write_fp4 = self.nelems * _MXFP4_BPE
-        bytes_write_scales = max(1, self.nelems // _MXFP4_GROUP_SIZE) * _E8M0_BPE
+        # Output dtype (FP4) not in trace args (return value)
+        bytes_write_fp4 = self.nelems * name2bpe("fp4")
+        # Scale dtype: one E8M0 byte per 32-element block (OCP Microscaling spec)
+        bytes_write_scales = max(1, self.nelems // MXFP4_GROUP_SIZE) * name2bpe("c10::Float8_e8m0fnu")
         return bytes_read + bytes_write_fp4 + bytes_write_scales
 
 
@@ -280,8 +309,10 @@ class quantize_mxfp4_h16_dual(_QuantizeMxfp4Base):
         if self.bpe_in is None:
             return None
         bytes_read = self.nelems * self.bpe_in
-        bytes_write_fp4 = 2 * self.nelems * _MXFP4_BPE
-        bytes_write_scales = 2 * max(1, self.nelems // _MXFP4_GROUP_SIZE) * _E8M0_BPE
+        # Output dtype (FP4) not in trace args (return value)
+        bytes_write_fp4 = 2 * self.nelems * name2bpe("fp4")
+        # Scale dtype: one E8M0 byte per 32-element block (OCP Microscaling spec)
+        bytes_write_scales = 2 * max(1, self.nelems // MXFP4_GROUP_SIZE) * name2bpe("c10::Float8_e8m0fnu")
         return bytes_read + bytes_write_fp4 + bytes_write_scales
 
 

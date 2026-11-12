@@ -147,7 +147,7 @@ def name2bpe(name):
     Args:
         name (str): The name of the data type.
     Returns:
-        int: The number of bytes per element.
+        float or None: The number of bytes per element.
     """
     dict_bpe2dtype = {
         8: ["double", "long int"],
@@ -161,10 +161,8 @@ def name2bpe(name):
             "unsigned char",
             "signed char",
             "fp8",
-            # Float4_e2m1fn_x2 packs two FP4 values into one byte. Trace tensor
-            # shapes already reflect the packed layout (K_packed = K/2), so we
-            # use bpe=1 for the packed-pair element and let callers apply the
-            # ×2 K-unpacking explicitly when modelling FLOPs.
+        ],
+        0.5: [
             "c10::float4_e2m1fn_x2",
             "fp4",
         ],
@@ -176,6 +174,10 @@ def name2bpe(name):
         return None
     return dict_dtype2bpe.get(name.lower(), None)
 
+
+# MXFP4 block size: number of FP4 elements that share one E8M0 scale value.
+# Fixed at 32 by the OCP Microscaling spec.
+MXFP4_GROUP_SIZE = 32
 
 # Keys are stored without a namespace, because torch_dtype_map strips one off
 # its input before looking it up. That way "c10::Half" and the already-stripped
