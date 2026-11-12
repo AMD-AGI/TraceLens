@@ -1267,6 +1267,10 @@ def _project_op(
     )
     _dims_only, dtype = _split_shape_text(output_text)
     bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    # A bool mask has no floating-point peak. It is still one byte per element
+    # on device, which is the width _integer_bpe records.
+    if bpe is None:
+        bpe = _integer_bpe(dtype)
 
     # Introspective boundaries: the modeling source tags each module with a role
     # ("attention"/"ffn") and the arch spec says whether the model is MoE, so we

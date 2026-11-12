@@ -157,6 +157,8 @@ def name2bpe(name):
             "c10::float8_e4m3fnuz",
             "c10::float8_e4m3fn",
             "c10::float8_e5m2",
+            # PyTorch stores a bool element in one byte.
+            "bool",
             "c10::float8_e8m0fnu",
             "unsigned char",
             "signed char",
