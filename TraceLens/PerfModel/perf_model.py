@@ -3617,17 +3617,6 @@ class aten_reciprocal(_TwoFlopUnary):
     """``aten::reciprocal`` and ``aten::reciprocal_``."""
 
 
-class aten_clone(aten_unary_elementwise):
-    """``aten::clone`` materializes a tensor. No arithmetic.
-
-    Bytes are one read and one write of the cloned dtype.
-    """
-
-    @staticmethod
-    def flops_func(nelems):
-        return 0
-
-
 class aten_to(aten_unary_elementwise):
     """``aten::to`` and ``aten::_to_copy``: a dtype or device copy.
 

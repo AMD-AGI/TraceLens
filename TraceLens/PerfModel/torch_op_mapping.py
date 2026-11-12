@@ -399,8 +399,6 @@ for op in ("aten::sqrt", "aten::sqrt_"):
     op_to_perf_model_class_map[op] = perf_model.aten_sqrt
 for op in ("aten::reciprocal", "aten::reciprocal_"):
     op_to_perf_model_class_map[op] = perf_model.aten_reciprocal
-for op in ("aten::clone",):
-    op_to_perf_model_class_map[op] = perf_model.aten_clone
 for op in ("aten::to", "aten::_to_copy"):
     op_to_perf_model_class_map[op] = perf_model.aten_to
 for op in ("aten::pad",):

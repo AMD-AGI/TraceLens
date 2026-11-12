@@ -2512,19 +2512,11 @@ class TestElementwiseReduceCoverage:
             assert op_to_perf_model_class_map[name] is cls
             assert op_to_perf_model_class_map[inplace] is cls
 
-    def test_clone_is_a_copy(self):
-        event = {
-            "args": {
-                "Input Dims": [(4, 128), []],
-                "Input type": ["long int", ""],
-                "Input Strides": [(128, 1), []],
-                "Concrete Inputs": ["", ""],
-            }
-        }
-        model = perf_model.aten_clone(event)
-        assert model.flops() == 0
-        assert model.bytes() == 2 * 4 * 128 * 8
-        assert op_to_perf_model_class_map["aten::clone"] is perf_model.aten_clone
+    def test_clone_is_left_to_its_copy(self):
+        # aten::clone allocates and calls aten::copy_. Modeling the parent
+        # stops the unified walk on clone and lists the same kernel twice
+        # on the UnaryElementwise sheet.
+        assert "aten::clone" not in op_to_perf_model_class_map
 
     def test_to_casts_between_the_recorded_scalar_types(self):
         event = {
