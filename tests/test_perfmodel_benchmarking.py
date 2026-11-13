@@ -351,6 +351,26 @@ class TestMicrobenchGpuBenchmarks:
         tflops = mb.bench_gemm(64, 64, 64, torch.float16, device=0)
         assert tflops > 0
 
+    @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+    def test_fma_chain_matches_reference(self, dtype_name):
+        torch = _require_cuda_gpu()
+        mb = _import_microbench()
+        mb.WARMUP = 1
+        mb.REP = 1
+        dtype = getattr(torch, dtype_name)
+        acc_fp32 = dtype != torch.float16
+        n, repeat = 4096, 20
+        x = torch.full((n,), 1.0, device="cuda", dtype=dtype)
+        y = torch.full((n,), 0.25, device="cuda", dtype=dtype)
+        z = torch.linspace(-1, 1, n, device="cuda").to(dtype)
+        out = torch.empty(n, device="cuda", dtype=torch.float32 if acc_fp32 else dtype)
+        mb._triton_fma_chain_ms(
+            x, y, z, out, repeat=repeat, block=2048, acc_fp32=acc_fp32
+        )
+        # x = 1 makes acc grow by y per step, so a dropped FMA shifts it by 0.25.
+        ref = z.float() + repeat * 0.25
+        torch.testing.assert_close(out.float(), ref, atol=0.05, rtol=0)
+
     def test_prepare_mxfp4_gemm_on_gpu(self):
         torch = _require_cuda_gpu()
         fp = _import_fp4fp6_helpers()
