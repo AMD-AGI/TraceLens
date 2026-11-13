@@ -209,7 +209,8 @@ class TestPseudoOpsPerfUtils:
         assert mappings["pseudo_pa_mqa_logits_fp4"] is pseudo_pa_mqa_logits_fp4
         assert mappings["pseudo_hc_boundary"] is hc_boundary
         assert mappings["pseudo_mxfp8_gemv"] is mxfp8_gemv
-        assert mappings["aten::topk"] is pseudo_flash_indexer_topk
+        assert mappings["pseudo_flash_indexer_topk"] is pseudo_flash_indexer_topk
+        assert "aten::topk" not in mappings
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()

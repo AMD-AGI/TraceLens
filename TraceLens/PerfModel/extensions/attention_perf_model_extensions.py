@@ -1567,10 +1567,24 @@ class pseudo_quantize_fp4_indexer:
 
 class pseudo_flash_indexer_topk:
     """
-    Pseudo parent for Flash PD indexer selection that currently lands on
-    aten::topk (+ optional repeat_interleave). Uses score matrix dims from the
-    wrapped aten::topk event rather than inventing a generic aten::topk formula
-    for unrelated call sites.
+    Flash PD lightning-indexer TopK pseudo parent (not a generic ``aten::topk``
+    model). Trace2Tree injects this above qualifying indexer ``aten::topk``
+    (+ optional ``repeat_interleave``) so FLOPs attach only via the pseudo name.
+
+    Approximate wrapped signature (PyTorch)::
+
+        aten::topk(self, k, dim=-1, largest=True, sorted=True)
+            self  # [rows, cols] score matrix — float / fp32 typical
+            k     # int — top-k (Flash often 512; may appear in Concrete Inputs)
+
+    Expected geometry (from the wrapped ``aten::topk`` shape donor):
+        ``Input Dims[0]`` = (rows, cols) with ``cols >= 1024`` (indexer-scale
+        score width; narrower TopK is rejected as ``_no_perf``).
+        ``Input type[0]`` = score dtype; ``k`` from Concrete Inputs digits or
+        default 512.
+
+    This class must not be registered under bare ``aten::topk`` — other TopK
+    call sites in the process are unrelated to DSV4 indexer selection.
     """
 
     category = "InferenceAttention"

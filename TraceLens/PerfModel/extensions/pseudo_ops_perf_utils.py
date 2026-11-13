@@ -78,8 +78,9 @@ def get_pseudo_op_mappings():
         # DeepSeek-V4.1-Flash SGLang pseudo parents / guarded maps (Trace2Tree injectors)
         "pseudo_pa_mqa_logits_fp4": attention_perf_model_extensions.pseudo_pa_mqa_logits_fp4,
         "pseudo_quantize_fp4_indexer": attention_perf_model_extensions.pseudo_quantize_fp4_indexer,
+        # Flash indexer TopK FLOPs only via the injected pseudo parent — never
+        # bare aten::topk (too generic; other TopK sites are unrelated to DSV4).
         "pseudo_flash_indexer_topk": attention_perf_model_extensions.pseudo_flash_indexer_topk,
-        "aten::topk": attention_perf_model_extensions.pseudo_flash_indexer_topk,
         "pseudo_hc_boundary": perf_model_extensions.hc_boundary,
         "pseudo_hc_mix_reduce_sinkhorn": perf_model_extensions.hc_mix_reduce_sinkhorn,
         "pseudo_mxfp8_gemv": perf_model_extensions.mxfp8_gemv,

@@ -688,9 +688,25 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
 
 class rmsnorm_fake_quant_fp8:
     """
-    Flash SGLang `_rmsnorm_fake_quant_fp8` — fused RMSNorm + FP8 fake-quant.
+    Flash SGLang fused RMSNorm + FP8 fake-quant
+    (``_rmsnorm_fake_quant_fp8`` / ``rmsnorm_fake_quant_fp8``).
 
-    Accepts either aiter-style Input Dims or injector-stamped (M, N).
+    Applies RMSNorm over the last dimension, then fake-quants the normalized
+    activations to FP8 (for downstream MXFP8 / FP8 paths). Modeled as vector
+    traffic: RMSNorm ~2N per row plus ~2 ops per element for quant.
+
+    Approximate signature::
+
+        rmsnorm_fake_quant_fp8(
+            x,       # [M, N] (or broadcastable), typically c10::BFloat16
+            weight,  # [N], typically c10::BFloat16 (affine scale)
+            ...      # eps / quant params as scalars
+        ) -> y       # [M, N], logical FP8 (stored/viewed per kernel)
+
+    Geometry from ``Input Dims`` / ``Input type`` when present:
+        Prefer weight/x shapes ``dims[1]`` → (M, N) with ``types[1]``, else
+        ``dims[0]`` → (M, N) with ``types[0]``. Fallback: injector stamps
+        ``M`` / ``num_tokens``, ``N`` / ``hidden_dim``, optional ``dtype_in``.
     """
 
     category = "RMSNorm"
