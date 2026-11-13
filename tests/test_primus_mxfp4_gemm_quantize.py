@@ -102,8 +102,10 @@ def _mxfp4_quantize_event(M=16384, N=12288, dtype_in="c10::BFloat16"):
 
 
 def test_name2bpe_float4_e2m1fn_x2():
-    # Packed FP4 pair: 1 byte per element of the traced tensor.
+    # Packed FP4 pair: one byte per element of the traced tensor.
     assert name2bpe("c10::Float4_e2m1fn_x2") == 1
+    # One logical value, for callers that have already unpacked K.
+    assert name2bpe("fp4") == 0.5
 
 
 def test_name2bpe_e8m0_scale():
@@ -170,8 +172,9 @@ def test_hipblaslt_gemm_fp4_bytes_includes_block_scales():
             scaleB_shape=(N, K // 32),
         )
     )
-    bytes_A = M * (K // 2)  # FP4 packed, bpe=1 over K_packed
-    bytes_B = N * (K // 2)
+    bpe = name2bpe("c10::Float4_e2m1fn_x2")
+    bytes_A = M * (K // 2) * bpe
+    bytes_B = N * (K // 2) * bpe
     bytes_scaleA = M * (K // 32)
     bytes_scaleB = N * (K // 32)
     bytes_out = M * N * 2  # BF16 output

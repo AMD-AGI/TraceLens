@@ -451,7 +451,8 @@ TraceLens_generate_perf_report_pytorch_inference \
 
 Output behavior matches the PyTorch report: a single Excel workbook is written
 next to the trace by default; use `--output_xlsx_path` or `--output_csvs_dir` to
-change the destination.
+change the destination. A `trace_checks.json` file is also written to the output
+directory (see [trace quality checks](../reference/trace-quality.md)).
 
 ## Merge capture traces
 
