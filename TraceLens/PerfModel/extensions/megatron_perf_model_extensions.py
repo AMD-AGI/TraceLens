@@ -10,6 +10,11 @@ import logging
 import math
 import re
 
+from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+    get_bwd_ops_for_fwd_op,
+    set_bookkeeping_attr,
+)
+
 
 def _link_checkpoint_fwd_bwd(trace_tree):
     """Wire bwd_events for TEv2 ops inside CheckpointFunctionBackward.
@@ -154,27 +159,6 @@ def tree_postprocess_extension(trace_tree):
             create_host_mm_ops_from_layernormlinear_op(trace_tree, fwd_op_event)
 
     _annotate_layernorm_backward_shapes(trace_tree)
-
-
-def get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event: dict) -> list[dict]:
-    """
-    Get backward operations for a given forward operation.
-    Uses on-demand subtree aggregation to find all backward events.
-    """
-    bwd_eventUIDs = fwd_op_event.get("bwd_events") or trace_tree.get_subtree_bwd_events(
-        fwd_op_event["UID"]
-    )
-    bwd_events = [trace_tree.get_UID2event(uid) for uid in bwd_eventUIDs]
-    return bwd_events
-
-
-def set_bookkeeping_attr(tree, event: dict):
-    UID = len(tree.events)
-    event["UID"] = UID
-    tree.events.append(event)
-    tree.events_by_uid[UID] = event
-    seq_num = event["args"]["Sequence number"]
-    tree.seq_num2event_uids_map[seq_num].append(UID)
 
 
 def is_gemm_kernel(kernel_event: dict) -> bool:

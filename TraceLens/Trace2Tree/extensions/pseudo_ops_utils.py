@@ -29,6 +29,17 @@ def normalize_sglang_profiler_op_names(tree):
         del tree.name2event_uids[old]
 
 
+def get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event: dict) -> list[dict]:
+    """Get backward operations for a given forward operation.
+
+    Uses on-demand subtree aggregation to find all backward events.
+    """
+    bwd_uids = fwd_op_event.get("bwd_events") or trace_tree.get_subtree_bwd_events(
+        fwd_op_event["UID"]
+    )
+    return [trace_tree.get_UID2event(uid) for uid in bwd_uids]
+
+
 def set_bookkeeping_attr(tree, event: dict):
     """Add bookkeeping attributes for a new pseudo event in the tree."""
 

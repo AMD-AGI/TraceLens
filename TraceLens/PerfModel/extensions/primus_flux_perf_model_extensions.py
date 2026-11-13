@@ -229,6 +229,11 @@ class quantize_mxfp4_h16_dual(_QuantizeMxfp4Base):
 
 import collections
 
+from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+    get_bwd_ops_for_fwd_op,
+    set_bookkeeping_attr,
+)
+
 _GEMM_OP_NAMES = frozenset(
     {
         "primus_turbo::gemm_fp4_impl",
@@ -242,16 +247,6 @@ def _suffix_for_op(name):
     if "a6w4" in name:
         return "a6w4"
     return "gemm"
-
-
-def _set_bookkeeping(tree, event):
-    uid = len(tree.events)
-    event["UID"] = uid
-    tree.events.append(event)
-    tree.events_by_uid[uid] = event
-    seq_num = event["args"].get("Sequence number")
-    if seq_num is not None and seq_num in tree.seq_num2event_uids_map:
-        tree.seq_num2event_uids_map[seq_num].append(uid)
 
 
 def _inject_pseudo_op(tree, orig_event, pseudo_name):
@@ -282,7 +277,7 @@ def _inject_pseudo_op(tree, orig_event, pseudo_name):
         "children": [orig_event["UID"]],
         "gpu_events": orig_event.get("gpu_events", []),
     }
-    _set_bookkeeping(tree, pseudo_evt)
+    set_bookkeeping_attr(tree, pseudo_evt)
 
     children = parent_event.get("children", [])
     if orig_event["UID"] in children:
@@ -294,19 +289,12 @@ def _inject_pseudo_op(tree, orig_event, pseudo_name):
     orig_event["parent"] = pseudo_evt["UID"]
 
 
-def _get_bwd_ops(tree, fwd_event):
-    bwd_uids = fwd_event.get("bwd_events") or tree.get_subtree_bwd_events(
-        fwd_event["UID"]
-    )
-    return [tree.get_UID2event(uid) for uid in bwd_uids]
-
-
 def _collect_gemm_children(tree, parent_event):
-    result = []
-    for child_uid in parent_event.get("children", []):
-        child = tree.get_UID2event(child_uid)
-        if child.get("name") in _GEMM_OP_NAMES:
-            result.append(child)
+    result = [
+        child
+        for child in tree.get_children_events(parent_event)
+        if child.get("name") in _GEMM_OP_NAMES
+    ]
     result.sort(key=lambda e: e["ts"])
     return result
 
@@ -336,7 +324,7 @@ def _label_fwd_gemms(tree, fwd_event, prefix, processed_uids):
 
 def _label_bwd_gemms(tree, fwd_event, prefix, processed_uids):
     """Wrap backward GEMM descendants in xgrad/wgrad pseudo ops."""
-    for bwd_op in _get_bwd_ops(tree, fwd_event):
+    for bwd_op in get_bwd_ops_for_fwd_op(tree, fwd_event):
         for i, gemm_evt in enumerate(_collect_gemm_descendants(tree, bwd_op)):
             if gemm_evt["UID"] in processed_uids:
                 continue

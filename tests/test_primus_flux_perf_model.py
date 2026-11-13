@@ -312,6 +312,11 @@ class _FakeTree:
     def get_UID2event(self, uid):
         return self.events_by_uid[uid]
 
+    def get_children_events(self, event):
+        if "children" not in event:
+            return []
+        return [self.get_UID2event(uid) for uid in event["children"]]
+
     def get_subtree_bwd_events(self, uid):
         return self.events_by_uid[uid].get("bwd_events", [])
 
