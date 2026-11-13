@@ -68,7 +68,9 @@ RDNA_DERIVED_FROM = {
 # shorter warm-up before a config whose setup left the GPU idle (a Triton
 # compile, large allocations), the timed window (median per call), the burst
 # pass after an idle gap, the back-to-back run of the 16-bit GEMM winners
-# (median chunk after the settle time), and the sysfs telemetry period.
+# (median chunk after the settle time; chunks are sized from the wall time of
+# a shorter first chunk, since do_bench's rate leaves out launch overhead), and
+# the sysfs telemetry period.
 RDNA_WARM_S = 3.0
 RDNA_REWARM_S = 1.0
 RDNA_REWARM_AFTER_S = 0.25
@@ -78,6 +80,7 @@ RDNA_BURST_WINDOW_MS = 100
 RDNA_BACK_TO_BACK_S = 30.0
 RDNA_BACK_TO_BACK_SETTLE_S = 10.0
 RDNA_BACK_TO_BACK_CHUNK_S = 0.5
+RDNA_BACK_TO_BACK_FIRST_CHUNK_S = 0.05
 TELEMETRY_PERIOD_S = 0.1
 # The sysfs clocks are SMU averages over a few hundred ms; a window with fewer
 # samples than this records no clock.

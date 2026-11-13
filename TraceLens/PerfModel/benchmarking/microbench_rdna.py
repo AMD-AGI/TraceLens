@@ -41,6 +41,7 @@ from triton.testing import do_bench
 from .microbench_utils import (
     BW_PLATEAU_TOL,
     RDNA_BACK_TO_BACK_CHUNK_S,
+    RDNA_BACK_TO_BACK_FIRST_CHUNK_S,
     RDNA_BACK_TO_BACK_S,
     RDNA_BACK_TO_BACK_SETTLE_S,
     RDNA_BURST_IDLE_S,
@@ -914,24 +915,36 @@ def _back_to_back(
     time the board has settled at its power limit, with the clocks and power of
     that part; the median of the chunks before it; and the slowest and fastest
     chunk after it.
+
+    The first chunk has the calls the winner's rate fits in
+    ``RDNA_BACK_TO_BACK_FIRST_CHUNK_S``; the rest are sized from its wall time,
+    which includes the launch overhead the rate leaves out.
     """
     cand = winner.candidate
     rate_key = winner.rate_key
     unit, scale = _RATE_UNITS[rate_key]
-    calls = max(1, round(RDNA_BACK_TO_BACK_CHUNK_S * winner.rate * scale / cand.work))
+    calls = max(
+        1, round(RDNA_BACK_TO_BACK_FIRST_CHUNK_S * winner.rate * scale / cand.work)
+    )
     chunks: List[Tuple[float, float]] = []
     begin, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
     with _preferred_blas(cand.blas):
         fn = cand.factory()
         t0, wall0 = time.perf_counter(), time.time()
         while time.perf_counter() - t0 < seconds:
+            started = time.perf_counter()
             begin.record()
             for _ in range(calls):
                 fn()
             end.record()
             end.synchronize()
+            done = time.perf_counter()
             rate = cand.work * calls / (begin.elapsed_time(end) * 1e-3) / scale
-            chunks.append((time.perf_counter() - t0, rate))
+            chunks.append((done - t0, rate))
+            if len(chunks) == 1:
+                calls = max(
+                    1, round(calls * RDNA_BACK_TO_BACK_CHUNK_S / (done - started))
+                )
         del fn
     late = [r for t, r in chunks if t > settle_s]
     result = {
@@ -1016,6 +1029,7 @@ def _protocol_record(
                 "seconds": RDNA_BACK_TO_BACK_S,
                 "settle_s": RDNA_BACK_TO_BACK_SETTLE_S,
                 "chunk_s": RDNA_BACK_TO_BACK_CHUNK_S,
+                "first_chunk_s": RDNA_BACK_TO_BACK_FIRST_CHUNK_S,
             }
         ),
         "telemetry": {

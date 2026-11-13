@@ -751,6 +751,50 @@ class TestRdnaProtocolHelpers:
         assert (record["back_to_back"] is None) is skip
         assert record["telemetry"]["source"] is None
 
+    def test_back_to_back_chunks_follow_wall_time(self):
+        # A launch-bound GEMM: 1 ms of wall time per call, 0.25 ms of it on the GPU.
+        rd = _import_microbench_rdna()
+        clock = types.SimpleNamespace(wall=0.0, gpu=0.0)
+
+        def call():
+            clock.wall += 1e-3
+            clock.gpu += 0.25e-3
+
+        class FakeEvent:
+            def __init__(self, enable_timing=False):
+                self.at = 0.0
+
+            def record(self):
+                self.at = clock.gpu
+
+            def synchronize(self):
+                pass
+
+            def elapsed_time(self, other):
+                return (other.at - self.at) * 1e3
+
+        fake_time = types.SimpleNamespace(
+            perf_counter=lambda: clock.wall, time=lambda: clock.wall
+        )
+        work = 2 * 512**3
+        cand = rd._Candidate({"layout": "nt"}, lambda: call, work)
+        winner = rd._Winner(
+            "matrix", "matrix_fp16", cand, "tflops", work / 0.25e-3 / 1e12
+        )
+        proto = rd._RdnaProtocol(
+            SysfsTelemetry("0000:99:00.0", root="/nonexistent"),
+            warm_s=3.0,
+            window_ms=1000,
+        )
+        with patch.object(rd, "time", fake_time), patch.object(
+            rd.torch.cuda, "Event", FakeEvent
+        ):
+            held = rd._back_to_back(winner, proto, seconds=2.0, settle_s=0.75)
+        # Sized from the rate, a 0.5 s chunk would take 2 s and leave none before 0.75 s.
+        assert held["calls_per_chunk"] == 500
+        assert held["chunks"] == 5
+        assert held["first_0.75_s_tflops"] == held["tflops"] == round(winner.rate, 1)
+
 
 class TestRdnaWindowAndRecord:
     def test_hyperloom_settings_are_floored_and_logged(self, capsys):
