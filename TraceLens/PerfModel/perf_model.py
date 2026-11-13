@@ -6436,12 +6436,15 @@ __all__ = [name for name in globals() if not name.startswith("_")]
 # surface as separate trace op names; the backward recovers K from the forward
 # via the Sequence-number fwd_pass_cache (same pattern as ConvBias_ above).
 # ---------------------------------------------------------------------------
-MX_BLOCK = 32
-# FP4 E2M1 element occupies half a byte (two packed per byte).
-FP4_BPE = 0.5
-# E8M0 block scale is one byte.
-MX_SCALE_BPE = 1
-BF16_BPE = 2
+# MXFP4 format mechanics. These ops take BF16 inputs and quantize internally, so
+# -- unlike gemm_fp4_impl, which reads already-quantized FP4 operands and their
+# scale tensors straight from the trace -- the FP4 element size and E8M0 block
+# scale are not in the trace. They are pinned to the MXFP4 spec here but expressed
+# through name2bpe so they track the dtype table rather than raw magic numbers.
+# Everything the trace does record (the BF16 operand dtypes) is derived at use.
+MX_BLOCK = 32  # one E8M0 scale per 32 contraction elements
+FP4_BPE = name2bpe("c10::float4_e2m1fn_x2") / 2  # packed pair = 1 byte -> 0.5/elem
+MX_SCALE_BPE = name2bpe("c10::float8_e8m0fnu")  # E8M0 scale = 1 byte
 
 
 def _mx_gemm_bytes(M, N, K, bpe_in, bpe_out):
@@ -6529,8 +6532,10 @@ class FP4GemmMXFunction(GEMM):
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
-        bpe_out = name2bpe(self.param_details["dtype_A_B"][2]) or BF16_BPE
-        return _mx_gemm_bytes(self.M, self.N, self.K, BF16_BPE, bpe_out)
+        dtype_A_B = self.param_details["dtype_A_B"]
+        bpe_in = name2bpe(dtype_A_B[0])   # BF16 operand read, from trace Input type
+        bpe_out = name2bpe(dtype_A_B[2])  # BF16 output -- not in trace
+        return _mx_gemm_bytes(self.M, self.N, self.K, bpe_in, bpe_out)
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
@@ -6614,11 +6619,12 @@ class FP4GemmMXFunctionBackward(GEMM):
         if self.K is None or self.N is None:
             return None
         M, N, K = self.M, self.N, self.K
-        read_grad_out = M * N * BF16_BPE
+        bpe_bf16 = name2bpe(self.param_details["dtype_A_B"][0])  # grad_out/grads BF16, from trace
+        read_grad_out = M * N * bpe_bf16
         fp4_elems = 2 * M * N + N * K + M * K
         read_fp4 = fp4_elems * FP4_BPE
         read_scales = fp4_elems / MX_BLOCK * MX_SCALE_BPE
-        write_grads = (M * K + N * K) * BF16_BPE
+        write_grads = (M * K + N * K) * bpe_bf16
         return read_grad_out + read_fp4 + read_scales + write_grads
 
     def get_compute_precision(self):
@@ -6677,6 +6683,7 @@ class FP4GroupedMLPMXFunc(GEMM):
     @staticmethod
     def get_param_details(event):
         dims = event["args"]["Input Dims"]
+        dtypes = event["args"]["Input type"]
         T = dims[0][0]
         E, N1, K1 = dims[2][0], dims[2][1], dims[2][2]
         _E2, N2, K2 = dims[3][0], dims[3][1], dims[3][2]
@@ -6688,6 +6695,8 @@ class FP4GroupedMLPMXFunc(GEMM):
             "K": K1,
             "bias": False,
             "dtype_A_B": ("mxfp4", "mxfp4", "c10::BFloat16"),
+            # Real BF16 input dtype (from trace) for the on-the-fly quant read.
+            "dtype_in": dtypes[0],
             "T": T,
             "E": E,
             "N1": N1,
@@ -6706,12 +6715,14 @@ class FP4GroupedMLPMXFunc(GEMM):
         p = self.param_details
         T, E = p["T"], p["E"]
         N1, K1, N2, K2, I = p["N1"], p["K1"], p["N2"], p["K2"], p["I"]
-        per_elem = BF16_BPE + FP4_BPE + MX_SCALE_BPE / MX_BLOCK  # quant-read + FP4 + scale
+        bpe_in = name2bpe(p["dtype_in"])      # BF16 operand read, from trace
+        bpe_bf16 = name2bpe("c10::bfloat16")  # internal/output BF16 -- not in trace
+        per_elem = bpe_in + FP4_BPE + MX_SCALE_BPE / MX_BLOCK  # quant-read + FP4 + scale
         act_in = T * K1 * per_elem
         w1 = E * N1 * K1 * per_elem
         w2 = E * N2 * K2 * per_elem
-        intermediate = T * N1 * BF16_BPE + T * I * BF16_BPE
-        out = T * N2 * BF16_BPE
+        intermediate = T * N1 * bpe_bf16 + T * I * bpe_bf16
+        out = T * N2 * bpe_bf16
         # Transpose-quantized (col-major) FP4 copies saved for the backward:
         # the input activation, the GLU intermediate, and both expert weights.
         tq = (FP4_BPE + MX_SCALE_BPE / MX_BLOCK)
@@ -6790,11 +6801,13 @@ class FP4GroupedMLPMXFuncBackward(GEMM):
             return None
         T, E = p["T"], p["E"]
         N1, K1, N2, K2, I = p["N1"], p["K1"], p["N2"], p["K2"], p["I"]
-        per_elem = BF16_BPE + FP4_BPE + MX_SCALE_BPE / MX_BLOCK
+        bpe_in = name2bpe(p.get("dtype_in") or "c10::bfloat16")  # BF16 read, from fwd
+        bpe_bf16 = name2bpe("c10::bfloat16")
+        per_elem = bpe_in + FP4_BPE + MX_SCALE_BPE / MX_BLOCK
         # dgrad + wgrad for each GEMM reads the operands roughly twice over.
         operand = (T * K1 + E * N1 * K1 + E * N2 * K2) * per_elem
-        grads = (T * K1 + E * N1 * K1 + E * N2 * K2) * BF16_BPE
-        intermediate = (T * N1 + T * I) * BF16_BPE
+        grads = (T * K1 + E * N1 * K1 + E * N2 * K2) * bpe_bf16
+        intermediate = (T * N1 + T * I) * bpe_bf16
         return 2 * operand + grads + intermediate
 
     def get_compute_precision(self):
