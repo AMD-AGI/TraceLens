@@ -19,7 +19,7 @@ Run it once per platform to produce a `<platform>.json` arch file. Roofline-base
 | `microbench.py` | Main suite: matrix/vector TFLOPS + memory bandwidth; writes the arch JSON. |
 | `microbench_rocprof.py` | Validation: cross-checks measured GEMM TFLOPS against `rocprofv3` MFMA hardware counters (AMD only). |
 | `fp4fp6_helpers.py` | Triton `dot_scaled` + aiter/CK block-scaled MXFP4 / MXFP6 / INT8 GEMM helpers. |
-| `microbench_utils.py` | Device resolution and the pre-flight GPU-idle check (`amdsmi` / `nvidia-smi`). |
+| `microbench_utils.py` | Device resolution, the pre-flight GPU-idle check (`amdsmi` / `nvidia-smi`) and the gfx1100 ceiling allowlist. |
 
 ## Methodology
 
@@ -29,6 +29,7 @@ Run it once per platform to produce a `<platform>.json` arch file. Roofline-base
 - Matrix TFLOPS and INT8 use `2·M·N·K` FLOPs per GEMM. FP8 runs through `torch._scaled_mm` (dtype auto-selected per stack); INT8 through `torch._int_mm` and, when available, aiter CK `gemm_a8w8` (max is kept). MXFP4/MXFP6 use Triton `tl.dot_scaled` and, on gfx950, aiter CK `gemm_a4w4`. On AMD targets without native MX matrix instructions (any target not in `NATIVE_MX_GFX_ARCHS` in `microbench_utils.py`), these formats are converted and multiplied on the 16-bit matrix cores, so `matrix_fp4` and `matrix_fp6` report the 16-bit matrix peak instead of the converted kernel's measurement.
 - Vector TFLOPS use a compute-bound Triton FMA dependency chain (not PyTorch elementwise) to saturate the SIMD units.
 - Memory bandwidth is measured via device-to-device copy (read = `2·bytes`) and fill (write).
+- On `gfx1100` (RDNA3), the allowlist in `microbench_utils.py` (`published_tflops_keys`) limits the ceilings to `matrix_fp16`, `matrix_bf16`, `matrix_int8`, `vector_fp16`, `vector_fp32` and `vector_fp64`. RDNA3 WMMA has no FP8/FP4/FP6 path and FP32/FP64 GEMMs run on the vector ALUs, so those matrix keys are not benchmarked; `vector_bf16` is left out because the Triton BF16 FMA chain computes in FP32. A key that measures 0 is omitted rather than written as 0, and the run prints the reason for every key it leaves out. Every other target publishes every key, as before.
 
 ## Prerequisites
 
@@ -60,7 +61,7 @@ HIP_VISIBLE_DEVICES=2 python -m TraceLens.PerfModel.benchmarking.microbench \
 python -m TraceLens.PerfModel.benchmarking.microbench --device 0 --warmup 5 --rep 20
 ```
 
-The output filename is used as the arch `name` heuristically (memory tier → `MI300X` / `MI355X`), so name the file after your platform.
+The output filename is used as the arch `name` heuristically (memory tier → `MI300X` / `MI355X`), so name the file after your platform. Both Radeon PRO W7900 boards (`AMD Radeon Pro W7900` and `AMD Radeon Pro W7900 Dual Slot`, any case) are named `W7900`.
 
 ### Key options
 
@@ -94,6 +95,12 @@ The output filename is used as the arch `name` heuristically (memory tier → `M
 All numeric values are floats rounded to one decimal place (for example `0.4`
 TFLOPS for a slow fp64 unit), not integers.
 
+On `gfx1100` the JSON also records `"gfx_arch": "gfx1100"`, and
+`max_achievable_tflops` holds only the keys it publishes (see Methodology). A
+missing key means "no ceiling", so the report leaves that roofline blank
+instead of dividing by a placeholder. Every other target writes the full key
+set shown above.
+
 Drop this file into an arch directory (the bundled [`Agent/Analysis/utils/arch/`](../../Agent/Analysis/utils/arch/)) as `<platform>.json`, then pass `--gpu_arch_json_path <platform>.json` to the perf-report CLIs. See [`examples/gpu_arch_example.md`](../../../examples/gpu_arch_example.md) for the field reference.
 
 ## Validating against hardware counters (AMD)
@@ -104,3 +111,12 @@ Drop this file into an arch directory (the bundled [`Agent/Analysis/utils/arch/`
 python -m TraceLens.PerfModel.benchmarking.microbench_rocprof --device 0 \
     --output results/rocprof_compare.json
 ```
+
+On `gfx1100` the counter step is skipped, because `SQ_INSTS_VALU_MFMA_MOPS_*`
+are CDNA MFMA counters and RDNA3 WMMA has none. Each row's `counter_skipped`
+field says so, and the plain timing still runs. The default metrics there are
+its published matrix keys (`matrix_fp16`, `matrix_bf16`, `matrix_int8`).
+Other targets are unchanged.
+
+Other hardware counters on gfx1100 need the GPU at the `profile_standard` perf
+level: at `auto`, the GL2C and LDS counters read 0.

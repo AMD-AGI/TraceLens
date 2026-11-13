@@ -35,6 +35,7 @@ from typing import Dict, List, Optional, Tuple
 # Reuse all the benchmark helpers from microbench.py so the plain run is
 # byte-identical to what microbench.py does.
 from . import microbench as mb
+from .microbench_utils import gfx_target, published_tflops_keys
 
 # Metric -> rocprofv3 PMC counter (None means: benchmark only, no counter).
 COUNTER_MAP: Dict[str, Optional[str]] = {
@@ -49,6 +50,25 @@ COUNTER_MAP: Dict[str, Optional[str]] = {
 }
 
 DEFAULT_METRICS: List[str] = [k for k in mb.ARCH_TLOPS_KEYS if k.startswith("matrix_")]
+
+# gfx targets that lack the CDNA MFMA counters in COUNTER_MAP, with the reason
+# the counter cross-check is skipped there.
+MFMA_COUNTERS_UNAVAILABLE: Dict[str, str] = {
+    "gfx1100": (
+        "SQ_INSTS_VALU_MFMA_MOPS_* are CDNA MFMA counters; gfx1100 (RDNA3 WMMA) "
+        "has none"
+    ),
+}
+
+
+def _default_metrics(gfx: str) -> List[str]:
+    """Matrix metrics to run by default: on an allowlisted target, only the
+    ones it publishes."""
+    published = published_tflops_keys(gfx)
+    if published is None:
+        return list(DEFAULT_METRICS)
+    return [m for m in DEFAULT_METRICS if m in published]
+
 
 # Extra per-metric shapes appended to the default ``mb.GEMM_SHAPES`` list. The
 # there on MI355X (matches the shape used in aiter's op_tests).
@@ -354,10 +374,16 @@ def run_orchestrator(args: argparse.Namespace) -> int:
     rocprof_dir = Path(args.rocprof_dir).resolve()
     rocprof_dir.mkdir(parents=True, exist_ok=True)
 
+    import torch
+
+    props = torch.cuda.get_device_properties(args.device)
+    gfx = gfx_target(getattr(props, "gcnArchName", ""))
+    counter_skip = MFMA_COUNTERS_UNAVAILABLE.get(gfx)
+
     metrics = (
         [m.strip() for m in args.metrics.split(",")]
         if args.metrics
-        else DEFAULT_METRICS
+        else _default_metrics(gfx)
     )
     shapes = _parse_shapes(args.shapes)
 
@@ -386,6 +412,8 @@ def run_orchestrator(args: argparse.Namespace) -> int:
     print(f"PMC dir: {rocprof_dir}")
     print(f"rocprofv3: {args.rocprofv3}")
     print(f"warmup={args.warmup or mb.WARMUP}  rep={args.rep or mb.REP}")
+    if counter_skip:
+        print(f"Counters skipped: {counter_skip}")
     print("=" * 64)
 
     rows: List[Dict[str, object]] = []
@@ -502,6 +530,11 @@ def run_orchestrator(args: argparse.Namespace) -> int:
                 print("  [2/2] rocprof: skipped (no counter for this metric)")
                 rows.append(row)
                 continue
+            if counter_skip:
+                row["counter_skipped"] = counter_skip
+                print(f"  [2/2] rocprof: skipped ({counter_skip})")
+                rows.append(row)
+                continue
 
             run_dir = rocprof_dir / f"{metric}_{_shape_tag(M, N, K)}"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -597,6 +630,9 @@ def run_orchestrator(args: argparse.Namespace) -> int:
         "counter_map": COUNTER_MAP,
         "rows": rows,
     }
+    if counter_skip:
+        payload["gfx_arch"] = gfx
+        payload["counter_skipped"] = counter_skip
     with open(out_root, "w") as f:
         json.dump(payload, f, indent=2)
     print(f"\nWrote {out_root}")
@@ -629,6 +665,8 @@ def run_orchestrator(args: argparse.Namespace) -> int:
         "int8_winner",
         "error",
     ]
+    if counter_skip:
+        fieldnames.insert(-1, "counter_skipped")
     with open(csv_out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
@@ -658,7 +696,9 @@ def run_orchestrator(args: argparse.Namespace) -> int:
         roc_fl = float(r.get("rocprof_flops", 0.0))
         fl_r = float(r.get("flops_ratio_rocprof_over_calculated", 0.0))
         ms_r = float(r.get("ms_ratio_rocprof_over_measured", 0.0))
-        err = r.get("error", "")
+        err = r.get("error", "") or (
+            "counters skipped" if r.get("counter_skipped") else ""
+        )
         kname = str(r.get("rocprof_kernel_name", ""))
         kshort = kname if len(kname) <= 60 else kname[:60] + "..."
         print(

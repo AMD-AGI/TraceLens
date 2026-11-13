@@ -147,9 +147,11 @@ This adds:
       --gpu_arch_platform MI300X
   ```
 
-- `--gpu_arch_platform` takes a bundled platform name (`MI300X`, `MI325X`, under
+- `--gpu_arch_platform` takes a bundled platform name (`MI300X`, `MI325X`, `W7900`, under
   `TraceLens/Agent/Analysis/utils/arch/`); use `--gpu_arch_json_path` to supply
   your own spec. The two flags are mutually exclusive.
+- Without either flag, the report has no roofline columns and logs a warning
+  that no spec was given; no default spec is assumed.
 - An operation is classified by comparing its compute time (`FLOPs / peak FLOPS`)
   against its memory time (`bytes / peak bandwidth`): the larger term wins.
   Equivalently, operations whose arithmetic intensity (FLOPs/byte) sits below the

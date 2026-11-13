@@ -10,6 +10,8 @@
 - check_gpu_idle: pre-flight idle check via amdsmi or nvidia-smi.
 - mx_peak_without_native_support: MXFP4/MXFP6 ceiling on AMD targets that
   lack native MX matrix instructions.
+- published_tflops_keys / omitted_tflops_reason: ceiling allowlist for the
+  targets that have one (gfx1100).
 """
 
 from __future__ import annotations
@@ -17,16 +19,54 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 # AMD gfx targets whose matrix cores execute MXFP4/MXFP6 natively. On other
 # targets these formats are converted and multiplied on the 16-bit matrix cores.
 NATIVE_MX_GFX_ARCHS = frozenset({"gfx950"})
 
+# Ceilings an allowlisted target executes natively. Keys that measure 0 are
+# omitted rather than published as a zero ceiling. Targets without an entry
+# publish every key of the arch schema, 0.0 included.
+PUBLISHED_TFLOPS_KEYS_BY_ISA: Dict[str, Tuple[str, ...]] = {
+    "gfx1100": (
+        "matrix_fp16",
+        "matrix_bf16",
+        "matrix_int8",
+        "vector_fp16",
+        "vector_fp32",
+        "vector_fp64",
+    ),
+}
+
+OMITTED_TFLOPS_REASONS: Dict[str, Dict[str, str]] = {
+    "gfx1100": {
+        "matrix_fp8": "RDNA3 WMMA has no FP8 path",
+        "matrix_fp4": "RDNA3 WMMA has no FP4 path",
+        "matrix_fp6": "RDNA3 WMMA has no FP6 path",
+        "matrix_fp32": "RDNA3 WMMA has no FP32 path; FP32 GEMMs run on the vector ALUs",
+        "matrix_fp64": "RDNA3 WMMA has no FP64 path; FP64 GEMMs run on the vector ALUs",
+        "vector_bf16": "the Triton BF16 FMA chain computes in FP32, so it measures no BF16 ceiling",
+    },
+}
+
 
 def gfx_target(gcn_arch_name: Optional[str]) -> str:
     """Base gfx target of a ``gcnArchName`` such as ``gfx942:sramecc+:xnack-``."""
     return (gcn_arch_name or "").split(":")[0]
+
+
+def published_tflops_keys(gfx: str) -> Optional[Tuple[str, ...]]:
+    """
+    Ceiling keys the microbenchmark publishes for gfx target *gfx*, or
+    ``None`` when *gfx* has no allowlist and publishes every key.
+    """
+    return PUBLISHED_TFLOPS_KEYS_BY_ISA.get(gfx)
+
+
+def omitted_tflops_reason(gfx: str, key: str) -> str:
+    """Why allowlisted target *gfx* does not publish *key*."""
+    return OMITTED_TFLOPS_REASONS[gfx][key]
 
 
 def mx_peak_without_native_support(
