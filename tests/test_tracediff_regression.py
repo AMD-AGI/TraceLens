@@ -85,6 +85,9 @@ def test_tracediff_regression(tmp_path, update_references):
         test_file = os.path.join(output_dir, filename)
         if not os.path.exists(ref_file):
             continue
+        if not os.path.exists(test_file):
+            errors.append(f"{filename}: not produced by generate_tracediff_report()")
+            continue
         with open(ref_file) as f:
             ref_lines = f.readlines()
         with open(test_file) as f:

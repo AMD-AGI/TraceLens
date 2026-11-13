@@ -6,8 +6,8 @@
 
 import pandas as pd, pytest, sys, types, os
 from types import SimpleNamespace
-from TraceLens.TraceDiff.trace_diff import (
-    TraceDiff,
+from TraceLens.TraceDiff.trace_diff import TraceDiff
+from TraceLens.TraceDiff.merge import (
     _disambiguate_same_name_candidates,
     _gpu_path_child_names_at_bfs_levels,
 )

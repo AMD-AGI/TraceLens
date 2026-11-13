@@ -58,72 +58,20 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
 
     trace1 = df[df["source"] == "trace1"]
     trace2 = df[df["source"] == "trace2"]
-    lca_ids = df["lowest_common_ancestor_id"].unique()
 
     rows = []
-    for lca_id in lca_ids:
-        t1 = trace1[trace1["lowest_common_ancestor_id"] == lca_id]
-        t2 = trace2[trace2["lowest_common_ancestor_id"] == lca_id]
-
-        cpu_ops_t1 = t1["cpu_op_name"].unique()
-        if len(cpu_ops_t1) == 1:
-            op_name = cpu_ops_t1[0]
-        elif len(cpu_ops_t1) > 1:
-            op_name = " | ".join(sorted(cpu_ops_t1))
-        else:
-            cpu_ops_t2 = t2["cpu_op_name"].unique()
-            if len(cpu_ops_t2) == 1:
-                op_name = cpu_ops_t2[0]
-            elif len(cpu_ops_t2) > 1:
-                op_name = " | ".join(sorted(cpu_ops_t2))
-            else:
-                op_name = "unknown"
-
+    for lca_id in df["lowest_common_ancestor_id"].unique():
         lca_names = df[df["lowest_common_ancestor_id"] == lca_id][
             "lowest_common_ancestor_name"
         ].unique()
-        lca_name = lca_names[0] if len(lca_names) > 0 else ""
-
-        src = t1 if not t1.empty else t2
-        nn_module_stack = src["nn_module_stack"].iloc[0] if not src.empty else ""
-        nn_module_parent = src["nn_module_parent"].iloc[0] if not src.empty else ""
-
-        kernel_time_trace1 = t1["busy_time"].iloc[0] if not t1.empty else 0.0
-        kernel_time_trace2 = t2["busy_time"].iloc[0] if not t2.empty else 0.0
-        num_kernels_trace1 = len(t1)
-        num_kernels_trace2 = len(t2)
-        kernel_names_trace1 = t1["name"].tolist() if not t1.empty else []
-        kernel_names_trace2 = t2["name"].tolist() if not t2.empty else []
-
-        input_dims = src["Input Dims"].iloc[0] if not src.empty else ""
-        input_type = src["Input type"].iloc[0] if not src.empty else ""
-        input_strides = src["Input Strides"].iloc[0] if not src.empty else ""
-        concrete_inputs = src["Concrete Inputs"].iloc[0] if not src.empty else ""
-
-        row = {
-            "name": op_name,
-            "lowest_common_ancestor_name": lca_name,
-            "lowest_common_ancestor_id": lca_id,
-            "nn_module_stack": nn_module_stack,
-            "nn_module_parent": nn_module_parent,
-            "Input Dims": input_dims,
-            "Input type": input_type,
-            "Input Strides": input_strides,
-            "Concrete Inputs": concrete_inputs,
-            "kernel_time_trace1_us": kernel_time_trace1,
-            "kernel_time_trace2_us": kernel_time_trace2,
-            "num_kernels_trace1": num_kernels_trace1,
-            "num_kernels_trace2": num_kernels_trace2,
-            "kernel_names_trace1": kernel_names_trace1,
-            "kernel_names_trace2": kernel_names_trace2,
-        }
-
-        if kernel_time_trace1 > 0:
-            row["speedup (trace2/trace1)"] = kernel_time_trace2 / kernel_time_trace1
-        else:
-            row["speedup (trace2/trace1)"] = float("nan")
-        row["delta_us (trace2 - trace1)"] = kernel_time_trace2 - kernel_time_trace1
-        rows.append(row)
+        rows.append(
+            _lca_summary_row(
+                lca_id,
+                lca_names[0] if len(lca_names) > 0 else "",
+                trace1[trace1["lowest_common_ancestor_id"] == lca_id],
+                trace2[trace2["lowest_common_ancestor_id"] == lca_id],
+            )
+        )
 
     df_summary = pd.DataFrame(rows)
     if df_summary.empty:
@@ -132,7 +80,55 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
     df_summary = df_summary.sort_values(
         by="kernel_time_trace1_us", ascending=False
     ).reset_index(drop=True)
+    return _add_total_pct_columns(df_summary)
 
+
+def _lca_op_name(t1: pd.DataFrame, t2: pd.DataFrame) -> str:
+    """CPU op name for one LCA; several names are joined, none is "unknown"."""
+    for frame in (t1, t2):
+        names = frame["cpu_op_name"].unique()
+        if len(names) == 1:
+            return names[0]
+        if len(names) > 1:
+            return " | ".join(sorted(names))
+    return "unknown"
+
+
+def _first_value(frame: pd.DataFrame, col: str) -> Any:
+    """First value of a column, or empty string when the frame has no rows."""
+    return frame[col].iloc[0] if not frame.empty else ""
+
+
+def _lca_summary_row(
+    lca_id: Any, lca_name: Any, t1: pd.DataFrame, t2: pd.DataFrame
+) -> Dict[str, Any]:
+    """One per-LCA summary row carrying both traces' kernel times."""
+    src = t1 if not t1.empty else t2
+    time1 = t1["busy_time"].iloc[0] if not t1.empty else 0.0
+    time2 = t2["busy_time"].iloc[0] if not t2.empty else 0.0
+    return {
+        "name": _lca_op_name(t1, t2),
+        "lowest_common_ancestor_name": lca_name,
+        "lowest_common_ancestor_id": lca_id,
+        "nn_module_stack": _first_value(src, "nn_module_stack"),
+        "nn_module_parent": _first_value(src, "nn_module_parent"),
+        "Input Dims": _first_value(src, "Input Dims"),
+        "Input type": _first_value(src, "Input type"),
+        "Input Strides": _first_value(src, "Input Strides"),
+        "Concrete Inputs": _first_value(src, "Concrete Inputs"),
+        "kernel_time_trace1_us": time1,
+        "kernel_time_trace2_us": time2,
+        "num_kernels_trace1": len(t1),
+        "num_kernels_trace2": len(t2),
+        "kernel_names_trace1": t1["name"].tolist() if not t1.empty else [],
+        "kernel_names_trace2": t2["name"].tolist() if not t2.empty else [],
+        "speedup (trace2/trace1)": (time2 / time1 if time1 > 0 else float("nan")),
+        "delta_us (trace2 - trace1)": time2 - time1,
+    }
+
+
+def _add_total_pct_columns(df_summary: pd.DataFrame) -> pd.DataFrame:
+    """Share-of-total columns, added only for a trace that contributed time."""
     total_trace1 = df_summary["kernel_time_trace1_us"].sum()
     total_trace2 = df_summary["kernel_time_trace2_us"].sum()
     if total_trace1 > 0:
@@ -146,7 +142,6 @@ def tracediff_perf_summary_from_diff_stats(diff_stats_df: pd.DataFrame) -> pd.Da
         df_summary["pct_of_trace2_total (%)"] = (
             df_summary["kernel_time_trace2_us"] / total_trace2
         ) * 100
-
     return df_summary
 
 
@@ -239,41 +234,52 @@ def _build_lca_metadata(
     lca_trace2_time = trace2.groupby("lowest_common_ancestor_id")["busy_time"].first()
 
     for lca_id, grp in trace1.groupby("lowest_common_ancestor_id"):
-        t1_total = float(grp["busy_time"].iloc[0])
-
-        t2_total = float(lca_trace2_time.get(lca_id, 0.0))
-        has_trace2_match = bool(_trace2_gpu_op_uid_set_for_lca(trace2, lca_id))
-
         names = grp["lowest_common_ancestor_name"].dropna()
         lca_display_name = str(names.iloc[0]) if not names.empty else None
-        if lca_display_name == "":
-            lca_display_name = None
-
-        seen: Set[Any] = set()
-        for _, row in grp.iterrows():
-            key = _resolve_diff_row_to_key(row, uid_to_row_idx)
-            if key is None or key in seen:
-                continue
-            seen.add(key)
-            if key not in out:
-                out[key] = {
-                    "lca_ids": [lca_id],
-                    "lca_names": [lca_display_name],
-                    "lca_total_kernel_time_trace1_us": t1_total,
-                    "lca_total_kernel_time_trace2_us": t2_total,
-                    "lca_count_trace2": 1 if has_trace2_match else 0,
-                }
-            else:
-                existing = out[key]
-                if lca_id not in existing["lca_ids"]:
-                    existing["lca_ids"].append(lca_id)
-                    existing["lca_names"].append(lca_display_name)
-                    existing["lca_total_kernel_time_trace1_us"] += t1_total
-                    existing["lca_total_kernel_time_trace2_us"] += t2_total
-                    if has_trace2_match:
-                        existing["lca_count_trace2"] += 1
+        entry = {
+            "lca_ids": [lca_id],
+            "lca_names": [lca_display_name or None],
+            "lca_total_kernel_time_trace1_us": float(grp["busy_time"].iloc[0]),
+            "lca_total_kernel_time_trace2_us": float(lca_trace2_time.get(lca_id, 0.0)),
+            "lca_count_trace2": (
+                1 if _trace2_gpu_op_uid_set_for_lca(trace2, lca_id) else 0
+            ),
+        }
+        _accumulate_lca_rows(out, grp, uid_to_row_idx, lca_id, entry)
 
     return out
+
+
+def _accumulate_lca_rows(
+    out: Dict[Any, Dict[str, Any]],
+    grp: pd.DataFrame,
+    uid_to_row_idx: Dict[Any, Any],
+    lca_id: Any,
+    entry: Dict[str, Any],
+) -> None:
+    """Fold one LCA group's rows into the per-summary-row metadata."""
+    seen: Set[Any] = set()
+    for _, row in grp.iterrows():
+        key = _resolve_diff_row_to_key(row, uid_to_row_idx)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        existing = out.get(key)
+        if existing is None:
+            out[key] = dict(
+                entry,
+                lca_ids=list(entry["lca_ids"]),
+                lca_names=list(entry["lca_names"]),
+            )
+        elif lca_id not in existing["lca_ids"]:
+            existing["lca_ids"].append(lca_id)
+            existing["lca_names"].append(entry["lca_names"][0])
+            for key_name in (
+                "lca_total_kernel_time_trace1_us",
+                "lca_total_kernel_time_trace2_us",
+                "lca_count_trace2",
+            ):
+                existing[key_name] += entry[key_name]
 
 
 _TRACE2_OP_COUNT_COL = "lca_count_trace2"
@@ -296,59 +302,58 @@ def _enrich_sheet_with_trace2(
         return df_sheet
 
     df = df_sheet.copy()
+    counts, ids, names, t1_vals, t2_vals = _lca_columns(df, lca_metadata)
 
-    trace2_counts: List[float] = []
-    lca_id_vals: List[Any] = []
-    lca_name_vals: List[Any] = []
-    lca_t1_vals: List[float] = []
-    lca_t2_vals: List[float] = []
-
-    for idx, row in df.iterrows():
-        meta = lca_metadata.get(idx)
-
-        cv = meta.get("lca_count_trace2") if meta else None
-        trace2_counts.append(np.nan if cv is None else float(cv))
-
-        if meta:
-            ids = meta.get("lca_ids", [])
-            names = meta.get("lca_names", [])
-            lca_id_vals.append("; ".join(str(i) for i in ids) if ids else np.nan)
-            lca_name_vals.append(
-                "; ".join(str(n) for n in names if n is not None) if names else np.nan
-            )
-            t1m = meta.get("lca_total_kernel_time_trace1_us")
-            t2m = meta.get("lca_total_kernel_time_trace2_us")
-            lca_t1_vals.append(float(t1m) if t1m is not None else np.nan)
-            lca_t2_vals.append(float(t2m) if t2m is not None else np.nan)
-        else:
-            lca_id_vals.append(np.nan)
-            lca_name_vals.append(np.nan)
-            lca_t1_vals.append(np.nan)
-            lca_t2_vals.append(np.nan)
-
-    col_idx = df.columns.get_loc(kernel_time_col)
-
-    lca_t1 = pd.Series(lca_t1_vals, index=df.index, dtype=float)
-    lca_t2 = pd.Series(lca_t2_vals, index=df.index, dtype=float)
-    c2 = pd.Series(trace2_counts, index=df.index, dtype=float)
-
-    insert_at = col_idx + 1
-
-    def _ins(name: str, series) -> None:
-        nonlocal insert_at
-        df.insert(insert_at, name, series)
-        insert_at += 1
-
+    lca_t1 = pd.Series(t1_vals, index=df.index, dtype=float)
+    lca_t2 = pd.Series(t2_vals, index=df.index, dtype=float)
     row_t1 = df[kernel_time_col].astype(float)
-    _ins("speedup (trace2/trace1)", lca_t2 / lca_t1.replace(0, np.nan))
-    _ins("delta_us (trace2 - trace1)", lca_t2 - row_t1)
-    _ins(_TRACE2_OP_COUNT_COL, c2)
-    _ins("lca_id", pd.Series(lca_id_vals, index=df.index, dtype=object))
-    _ins("lca_name", pd.Series(lca_name_vals, index=df.index, dtype=object))
-    _ins("lca_total_kernel_time_trace1_us", lca_t1)
-    _ins("lca_total_kernel_time_trace2_us", lca_t2)
+
+    columns = (
+        ("speedup (trace2/trace1)", lca_t2 / lca_t1.replace(0, np.nan)),
+        ("delta_us (trace2 - trace1)", lca_t2 - row_t1),
+        (_TRACE2_OP_COUNT_COL, pd.Series(counts, index=df.index, dtype=float)),
+        ("lca_id", pd.Series(ids, index=df.index, dtype=object)),
+        ("lca_name", pd.Series(names, index=df.index, dtype=object)),
+        ("lca_total_kernel_time_trace1_us", lca_t1),
+        ("lca_total_kernel_time_trace2_us", lca_t2),
+    )
+    col_idx = df.columns.get_loc(kernel_time_col)
+    for offset, (name, series) in enumerate(columns):
+        df.insert(col_idx + 1 + offset, name, series)
 
     return df
+
+
+def _lca_columns(
+    df: pd.DataFrame, lca_metadata: Dict[Any, Dict[str, Any]]
+) -> tuple[List[Any], List[Any], List[Any], List[float], List[float]]:
+    """Per-row LCA counts, ids, names and kernel-time totals, in sheet order."""
+    counts: List[float] = []
+    ids: List[Any] = []
+    names: List[Any] = []
+    t1_vals: List[float] = []
+    t2_vals: List[float] = []
+    for idx in df.index:
+        meta = lca_metadata.get(idx)
+        if not meta:
+            for acc in (counts, ids, names, t1_vals, t2_vals):
+                acc.append(np.nan)
+            continue
+        count = meta.get("lca_count_trace2")
+        counts.append(np.nan if count is None else float(count))
+        lca_ids = meta.get("lca_ids", [])
+        lca_names = meta.get("lca_names", [])
+        ids.append("; ".join(str(i) for i in lca_ids) if lca_ids else np.nan)
+        names.append(
+            "; ".join(str(n) for n in lca_names if n is not None)
+            if lca_names
+            else np.nan
+        )
+        total1 = meta.get("lca_total_kernel_time_trace1_us")
+        total2 = meta.get("lca_total_kernel_time_trace2_us")
+        t1_vals.append(float(total1) if total1 is not None else np.nan)
+        t2_vals.append(float(total2) if total2 is not None else np.nan)
+    return counts, ids, names, t1_vals, t2_vals
 
 
 def enrich_perf_report_dict_inplace(
