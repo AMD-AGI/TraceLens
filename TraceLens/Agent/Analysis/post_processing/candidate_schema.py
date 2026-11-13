@@ -9,13 +9,13 @@
 The contract between the ``render_analysis_json`` producer and any downstream
 consumer of ``analysis.json``. Additive-only: a drifted field surfaces as a
 ``TypedDict`` mismatch at the read boundary, never a silent mis-parse. Carries
-the compute and fusion tiers (standalone only); there is no system task yet.
+the compute, fusion and system tiers (standalone only).
 ``impact.mid`` is not additive across tiers: medium/low-confidence fusion
 candidates do not null out their compute rows, so the same time can appear in
 both ``compute_optimizations`` and ``fusion_optimizations``.
 """
 
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 try:  # NotRequired landed in typing in 3.11; earlier versions get it from typing_extensions.
     from typing import NotRequired
@@ -33,21 +33,21 @@ class Impact(TypedDict):
 class TaskMember(TypedDict):
     """One data-table row within a task (array-of-structs member)."""
 
-    kernel_launcher_path: Optional[str]
-    library: Optional[str]
-    category: Optional[str]
-    analysis_md_rank: Optional[str]
+    kernel_launcher_path: str | None
+    library: str | None
+    category: str | None
+    analysis_md_rank: str | None
     kernel_name: list[str]
-    args_shapes: Optional[list[str]]
-    args_datatypes: Optional[list[str]]
-    time_ms: Optional[float]
-    count: Optional[int]
-    pct_e2e: Optional[float]
-    flops_per_byte: Optional[float]
-    efficiency_percent: Optional[float]
-    efficiency_peak_value: Optional[float]
-    efficiency_peak_unit: Optional[str]
-    bound: Optional[str]
+    args_shapes: list[str] | None
+    args_datatypes: list[str] | None
+    time_ms: float | None
+    count: int | None
+    pct_e2e: float | None
+    flops_per_byte: float | None
+    efficiency_percent: float | None
+    efficiency_peak_value: float | None
+    efficiency_peak_unit: str | None
+    bound: str | None
 
 
 class ComputeMember(TaskMember):
@@ -57,21 +57,21 @@ class ComputeMember(TaskMember):
 
 
 class _TaskBase(TypedDict):
-    """Fields shared by both task tiers."""
+    """Fields shared by all task tiers."""
 
     priority: int
-    operation: Optional[str]
-    identification: Optional[str]
-    reasoning: Optional[str]
-    resolution: Optional[str]
+    operation: str | None
+    identification: str | None
+    reasoning: str | None
+    resolution: str | None
     prose_truncated: bool
-    impact: Impact
-    node: Optional[str]
+    node: str | None
 
 
 class ComputeTask(_TaskBase):
     """An operation-grouped compute optimization task."""
 
+    impact: Impact
     members: list[ComputeMember]
 
 
@@ -80,14 +80,31 @@ class FusionTask(_TaskBase):
 
     The severity color and ``P<N>:`` prefix are stripped from the heading.
 
-    ``kind`` is the fusion kind named in the Identification's "Surfaced as"
-    sentence (null when it names none), ``reasoning`` is always null (fusion blocks
-    carry no such label) and ``priority`` is the rank within fusion by
-    ``impact.mid``.
+    ``reasoning`` is always null (fusion blocks carry no such label) and
+    ``priority`` is the rank within fusion by ``impact.mid``.
     """
 
-    kind: Optional[str]
+    impact: Impact
     members: list[TaskMember]
+
+
+class SystemMember(TypedDict):
+    """One ``| Metric | Value |`` row of a system finding; ``value`` is null when unreadable."""
+
+    metric: str
+    value: float | None
+    unit: str
+
+
+class SystemTask(_TaskBase):
+    """One system finding; ``operation`` is its fixed title.
+
+    System impact is not quantifiable from trace data, so ``impact`` is always
+    null, and ``priority`` is the report P-number.
+    """
+
+    impact: None
+    members: list[SystemMember]
 
 
 class ReportInfo(TypedDict):
@@ -103,11 +120,11 @@ class TopOperationRow(TypedDict):
     """One row of the flat Top Operations table."""
 
     rank: int
-    category: Optional[str]
-    time_ms: Optional[float]
-    pct_of_compute: Optional[float]
-    ops: Optional[int]
-    potential_improvement_md: Optional[str]
+    category: str | None
+    time_ms: float | None
+    pct_of_compute: float | None
+    ops: int | None
+    potential_improvement_md: str | None
     node: NotRequired[str]
 
 
@@ -135,4 +152,5 @@ class AnalysisReport(TypedDict):
     top_operations: NotRequired[list[TopOperationRow]]
     compute_optimizations: list[ComputeTask]
     fusion_optimizations: list[FusionTask]
+    system_optimizations: list[SystemTask]
     appendix: NotRequired[Appendix]

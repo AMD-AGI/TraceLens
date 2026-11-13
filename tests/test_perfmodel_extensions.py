@@ -2949,19 +2949,16 @@ class TestPerfModelExtensionsCoverage:
         assert model.flops() == 2 * 128 * 512 * 256
 
     def test_gemm_afp4wfp4(self):
+        # M=64, N=256, K=256: packed X and W, E8M0 scales, BF16 output.
         event = {
             "args": {
-                "Input Dims": [[64, 128], [256, 64], [64, 4], [256, 4]],
-                "Input type": [
-                    "c10::BFloat16",
-                    "c10::Float4_e2m1fn_x2",
-                    "c10::Float",
-                    "c10::Float",
-                ],
+                "Input Dims": [[64, 128], [256, 128], [64, 8], [256, 8]],
+                "Input type": ["unsigned char"] * 4,
             }
         }
         model = gemm_afp4wfp4(event)
-        assert model.bytes() > 0
+        x, w, out, scales = 64 * 128, 256 * 128, 64 * 256 * 2, (64 + 256) * 8
+        assert model.bytes() == x + w + out + scales
 
     def test_mxfp4_quant_variants(self):
         base_event = {
@@ -6880,3 +6877,81 @@ class TestPerfModelDeepCoverage2:
             }
         )
         assert ce.get_compute_precision() is not None
+
+
+def test_moe_sorting_opus_fwd_maps_and_models():
+    cls = get_pseudo_op_mappings()["aiter::moe_sorting_opus_fwd"]
+    # main maps this op to the dedicated subclass of MoeSortScatterGather.
+    assert cls is moe_ext.moe_sorting_opus_fwd
+    assert issubclass(cls, MoeSortScatterGather)
+    model = cls(
+        {
+            "args": {
+                "Input Dims": [
+                    [1113, 9],
+                    [1113, 9],
+                    [26456],
+                    [26456],
+                    [414],
+                    [2],
+                    [1113, 6144],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+    )
+    pairs = 1113 * 9
+    written = 26456
+    experts = 257
+    moe_elems = 1113 * 6144
+    assert model.flops() == 2 * pairs + experts + 2 * written + moe_elems
+    assert model.bytes() == pairs * 8 + written * 8 + 414 * 4 + 8 + moe_elems * 2
+
+
+def test_fused_fp8_bmm_rope_cat_and_cache_mla():
+    name = (
+        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla"
+    )
+    cls = get_pseudo_op_mappings()[name]
+    assert cls is pext.fused_fp8_bmm_rope_cat_and_cache_mla
+    model = cls(
+        {
+            "args": {
+                "Input Dims": [
+                    [8, 12, 192],
+                    [8, 512, 192],
+                    [],
+                    [12, 8, 64],
+                    [12, 1, 512],
+                    [12, 1, 64],
+                    [2991488, 1, 576],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                ],
+            }
+        }
+    )
+    bmm = 2 * 8 * 12 * 512 * 192
+    rope = 3 * (12 * 8 * 64 + 12 * 1 * 64)
+    assert model.flops() == bmm + rope
+    read_q = (8 * 12 * 192 + 12 * 8 * 64) * 2
+    read_w = 8 * 512 * 192 * 1
+    read_k = 12 * 1 * (512 + 64) * 2
+    write_q = 12 * 8 * (512 + 64) * 1
+    write_kv = 12 * 1 * (512 + 64) * 1
+    assert model.bytes() == read_q + read_w + read_k + write_q + write_kv
