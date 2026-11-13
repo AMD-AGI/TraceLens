@@ -6474,7 +6474,11 @@ class gemm_fp4_impl(GEMM):
         bytes_A = M * (K // 2) * bpe_A
         bytes_B = N * (K // 2) * bpe_B
         bytes_output = M * N * bpe_output
-        bytes_bias = N * name2bpe(self.param_details["bias_dtype"]) if self.param_details["bias"] else 0
+        bytes_bias = (
+            N * name2bpe(self.param_details["bias_dtype"])
+            if self.param_details["bias"]
+            else 0
+        )
         bpe_scale = name2bpe(self.param_details["scale_dtype"])
         bytes_b_scale = prod(self.param_details["b_scale_shape"]) * bpe_scale
         return bytes_A + bytes_B + bytes_output + bytes_bias + bytes_b_scale
