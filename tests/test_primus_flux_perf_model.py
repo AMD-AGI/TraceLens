@@ -13,7 +13,6 @@ Tests for Primus Turbo / Flux MXFP4 ops:
   - tree_postprocess_extension (fwd/bwd pseudo-op labeling)
 """
 
-
 from TraceLens.PerfModel.perf_model import gemm_fp4_impl, GEMM
 from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
     a6w4_mm_qa,
