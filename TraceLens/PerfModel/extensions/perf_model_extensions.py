@@ -961,7 +961,8 @@ class gemm_a16w16_asm(gemm_a16w16_atomic_):
         }
 
     def flops(self):
-        return self.B * super().flops()
+        total = super().flops()
+        return None if total is None else self.B * total
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         total = super().bytes(
