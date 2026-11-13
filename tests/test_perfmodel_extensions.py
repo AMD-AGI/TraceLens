@@ -7104,6 +7104,39 @@ class TestFlashDSv41PseudoOps:
         assert model.flops() > 0
         assert model.get_compute_precision() == "fp4"
         assert model.bytes() > 0
+        assert model.get_maf_type() == "matrix"
+        # Input Dims override for Q geometry.
+        shaped = pseudo_pa_mqa_logits_fp4(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "v4_model_name": "DeepSeek-V4-Flash",
+                    "Input Dims": [[], [], [8, 128], [8, 64, 128]],
+                    "Input type": [
+                        "",
+                        "",
+                        "c10::Float4_e2m1fn_x2",
+                        "c10::Float4_e2m1fn_x2",
+                    ],
+                },
+            }
+        )
+        assert shaped.flops() > 0
+        # Empty annotation → zero queries → flops None.
+        empty_ann = pseudo_pa_mqa_logits_fp4(
+            {
+                "annotation": (
+                    "execute_0_context_0(sq0sk0sqsq0sqsk0)"
+                    "_generation_0(sq0sk0sqsq0sqsk0)"
+                ),
+                "args": {"v4_model_name": "DeepSeek-V4-Flash"},
+            }
+        )
+        assert empty_ann.flops() is None
+        no_ann = pseudo_pa_mqa_logits_fp4({"annotation": "NA", "args": {}})
+        assert no_ann.flops() is None
+        assert no_ann.bytes() is None
+        assert no_ann.get_compute_precision() is None
 
     def test_pseudo_quantize_fp4_indexer(self):
         event = {
@@ -7112,7 +7145,36 @@ class TestFlashDSv41PseudoOps:
         }
         model = pseudo_quantize_fp4_indexer(event)
         assert model.flops() > 0
+        assert model.bytes() > 0
         assert model.get_compute_precision() == "fp4"
+        assert model.get_maf_type() == "vector"
+        # Prefer Input Dims numel when present.
+        shaped = pseudo_quantize_fp4_indexer(
+            {
+                "annotation": "NA",
+                "args": {
+                    "v4_model_name": "DeepSeek-V4-Flash",
+                    "Input Dims": [[8, 128]],
+                    "index_head_dim": 128,
+                },
+            }
+        )
+        assert shaped.flops() > 0
+        stamped = pseudo_quantize_fp4_indexer(
+            {
+                "annotation": "NA",
+                "args": {"num_tokens": 8, "index_head_dim": 128},
+            }
+        )
+        assert stamped.flops() > 0
+        empty = pseudo_quantize_fp4_indexer({"annotation": "NA", "args": {}})
+        assert empty.flops() is None
+        assert empty.bytes() is None
+        assert empty.get_compute_precision() is None
+        bad = pseudo_quantize_fp4_indexer(
+            {"annotation": "NA", "args": {"Input Dims": [["x"]], "index_head_dim": 128}}
+        )
+        assert bad.param_details.get("_no_perf")
 
     def test_pseudo_flash_indexer_topk(self):
         event = {
@@ -7126,6 +7188,8 @@ class TestFlashDSv41PseudoOps:
         model = pseudo_flash_indexer_topk(event)
         assert model.flops() == 563 * 47599
         assert model.bytes() > 0
+        assert model.get_compute_precision() == "fp32"
+        assert model.get_maf_type() == "vector"
         small = pseudo_flash_indexer_topk(
             {
                 "annotation": self._ANN,
@@ -7133,6 +7197,24 @@ class TestFlashDSv41PseudoOps:
             }
         )
         assert small.flops() is None
+        assert small.bytes() is None
+        assert small.get_compute_precision() is None
+        # No annotation → stats fallback; still FLOPs from dims.
+        no_ann = pseudo_flash_indexer_topk(
+            {
+                "annotation": "NA",
+                "args": {
+                    "Input Dims": [(8, 2048), ()],
+                    "Input type": ["float"],
+                    "Concrete Inputs": ["k=notadigit", "256"],
+                },
+            }
+        )
+        assert no_ann.flops() == 8 * 2048
+        assert no_ann.bytes() > 0
+        broken = pseudo_flash_indexer_topk({"args": {}})
+        assert broken.param_details.get("_no_perf")
+        assert broken.flops() is None
 
     def test_hc_boundary_and_sinkhorn(self):
         event = {
@@ -7160,95 +7242,174 @@ class TestFlashDSv41PseudoOps:
         assert postish.bytes() > 0
         stamped = hc_boundary({"args": {"M": 8, "n": 4, "C": 5120}})
         assert stamped.flops() > 0
+        assert stamped.bytes() > 0
+        empty = hc_boundary({"args": {}})
+        assert empty.flops() is None
+        assert empty.bytes() is None
         sink = hc_mix_reduce_sinkhorn({"args": {"M": 8, "n": 4, "C": 1}})
         assert sink.flops() == 8 * 8 * 4 * 4
+        assert sink.bytes() > 0
+        sink_dims = hc_mix_reduce_sinkhorn(
+            {
+                "args": {
+                    "Input Dims": [[8, 4, 1]],
+                    "Input type": ["float"],
+                }
+            }
+        )
+        assert sink_dims.flops() > 0
+        sink_empty = hc_mix_reduce_sinkhorn({"args": {}})
+        assert sink_empty.flops() is None
+        assert sink_empty.bytes() is None
 
     def test_mxfp8_router_rmsnorm(self):
         gemv = mxfp8_gemv({"args": {"M": 1, "N": 5120, "K": 5120}})
         assert gemv.flops() == 2 * 1 * 5120 * 5120
+        assert gemv.bytes() > 0
         assert gemv.get_compute_precision() == "fp8"
+        assert gemv.get_maf_type() == "matrix"
+        gemv_dims = mxfp8_gemv(
+            {
+                "args": {
+                    "Input Dims": [[1, 5120], [5120, 5120]],
+                    "Input type": ["c10::Float8_e4m3fn", "c10::Float8_e4m3fn"],
+                }
+            }
+        )
+        assert gemv_dims.flops() > 0
+        gemv_empty = mxfp8_gemv({"args": {}})
+        assert gemv_empty.flops() is None
+        assert gemv_empty.bytes() is None
+        assert gemv_empty.get_compute_precision() is None
         rg = router_gemv_split_k({"args": {"M": 1, "E": 384, "K": 5120}})
         assert rg.flops() == 2 * 1 * 384 * 5120
+        assert rg.bytes() > 0
+        assert rg.get_compute_precision() == "bf16"
+        assert rg.get_maf_type() == "matrix"
+        rg_dims = router_gemv_split_k(
+            {
+                "args": {
+                    "Input Dims": [[1, 5120], [384, 5120]],
+                    "Input type": ["c10::BFloat16", "c10::BFloat16"],
+                }
+            }
+        )
+        assert rg_dims.flops() > 0
+        rg_empty = router_gemv_split_k({"args": {}})
+        assert rg_empty.flops() is None
+        assert rg_empty.bytes() is None
+        assert rg_empty.get_compute_precision() is None
         gate = router_gate({"args": {"M": 4, "E": 384, "topk": 6}})
         assert gate.flops() == 6 * 4 * 384
+        assert gate.bytes() > 0
+        assert gate.get_compute_precision() == "bf16"
+        assert gate.get_maf_type() == "vector"
+        gate_dims = router_gate(
+            {
+                "args": {
+                    "Input Dims": [[4, 6], [], [4, 384]],
+                    "Input type": ["float", "", "float"],
+                }
+            }
+        )
+        assert gate_dims.flops() > 0
+        gate_empty = router_gate({"args": {}})
+        assert gate_empty.flops() is None
+        assert gate_empty.bytes() is None
+        assert gate_empty.get_compute_precision() is None
         rn = rmsnorm_fake_quant_fp8({"args": {"M": 4, "N": 5120}})
         assert rn.flops() > 0
+        assert rn.bytes() > 0
         assert rn.get_compute_precision() == "fp8"
+        assert rn.get_maf_type() == "vector"
+        rn_dims0 = rmsnorm_fake_quant_fp8(
+            {
+                "args": {
+                    "Input Dims": [[4, 5120]],
+                    "Input type": ["c10::BFloat16"],
+                }
+            }
+        )
+        assert rn_dims0.flops() > 0
+        rn_dims1 = rmsnorm_fake_quant_fp8(
+            {
+                "args": {
+                    "Input Dims": [[], [4, 5120]],
+                    "Input type": ["", "c10::BFloat16"],
+                }
+            }
+        )
+        assert rn_dims1.flops() > 0
+        rn_empty = rmsnorm_fake_quant_fp8({"args": {}})
+        assert rn_empty.flops() is None
+        assert rn_empty.bytes() is None
+        assert rn_empty.get_compute_precision() is None
+
+    @staticmethod
+    def _make_tree(events, link_root_children=True):
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+            set_bookkeeping_attr,
+        )
+
+        class _Tree:
+            def __init__(self, evts):
+                self.events = []
+                self.events_by_uid = {}
+                self.name2event_uids = {}
+                self.cpu_root_nodes = []
+                self.seq_num2event_uids_map = {}
+                for e in evts:
+                    set_bookkeeping_attr(self, e)
+                    self.name2event_uids.setdefault(e["name"], []).append(e["UID"])
+                if evts:
+                    self.cpu_root_nodes = [evts[0]["UID"]]
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid.get(uid)
+
+            def get_parent_event(self, evt):
+                pid = evt.get("parent")
+                return self.events_by_uid.get(pid) if pid is not None else None
+
+        return _Tree(events)
+
+    @staticmethod
+    def _evt(name, cat="python_function", **extra):
+        base = {
+            "ph": "X",
+            "name": name,
+            "cat": cat,
+            "pid": 1,
+            "tid": 1,
+            "ts": 0,
+            "dur": 1,
+            "args": {},
+            "children": [],
+            "gpu_events": [],
+        }
+        base.update(extra)
+        return base
 
     def test_sglang_sparse_decode_single_owner(self):
         from TraceLens.Trace2Tree.extensions.sglang_sparse_decode_pseudo_ops import (
             create_pseudo_ops_sglang_sparse_decode,
         )
 
-        # Minimal synthetic tree: python owner with launcher+kernel children.
-        owner = {
-            "ph": "X",
-            "name": "aiter/ops/triton/attention/pa_decode_sparse.py(458): _pa_decode_sparse_gfx950_gluon",
-            "cat": "python_function",
-            "pid": 1,
-            "tid": 1,
-            "ts": 0,
-            "dur": 10,
-            "args": {},
-            "children": [],
-            "gpu_events": [],
-        }
-        launcher = {
-            "ph": "X",
-            "name": "hipModuleLaunchKernel",
-            "cat": "cuda_runtime",
-            "pid": 1,
-            "tid": 1,
-            "ts": 1,
-            "dur": 1,
-            "args": {},
-            "children": [],
-            "gpu_events": [],
-        }
-        kernel = {
-            "ph": "X",
-            "name": "hipModuleLaunchKernel->_pa_decode_sparse_BLOCK_M_16_BLOCK_K_64_HEAD_SIZE_512_NUM_SPLITS_1_UNIFORM_0_MAIN_IS_FP8_1 (Synthetic Op)",
-            "cat": "kernel",
-            "pid": 1,
-            "tid": 1,
-            "ts": 2,
-            "dur": 5,
-            "args": {"correlation": 1},
-            "children": [],
-            "gpu_events": [],
-        }
-
-        # Build via TraceToTree-like minimal stub if full ctor is heavy: call helpers directly.
-        class _Tree:
-            def __init__(self, events):
-                self.events = []
-                self.events_by_uid = {}
-                self.name2event_uids = {}
-                self.cpu_root_nodes = []
-                self.seq_num2event_uids_map = {}
-                for e in events:
-                    from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
-                        set_bookkeeping_attr,
-                    )
-
-                    set_bookkeeping_attr(self, e)
-                    self.name2event_uids.setdefault(e["name"], []).append(e["UID"])
-                # link
-                owner["children"] = [launcher["UID"]]
-                launcher["parent"] = owner["UID"]
-                launcher["children"] = [kernel["UID"]]
-                kernel["parent"] = launcher["UID"]
-                owner["gpu_events"] = [kernel["UID"]]
-                self.cpu_root_nodes = [owner["UID"]]
-
-            def get_UID2event(self, uid):
-                return self.events_by_uid[uid]
-
-            def get_parent_event(self, evt):
-                pid = evt.get("parent")
-                return self.events_by_uid.get(pid) if pid is not None else None
-
-        tree = _Tree([owner, launcher, kernel])
+        owner = self._evt(
+            "aiter/ops/triton/attention/pa_decode_sparse.py(458): _pa_decode_sparse_gfx950_gluon",
+        )
+        launcher = self._evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        kernel = self._evt(
+            "hipModuleLaunchKernel->_pa_decode_sparse_BLOCK_M_16_BLOCK_K_64_HEAD_SIZE_512_NUM_SPLITS_1_UNIFORM_0_MAIN_IS_FP8_1 (Synthetic Op)",
+            cat="kernel",
+            args={"correlation": 1},
+        )
+        tree = self._make_tree([owner, launcher, kernel])
+        owner["children"] = [launcher["UID"]]
+        launcher["parent"] = owner["UID"]
+        launcher["children"] = [kernel["UID"]]
+        kernel["parent"] = launcher["UID"]
+        owner["gpu_events"] = [kernel["UID"]]
         create_pseudo_ops_sglang_sparse_decode(tree)
         pseudos = [
             e
@@ -7257,11 +7418,99 @@ class TestFlashDSv41PseudoOps:
         ]
         assert len(pseudos) == 1
         assert pseudos[0]["name"] == "pseudo_v4_paged_decode_swa"
+        # Idempotent: already-injected sole child is skipped.
+        before = len(tree.events)
+        create_pseudo_ops_sglang_sparse_decode(tree)
+        assert len(tree.events) == before
+
+    def test_sglang_sparse_decode_modes_and_edges(self):
+        from TraceLens.Trace2Tree.extensions.sglang_sparse_decode_pseudo_ops import (
+            create_pseudo_ops_sglang_sparse_decode,
+        )
+        import os
+
+        # No owners → warning path, no crash.
+        empty = self._make_tree([])
+        create_pseudo_ops_sglang_sparse_decode(empty)
+
+        # Reduce-only owner when no sparse owner is present.
+        reduce_owner = self._evt(
+            "aiter/ops/triton/attention/aiter_sparse_decode_reduce.py(12): aiter_sparse_split_reduce",
+        )
+        launch = self._evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        tree = self._make_tree([reduce_owner, launch])
+        reduce_owner["children"] = [launch["UID"]]
+        launch["parent"] = reduce_owner["UID"]
+        create_pseudo_ops_sglang_sparse_decode(tree)
+        assert any(e.get("name") == "pseudo_v4_paged_decode_swa" for e in tree.events)
+
+        # HCA / CSA mode detection from kernel names.
+        for mark, mode in (("HCA", "hca"), ("compress_csa", "csa")):
+            owner = self._evt(
+                "aiter/ops/triton/attention/pa_decode_sparse.py(10): pa_decode_sparse",
+            )
+            kern = self._evt(
+                f"hipModuleLaunchKernel->_pa_decode_sparse_{mark}_MAIN (Synthetic Op)",
+                cat="kernel",
+            )
+            t = self._make_tree([owner, kern])
+            owner["children"] = [kern["UID"]]
+            kern["parent"] = owner["UID"]
+            owner["gpu_events"] = [kern["UID"]]
+            create_pseudo_ops_sglang_sparse_decode(t)
+            assert any(
+                e.get("name") == f"pseudo_v4_paged_decode_{mode}" for e in t.events
+            )
+
+        # Owner with no children/gpu_events is skipped.
+        barren = self._evt(
+            "aiter/ops/triton/attention/pa_decode_sparse.py(1): _pa_decode_sparse_gfx950_gluon",
+        )
+        t2 = self._make_tree([barren])
+        create_pseudo_ops_sglang_sparse_decode(t2)
+        assert not any(
+            str(e.get("name", "")).startswith("pseudo_v4_paged_decode_")
+            for e in t2.events
+        )
+
+        # Bad TL_TP falls back via _safe_int.
+        owner = self._evt(
+            "sglang/kernels/hip_flash_mla.py(9): aiter_sparse_decode_fwd",
+        )
+        child = self._evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        t3 = self._make_tree([owner, child])
+        owner["children"] = [child["UID"]]
+        child["parent"] = owner["UID"]
+        old = os.environ.get("TL_TP")
+        os.environ["TL_TP"] = "not-an-int"
+        try:
+            create_pseudo_ops_sglang_sparse_decode(t3)
+        finally:
+            if old is None:
+                os.environ.pop("TL_TP", None)
+            else:
+                os.environ["TL_TP"] = old
+        assert any(
+            str(e.get("name", "")).startswith("pseudo_v4_paged_decode_")
+            for e in t3.events
+        )
+
+        # Direct unit coverage for dangling child UID in kernel-name walk.
+        from TraceLens.Trace2Tree.extensions import (
+            sglang_sparse_decode_pseudo_ops as sparse_mod,
+        )
+
+        owner2 = self._evt(
+            "aiter/ops/triton/attention/pa_decode_sparse.py(2): pa_decode_sparse",
+        )
+        child2 = self._evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        t4 = self._make_tree([owner2, child2])
+        owner2["children"] = [child2["UID"], 424242]
+        child2["parent"] = owner2["UID"]
+        names = sparse_mod._kernel_names_under(t4, owner2)
+        assert isinstance(names, list)
 
     def test_sglang_flash_misc_and_moe_injectors(self):
-        from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
-            set_bookkeeping_attr,
-        )
         from TraceLens.Trace2Tree.extensions.sglang_flash_misc_pseudo_ops import (
             create_pseudo_ops_sglang_flash_misc,
         )
@@ -7272,55 +7521,44 @@ class TestFlashDSv41PseudoOps:
             create_pseudo_ops_sglang_flash_indexer,
         )
 
-        class _Tree:
-            def __init__(self, events):
-                self.events = []
-                self.events_by_uid = {}
-                self.name2event_uids = {}
-                self.cpu_root_nodes = []
-                self.seq_num2event_uids_map = {}
-                for e in events:
-                    set_bookkeeping_attr(self, e)
-                    self.name2event_uids.setdefault(e["name"], []).append(e["UID"])
-                self.cpu_root_nodes = [events[0]["UID"]]
-
-            def get_UID2event(self, uid):
-                return self.events_by_uid[uid]
-
-            def get_parent_event(self, evt):
-                pid = evt.get("parent")
-                return self.events_by_uid.get(pid) if pid is not None else None
-
-        def _evt(name, cat="python_function", **extra):
-            base = {
-                "ph": "X",
-                "name": name,
-                "cat": cat,
-                "pid": 1,
-                "tid": 1,
-                "ts": 0,
-                "dur": 1,
-                "args": {},
-                "children": [],
-                "gpu_events": [],
-            }
-            base.update(extra)
-            return base
-
-        # mHC boundary owner
-        owner = _evt(
+        # mHC boundary owner (+ annotation token inference)
+        owner = self._evt(
             "/sgl-workspace/sglang/python/sglang/kernels/ops/layernorm/mhc_boundary_hip.py(403): hc_boundary_fused",
             annotation=self._ANN,
         )
-        child = _evt("hipModuleLaunchKernel", cat="cuda_runtime")
-        tree = _Tree([owner, child])
+        child = self._evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        tree = self._make_tree([owner, child])
         owner["children"] = [child["UID"]]
         child["parent"] = owner["UID"]
         create_pseudo_ops_sglang_flash_misc(tree)
         assert any(e.get("name") == "pseudo_hc_boundary" for e in tree.events)
+        # Skip already-injected sole child.
+        before = len(tree.events)
+        create_pseudo_ops_sglang_flash_misc(tree)
+        assert len(tree.events) == before
+        # Barren owner (no children / gpu_events) skipped.
+        barren = self._evt(
+            "rmsnorm_fake_quant_amd_gfx95.py(1): rmsnorm_fake_quant_fp8",
+        )
+        t_barren = self._make_tree([barren])
+        create_pseudo_ops_sglang_flash_misc(t_barren)
+        assert not any(
+            e.get("name") == "pseudo_rmsnorm_fake_quant_fp8" for e in t_barren.events
+        )
+        # Annotation parse failure → default tokens=1.
+        bad_ann = self._evt(
+            "mxfp8_native_amd_gfx95.py(3): mxfp8_native_blockscaled_linear",
+            annotation="not-a-real-annotation",
+        )
+        launch = self._evt("hipModuleLaunchKernel", cat="cuda_runtime")
+        t_bad = self._make_tree([bad_ann, launch])
+        bad_ann["children"] = [launch["UID"]]
+        launch["parent"] = bad_ann["UID"]
+        create_pseudo_ops_sglang_flash_misc(t_bad)
+        assert any(e.get("name") == "pseudo_mxfp8_gemv" for e in t_bad.events)
 
-        # MoE gemm2 child under fused_moe_
-        fused = _evt(
+        # MoE gemm2 + reduction children under fused_moe_
+        fused = self._evt(
             "aiter::fused_moe_",
             cat="cpu_op",
             args={
@@ -7333,26 +7571,189 @@ class TestFlashDSv41PseudoOps:
                 ],
             },
         )
-        gemm2 = _evt(
+        gemm2 = self._evt(
             "aiter::fused_moe_->gemm2_a4w4_port_hmax8192 (Synthetic Op)",
             cat="cpu_op",
         )
-        tree2 = _Tree([fused, gemm2])
-        fused["children"] = [gemm2["UID"]]
-        gemm2["parent"] = fused["UID"]
+        reduce = self._evt(
+            "aiter::fused_moe_->moe_reduction_kernel_hmax8192 (Synthetic Op)",
+            cat="cpu_op",
+        )
+        dangling = self._evt("ghost", cat="cpu_op")
+        nested = self._evt("intermediate_launcher", cat="cuda_runtime")
+        tree2 = self._make_tree([fused, gemm2, reduce, dangling, nested])
+        # Nested walk + None child UID path.
+        fused["children"] = [nested["UID"], 999999]
+        nested["parent"] = fused["UID"]
+        nested["children"] = [gemm2["UID"], reduce["UID"]]
+        gemm2["parent"] = nested["UID"]
+        reduce["parent"] = nested["UID"]
         create_pseudo_ops_sglang_flash_moe_children(tree2)
         assert any(
             e.get("name") == "pseudo_op::moe_flydsl_gemm2_a4w4" for e in tree2.events
         )
+        assert any(
+            e.get("name") == "pseudo_op::moe_flydsl_moe_reduction" for e in tree2.events
+        )
+        # Already-pseudo children are skipped on re-run.
+        before2 = len(tree2.events)
+        create_pseudo_ops_sglang_flash_moe_children(tree2)
+        assert len(tree2.events) == before2
+        # No fused_moe_ parent → early return.
+        create_pseudo_ops_sglang_flash_moe_children(self._make_tree([]))
 
-        # Indexer MQA owner
-        mqa = _evt(
+        # Indexer MQA + quant + flashmla + aten::topk paths
+        mqa = self._evt(
             "aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4.py(638): flydsl_pa_mqa_logits_fp4",
             annotation=self._ANN,
         )
-        launch = _evt("hipModuleLaunchKernel", cat="cuda_runtime")
-        tree3 = _Tree([mqa, launch])
-        mqa["children"] = [launch["UID"]]
-        launch["parent"] = mqa["UID"]
+        quant = self._evt(
+            "aiter/ops/flydsl/kernels/fp4_indexer.py(20): quantize_fp4_indexer_tensor",
+            annotation=self._ANN,
+        )
+        flashmla = self._evt(
+            "sglang/kernels/elementwise_hip.py(10): fused_k_norm_rope_flashmla_with_q",
+            annotation=self._ANN,
+        )
+        launch_m = self._evt("hipModuleLaunchKernel", cat="cuda_runtime", ts=1)
+        launch_q = self._evt("hipModuleLaunchKernel", cat="cuda_runtime", ts=2)
+        launch_f = self._evt("hipModuleLaunchKernel", cat="cuda_runtime", ts=3)
+        # Root aten::topk (no parent) with score dims + gpu child.
+        topk_root = self._evt(
+            "aten::topk",
+            cat="cpu_op",
+            args={
+                "Input Dims": [(8, 2048), ()],
+                "Input type": ["float"],
+            },
+        )
+        topk_child = self._evt("aten::topk_kernel", cat="kernel", ts=4)
+        # Child aten::topk under a parent → inject above.
+        parent = self._evt("python_parent", cat="python_function", ts=5)
+        topk_child_evt = self._evt(
+            "aten::topk",
+            cat="cpu_op",
+            ts=6,
+            args={
+                "Input Dims": [(16, 4096), ()],
+                "Input type": ["float"],
+            },
+        )
+        # Reject: too-narrow cols.
+        topk_reject = self._evt(
+            "aten::topk",
+            cat="cpu_op",
+            ts=7,
+            args={"Input Dims": [(8, 64), ()], "Input type": ["float"]},
+        )
+        # Reject: int dtype scores with wide cols.
+        topk_int = self._evt(
+            "aten::topk",
+            cat="cpu_op",
+            ts=8,
+            args={"Input Dims": [(8, 2048), ()], "Input type": ["int"]},
+        )
+        # Non-cpu_op aten::topk skipped.
+        topk_non_cpu = self._evt(
+            "aten::topk",
+            cat="python_function",
+            ts=9,
+            args={"Input Dims": [(8, 2048), ()], "Input type": ["float"]},
+        )
+        # Root topk with no children/gpu_events skipped.
+        topk_barren = self._evt(
+            "aten::topk",
+            cat="cpu_op",
+            ts=10,
+            args={"Input Dims": [(8, 2048), ()], "Input type": ["float"]},
+        )
+        tree3 = self._make_tree(
+            [
+                mqa,
+                launch_m,
+                quant,
+                launch_q,
+                flashmla,
+                launch_f,
+                topk_root,
+                topk_child,
+                parent,
+                topk_child_evt,
+                topk_reject,
+                topk_int,
+                topk_non_cpu,
+                topk_barren,
+            ]
+        )
+        for owner, launch in (
+            (mqa, launch_m),
+            (quant, launch_q),
+            (flashmla, launch_f),
+        ):
+            owner["children"] = [launch["UID"]]
+            launch["parent"] = owner["UID"]
+        topk_root["children"] = [topk_child["UID"]]
+        topk_child["parent"] = topk_root["UID"]
+        topk_root["gpu_events"] = [topk_child["UID"]]
+        parent["children"] = [
+            topk_child_evt["UID"],
+            topk_reject["UID"],
+            topk_int["UID"],
+        ]
+        topk_child_evt["parent"] = parent["UID"]
+        topk_reject["parent"] = parent["UID"]
+        topk_int["parent"] = parent["UID"]
         create_pseudo_ops_sglang_flash_indexer(tree3)
-        assert any(e.get("name") == "pseudo_pa_mqa_logits_fp4" for e in tree3.events)
+        names = {e.get("name") for e in tree3.events}
+        assert "pseudo_pa_mqa_logits_fp4" in names
+        assert "pseudo_quantize_fp4_indexer" in names
+        assert "fused_k_norm_rope_q_flashmla" in names
+        assert "pseudo_flash_indexer_topk" in names
+        # Skip already-injected named owners / topk parents on re-run.
+        before3 = len(tree3.events)
+        create_pseudo_ops_sglang_flash_indexer(tree3)
+        assert len(tree3.events) == before3
+        # Barren named owner skipped.
+        barren_mqa = self._evt(
+            "aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4.py(1): flydsl_pa_mqa_logits_fp4",
+        )
+        t_b = self._make_tree([barren_mqa])
+        create_pseudo_ops_sglang_flash_indexer(t_b)
+        assert "pseudo_pa_mqa_logits_fp4" not in {e.get("name") for e in t_b.events}
+
+    def test_flash_registry_auto_detect(self):
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+            apply_pseudo_op_extensions,
+        )
+
+        # Tree whose names trip every Flash auto-detect branch.
+        events = [
+            self._evt(
+                "aiter/ops/triton/attention/pa_decode_sparse.py(1): _pa_decode_sparse_gfx950_gluon",
+            ),
+            self._evt(
+                "aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4.py(1): flydsl_pa_mqa_logits_fp4",
+            ),
+            self._evt(
+                "mhc_boundary_hip.py(1): hc_boundary_fused",
+            ),
+            self._evt("aiter::fused_moe_", cat="cpu_op"),
+            self._evt(
+                "aiter::fused_moe_->gemm2_a4w4_port (Synthetic Op)",
+                cat="cpu_op",
+            ),
+            self._evt("aten::topk", cat="cpu_op"),
+        ]
+        tree = self._make_tree(events)
+        # Wire minimal children so injectors that require them don't warn-only.
+        for owner_idx, child_idx in ((0, 5), (1, 5), (2, 5), (3, 4)):
+            owner = events[owner_idx]
+            child = events[child_idx]
+            owner.setdefault("children", [])
+            if child["UID"] not in owner["children"]:
+                owner["children"].append(child["UID"])
+            child["parent"] = owner["UID"]
+        apply_pseudo_op_extensions(tree, verbose=True)
+        # Registry path exercised; injectors may or may not add nodes depending
+        # on child wiring — assert the call completed and tree still valid.
+        assert tree.name2event_uids

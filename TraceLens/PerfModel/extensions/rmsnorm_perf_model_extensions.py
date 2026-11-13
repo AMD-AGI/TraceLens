@@ -9,6 +9,7 @@ Performance models for RMSNorm pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+from TraceLens.PerfModel.utils import name2bpe
 
 
 class RMSNorm(CoreRMSNorm):
