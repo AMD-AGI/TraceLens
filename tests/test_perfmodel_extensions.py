@@ -7098,10 +7098,24 @@ class TestFlashDSv41PerfModels:
             },
         }
         model = sgl_kernel_deepseek_v4_topk_transform_512(event)
-        assert model.flops() == 815046
+        # Annotation sqsk compressed by CSA stride 4.
+        assert model.flops() == (815046 + 3) // 4
+        assert model.param_details["topk"] == 512
         assert model.get_compute_precision() == "fp32"
         assert model.bytes() > 0
         assert model.get_maf_type() == "vector"
+        # DSV4-Pro topk comes from dst page-table width (1024), not the op name.
+        pro = sgl_kernel_deepseek_v4_topk_transform_512(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": [(8, 1048640), (8,), (8, 8194), (8, 1024), (), ()],
+                    "Input type": ["float", "int", "int", "int", "Scalar", ""],
+                },
+            }
+        )
+        assert pro.param_details["topk"] == 1024
+        assert pro.flops() == model.flops()
         no_ann = sgl_kernel_deepseek_v4_topk_transform_512(
             {"annotation": "NA", "args": event["args"]}
         )
@@ -7131,7 +7145,7 @@ class TestFlashDSv41PerfModels:
             },
         }
         model = sgl_kernel_fast_topk(event)
-        assert model.flops() == 815046
+        assert model.flops() == (815046 + 3) // 4
         assert model.bytes() > 0
         assert model.get_maf_type() == "vector"
         assert model.get_compute_precision() == "fp32"

@@ -1389,14 +1389,54 @@ class rocm_aiter_sparse_attn_indexer(InferenceAttention):
         return "matrix"
 
 
+def _compressed_indexer_valid_scores(stats, stride=None):
+    """Causal-corrected sq*sk mapped into compressed indexer slots.
+
+    Annotation ``sk`` is in token space. Flash CSA lightning-indexer scores
+    against keys compressed by ``stride`` (default
+    ``_V4PagedDecodeBase.CSA_COMPRESS_STRIDE``). Using uncompressed sqsk
+    over-counts decode bytes vs hardware counters by roughly that factor.
+    """
+    if stride is None:
+        stride = _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+    stride = max(int(stride), 1)
+    total = 0
+    for phase in ("c", "g"):
+        dense = (
+            stats[f"{phase}_sqsk"]
+            - (stats[f"{phase}_sqsq"] - stats[f"{phase}_sq"]) // 2
+        )
+        if dense > 0:
+            total += (int(dense) + stride - 1) // stride
+    return total
+
+
 class sgl_kernel_deepseek_v4_topk_transform_512:
     """
-    Perf model for sgl_kernel::deepseek_v4_topk_transform_512 (Flash indexer
-    top-k + page-table transform; topk fixed at 512 by the op name).
+    Perf model for ``sgl_kernel::deepseek_v4_topk_transform_512``.
 
-    Expected Input Dims:
-        [0] score (rows, L_max)   [1] lengths (rows,)
-        [2] src/aux indices      [3] dst / topk indices (rows, 512)
+    Flash / DeepSeek-V4 indexer path: select top-k score indices and rewrite
+    them into a paged dst page-table (optionally gathering from a src table).
+    Despite the ``_512`` suffix in the op name, ``topk`` is the dst page-table
+    width from ``Input Dims`` (commonly 512 on Flash, 1024 on DSV4-Pro).
+
+    Approximate signature (SGLang / sgl_kernel)::
+
+        deepseek_v4_topk_transform_512(
+            score,           # [rows, L_max], score dtype (often float/fp32)
+            lengths,         # [rows], int — valid score count per row
+            src_page_table,  # [rows, aux] or similar, int indices
+            dst_page_table,  # [rows, topk], int — top-k / page indices
+            ...              # scalars / unused trailing args
+        )
+
+    Expected ``Input Dims`` / ``Input type``:
+        [0] score (rows, L_max) — dtype score
+        [1] lengths (rows,) — int
+        [2] src/aux indices — int
+        [3] dst / topk indices (rows, topk) — int; ``topk`` from this width
+    Non-tensor: step annotation supplies causal sq/sk; valid score traffic is
+    compressed by the CSA indexer stride (see ``_compressed_indexer_valid_scores``).
     """
 
     category = "InferenceAttention"
@@ -1415,6 +1455,7 @@ class sgl_kernel_deepseek_v4_topk_transform_512:
             dims = event["args"]["Input Dims"]
             types = event["args"]["Input type"]
             rows = dims[0][0]
+            # topk from dst page-table width (Flash 512 / Pro 1024), not the op name.
             topk = dims[3][1] if len(dims) > 3 and dims[3] and len(dims[3]) > 1 else 512
             params = {
                 "rows": rows,
@@ -1425,10 +1466,7 @@ class sgl_kernel_deepseek_v4_topk_transform_512:
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         params.update(stats)
-        params["valid_scores"] = sum(
-            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
-            for p in ("c", "g")
-        )
+        params["valid_scores"] = _compressed_indexer_valid_scores(stats)
         return params
 
     def flops(self):
@@ -1466,10 +1504,27 @@ class sgl_kernel_deepseek_v4_topk_transform_512:
 
 class sgl_kernel_fast_topk:
     """
-    Perf model for sgl_kernel::fast_topk (Flash decode indexer selection).
+    Perf model for ``sgl_kernel::fast_topk`` (Flash decode indexer selection).
 
-    Expected Input Dims:
-        [0] score (rows, L_max)  [1] topk_idx (rows, topk)  [2] lengths (rows,)
+    Selects the top-k score indices per row from a (possibly padded) score
+    buffer; used on the Flash decode indexer path alongside
+    ``deepseek_v4_topk_transform_512``.
+
+    Approximate signature (SGLang / sgl_kernel)::
+
+        fast_topk(
+            score,      # [rows, L_max], score dtype (often float/fp32)
+            topk_idx,   # [rows, topk], int — written top-k indices
+            lengths,    # [rows], int — valid score count per row
+            ...
+        )
+
+    Expected ``Input Dims`` / ``Input type``:
+        [0] score (rows, L_max) — dtype score
+        [1] topk_idx (rows, topk) — int; ``topk`` from this width
+        [2] lengths (rows,) — int
+    Non-tensor: step annotation supplies causal sq/sk; valid score traffic is
+    compressed by the CSA indexer stride (see ``_compressed_indexer_valid_scores``).
     """
 
     category = "InferenceAttention"
@@ -1499,10 +1554,7 @@ class sgl_kernel_fast_topk:
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         params.update(stats)
-        params["valid_scores"] = sum(
-            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
-            for p in ("c", "g")
-        )
+        params["valid_scores"] = _compressed_indexer_valid_scores(stats)
         return params
 
     def flops(self):
