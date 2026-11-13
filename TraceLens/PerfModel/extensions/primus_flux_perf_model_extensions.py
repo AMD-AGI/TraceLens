@@ -10,7 +10,12 @@ Performance models for Primus Flux operations.
 
 from math import prod
 
-from TraceLens.PerfModel.perf_model import GEMM, UnaryElementwise
+from TraceLens.PerfModel.perf_model import (
+    GEMM,
+    SDPA,
+    UnaryElementwise,
+    extract_sdpa_cfg,
+)
 from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
 
 
@@ -223,6 +228,121 @@ class quantize_mxfp4_h16_dual(_QuantizeMxfp4Base):
             * name2bpe("c10::Float8_e8m0fnu")
         )
         return bytes_read + bytes_write_fp4 + bytes_write_scales
+
+
+# ── FlydSL attention perf models ──────────────────────────────────────────
+
+# BNHD layout: batch=0, heads=2, seq=1, head_dim=3
+_BNHD_IDX = (0, 2, 1, 3)
+
+
+class flux_flydsl_attn_fwd(SDPA):
+    """
+    flux_flydsl::attn_fwd — FlydSL Flash Attention forward.
+
+    3 inputs: Q, K, V all [B, S, H, D] BF16.
+    Non-causal joint image+text attention.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        cfg = extract_sdpa_cfg(dims[0], dims[1], dims[2], _BNHD_IDX)
+        cfg["causal"] = False
+        cfg["flash_impl"] = True
+        cfg["dropout"] = 0.0
+        cfg["dtype_A_B"] = tuple(event["args"]["Input type"][:2])
+        return cfg
+
+
+class flux_flydsl_attn_fwd_split(SDPA):
+    """
+    flux_flydsl::attn_fwd_split — FlydSL Flash Attention forward with split point.
+
+    4 inputs: Q, K, V all [B, S, H, D] BF16 + scalar split point.
+    The split point divides the sequence into two modality segments
+    (e.g., 256 image tokens + 256 text tokens) but does not change
+    the tensor shapes or total FLOPs/bytes.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        cfg = extract_sdpa_cfg(dims[0], dims[1], dims[2], _BNHD_IDX)
+        cfg["causal"] = False
+        cfg["flash_impl"] = True
+        cfg["dropout"] = 0.0
+        cfg["dtype_A_B"] = tuple(event["args"]["Input type"][:2])
+        return cfg
+
+
+class flux_flydsl_attn_bwd(SDPA):
+    """
+    flux_flydsl::attn_bwd — FlydSL Flash Attention backward.
+
+    6 inputs: dOut [B,S,H,D], Q [B,S,H,D], K [B,S,H,D], V [B,S,H,D],
+    Out [B,S,H,D] (all BF16), LSE [B,H,S] (float32).
+    """
+
+    category = "SDPA_bwd"
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        # dOut=0, Q=1, K=2, V=3, Out=4, LSE=5
+        cfg = extract_sdpa_cfg(dims[1], dims[2], dims[3], _BNHD_IDX)
+        cfg["causal"] = False
+        cfg["flash_impl"] = True
+        cfg["dropout"] = 0.0
+        cfg["dtype_A_B"] = tuple(event["args"]["Input type"][:2])
+        return cfg
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element=None):
+        if bytes_per_element is None:
+            bytes_per_element = name2bpe(self.param_details["dtype_A_B"][0])
+        return self.bytes_bwd(bytes_per_element)
+
+
+class flux_flydsl_attn_bwd_split(SDPA):
+    """
+    flux_flydsl::attn_bwd_split — FlydSL Flash Attention backward with split.
+
+    8 inputs: dOut_x [B,S/2,H,D], dOut_img [B,S/2,H,D],
+    K [B,S,H,D], V [B,S,H,D], Out [B,S,H,D],
+    Q_x [B,S/2,H,D], Q_img [B,S/2,H,D], LSE [B,H,S] (float32).
+
+    Q and dOut are split into two half-length tensors per modality.
+    The full sequence length is derived from K (which is not split).
+    """
+
+    category = "SDPA_bwd"
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        # dOut_x=0, dOut_img=1, K=2, V=3, Out=4, Q_x=5, Q_img=6, LSE=7
+        # K and V have the full sequence length; Q is split into two halves
+        k_shape = dims[2]
+        v_shape = dims[3]
+        # Reconstruct full Q shape from K (same B, S, H, D)
+        q_shape = list(k_shape)
+        cfg = extract_sdpa_cfg(q_shape, k_shape, v_shape, _BNHD_IDX)
+        cfg["causal"] = False
+        cfg["flash_impl"] = True
+        cfg["dropout"] = 0.0
+        cfg["dtype_A_B"] = tuple(event["args"]["Input type"][:2])
+        return cfg
+
+    def flops(self):
+        return self.flops_bwd()
+
+    def bytes(self, bytes_per_element=None):
+        if bytes_per_element is None:
+            bytes_per_element = name2bpe(self.param_details["dtype_A_B"][0])
+        return self.bytes_bwd(bytes_per_element)
 
 
 # ── Tree postprocess: fwd/bwd pseudo-op labeling ──────────────────────────
