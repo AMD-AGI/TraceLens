@@ -83,6 +83,31 @@ def _inject_named_owners(trace_tree, pattern, pseudo_name, extra=None):
         logger.info("Injected %s under %s", pseudo_name, owner.get("name"))
 
 
+def _already_has_flash_indexer_topk(trace_tree, evt, parent):
+    if parent is not None and parent.get("name") == "pseudo_flash_indexer_topk":
+        return True
+    children = evt.get("children") or []
+    if len(children) != 1:
+        return False
+    child = trace_tree.get_UID2event(children[0])
+    return bool(child and child.get("name") == "pseudo_flash_indexer_topk")
+
+
+def _is_flash_indexer_score_topk(evt):
+    args = evt.get("args") or {}
+    dims = args.get("Input Dims") or []
+    types = args.get("Input type") or []
+    if not dims or not dims[0] or len(dims[0]) < 2:
+        return False
+    rows, cols = dims[0][0], dims[0][1]
+    if rows is None or cols is None or cols < 1024:
+        return False
+    dtype0 = str(types[0]) if types else ""
+    if types and "int" in dtype0.lower() and "float" not in dtype0.lower():
+        return False
+    return True
+
+
 def _inject_aten_topk_parents(trace_tree, model_name):
     """Attach a Flash indexer TopK pseudo around qualifying aten::topk ops.
 
@@ -90,31 +115,17 @@ def _inject_aten_topk_parents(trace_tree, model_name):
     (common on Flash PD captures), wrap its children instead so kernel time
     still rolls under a FLOPs-capable pseudo name.
     """
-    uids = list(trace_tree.name2event_uids.get(ATEN_TOPK, []))
-    for uid in uids:
+    for uid in list(trace_tree.name2event_uids.get(ATEN_TOPK, [])):
         evt = trace_tree.get_UID2event(uid)
         if evt.get("cat") != "cpu_op":
             continue
         parent = trace_tree.get_parent_event(evt)
-        if parent is not None and parent.get("name") == "pseudo_flash_indexer_topk":
+        if _already_has_flash_indexer_topk(trace_tree, evt, parent):
             continue
-        children = evt.get("children") or []
-        if len(children) == 1:
-            child = trace_tree.get_UID2event(children[0])
-            if child and child.get("name") == "pseudo_flash_indexer_topk":
-                continue
-        args = evt.get("args") or {}
-        dims = args.get("Input Dims") or []
-        types = args.get("Input type") or []
-        if not dims or not dims[0] or len(dims[0]) < 2:
-            continue
-        rows, cols = dims[0][0], dims[0][1]
-        if rows is None or cols is None or cols < 1024:
-            continue
-        dtype0 = str(types[0]) if types else ""
-        if types and "int" in dtype0.lower() and "float" not in dtype0.lower():
+        if not _is_flash_indexer_score_topk(evt):
             continue
         extra = {"v4_model_name": model_name, "indexer_topk_parent": True}
+        children = evt.get("children") or []
         if parent is None:
             if not children and not evt.get("gpu_events"):
                 continue
@@ -125,11 +136,11 @@ def _inject_aten_topk_parents(trace_tree, model_name):
                 shape_donor_evt=evt,
                 extra_args=extra,
             )
-        else:
-            inject_pseudo_op_above_event(
-                trace_tree,
-                evt,
-                "pseudo_flash_indexer_topk",
-                shape_donor_evt=evt,
-                extra_args=extra,
-            )
+            continue
+        inject_pseudo_op_above_event(
+            trace_tree,
+            evt,
+            "pseudo_flash_indexer_topk",
+            shape_donor_evt=evt,
+            extra_args=extra,
+        )

@@ -121,7 +121,7 @@ def _infer_tokens_from_annotation(trace_tree):
             tokens = stats.get("c_sq", 0) + stats.get("g_sq", 0)
             if tokens:
                 return int(tokens)
-        except Exception:
+        except (ValueError, TypeError, KeyError, AttributeError, ImportError):
             continue
     return 1
 
