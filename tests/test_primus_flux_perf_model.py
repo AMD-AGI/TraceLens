@@ -496,3 +496,136 @@ def test_tree_postprocess_rewires_parent():
     gemm = tree.get_UID2event(gemm_uid)
     pseudo_uid = gemm["parent"]
     assert pseudo_uid in fwd_event["children"]
+
+
+def test_quantize_mxfp4_base_flops():
+    """_QuantizeMxfp4Base.flops() returns 2 * nelems (single quant)."""
+    model = quantize_mxfp4_h16_dual(_quantize_mxfp4_event(M=32, N=64))
+    base_flops = _QuantizeMxfp4Base.flops(model)
+    assert base_flops == 2 * 32 * 64
+
+
+def test_quantize_mxfp4_base_bytes_none_bpe():
+    """_QuantizeMxfp4Base.bytes() returns None when bpe_in is None."""
+    event = _quantize_mxfp4_event()
+    event["args"]["Input type"][0] = "unknown_dtype"
+    model = quantize_mxfp4_h16_dual(event)
+    assert _QuantizeMxfp4Base.bytes(model) is None
+
+
+def test_quantize_mxfp4_dual_bytes_none_bpe():
+    """quantize_mxfp4_h16_dual.bytes() returns None when bpe_in is None."""
+    event = _quantize_mxfp4_event()
+    event["args"]["Input type"][0] = "unknown_dtype"
+    model = quantize_mxfp4_h16_dual(event)
+    assert model.bytes() is None
+
+
+def test_inject_pseudo_op_no_parent():
+    """_inject_pseudo_op is a no-op when the event has no parent."""
+    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
+        _inject_pseudo_op,
+    )
+
+    tree = _FakeTree()
+    evt = {
+        "name": "primus_turbo::gemm_fp4_impl",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 100,
+        "dur": 10,
+        "args": {
+            "Input Dims": [],
+            "Input type": [],
+            "Input Strides": [],
+            "Concrete Inputs": [],
+        },
+        "children": [],
+        "gpu_events": [],
+    }
+    tree.add_event(evt)
+    before = len(tree.events)
+    _inject_pseudo_op(tree, evt, "test_pseudo")
+    assert len(tree.events) == before
+
+
+def test_inject_pseudo_op_child_not_in_parent_children():
+    """_inject_pseudo_op appends to parent children when orig UID is not in the list."""
+    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
+        _inject_pseudo_op,
+    )
+
+    tree = _FakeTree()
+    parent = {
+        "name": "parent",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 0,
+        "dur": 100,
+        "args": {},
+        "children": [],
+    }
+    parent_uid = tree.add_event(parent)
+    child = {
+        "name": "primus_turbo::gemm_fp4_impl",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 10,
+        "dur": 10,
+        "args": {
+            "Input Dims": [],
+            "Input type": [],
+            "Input Strides": [],
+            "Concrete Inputs": [],
+            "Sequence number": 0,
+            "External id": 0,
+        },
+        "parent": parent_uid,
+        "children": [],
+        "gpu_events": [],
+    }
+    tree.add_event(child)
+    # Deliberately don't add child to parent["children"]
+    _inject_pseudo_op(tree, child, "test_pseudo")
+    assert len(parent["children"]) == 1
+
+
+def test_collect_gemm_children_empty():
+    """_collect_gemm_children returns empty list when no GEMM children."""
+    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
+        _collect_gemm_children,
+    )
+
+    tree = _FakeTree()
+    parent = {"name": "parent", "children": []}
+    tree.add_event(parent)
+    non_gemm = {"name": "aten::add", "ts": 1}
+    uid = tree.add_event(non_gemm)
+    parent["children"].append(uid)
+    assert _collect_gemm_children(tree, parent) == []
+
+
+def test_collect_gemm_descendants_nested():
+    """_collect_gemm_descendants finds GEMMs nested multiple levels deep."""
+    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
+        _collect_gemm_descendants,
+    )
+
+    tree = _FakeTree()
+    root = {"name": "root", "children": [], "ts": 0}
+    tree.add_event(root)
+    mid = {"name": "aten::view", "children": [], "ts": 1}
+    mid_uid = tree.add_event(mid)
+    root["children"].append(mid_uid)
+    gemm = {"name": "primus_turbo::gemm_fp4_impl", "children": [], "ts": 2}
+    gemm_uid = tree.add_event(gemm)
+    mid["children"].append(gemm_uid)
+    result = _collect_gemm_descendants(tree, root)
+    assert len(result) == 1
+    assert result[0]["name"] == "primus_turbo::gemm_fp4_impl"
