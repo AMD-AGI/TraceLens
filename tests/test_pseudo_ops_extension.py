@@ -50,6 +50,14 @@ from TraceLens.Trace2Tree.extensions.moe_gptq_awq_pseudo_ops import (
     _create_pseudo_op_moe_gptq_awq,
     create_pseudo_ops_moe_gptq_awq,
 )
+from TraceLens.Trace2Tree.extensions.moe_mega_ep_pseudo_ops import (
+    create_pseudo_ops_moe_mega_ep,
+)
+from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
+    get_pseudo_op_mappings,
+)
+from TraceLens.PerfModel.utils import torch_dtype_map
+from math import prod
 from tests.test_trace2tree import _add_gpu_chain, _mk_event
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
@@ -1589,3 +1597,198 @@ class TestTraceToTreePhase4:
                 short_kernel_study=True,
             )
             assert (out / "gpu_timeline.csv").exists()
+
+
+_MEGA_T, _MEGA_H, _MEGA_I, _MEGA_E, _MEGA_TOPK = 512, 7168, 3072, 96, 6
+_MEGA_W1 = [_MEGA_E, 2 * _MEGA_I, _MEGA_H // 2]
+_MEGA_W2 = [_MEGA_E, _MEGA_H, _MEGA_I // 2]
+_MEGA_W1_SCALE = [_MEGA_E, 192, _MEGA_H]
+_MEGA_W2_SCALE = [_MEGA_E, 224, _MEGA_I]
+# Traced receive-arena row: 3584 B payload + 224 B scales, padded to 128 B.
+_MEGA_WIRE_STRIDE = 3840
+_MEGA_KERNELS = [
+    ("moe_forward", "tdm_compact_plan", "pseudo_op::mega_moe_plan"),
+    ("moe_forward", "ep_dispatch_tdm_64x8", "pseudo_op::mega_moe_dispatch"),
+    (
+        "fused_moe",
+        "a8w4_tdm_fp4_t64x256x256_w1x4_b3_K7168_e96_act1_q1r4_mg10",
+        "pseudo_op::mega_moe_gemm_up",
+    ),
+    (
+        "fused_moe",
+        "a8w4_tdm_fp4_t64x256x256_w1x4_b3_K3072_e96_epscatter_mg10",
+        "pseudo_op::mega_moe_gemm_down",
+    ),
+    ("moe_forward", "ep_combine_fused_sync_0", "pseudo_op::mega_moe_combine_sync"),
+    ("moe_forward", "ep_combine_fused_0", "pseudo_op::mega_moe_combine"),
+    ("moe_forward", "unrelated_kernel", None),
+]
+
+
+def _mega_moe_events(with_weights=True):
+    moe_forward = _mk_event(
+        "cpu_op",
+        "aiter::moe_forward",
+        ts=0,
+        dur=1000,
+        pid=1,
+        tid=1,
+        args={
+            "Input Dims": [[_MEGA_T, _MEGA_H], [_MEGA_T, 384], []],
+            "Input type": ["c10::BFloat16", "c10::BFloat16", ""],
+            "Sequence number": 5,
+        },
+    )
+    fused_dims = [[] for _ in range(36)]
+    fused_strides = [[] for _ in range(36)]
+    fused_strides[0] = [_MEGA_WIRE_STRIDE, 1]
+    if with_weights:
+        fused_dims[0] = [417792, _MEGA_H // 2]
+        fused_dims[1] = _MEGA_W1
+        fused_dims[2] = _MEGA_W2
+        fused_dims[3] = [1, _MEGA_TOPK]
+        fused_dims[9] = _MEGA_W1_SCALE
+        fused_dims[10] = _MEGA_W2_SCALE
+        fused_dims[11] = [417792, _MEGA_H // 32]
+    fused_moe = _mk_event(
+        "cpu_op",
+        "aiter::fused_moe_",
+        ts=300,
+        dur=300,
+        pid=1,
+        tid=1,
+        args={
+            "Input Dims": fused_dims,
+            "Input Strides": fused_strides,
+            "Input type": ["unsigned char"] * 36,
+        },
+    )
+    events = [moe_forward, fused_moe]
+    launch = {"moe_forward": [100, 150, 700, 750, 800], "fused_moe": [350, 400]}
+    for corr, (owner, kernel, _) in enumerate(_MEGA_KERNELS, start=70):
+        cpu_op = moe_forward if owner == "moe_forward" else fused_moe
+        ts = launch[owner].pop(0)
+        _add_gpu_chain(events, cpu_op, corr, kernel, ts, ts + 1000)
+    return events
+
+
+class TestMegaMoEPseudoOps:
+    def _pseudo_ops(self, tree):
+        return {
+            e["name"]: e
+            for e in tree.events
+            if e.get("args", {}).get("Pseudo op") is True
+        }
+
+    def test_each_kernel_gets_its_pseudo_op(self):
+        tree = _build_tree(_mega_moe_events())
+        apply_pseudo_op_extensions(tree, verbose=True)
+        pseudo_ops = self._pseudo_ops(tree)
+        expected = {name for _, _, name in _MEGA_KERNELS if name}
+        assert set(pseudo_ops) == expected
+        for _, kernel, name in _MEGA_KERNELS:
+            if name is None:
+                continue
+            (kernel_evt,) = tree.get_gpu_events(pseudo_ops[name])
+            assert kernel_evt["name"] == kernel
+            args = pseudo_ops[name]["args"]
+            assert args["Input Dims"][0] == [_MEGA_T, _MEGA_H]
+            assert args["mega_moe_topk"] == _MEGA_TOPK
+            assert args["mega_moe_inter_dim"] == _MEGA_I
+            assert args["mega_moe_wire_row_bytes"] == _MEGA_H // 2
+            assert args["mega_moe_wire_row_stride"] == _MEGA_WIRE_STRIDE
+        assert (
+            categorize_torch_op({"name": "pseudo_op::mega_moe_combine_sync"})
+            == "MoE_comm_fwd"
+        )
+
+    def test_models_use_balanced_routing(self):
+        tree = _build_tree(_mega_moe_events())
+        create_pseudo_ops_moe_mega_ep(tree)
+        pseudo_ops = self._pseudo_ops(tree)
+        mappings = get_pseudo_op_mappings()
+        models = {
+            name: mappings[name](evt)
+            for name, evt in pseudo_ops.items()
+            if name in mappings
+        }
+        routes = _MEGA_T * _MEGA_TOPK
+        wire_row = _MEGA_H // 2 + _MEGA_H // 32
+        inter_row = _MEGA_I // 2 + _MEGA_I // 32
+        active = _MEGA_E * (1 - (1 - 1 / _MEGA_E) ** routes)
+
+        up = models["pseudo_op::mega_moe_gemm_up"]
+        assert up.flops() == 2 * _MEGA_T * _MEGA_H * _MEGA_I * _MEGA_TOPK * 2
+        w1 = (prod(_MEGA_W1) + prod(_MEGA_W1_SCALE)) / _MEGA_E
+        assert up.bytes() == pytest.approx(
+            routes * wire_row + active * w1 + routes * inter_row
+        )
+        assert up.get_compute_precision() == torch_dtype_map("mxfp4")
+        assert up.get_maf_type() == "matrix"
+
+        down = models["pseudo_op::mega_moe_gemm_down"]
+        assert down.flops() == 2 * _MEGA_T * _MEGA_I * _MEGA_H * _MEGA_TOPK
+        w2 = (prod(_MEGA_W2) + prod(_MEGA_W2_SCALE)) / _MEGA_E
+        assert down.bytes() == pytest.approx(
+            routes * inter_row + active * w2 + routes * _MEGA_H * 2
+        )
+        assert down.get_maf_type() == "matrix"
+
+        dispatch = models["pseudo_op::mega_moe_dispatch"]
+        assert dispatch.flops() == 0
+        assert dispatch.bytes() == _MEGA_T * wire_row + routes * (_MEGA_WIRE_STRIDE + 8)
+        assert dispatch.get_maf_type() is None
+        assert dispatch.get_compute_precision() is None
+
+        combine = models["pseudo_op::mega_moe_combine"]
+        assert combine.flops() == _MEGA_T * (_MEGA_TOPK - 1) * _MEGA_H
+        assert combine.bytes() == (routes + _MEGA_T) * _MEGA_H * 2
+        assert combine.get_maf_type() == "vector"
+        assert combine.get_compute_precision() == torch_dtype_map("c10::BFloat16")
+
+        plan = models["pseudo_op::mega_moe_plan"]
+        assert plan.flops() == 0
+        assert plan.bytes() == routes * 16
+        assert plan.get_maf_type() == "vector"
+        assert plan.get_compute_precision() is None
+
+    def test_models_follow_the_wire_format(self):
+        tree = _build_tree(_mega_moe_events())
+        create_pseudo_ops_moe_mega_ep(tree)
+        pseudo_ops = self._pseudo_ops(tree)
+        mappings = get_pseudo_op_mappings()
+
+        bf16_wire = deepcopy(pseudo_ops["pseudo_op::mega_moe_gemm_down"])
+        bf16_wire["args"]["mega_moe_wire_row_bytes"] = _MEGA_H * 2
+        bf16_wire["args"]["mega_moe_wire_scale_bytes"] = 0
+        model = mappings["pseudo_op::mega_moe_gemm_down"](bf16_wire)
+        # An unquantized wire carries no MX scales for the intermediate either.
+        assert model._intermediate_row_bytes() == _MEGA_I * 2
+        assert model.get_compute_precision() == torch_dtype_map("fp8")
+
+        for name in ("pseudo_op::mega_moe_gemm_down", "pseudo_op::mega_moe_combine"):
+            unknown = deepcopy(pseudo_ops[name])
+            unknown["args"]["Input type"] = ["opaque"]
+            assert mappings[name](unknown).bytes() is None
+
+    def test_finds_expert_gemm_below_python_frames(self):
+        events = _mega_moe_events()
+        events.append(
+            _mk_event(
+                "python_function",
+                "aiter/ops/flydsl/kernels/mega_moe.py(491): _compute",
+                ts=250,
+                dur=400,
+                pid=1,
+                tid=1,
+                args={"Python id": 9},
+            )
+        )
+        tree = _build_tree(events, add_python_func=True)
+        create_pseudo_ops_moe_mega_ep(tree)
+        assert "pseudo_op::mega_moe_gemm_up" in self._pseudo_ops(tree)
+
+    def test_skips_layers_without_expert_weights(self):
+        tree = _build_tree(_mega_moe_events(with_weights=False))
+        create_pseudo_ops_moe_mega_ep(tree)
+        assert not self._pseudo_ops(tree)

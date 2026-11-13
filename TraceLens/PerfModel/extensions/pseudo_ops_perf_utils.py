@@ -48,6 +48,12 @@ def get_pseudo_op_mappings():
         # MoE flydsl two-stage (under aiter::fused_moe_)
         "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
+        # MoE expert-parallel mega-MoE (under aiter::moe_forward)
+        "pseudo_op::mega_moe_plan": moe_perf_model_extensions.mega_moe_plan,
+        "pseudo_op::mega_moe_dispatch": moe_perf_model_extensions.mega_moe_dispatch,
+        "pseudo_op::mega_moe_gemm_up": moe_perf_model_extensions.mega_moe_gemm_up,
+        "pseudo_op::mega_moe_gemm_down": moe_perf_model_extensions.mega_moe_gemm_down,
+        "pseudo_op::mega_moe_combine": moe_perf_model_extensions.mega_moe_combine,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
         "aiter::biased_grouped_topk_hip": moe_perf_model_extensions.BiasedGroupedTopk,
         "sglang_profiler::topk__post_process_topk_ids": moe_perf_model_extensions.sglang_fused_append_shared_experts,
@@ -196,6 +202,8 @@ def get_pseudo_op_category_only_mappings():
     return {
         # MoE sort/permutation aux kernels (aiter moe_op_mxfp4.py); memory-bound, negligible FLOPs, classify only.
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": "MoE_aux",
+        # Mega-MoE cross-GPU barrier before the combine reduce; its time is the peer wait, so classify only.
+        "pseudo_op::mega_moe_combine_sync": "MoE_comm_fwd",
         "aiter::unified_attention_with_output_base->_fused_qk_rope_reshape_and_cache_kernel (Synthetic Op)": "FusedRoPE",
         "hipModuleLaunchKernel->kv_indices_generate_kernel (Synthetic Op)": "InferenceAttention",
         "aiter::get_mla_metadata_v1": "InferenceAttention",

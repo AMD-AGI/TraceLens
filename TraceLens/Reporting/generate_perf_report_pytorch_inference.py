@@ -67,6 +67,7 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "sglang_profiler::moe_sorting_small__run_small_sort",
     "aiter::gemm_a8w8_blockscale_bpreshuffle",
     "aiter::_opus_moe_stage1_a8w4_fwd_raw",
+    "pseudo_op::mega_moe_",
     "_moe_C::topk_softplus_sqrt",
     "aiter::moe_sorting_opus_fwd",
     "pseudo_vllm_sparse_attn_decode",
