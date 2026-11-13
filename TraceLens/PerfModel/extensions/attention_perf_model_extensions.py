@@ -104,6 +104,14 @@ class InferenceAttention:
         return IterationAnnotation(annotation).chunk_stats()
 
     @staticmethod
+    def _causal_kv_pairs(stats):
+        """(query, key) pairs a causal scorer visits, from the sq/sk aggregates."""
+        return sum(
+            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
+            for p in ("c", "g")
+        )
+
+    @staticmethod
     def get_param_details(event):
         try:
             annotation = str(event.get("annotation"))
@@ -1211,6 +1219,107 @@ class mla_decode_v4_asm(InferenceAttention):
         return super().get_maf_type()
 
 
+class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
+    """HBM bytes of the FP8 NoPE and BF16 RoPE query, the BF16 output, and each attended KV row's FP8 NoPE, BF16 RoPE and int32 index; the page pool is not read.
+
+    The index buffers are sized for the largest CUDA-graph batch, so the
+    attended rows come from a decode sq/sk step annotation: ``min(ctx, window)``
+    plus ``min(ctx / 4, index_topk)`` CSA or ``ctx / 128`` HCA compressed rows,
+    with the layer mode stamped from its compress kernels. Other steps are
+    no-perf. A NoPE row packs its values with their E8M0 scales, so the
+    QK and PV head dim is the output's, not the NoPE row width plus RoPE.
+
+        Input Dims[0] = q_nope (T, H, row)   Input Dims[1] = q_rope (T, H, RD)
+        Input Dims[2] = kv_nope (rows, row)  Input Dims[3] = kv_rope (rows, RD)
+        Input Dims[4] = kv_indices (capacity,)  Input Dims[5], [9] = indptr (T + 1,)
+        Input Dims[10] = attn_sink (H,)      Input Dims[11] = out (T, H, D)
+    """
+
+    @classmethod
+    def get_param_details(cls, event):
+        try:
+            args = event.get("args") or {}
+            dims = args["Input Dims"]
+            types = args["Input type"]
+            tokens, heads, nope_row = (int(x) for x in dims[0])
+            d_rope = int(dims[1][2])
+            d_head = int(dims[11][2])
+            indptr_elems = int(dims[5][0]) + int(dims[9][0])
+            sink_elems = int(dims[10][0])
+            ann = IterationAnnotation(str(event.get("annotation")))
+            if not ann.has_sqsk or ann.c_sq or ann.g_sq <= 0 or tokens <= 0:
+                raise ValueError
+            mode = args["v4_mode"]
+            stride = cls.COMPRESS_STRIDE[mode]
+            window = int(args.get("v4_window") or cls.WINDOW)
+            index_topk = int(args.get("v4_index_topk") or cls.MAX_INDEX_TOPK)
+            mean_ctx = ann.g_sqsk / ann.g_sq
+            compressed = math.ceil(mean_ctx / stride) if stride else 0
+            if mode == "csa":
+                compressed = min(compressed, index_topk)
+            live = min(ann.g_sq, tokens)
+            num_kv = live * (min(math.ceil(mean_ctx), window) + compressed)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return add_logical_batch_size(
+                InferenceAttention.no_perf_param_details(), event
+            )
+        details = {
+            "B": 1,
+            "N_Q": tokens,
+            "H_Q": heads,
+            "N_KV": num_kv,
+            "H_KV": 1,
+            "d_h_qk": d_head,
+            "d_h_v": d_head,
+            "c_sq": 0,
+            "c_sk": 0,
+            "c_sqsq": 0,
+            "c_sqsk": 0,
+            "g_sq": live,
+            "g_sk": num_kv,
+            "g_sqsq": live,
+            "g_sqsk": num_kv,
+            "dtype_Q": types[0],
+            "dtype_rope": types[1],
+            "dtype_kv": types[2],
+            "dtype_kvrope": types[3],
+            "dtype_index": types[4],
+            "dtype_out": types[11],
+            "nope_row": nope_row,
+            "rope_dim": d_rope,
+            "indptr_elems": indptr_elems,
+            "sink_elems": sink_elems,
+            "kv_mode": mode,
+            "live_queries": live,
+        }
+        return add_logical_batch_size(details, event)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe = [
+            name2bpe(str(p[key]).lower())
+            for key in (
+                "dtype_Q",
+                "dtype_rope",
+                "dtype_kv",
+                "dtype_kvrope",
+                "dtype_index",
+                "dtype_out",
+            )
+        ]
+        if None in bpe:
+            return None
+        bpe_q, bpe_rope, bpe_kv, bpe_kvrope, bpe_index, bpe_out = bpe
+        nope_row, d_rope = p["nope_row"], p["rope_dim"]
+        q_rows = p["N_Q"] * p["H_Q"]
+        query = q_rows * (nope_row * bpe_q + d_rope * bpe_rope)
+        kv = p["N_KV"] * (nope_row * bpe_kv + d_rope * bpe_kvrope + bpe_index)
+        meta = (p["indptr_elems"] + p["sink_elems"]) * 4
+        return query + kv + meta + q_rows * p["d_h_v"] * bpe_out
+
+
 class sgl_kernel_fast_topk_transform_fused:
     """
     Performance model for sgl_kernel::fast_topk_transform_fused (DSA indexer
@@ -1249,10 +1358,7 @@ class sgl_kernel_fast_topk_transform_fused:
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         params.update(stats)
-        params["valid_scores"] = sum(
-            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
-            for p in ("c", "g")
-        )
+        params["valid_scores"] = InferenceAttention._causal_kv_pairs(stats)
         return params
 
     def flops(self):
@@ -1286,6 +1392,84 @@ class sgl_kernel_fast_topk_transform_fused:
 
     def get_maf_type(self):
         return "vector"
+
+
+class pa_mqa_logits_mxfp4:
+    """HBM bytes of the MXFP4 query, its e8m0 scales and per-head BF16 weights, and per scored key its MXFP4 row, scale, page id share and FP32 logit.
+
+    Each row scores ``out[r, k] = sum_h relu(q[r, h] . K[k]) * w[r, h]`` over its
+    CSA-compressed context. The cache and logits buffers are sized for the
+    longest context, so the scored keys come from the step annotation: the
+    causal (query, key) pairs over the CSA compression stride. The
+    ``q_per_block`` rows of a CTA share each KV tile they load.
+
+    Expected Input Dims (aiter::_fwd_sched_raw):
+        [1] q (T, H, D/2) uint8          [2] q_scale (T, H, D/32) uint8
+        [3] kv_cache (pages, P, D/2)     [4] kv_scale (pages, P, D/32)
+        [6] weights (T, H) bf16          Concrete Inputs[16] = q_per_block
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    _PAGE_ID_BYTES = 4
+    _LOGIT_BYTES = 4
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            rows, heads, q_row = dims[1]
+            params = {
+                "rows": min(stats["c_sq"] + stats["g_sq"], rows),
+                "heads": heads,
+                "head_dim": 2 * q_row,
+                "q_row_bytes": q_row + dims[2][2],
+                "kv_row_bytes": dims[3][2] + dims[4][2],
+                "page_size": dims[3][1],
+                "weight_bytes": name2bpe(event["args"]["Input type"][6]),
+                "q_per_block": max(int(event["args"]["Concrete Inputs"][16]), 1),
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params["keys"] = (
+            InferenceAttention._causal_kv_pairs(stats)
+            // _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+        )
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # Per head: a head_dim dot product, then the ReLU-weighted head sum.
+        return p["keys"] * p["heads"] * (2 * p["head_dim"] + 2)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf") or p["weight_bytes"] is None:
+            return None
+        query = p["rows"] * p["heads"] * (p["q_row_bytes"] + p["weight_bytes"])
+        kv_per_key = p["kv_row_bytes"] + self._PAGE_ID_BYTES / p["page_size"]
+        return query + p["keys"] * (kv_per_key / p["q_per_block"] + self._LOGIT_BYTES)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def get_compute_precision(self):
+        return None if self.param_details.get("_no_perf") else torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return None if self.param_details.get("_no_perf") else "matrix"
 
 
 class rocm_aiter_sparse_attn_indexer(InferenceAttention):

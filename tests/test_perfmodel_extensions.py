@@ -832,6 +832,176 @@ class TestPerfModelExtensions:
         assert model.flops() is None
         assert model.bytes() is None
 
+    @staticmethod
+    def _sparse_mla_event(mode, annotation, tokens=4):
+        # Index and KV buffers are capacities; only q, out and the mode vary.
+        event = {
+            "args": {
+                "Input Dims": [
+                    [tokens, 128, 512],
+                    [tokens, 128, 64],
+                    [188122880, 512],
+                    [188122880, 64],
+                    [589824],
+                    [tokens + 1],
+                    [188122880, 512],
+                    [188122880, 64],
+                    [0],
+                    [tokens + 1],
+                    [128],
+                    [tokens, 128, 512],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "float",
+                    "c10::BFloat16",
+                    "Scalar",
+                ],
+            },
+            "annotation": annotation,
+        }
+        if mode is not None:
+            event["args"]["v4_mode"] = mode
+        return event
+
+    @pytest.mark.parametrize(
+        "mode, ctx, per_query",
+        [
+            ("csa", 32768, 128 + 1024),
+            ("csa", 100, 100 + 25),
+            ("hca", 32768, 128 + 32768 // 128),
+        ],
+    )
+    def test_sparse_mla_v4_kv_from_annotation(self, mode, ctx, per_query):
+        # Three live requests in a four-token CUDA graph.
+        event = self._sparse_mla_event(mode, self._decode_annotation(3, ctx))
+        model = aext.mla_sparse_prefill_fp8_asm_fwd(event)
+        num_kv = 3 * per_query
+        assert model.param_details["N_KV"] == num_kv
+        assert model.param_details["kv_mode"] == mode
+        # The 512-byte NoPE row holds 448 values and their scales, plus 64 RoPE.
+        assert model.flops() == 128 * 2 * num_kv * (512 + 512)
+        assert model.bytes() == (
+            4 * 128 * (512 + 64 * 2)
+            + num_kv * (512 + 64 * 2 + 4)
+            + (5 + 5 + 128) * 4
+            + 4 * 128 * 512 * 2
+        )
+        assert model.get_compute_precision() == "fp8"
+
+    @pytest.mark.parametrize(
+        "mode, annotation",
+        [
+            ("csa", "NA"),
+            (
+                None,
+                "execute_3_context_0(sq0sk0sqsq0sqsk0)_generation_3(sq3sk300sqsq3sqsk300)",
+            ),
+            (
+                "csa",
+                "execute_1_context_1(sq8sk8sqsq64sqsk64)_generation_0(sq0sk0sqsq0sqsk0)",
+            ),
+        ],
+    )
+    def test_sparse_mla_v4_no_perf_without_decode_context(self, mode, annotation):
+        model = aext.mla_sparse_prefill_fp8_asm_fwd(
+            self._sparse_mla_event(mode, annotation)
+        )
+        assert model.param_details["_no_perf"] is True
+        assert model.flops() is None
+        assert model.bytes() is None
+        assert model.get_maf_type() is None
+
+    @staticmethod
+    def _mqa_logits_event(annotation, rows=4, q_per_block=1):
+        # Traced aiter::_fwd_sched_raw layout; the cache and logits are capacities.
+        return {
+            "args": {
+                "Input Dims": [
+                    [1],
+                    [rows, 64, 64],
+                    [rows, 64, 4],
+                    [84664, 64, 64],
+                    [84664, 64, 4],
+                    [rows, 4096],
+                    [rows, 64],
+                    [0],
+                    [rows],
+                    [3168, 8],
+                    [rows, 262144],
+                ]
+                + [[]] * 7,
+                "Input type": [
+                    "c10::BFloat16",
+                    "unsigned char",
+                    "unsigned char",
+                    "unsigned char",
+                    "unsigned char",
+                    "int",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                ]
+                + ["Scalar"] * 7,
+                "Concrete Inputs": [""] * 11
+                + [str(rows), "3072", "0.011", "64", "262144", str(q_per_block), "64"],
+            },
+            "annotation": annotation,
+        }
+
+    def test_mqa_logits_mxfp4_decode_keys_from_annotation(self):
+        model = aext.pa_mqa_logits_mxfp4(
+            self._mqa_logits_event(self._decode_annotation(3, 32768))
+        )
+        keys = 3 * 32768 // 4
+        assert model.param_details["keys"] == keys
+        assert model.flops() == keys * 64 * (2 * 128 + 2)
+        assert model.bytes() == 3 * 64 * (64 + 4 + 2) + keys * (64 + 4 + 4 + 4 / 64)
+        assert model.get_compute_precision() == "fp4"
+        assert model.get_maf_type() == "matrix"
+
+    def test_mqa_logits_mxfp4_prefill_scores_causal_pairs(self):
+        annotation = (
+            "execute_1_context_1(sq8sk8sqsq64sqsk64)_generation_0(sq0sk0sqsq0sqsk0)"
+        )
+        model = aext.pa_mqa_logits_mxfp4(
+            self._mqa_logits_event(annotation, rows=16, q_per_block=4)
+        )
+        assert model.param_details["rows"] == 8
+        keys = (64 - (64 - 8) // 2) // 4
+        assert model.param_details["keys"] == keys
+        # Four rows per CTA share each KV tile; every row stores its own logits.
+        assert model.bytes() == 8 * 64 * (64 + 4 + 2) + keys * (
+            (64 + 4 + 4 / 64) / 4 + 4
+        )
+
+    def test_sparse_mla_v4_and_mqa_logits_unknown_dtype_bytes(self):
+        mla = self._sparse_mla_event("csa", self._decode_annotation(3, 1000))
+        mla["args"]["Input type"][2] = "c10::Unknown"
+        assert aext.mla_sparse_prefill_fp8_asm_fwd(mla).bytes() is None
+        logits = self._mqa_logits_event(self._decode_annotation(3, 1000))
+        logits["args"]["Input type"][6] = "c10::Unknown"
+        assert aext.pa_mqa_logits_mxfp4(logits).bytes() is None
+
+    def test_mqa_logits_mxfp4_no_perf_without_annotation(self):
+        model = aext.pa_mqa_logits_mxfp4(self._mqa_logits_event("NA"))
+        assert model.flops() is None
+        assert model.bytes() is None
+        assert model.get_compute_precision() is None
+        assert model.get_maf_type() is None
+
     def test_mla_bytes_reject_broadcast_stride(self):
         event = {
             "args": {
