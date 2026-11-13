@@ -142,7 +142,7 @@ _BREAK_RANK = os.environ.get("TRACELENS_SHAPE_BREAK_RANK", "").strip()
 # Module prefixes that belong to the JIT machinery itself. A frame in one of
 # these is never "the launcher" -- notably Triton's own KernelInterface
 # __getitem__ lambda sits between the caller and .run().
-_JIT_MODULES = ("triton", "flydsl", "tvm_ffi")
+_JIT_MODULES = ("triton", "flydsl", "tvm_ffi", "tilelang", "tvm")
 
 # Individual modules that are launch machinery inside an otherwise ordinary
 # package: aiter's HsacoKernel.__getitem__ closure sits between the caller and
@@ -1079,6 +1079,70 @@ def install_aiter_compile_ops_hooks() -> bool:
     return True
 
 
+def _tilelang_name(kernel: Any) -> Optional[str]:
+    """A TileLang kernel's factory name, else its entry symbol.
+
+    Every TileLang kernel's entry point is ``main`` (hence ``main_kernel`` on
+    the GPU), so the ``@tilelang.jit`` factory that built it -- tagged at
+    compile time by ``install_tilelang_jit_hooks`` -- is the useful name.
+    """
+    name = getattr(kernel, "_jit_shape_name", None)
+    if name:
+        return name
+    func = getattr(kernel, "prim_func", None)
+    try:
+        return str(func.attrs["global_symbol"])
+    except Exception:
+        return None
+
+
+def install_tilelang_kernel_hooks() -> bool:
+    """Hook TileLang launches: ``JITKernel.__call__``. False if not imported yet.
+
+    TileLang compiles TVM TIR to a HIP/CUDA library and calls it through its
+    own runtime adapter, so its launches never reach Triton's hooks. The
+    caller passes real tensors (``kernel(q, kv, indices)``); outputs that the
+    kernel allocates itself (``out_idx``) are not among them.
+    """
+    mod = sys.modules.get("tilelang.jit.kernel")
+    cls = getattr(mod, "JITKernel", None) if mod is not None else None
+    if not isinstance(cls, type):
+        return False
+    return _wrap_launch(cls, "__call__", _tilelang_name, "tilelang_kernel", "tilelang.jit")
+
+
+def install_tilelang_jit_hooks() -> bool:
+    """Tag kernels compiled by ``@tilelang.jit`` with their factory's name.
+
+    Kernels are compiled (and cached) during warmup, long before a profiler
+    window, so this is installed when ``tilelang.jit`` finishes importing.
+    False until then.
+    """
+    mod = sys.modules.get("tilelang.jit")
+    cls = getattr(mod, "JITImpl", None) if mod is not None else None
+    original = getattr(cls, "compile", None) if isinstance(cls, type) else None
+    if not callable(original):
+        return False
+    if getattr(cls, "_jit_shape_traced_compile", False):
+        return True
+
+    @functools.wraps(original)
+    def compile(self, *args, **kwargs):
+        kernel = original(self, *args, **kwargs)
+        try:
+            name = _name_of(self.func, getattr(self.func, "func", None))
+            if name and kernel is not None:
+                kernel._jit_shape_name = name
+        except Exception:  # pragma: no cover - never break the workload
+            pass
+        return kernel
+
+    cls.compile = compile
+    cls._jit_shape_traced_compile = True
+    _installed["tilelang.compile"] = f"{cls.__module__}.{cls.__qualname__}.compile"
+    return True
+
+
 def install_hooks() -> bool:
     """Install every JIT hook whose library is currently importable.
 
@@ -1092,4 +1156,7 @@ def install_hooks() -> bool:
     cpp_itfs = install_aiter_cpp_itfs_hooks()
     aiter_flydsl = install_aiter_flydsl_hooks()
     compile_ops = install_aiter_compile_ops_hooks()
-    return triton or compiled or flydsl or tvm_ffi or cpp_itfs or aiter_flydsl or compile_ops
+    tilelang = install_tilelang_kernel_hooks()
+    tilelang_names = install_tilelang_jit_hooks()
+    return (triton or compiled or flydsl or tvm_ffi or cpp_itfs or aiter_flydsl
+            or compile_ops or tilelang or tilelang_names)

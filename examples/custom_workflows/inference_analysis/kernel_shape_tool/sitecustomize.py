@@ -262,6 +262,8 @@ _PENDING_PATCHES = {
     "csrc.cpp_itfs.utils": _installer("install_aiter_cpp_itfs_hooks"),
     "aiter.jit.core": _installer("install_aiter_compile_ops_hooks"),
     "aiter.ops.flydsl.kernels.tensor_shim": _installer("install_aiter_flydsl_hooks"),
+    "tilelang.jit": _installer("install_tilelang_jit_hooks"),
+    "tilelang.jit.kernel": _installer("install_tilelang_kernel_hooks"),
 }
 
 
