@@ -47,6 +47,16 @@ peak FLOPS and peak bandwidth for that target GPU (for example,
 | Target GPU         | Notes |
 |--------------------|-------|
 | AMD Instinct™ MI300X | Used for the roofline knee point (for example, FP16 ≈ 1300 TFLOPS / 5.3 TB/s ≈ 245 FLOPs/byte). |
+| AMD Radeon™ PRO W7900 and W7900 Dual Slot (gfx1100) | `--gpu_arch_platform W7900`. AMD's published figures: matrix FP16 and INT8, vector FP32, and 864 GB/s. BF16 matrix, FP16/BF16/FP64 vector, FP8/FP4/FP6 and FP32/FP64 matrix rows get no roofline. |
+
+The W7900 spec uses AMD's published peaks from the
+[Radeon PRO W7900](https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900.html)
+and
+[Radeon PRO W7900 Dual Slot](https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900-dual-slot.html)
+product pages: 864 GB/s, 123 TFLOPS matrix FP16, 123 TOPS matrix INT8 and
+61.3 TFLOPS vector FP32. The keys left out are listed in
+`TraceLens/Agent/Analysis/utils/arch/README.md`. Other gfx1100 boards (W7800,
+Radeon RX 7900 series) have no bundled spec.
 
 ## Software requirements
 

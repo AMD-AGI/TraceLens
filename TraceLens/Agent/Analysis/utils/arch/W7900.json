@@ -1,0 +1,11 @@
+{
+    "name": "W7900",
+    "gfx_arch": "gfx1100",
+    "mem_bw_gbps": 864,
+    "memory_gb": 48,
+    "max_achievable_tflops": {
+        "matrix_fp16": 123,
+        "matrix_int8": 123,
+        "vector_fp32": 61.3
+    }
+}

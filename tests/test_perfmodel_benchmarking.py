@@ -12,16 +12,41 @@ lazily and skipped unless a GPU runtime is available.
 
 from __future__ import annotations
 
-import importlib.util, json, pytest
+import argparse, importlib.util, json, pytest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from TraceLens.PerfModel.benchmarking.microbench_utils import (
+    OMITTED_TFLOPS_REASONS,
     _int_metric,
     check_gpu_idle,
     gfx_target,
     mx_peak_without_native_support,
+    omitted_tflops_reason,
+    published_tflops_keys,
     resolve_physical_device,
 )
+
+GFX1100_KEYS = {
+    "matrix_fp16",
+    "matrix_bf16",
+    "matrix_int8",
+    "vector_fp16",
+    "vector_fp32",
+    "vector_fp64",
+}
+GFX1100_OMITTED = set(OMITTED_TFLOPS_REASONS["gfx1100"])
+# Targets with no ceiling allowlist; they publish what they published on main.
+TARGETS_WITHOUT_ALLOWLIST = [
+    "gfx942",
+    "gfx950",
+    "gfx1151",
+    "gfx1201",
+    "gfx90a",
+    "gfx1030",
+    "gfx1101",
+    "gfx1102",
+]
 
 # These modules import torch; without it they stay None and the tests that use them skip in _require_torch.
 try:
@@ -156,6 +181,23 @@ class TestMxPeakWithoutNativeSupport:
         assert mx_peak_without_native_support(gfx, self.MATRIX) is None
 
 
+class TestCeilingAllowlist:
+    def test_gfx1100_publishes_only_native_ceilings(self):
+        assert set(published_tflops_keys("gfx1100")) == GFX1100_KEYS
+
+    @pytest.mark.parametrize("key", sorted(GFX1100_OMITTED))
+    def test_gfx1100_omissions_name_the_rdna3_reason(self, key):
+        reason = omitted_tflops_reason("gfx1100", key)
+        if key == "vector_bf16":
+            assert "FP32" in reason
+        else:
+            assert reason.startswith("RDNA3 WMMA has no")
+
+    @pytest.mark.parametrize("gfx", [*TARGETS_WITHOUT_ALLOWLIST, ""])
+    def test_other_targets_have_no_allowlist(self, gfx):
+        assert published_tflops_keys(gfx) is None
+
+
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestMicrobenchHelpers:
     def test_gemm_flops(self):
@@ -173,11 +215,125 @@ class TestMicrobenchHelpers:
             ("Generic GPU", 280.0, "MI355X"),
             ("Some Card", 64.0, "Card"),
             ("", 0.0, "GPU"),
+            # Both W7900 boards are one platform; only the cooler differs.
+            ("AMD Radeon Pro W7900", 45.0, "W7900"),
+            ("AMD Radeon PRO W7900 Dual Slot", 45.0, "W7900"),
+            ("amd radeon pro w7900 dual slot     ", 45.0, "W7900"),
+            # Other gfx1100 boards and a bare gfx target keep the last-word
+            # fallback.
+            ("AMD Radeon Pro W7800", 32.0, "W7800"),
+            ("AMD Radeon Pro W7800 48GB", 48.0, "48GB"),
+            ("AMD Radeon RX 7900 XTX", 24.0, "XTX"),
+            ("AMD Radeon RX 7900 XT", 20.0, "XT"),
+            ("AMD Radeon RX 7900 GRE", 16.0, "GRE"),
+            ("gfx1100", 45.0, "gfx1100"),
+            ("AMD Radeon AI PRO R9700", 32.0, "R9700"),
         ],
     )
     def test_arch_product_name(self, gpu_name, mem_gb, expected):
         mb = _import_microbench()
         assert mb._arch_product_name(gpu_name, mem_gb) == expected
+
+    @staticmethod
+    def _all_results(value):
+        keys = _import_microbench().ARCH_TLOPS_KEYS
+        matrix = {k: value for k in keys if k.startswith("matrix_")}
+        vector = {k: value for k in keys if k.startswith("vector_")}
+        return matrix, vector
+
+    def test_gfx1100_allowlist_covers_the_schema(self):
+        mb = _import_microbench()
+        assert GFX1100_KEYS.isdisjoint(GFX1100_OMITTED)
+        assert GFX1100_KEYS | GFX1100_OMITTED == set(mb.ARCH_TLOPS_KEYS)
+
+    def test_build_measured_arch_json_gfx1100(self, capsys):
+        mb = _import_microbench()
+        matrix, vector = self._all_results(12.0)
+        payload = mb._build_measured_arch_json(
+            gpu_name="AMD Radeon Pro W7900 Dual Slot",
+            mem_gb=45.0,
+            read_bw_gbps=800.0,
+            matrix_results=matrix,
+            vector_results=vector,
+            gfx_arch="gfx1100",
+        )
+        assert payload["name"] == "W7900"
+        assert payload["gfx_arch"] == "gfx1100"
+        assert set(payload["max_achievable_tflops"]) == GFX1100_KEYS
+        out = capsys.readouterr().out
+        for key in GFX1100_OMITTED:
+            assert f"[{key}] omitted: {omitted_tflops_reason('gfx1100', key)}" in out
+
+    def test_build_measured_arch_json_gfx1100_omits_unmeasured(self, capsys):
+        mb = _import_microbench()
+        matrix, vector = self._all_results(12.0)
+        matrix["matrix_int8"] = 0.0
+        payload = mb._build_measured_arch_json(
+            "AMD Radeon Pro W7900", 45.0, 800.0, matrix, vector, gfx_arch="gfx1100"
+        )
+        assert "matrix_int8" not in payload["max_achievable_tflops"]
+        assert "[matrix_int8] omitted: not measured on gfx1100" in (
+            capsys.readouterr().out
+        )
+
+    @pytest.mark.parametrize("gfx", TARGETS_WITHOUT_ALLOWLIST)
+    def test_build_measured_arch_json_other_targets_unchanged(self, gfx, capsys):
+        mb = _import_microbench()
+        matrix = {"matrix_fp16": 100.0, "matrix_fp4": 100.0}
+        vector = {"vector_fp32": 50.0}
+        args = ("AMD Instinct MI210", 64.0, 1600.0, matrix, vector)
+        payload = mb._build_measured_arch_json(*args, gfx_arch=gfx)
+        assert payload == mb._build_measured_arch_json(*args)
+        assert "gfx_arch" not in payload
+        assert list(payload["max_achievable_tflops"]) == list(mb.ARCH_TLOPS_KEYS)
+        assert payload["max_achievable_tflops"]["matrix_fp8"] == 0.0
+        assert "omitted" not in capsys.readouterr().out
+
+    @staticmethod
+    def _bench_matrix_with_fakes(mb, gfx, fp8_bench, mx_bench):
+        props = SimpleNamespace(gcnArchName=f"{gfx}:sramecc-:xnack-")
+        with patch.object(
+            mb.torch.cuda, "get_device_properties", return_value=props
+        ), patch.object(mb, "bench_gemm", return_value=40.0), patch.object(
+            mb, "bench_gemm_fp8", side_effect=fp8_bench
+        ), patch.object(
+            mb, "_bench_mx_matrix_peak", side_effect=mx_bench
+        ), patch.object(
+            mb, "bench_gemm_int8", return_value=60.0
+        ), patch.object(
+            mb, "bench_int8_ck_gemm", return_value=0.0
+        ), patch(
+            "TraceLens.PerfModel.benchmarking.fp4fp6_helpers.get_mxfp6_kind",
+            return_value="",
+        ):
+            return mb.bench_matrix_tflops(device=0)
+
+    @staticmethod
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("benchmark ran for a key the target omits")
+
+    def test_bench_matrix_tflops_gfx1100_skips_and_has_no_mx_substitution(self):
+        mb = _import_microbench()
+        results = self._bench_matrix_with_fakes(
+            mb, "gfx1100", self._must_not_run, self._must_not_run
+        )
+        assert results == {
+            "matrix_fp16": 40.0,
+            "matrix_bf16": 40.0,
+            "matrix_int8": 60.0,
+        }
+
+    @pytest.mark.parametrize("gfx", ["gfx1201", "gfx90a", "gfx1101"])
+    def test_bench_matrix_tflops_other_targets_keep_full_schema(self, gfx):
+        mb = _import_microbench()
+        results = self._bench_matrix_with_fakes(
+            mb, gfx, lambda *_a, **_k: 5.0, lambda *_a, **_k: 0.0
+        )
+        matrix_keys = {k for k in mb.ARCH_TLOPS_KEYS if k.startswith("matrix_")}
+        assert matrix_keys <= set(results)
+        # Non-native MX targets keep the existing substitution with the
+        # 16-bit peak.
+        assert results["matrix_fp4"] == results["matrix_fp6"] == 40.0
 
     def test_build_measured_arch_json_shape(self):
         mb = _import_microbench()
@@ -275,6 +431,61 @@ class TestMicrobenchRocprofParsing:
         mb = _import_microbench()
         matrix_keys = [k for k in mb.ARCH_TLOPS_KEYS if k.startswith("matrix_")]
         assert set(matrix_keys) <= set(rp.COUNTER_MAP)
+
+    def test_default_metrics(self):
+        rp = _import_microbench_rocprof()
+        assert rp._default_metrics("gfx1100") == [
+            "matrix_fp16",
+            "matrix_bf16",
+            "matrix_int8",
+        ]
+        assert rp._default_metrics("gfx942") == rp.DEFAULT_METRICS
+
+    def test_orchestrator_skips_counters_on_gfx1100(self, tmp_path: Path):
+        rp = _import_microbench_rocprof()
+        rocprof_calls = []
+
+        def fake_single(**kwargs):
+            rocprof_calls.append(kwargs.get("rocprof_cmd"))
+            kwargs["out_json"].write_text(
+                json.dumps(
+                    {"measured_ms": 1.0, "measured_tflops": 2.0, "flops_per_call": 3.0}
+                )
+            )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        args = argparse.Namespace(
+            output=str(tmp_path / "out.json"),
+            rocprof_dir=str(tmp_path / "pmc"),
+            metrics=None,
+            shapes="64,64,64",
+            allow_busy=True,
+            device=0,
+            warmup=None,
+            rep=None,
+            rocprofv3="rocprofv3",
+        )
+        props = SimpleNamespace(gcnArchName="gfx1100")
+        with patch(
+            "torch.cuda.get_device_properties", return_value=props
+        ), patch.object(rp.mb, "mx_available", return_value=False), patch.object(
+            rp, "_run_subprocess_single", side_effect=fake_single
+        ):
+            assert rp.run_orchestrator(args) == 0
+
+        assert rocprof_calls == [None, None, None]
+        mfma = rp.MFMA_COUNTERS_UNAVAILABLE["gfx1100"]
+        payload = json.loads((tmp_path / "out.json").read_text())
+        assert payload["gfx_arch"] == "gfx1100"
+        assert payload["counter_skipped"] == mfma
+        assert [r["metric"] for r in payload["rows"]] == [
+            "matrix_fp16",
+            "matrix_bf16",
+            "matrix_int8",
+        ]
+        assert all(row["counter_skipped"] == mfma for row in payload["rows"])
+        header = (tmp_path / "out.csv").read_text().splitlines()[0].split(",")
+        assert header[-2:] == ["counter_skipped", "error"]
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
