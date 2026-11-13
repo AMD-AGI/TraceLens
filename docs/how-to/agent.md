@@ -169,11 +169,8 @@ Every report has the same top-level structure:
 ### Example output
 
 The excerpts below show one detailed-analysis card from each tier of a standalone
-report.
-
-*Note: All performance data shown here are example outputs from TraceLens, intended
-to illustrate the agent's capabilities. They are not official performance
-benchmarks.*
+report. The performance data in them are example outputs that illustrate the
+agent's capabilities, not official performance benchmarks.
 
 #### Compute kernel analysis
 
