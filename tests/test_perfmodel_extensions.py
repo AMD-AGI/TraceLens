@@ -7101,10 +7101,26 @@ class TestFlashDSv41PerfModels:
         assert model.flops() == 815046
         assert model.get_compute_precision() == "fp32"
         assert model.bytes() > 0
+        assert model.get_maf_type() == "vector"
         no_ann = sgl_kernel_deepseek_v4_topk_transform_512(
             {"annotation": "NA", "args": event["args"]}
         )
         assert no_ann.flops() is None
+        assert no_ann.bytes() is None
+        unknown_dtype = sgl_kernel_deepseek_v4_topk_transform_512(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": event["args"]["Input Dims"],
+                    "Input type": ["not_a_dtype", "int", "int", "int"],
+                },
+            }
+        )
+        assert unknown_dtype.bytes() is None
+        with pytest.raises(NotImplementedError):
+            model.flops_bwd()
+        with pytest.raises(NotImplementedError):
+            model.bytes_bwd()
 
     def test_sgl_kernel_fast_topk(self):
         event = {
@@ -7117,9 +7133,50 @@ class TestFlashDSv41PerfModels:
         model = sgl_kernel_fast_topk(event)
         assert model.flops() == 815046
         assert model.bytes() > 0
+        assert model.get_maf_type() == "vector"
+        assert model.get_compute_precision() == "fp32"
+        no_ann = sgl_kernel_fast_topk(
+            {"annotation": "NA", "args": event["args"]}
+        )
+        assert no_ann.flops() is None
+        assert no_ann.bytes() is None
+        unknown_dtype = sgl_kernel_fast_topk(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": event["args"]["Input Dims"],
+                    "Input type": ["not_a_dtype", "int"],
+                },
+            }
+        )
+        assert unknown_dtype.bytes() is None
+        with pytest.raises(NotImplementedError):
+            model.flops_bwd()
+        with pytest.raises(NotImplementedError):
+            model.bytes_bwd()
 
     def test_fused_k_norm_rope_q_flashmla(self):
         rope = fused_k_norm_rope_q_flashmla(
             {"annotation": self._ANN, "args": {"d_h": 512, "rope_dim": 64}}
         )
         assert rope.flops() > 0
+        assert rope.bytes() > 0
+        assert rope.get_compute_precision() == "bf16"
+        assert rope.get_maf_type() == "vector"
+        # Fallback to stamped num_tokens when annotation is not parseable.
+        stamped = fused_k_norm_rope_q_flashmla(
+            {"annotation": "NA", "args": {"num_tokens": 8, "d_h": 512, "rope_dim": 64}}
+        )
+        assert stamped.flops() > 0
+        assert stamped.bytes() > 0
+        # No tokens → _no_perf path.
+        empty = fused_k_norm_rope_q_flashmla({"annotation": "NA", "args": {}})
+        assert empty.flops() is None
+        assert empty.bytes() is None
+        assert empty.get_compute_precision() is None
+        # Outer except: non-int geometry stamps.
+        bad = fused_k_norm_rope_q_flashmla(
+            {"annotation": "NA", "args": {"num_tokens": "x", "d_h": "y"}}
+        )
+        assert bad.param_details.get("_no_perf")
+        assert bad.flops() is None
