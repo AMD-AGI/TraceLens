@@ -920,6 +920,34 @@ class TestPerfModelExtensions:
         assert model.bytes() is None
         assert model.get_maf_type() is None
 
+    def test_sparse_mla_v4_prefill_pairs_from_index_buffers(self):
+        # gfx1250 prefill: dims[4] is the HCA count, dims[8] the causal window.
+        event = self._sparse_mla_event(None, None, tokens=14336)
+        event["args"]["Input Dims"][4] = [50288]
+        event["args"]["Input Dims"][8] = [1721216]
+        model = aext.mla_sparse_prefill_fp8_asm_fwd(event)
+        pairs = 50288 + 1721216
+        assert model.param_details["N_KV"] == pairs
+        assert model.param_details["d_h_qk"] == 512
+        assert model.param_details["d_h_v"] == 512
+        assert model.flops() == 128 * 2 * pairs * (512 + 512)
+        assert model.bytes() == (
+            14336 * 128 * (512 + 64 * 2)
+            + pairs * (512 + 64 * 2 + 4)
+            + (14337 + 14337 + 128) * 4
+            + 14336 * 128 * 512 * 2
+        )
+
+        # A decode annotation still uses the annotation, not those lengths.
+        decode = self._sparse_mla_event(
+            "csa", self._decode_annotation(3, 100), tokens=4
+        )
+        decode["args"]["Input Dims"][4] = [50288]
+        decode["args"]["Input Dims"][8] = [1721216]
+        assert aext.mla_sparse_prefill_fp8_asm_fwd(decode).param_details[
+            "N_KV"
+        ] == 3 * (100 + 25)
+
     @staticmethod
     def _mqa_logits_event(annotation, rows=4, q_per_block=1):
         # Traced aiter::_fwd_sched_raw layout; the cache and logits are capacities.
