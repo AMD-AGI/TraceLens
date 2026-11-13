@@ -12,8 +12,12 @@ Tests for Primus Turbo / Flux MXFP4 ops:
   - tree_postprocess_extension (fwd/bwd pseudo-op labeling)
 """
 
-from TraceLens.PerfModel.perf_model import GEMM
+from TraceLens.PerfModel.perf_model import GEMM, SDPA
 from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
+    flux_flydsl_attn_fwd,
+    flux_flydsl_attn_fwd_split,
+    flux_flydsl_attn_bwd,
+    flux_flydsl_attn_bwd_split,
     a6w4_mm_qa,
     a6w4_mm_qa_prequant_w,
     quantize_mxfp4_h16_dual,
@@ -93,9 +97,8 @@ def _quantize_mxfp4_event(M=3072, N=3072):
     }
 
 
-# ===========================================================================
-# Op registration
-# ===========================================================================
+# ====================================================================# Op registration
+# ====================================================================
 
 
 def test_a6w4_mm_qa_registered():
@@ -138,9 +141,8 @@ def test_pseudo_ops_registered():
             assert name in op_to_perf_model_class_map, f"missing: {name}"
 
 
-# ===========================================================================
-# a6w4_mm_qa
-# ===========================================================================
+# ====================================================================# a6w4_mm_qa
+# ====================================================================
 
 
 def test_a6w4_mm_qa_inherits_gemm():
@@ -187,9 +189,8 @@ def test_a6w4_mm_qa_no_bias():
     assert model.bytes() == expected
 
 
-# ===========================================================================
-# a6w4_mm_qa_prequant_w
-# ===========================================================================
+# ====================================================================# a6w4_mm_qa_prequant_w
+# ====================================================================
 
 
 def test_a6w4_mm_qa_prequant_w_inherits_gemm():
@@ -222,9 +223,8 @@ def test_a6w4_mm_qa_prequant_w_bytes():
     assert model.bytes() == expected
 
 
-# ===========================================================================
-# quantize_mxfp4_h16_dual
-# ===========================================================================
+# ====================================================================# quantize_mxfp4_h16_dual
+# ====================================================================
 
 
 def test_quantize_mxfp4_dual_inherits_base():
@@ -251,9 +251,8 @@ def test_quantize_mxfp4_dual_bytes():
     assert model.bytes() == expected
 
 
-# ===========================================================================
-# name2bpe for FP4 types
-# ===========================================================================
+# ====================================================================# name2bpe for FP4 types
+# ====================================================================
 
 
 def test_name2bpe_fp4_returns_half():
@@ -272,9 +271,8 @@ def test_mxfp4_group_size_is_32():
     assert MXFP4_GROUP_SIZE == 32
 
 
-# ===========================================================================
-# _suffix_for_op helper
-# ===========================================================================
+# ====================================================================# _suffix_for_op helper
+# ====================================================================
 
 
 def test_suffix_for_gemm():
@@ -286,9 +284,8 @@ def test_suffix_for_a6w4():
     assert _suffix_for_op("primus_flux::a6w4_mm_qa_prequant_w") == "a6w4"
 
 
-# ===========================================================================
-# tree_postprocess_extension — pseudo-op injection
-# ===========================================================================
+# ====================================================================# tree_postprocess_extension — pseudo-op injection
+# ====================================================================
 
 
 class _FakeTree:
@@ -805,3 +802,239 @@ def test_quantize_mxfp4_base_bytes_single():
     bpe_scale = 1
     expected = 32 * 64 * bpe_in + 32 * 64 * bpe_fp4 + max(1, 32 * 64 // 32) * bpe_scale
     assert base_bytes == expected
+
+
+# ====================================================================# FlydSL attention helpers
+# ====================================================================
+
+
+def _flydsl_attn_fwd_event(B=32, S=512, H=24, D=128):
+    shape = [B, S, H, D]
+    stride = [S * H * D, H * D, D, 1]
+    return {
+        "name": "flux_flydsl::attn_fwd",
+        "args": {
+            "Input Dims": [shape, shape, shape],
+            "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16"],
+            "Input Strides": [stride, stride, stride],
+            "Concrete Inputs": ["", "", ""],
+        },
+    }
+
+
+def _flydsl_attn_fwd_split_event(B=32, S=512, H=24, D=128, split=256):
+    shape = [B, S, H, D]
+    stride = [S * H * D, H * D, D, 1]
+    return {
+        "name": "flux_flydsl::attn_fwd_split",
+        "args": {
+            "Input Dims": [shape, shape, shape, []],
+            "Input type": ["c10::BFloat16", "c10::BFloat16", "c10::BFloat16", "Scalar"],
+            "Input Strides": [stride, stride, stride, []],
+            "Concrete Inputs": ["", "", "", str(split)],
+        },
+    }
+
+
+def _flydsl_attn_bwd_event(B=32, S=512, H=24, D=128):
+    shape = [B, S, H, D]
+    stride = [S * H * D, H * D, D, 1]
+    lse_shape = [B, H, S]
+    lse_stride = [H * S, S, 1]
+    return {
+        "name": "flux_flydsl::attn_bwd",
+        "args": {
+            "Input Dims": [shape, shape, shape, shape, shape, lse_shape],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "float",
+            ],
+            "Input Strides": [stride, stride, stride, stride, stride, lse_stride],
+            "Concrete Inputs": ["", "", "", "", "", ""],
+        },
+    }
+
+
+def _flydsl_attn_bwd_split_event(B=32, S=512, H=24, D=128):
+    half_S = S // 2
+    full_shape = [B, S, H, D]
+    half_shape = [B, half_S, H, D]
+    full_stride = [S * H * D, H * D, D, 1]
+    half_stride = [half_S * H * D, H * D, D, 1]
+    lse_shape = [B, H, S]
+    lse_stride = [H * S, S, 1]
+    return {
+        "name": "flux_flydsl::attn_bwd_split",
+        "args": {
+            "Input Dims": [
+                half_shape,
+                half_shape,  # dOut_x, dOut_img
+                full_shape,
+                full_shape,
+                full_shape,  # K, V, Out
+                half_shape,
+                half_shape,  # Q_x, Q_img
+                lse_shape,  # LSE
+            ],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "float",
+            ],
+            "Input Strides": [
+                half_stride,
+                half_stride,
+                full_stride,
+                full_stride,
+                full_stride,
+                half_stride,
+                half_stride,
+                lse_stride,
+            ],
+            "Concrete Inputs": [""] * 8,
+        },
+    }
+
+
+# ====================================================================# FlydSL attention registration
+# ====================================================================
+
+
+def test_flydsl_attn_fwd_registered():
+    assert "flux_flydsl::attn_fwd" in op_to_perf_model_class_map
+    assert op_to_perf_model_class_map["flux_flydsl::attn_fwd"] is flux_flydsl_attn_fwd
+
+
+def test_flydsl_attn_fwd_split_registered():
+    assert "flux_flydsl::attn_fwd_split" in op_to_perf_model_class_map
+
+
+def test_flydsl_attn_bwd_registered():
+    assert "flux_flydsl::attn_bwd" in op_to_perf_model_class_map
+
+
+def test_flydsl_attn_bwd_split_registered():
+    assert "flux_flydsl::attn_bwd_split" in op_to_perf_model_class_map
+
+
+# ====================================================================# FlydSL attn_fwd
+# ====================================================================
+
+
+def test_flydsl_attn_fwd_inherits_sdpa():
+    assert issubclass(flux_flydsl_attn_fwd, SDPA)
+
+
+def test_flydsl_attn_fwd_category():
+    assert flux_flydsl_attn_fwd.category == "SDPA_fwd"
+
+
+def test_flydsl_attn_fwd_params():
+    model = flux_flydsl_attn_fwd(_flydsl_attn_fwd_event(B=32, S=512, H=24, D=128))
+    assert (
+        model.B,
+        model.N_Q,
+        model.H_Q,
+        model.N_KV,
+        model.H_KV,
+        model.d_h_qk,
+        model.d_h_v,
+    ) == (32, 512, 24, 512, 24, 128, 128)
+
+
+def test_flydsl_attn_fwd_flops():
+    B, S, H, D = 32, 512, 24, 128
+    model = flux_flydsl_attn_fwd(_flydsl_attn_fwd_event(B, S, H, D))
+    expected = 4 * B * H * S * S * D  # non-causal
+    assert model.flops() == expected
+
+
+def test_flydsl_attn_fwd_bytes():
+    B, S, H, D = 32, 512, 24, 128
+    model = flux_flydsl_attn_fwd(_flydsl_attn_fwd_event(B, S, H, D))
+    bpe = 2  # BF16
+    expected = (3 * B * S * H * D + B * S * H * D) * bpe  # Q+K+V read + O write
+    assert model.bytes() == expected
+
+
+# ====================================================================# FlydSL attn_fwd_split
+# ====================================================================
+
+
+def test_flydsl_attn_fwd_split_same_flops_as_fwd():
+    B, S, H, D = 32, 512, 24, 128
+    fwd = flux_flydsl_attn_fwd(_flydsl_attn_fwd_event(B, S, H, D))
+    split = flux_flydsl_attn_fwd_split(_flydsl_attn_fwd_split_event(B, S, H, D))
+    assert fwd.flops() == split.flops()
+
+
+def test_flydsl_attn_fwd_split_same_bytes_as_fwd():
+    B, S, H, D = 32, 512, 24, 128
+    fwd = flux_flydsl_attn_fwd(_flydsl_attn_fwd_event(B, S, H, D))
+    split = flux_flydsl_attn_fwd_split(_flydsl_attn_fwd_split_event(B, S, H, D))
+    assert fwd.bytes() == split.bytes()
+
+
+# ====================================================================# FlydSL attn_bwd
+# ====================================================================
+
+
+def test_flydsl_attn_bwd_inherits_sdpa():
+    assert issubclass(flux_flydsl_attn_bwd, SDPA)
+
+
+def test_flydsl_attn_bwd_category():
+    assert flux_flydsl_attn_bwd.category == "SDPA_bwd"
+
+
+def test_flydsl_attn_bwd_params():
+    model = flux_flydsl_attn_bwd(_flydsl_attn_bwd_event(B=32, S=512, H=24, D=128))
+    assert (model.B, model.N_Q, model.H_Q, model.N_KV) == (32, 512, 24, 512)
+
+
+def test_flydsl_attn_bwd_flops():
+    B, S, H, D = 32, 512, 24, 128
+    model = flux_flydsl_attn_bwd(_flydsl_attn_bwd_event(B, S, H, D))
+    fwd_flops = 4 * B * H * S * S * D
+    expected = int(fwd_flops * 2.5)  # bwd = 5/2 * fwd (5 matmuls with flash recompute)
+    assert model.flops() == expected
+
+
+def test_flydsl_attn_bwd_bytes():
+    B, S, H, D = 32, 512, 24, 128
+    model = flux_flydsl_attn_bwd(_flydsl_attn_bwd_event(B, S, H, D))
+    bpe = 2
+    expected = 7 * B * S * H * D * bpe  # Q,K,V,dO reads + dQ,dK,dV writes
+    assert model.bytes() == expected
+
+
+# ====================================================================# FlydSL attn_bwd_split
+# ====================================================================
+
+
+def test_flydsl_attn_bwd_split_category():
+    assert flux_flydsl_attn_bwd_split.category == "SDPA_bwd"
+
+
+def test_flydsl_attn_bwd_split_uses_full_seq():
+    model = flux_flydsl_attn_bwd_split(
+        _flydsl_attn_bwd_split_event(B=32, S=512, H=24, D=128)
+    )
+    assert model.N_Q == 512
+    assert model.N_KV == 512
+
+
+def test_flydsl_attn_bwd_split_same_flops_as_bwd():
+    B, S, H, D = 32, 512, 24, 128
+    bwd = flux_flydsl_attn_bwd(_flydsl_attn_bwd_event(B, S, H, D))
+    split = flux_flydsl_attn_bwd_split(_flydsl_attn_bwd_split_event(B, S, H, D))
+    assert bwd.flops() == split.flops()
