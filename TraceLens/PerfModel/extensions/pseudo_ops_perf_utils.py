@@ -75,6 +75,9 @@ def get_pseudo_op_mappings():
         "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
+        "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
+        "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
+        "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
