@@ -7135,9 +7135,7 @@ class TestFlashDSv41PerfModels:
         assert model.bytes() > 0
         assert model.get_maf_type() == "vector"
         assert model.get_compute_precision() == "fp32"
-        no_ann = sgl_kernel_fast_topk(
-            {"annotation": "NA", "args": event["args"]}
-        )
+        no_ann = sgl_kernel_fast_topk({"annotation": "NA", "args": event["args"]})
         assert no_ann.flops() is None
         assert no_ann.bytes() is None
         unknown_dtype = sgl_kernel_fast_topk(
