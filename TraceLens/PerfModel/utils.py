@@ -141,42 +141,149 @@ def dense_counted_tensor(event, indexes):
     return True
 
 
+# Bytes per traced element of each ``c10::ScalarType``, keyed by the type's
+# own name. ``Float4_e2m1fn_x2`` packs two FP4 values into one byte, and a
+# traced shape already counts those packed elements (K_packed), the same way
+# ``QUInt4x2`` and ``Bits4x2`` do. Callers that count unpacked logical
+# elements divide by two themselves.
+_DTYPE_BPE = {
+    "Byte": 1,
+    "Char": 1,
+    "Short": 2,
+    "Int": 4,
+    "Long": 8,
+    "Half": 2,
+    "Float": 4,
+    "Double": 8,
+    "ComplexHalf": 4,
+    "ComplexFloat": 8,
+    "ComplexDouble": 16,
+    "Bool": 1,
+    "QInt8": 1,
+    "QUInt8": 1,
+    "QInt32": 4,
+    "BFloat16": 2,
+    "QUInt4x2": 1,
+    "QUInt2x4": 1,
+    "Bits1x8": 1,
+    "Bits2x4": 1,
+    "Bits4x2": 1,
+    "Bits8": 1,
+    "Bits16": 2,
+    "Float8_e5m2": 1,
+    "Float8_e4m3fn": 1,
+    "Float8_e5m2fnuz": 1,
+    "Float8_e4m3fnuz": 1,
+    "UInt16": 2,
+    "UInt32": 4,
+    "UInt64": 8,
+    "Float8_e8m0fnu": 1,
+    "Float4_e2m1fn_x2": 1,
+    "BComplex32": 4,
+}
+
+# Spellings that are not a ``ScalarType`` name. Profiler traces say "long int"
+# for Long, and the roofline says "bf16" for BFloat16. "scalar" is the
+# profiler's non-tensor argument, which has always counted as 4 bytes.
+_DTYPE_NAME_ALIASES = {
+    "long int": "Long",
+    "unsigned char": "Byte",
+    "signed char": "Char",
+    "float16": "Half",
+    "float32": "Float",
+    "fp16": "Half",
+    "fp32": "Float",
+    "fp64": "Double",
+    "bf16": "BFloat16",
+    "fp8": "Float8_e4m3fn",
+    # One logical FP4 value. gemm_afp4wfp4 and the roofline count unpacked
+    # elements, so this width stays half a byte. The traced container
+    # Float4_e2m1fn_x2 is one byte.
+    "fp4": 0.5,
+    "scalar": 4,
+}
+
+_NAME_TO_BPE = {name.lower(): bpe for name, bpe in _DTYPE_BPE.items()}
+for _alias, _target in _DTYPE_NAME_ALIASES.items():
+    _NAME_TO_BPE[_alias] = _DTYPE_BPE[_target] if isinstance(_target, str) else _target
+
+# ``aten::to`` records the destination dtype as a ``ScalarType`` ordinal in
+# ``Concrete Inputs``, not as a name. This is the ordinal order of
+# ``AT_FORALL_SCALAR_TYPES_WITH_COMPLEX_AND_QINTS``.
+_SCALAR_TYPE_ORDINAL_TO_NAME = {
+    0: "Byte",
+    1: "Char",
+    2: "Short",
+    3: "Int",
+    4: "Long",
+    5: "Half",
+    6: "Float",
+    7: "Double",
+    8: "ComplexHalf",
+    9: "ComplexFloat",
+    10: "ComplexDouble",
+    11: "Bool",
+    12: "QInt8",
+    13: "QUInt8",
+    14: "QInt32",
+    15: "BFloat16",
+    16: "QUInt4x2",
+    17: "QUInt2x4",
+    18: "Bits1x8",
+    19: "Bits2x4",
+    20: "Bits4x2",
+    21: "Bits8",
+    22: "Bits16",
+    23: "Float8_e5m2",
+    24: "Float8_e4m3fn",
+    25: "Float8_e5m2fnuz",
+    26: "Float8_e4m3fnuz",
+    27: "UInt16",
+    28: "UInt32",
+    29: "UInt64",
+    44: "Float8_e8m0fnu",
+    45: "Float4_e2m1fn_x2",
+    46: "BComplex32",
+}
+
+
 def name2bpe(name):
+    """Bytes per element for a dtype name, or ``None`` when it is not one.
+
+    Accepts a ``c10::ScalarType`` name (``BFloat16`` or ``c10::BFloat16``),
+    a profiler spelling (``long int``, ``unsigned char``), and a simulation
+    name (``bf16``, ``fp32``). ``Float4_e2m1fn_x2`` is one byte per traced
+    element (two FP4 values). ``fp4`` is one logical value, half a byte, for
+    callers that have already unpacked K.
     """
-    This function maps a data type name to the number of bytes per element.
-    Args:
-        name (str): The name of the data type.
-    Returns:
-        float or None: The number of bytes per element.
-    """
-    dict_bpe2dtype = {
-        8: ["double", "long int"],
-        4: ["float", "scalar", "int"],
-        2: ["c10::half", "c10::bfloat16"],
-        1: [
-            "c10::float8_e4m3fnuz",
-            "c10::float8_e4m3fn",
-            "c10::float8_e5m2",
-            "c10::float8_e8m0fnu",
-            "unsigned char",
-            "signed char",
-            "fp8",
-            # Float4_e2m1fn_x2 packs two FP4 values into one byte. Trace tensor
-            # shapes already reflect the packed layout (K_packed = K/2), so we
-            # use bpe=1 for the packed-pair element and let callers apply the
-            # ×2 K-unpacking explicitly when modelling FLOPs.
-            "c10::float4_e2m1fn_x2",
-        ],
-        0.5: [
-            "fp4",
-        ],
-    }
-    dict_dtype2bpe = {
-        dtype: bpe for bpe, dtypes in dict_bpe2dtype.items() for dtype in dtypes
-    }
+
     if name is None:
         return None
-    return dict_dtype2bpe.get(name.lower(), None)
+    key = str(name).strip().lower().split("::")[-1]
+    if not key:
+        return None
+    return _NAME_TO_BPE.get(key)
+
+
+def scalar_type_bpe(token):
+    """Bytes of a profiler ``ScalarType`` ordinal, or ``None`` when it is not one.
+
+    The ordinal is only a way to recover the type name. The width comes from
+    ``name2bpe``.
+    """
+    if token is None:
+        return None
+    text = str(token).strip()
+    if not text:
+        return None
+    try:
+        code = int(text)
+    except ValueError:
+        return None
+    name = _SCALAR_TYPE_ORDINAL_TO_NAME.get(code)
+    if name is None:
+        return None
+    return name2bpe(name)
 
 
 # MXFP4 block size: number of FP4 elements that share one E8M0 scale value.

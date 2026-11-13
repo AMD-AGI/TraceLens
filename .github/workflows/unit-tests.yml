@@ -194,7 +194,7 @@ jobs:
       - name: Install dependencies
         if: env.TEST_MODE != 'none'
         run: |
-          apt update && apt install -y python3-venv git
+          apt update && apt install -y git
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
@@ -306,7 +306,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt update && apt install -y python3-venv git
+          apt update && apt install -y git
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
@@ -395,7 +395,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt update && apt install -y python3-venv git
+          apt update && apt install -y git
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
