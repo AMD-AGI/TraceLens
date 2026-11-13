@@ -54,6 +54,8 @@ from .microbench_utils import (
     check_gpu_idle,
     gfx_target,
     mx_peak_without_native_support,
+    omitted_tflops_reason,
+    published_tflops_keys,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,6 +125,12 @@ ARCH_TLOPS_KEYS: Tuple[str, ...] = (
     "vector_fp64",
 )
 
+# Marketing names of the two Radeon PRO W7900 boards (regular and Dual Slot),
+# lowercased. Both are the W7900 platform; only the cooler differs.
+W7900_MARKETING_NAMES = frozenset(
+    {"amd radeon pro w7900", "amd radeon pro w7900 dual slot"}
+)
+
 # GEMM shapes (M,N,K)
 GEMM_SHAPES: List[Tuple[int, int, int]] = [
     (8192, 8192, 8192),
@@ -174,6 +182,10 @@ def _bpe(dtype: torch.dtype) -> int:
 
 def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     """Short name to match arch JSONs like `MI300X.json` (e.g. 'MI300X')."""
+    # The last word of "AMD Radeon PRO W7900 Dual Slot" would be "Slot".
+    if " ".join(gpu_name.split()).lower() in W7900_MARKETING_NAMES:
+        return "W7900"
+
     # Client parts report e.g. "AMD Radeon 8060S Graphics": the model sits
     # between the brand and the trailing "Graphics", which names no model.
     match = re.search(r"\bRadeon\s+(.+?)\s+Graphics\b", gpu_name, re.IGNORECASE)
@@ -196,24 +208,44 @@ def _build_measured_arch_json(
     read_bw_gbps: float,
     matrix_results: Dict[str, float],
     vector_results: Dict[str, float],
+    gfx_arch: Optional[str] = None,
 ) -> Dict:
     """
     One object shaped like `MI300X.json`: only `name`, `mem_bw_gbps`, `memory_gb`,
     and `max_achievable_tflops` with the canonical TFLOPS keys (no extras).
+
+    On a target with a ceiling allowlist (see :func:`published_tflops_keys`),
+    the object also records `gfx_arch` and holds only the keys that target
+    publishes and measured above 0; each key it leaves out is printed with
+    the reason.
     """
+    published = published_tflops_keys(gfx_arch or "")
     maf: Dict[str, float] = {}
     for key in ARCH_TLOPS_KEYS:
+        if published is not None and key not in published:
+            print(f"  [{key}] omitted: {omitted_tflops_reason(gfx_arch, key)}")
+            continue
         if key.startswith("matrix_"):
-            maf[key] = round(float(matrix_results.get(key, 0.0)), 1)
+            value = round(float(matrix_results.get(key, 0.0)), 1)
         else:
-            maf[key] = round(float(vector_results.get(key, 0.0)), 1)
-    return {
-        "name": _arch_product_name(gpu_name, mem_gb),
-        "mem_bw_gbps": round(float(read_bw_gbps), 1),
-        "memory_gb": round(float(mem_gb), 1),
-        "max_achievable_tflops": maf,
-        "source": "These are benchmark derived peak flops and bw",
-    }
+            value = round(float(vector_results.get(key, 0.0)), 1)
+        if published is not None and value == 0.0:
+            print(f"  [{key}] omitted: not measured on {gfx_arch}")
+            continue
+        maf[key] = value
+
+    payload: Dict = {"name": _arch_product_name(gpu_name, mem_gb)}
+    if published is not None:
+        payload["gfx_arch"] = gfx_arch
+    payload.update(
+        {
+            "mem_bw_gbps": round(float(read_bw_gbps), 1),
+            "memory_gb": round(float(mem_gb), 1),
+            "max_achievable_tflops": maf,
+            "source": "These are benchmark derived peak flops and bw",
+        }
+    )
+    return payload
 
 
 # ── Matrix TFLOPS benchmarks ─────────────────────────────────────────
@@ -363,8 +395,22 @@ def _bench_mx_matrix_peak(
 
 
 def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
-    """Benchmark matrix (tensor core) TFLOPS across dtypes."""
+    """
+    Benchmark matrix (tensor core) TFLOPS across dtypes. On a target with a
+    ceiling allowlist (see :func:`published_tflops_keys`), dtypes it doesn't
+    publish are skipped.
+    """
     results = {}
+    gfx = gfx_target(
+        getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
+    )
+    published = published_tflops_keys(gfx)
+
+    def skipped(label: str) -> bool:
+        if published is None or label in published:
+            return False
+        print(f"\n  [{label}] skipped: {omitted_tflops_reason(gfx, label)}")
+        return True
 
     dtype_map = {
         "matrix_fp16": torch.float16,
@@ -374,6 +420,8 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
     }
 
     for label, dtype in dtype_map.items():
+        if skipped(label):
+            continue
         print(f"\n  [{label}]")
         shape_results = []
         for M, N, K in GEMM_SHAPES:
@@ -386,49 +434,56 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
         print(f"    Best: {best:.1f}  Median: {median:.1f}")
 
     # FP8
-    print(f"\n  [matrix_fp8]")
-    shape_results = []
-    for M, N, K in GEMM_SHAPES:
-        tflops = bench_gemm_fp8(M, N, K, device)
-        print(f"    ({M:>5},{N:>5},{K:>5}) → {tflops:8.1f} TFLOPS")
-        shape_results.append(tflops)
-    best = max(shape_results)
-    results["matrix_fp8"] = round(best, 1)
-    print(f"    Best: {best:.1f}")
+    if not skipped("matrix_fp8"):
+        print(f"\n  [matrix_fp8]")
+        shape_results = []
+        for M, N, K in GEMM_SHAPES:
+            tflops = bench_gemm_fp8(M, N, K, device)
+            print(f"    ({M:>5},{N:>5},{K:>5}) → {tflops:8.1f} TFLOPS")
+            shape_results.append(tflops)
+        best = max(shape_results)
+        results["matrix_fp8"] = round(best, 1)
+        print(f"    Best: {best:.1f}")
 
-    triton_mxfp4 = _bench_mx_matrix_peak(
-        "matrix_fp4 (triton dot_scaled)", bench_mxfp4_gemm, device, GEMM_SHAPES
-    )
-    ck_mxfp4 = _bench_mx_matrix_peak(
-        "matrix_fp4 (aiter CK gemm_a4w4)", bench_mxfp4_ck_gemm, device, GEMM_SHAPES
-    )
-    results["matrix_fp4"] = round(max(triton_mxfp4, ck_mxfp4), 1)
-    results["matrix_fp4_triton"] = triton_mxfp4
-    results["matrix_fp4_ck"] = ck_mxfp4
-    try:
-        from .fp4fp6_helpers import (
-            _MXFP6_DTYPE as _mxfp6_dt,
-            get_mxfp6_kind,
+    if not skipped("matrix_fp4"):
+        triton_mxfp4 = _bench_mx_matrix_peak(
+            "matrix_fp4 (triton dot_scaled)", bench_mxfp4_gemm, device, GEMM_SHAPES
         )
-    except Exception:
-        _mxfp6_kind, _mxfp6_dt = "", ""
-    else:
-        _mxfp6_kind = get_mxfp6_kind()
-    mxfp6_label = "matrix_fp6"
-    if _mxfp6_kind == "f6f4_via_e2m1":
-        mxfp6_label = (
-            "matrix_fp6 (no native e3m2/e2m3 in Triton; running e2m1 which "
-            "exercises the SAME v_mfma_scale_f32_*_f8f6f4 MFMA "
+        ck_mxfp4 = _bench_mx_matrix_peak(
+            "matrix_fp4 (aiter CK gemm_a4w4)",
+            bench_mxfp4_ck_gemm,
+            device,
+            GEMM_SHAPES,
         )
-    elif _mxfp6_kind == "native":
-        mxfp6_label = f"matrix_fp6 (triton dot_scaled, native {_mxfp6_dt})"
-    results["matrix_fp6"] = _bench_mx_matrix_peak(
-        mxfp6_label, bench_mxfp6_gemm, device, GEMM_SHAPES
+        results["matrix_fp4"] = round(max(triton_mxfp4, ck_mxfp4), 1)
+        results["matrix_fp4_triton"] = triton_mxfp4
+        results["matrix_fp4_ck"] = ck_mxfp4
+    if not skipped("matrix_fp6"):
+        try:
+            from .fp4fp6_helpers import (
+                _MXFP6_DTYPE as _mxfp6_dt,
+                get_mxfp6_kind,
+            )
+        except Exception:
+            _mxfp6_kind, _mxfp6_dt = "", ""
+        else:
+            _mxfp6_kind = get_mxfp6_kind()
+        mxfp6_label = "matrix_fp6"
+        if _mxfp6_kind == "f6f4_via_e2m1":
+            mxfp6_label = (
+                "matrix_fp6 (no native e3m2/e2m3 in Triton; running e2m1 which "
+                "exercises the SAME v_mfma_scale_f32_*_f8f6f4 MFMA "
+            )
+        elif _mxfp6_kind == "native":
+            mxfp6_label = f"matrix_fp6 (triton dot_scaled, native {_mxfp6_dt})"
+        results["matrix_fp6"] = _bench_mx_matrix_peak(
+            mxfp6_label, bench_mxfp6_gemm, device, GEMM_SHAPES
+        )
+    mx_peak = (
+        mx_peak_without_native_support(gfx, results)
+        if {"matrix_fp4", "matrix_fp6"} <= results.keys()
+        else None
     )
-    gfx = gfx_target(
-        getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
-    )
-    mx_peak = mx_peak_without_native_support(gfx, results)
     if mx_peak is not None:
         print(
             f"\n  {gfx} has no native MXFP4/MXFP6 matrix instructions; these "
@@ -436,6 +491,9 @@ def bench_matrix_tflops(device: int = 0) -> Dict[str, float]:
             f"matrix_fp6 use the 16-bit matrix peak ({mx_peak:.1f} TFLOPS)."
         )
         results["matrix_fp4"] = results["matrix_fp6"] = round(mx_peak, 1)
+
+    if skipped("matrix_int8"):
+        return results
 
     # INT8: torch._int_mm + aiter CK gemm_a8w8; take max.
     print("\n  [matrix_int8]  (torch._int_mm; TFLOPS = 2·M·N·K / time, AMD & CUDA)")
@@ -1189,6 +1247,7 @@ def main():
     props = torch.cuda.get_device_properties(device)
     total_mem = getattr(props, "total_memory", None) or getattr(props, "total_mem", 0)
     mem_gb = round(total_mem / 1024**3, 1)
+    gfx = gfx_target(getattr(props, "gcnArchName", ""))
 
     print("=" * 60)
     print(f"GPU Microbenchmarking Suite")
@@ -1259,7 +1318,12 @@ def main():
     write_bw = float(bw_results.get("write_bw_gbps", 0.0))
     mem_bw = max(read_bw, write_bw)
     arch_json = _build_measured_arch_json(
-        gpu_name, mem_gb, mem_bw, matrix_results, vector_results
+        gpu_name,
+        mem_gb,
+        mem_bw,
+        matrix_results,
+        vector_results,
+        gfx_arch=gfx or None,
     )
 
     # JSON: same shape as `results/MI300X.json`.

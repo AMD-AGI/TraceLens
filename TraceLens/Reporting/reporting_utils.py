@@ -31,7 +31,9 @@ def resolve_gpu_arch(
 
     Exactly one of ``gpu_arch_json_path``, ``gpu_arch_platform``, or ``gpu_arch``
     may be set. ``gpu_arch_platform`` is loaded via
-    ``TraceLens.Agent.Analysis.utils.arch_utils.load_arch``.
+    ``TraceLens.Agent.Analysis.utils.arch_utils.load_arch``. With none set,
+    returns ``None`` and warns that no spec is available; no default spec is
+    substituted.
     """
     sources = [
         gpu_arch_json_path is not None,
@@ -52,6 +54,11 @@ def resolve_gpu_arch(
         from TraceLens.Agent.Analysis.utils.arch_utils import load_arch
 
         return load_arch(gpu_arch_platform)
+    logger.warning(
+        "No GPU architecture spec given (--gpu_arch_platform or "
+        "--gpu_arch_json_path): roofline columns are omitted and no default "
+        "spec is assumed."
+    )
     return None
 
 
