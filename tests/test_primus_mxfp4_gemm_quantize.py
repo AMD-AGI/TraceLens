@@ -618,11 +618,6 @@ def test_aiter_gemm_a4w4_nt_layout_assumption():
         assert (model.M, model.N, model.K) == (M, N, K)
 
 
-# ===========================================================================
-# gemm_fp4_impl (Flux trace leaf — primus_turbo dispatcher as leaf cpu_op)
-# ===========================================================================
-
-
 def _gemm_fp4_impl_event(M=3072, N=3072, K=3072, has_bias=False):
     """Build a primus_turbo::gemm_fp4_impl event matching the Flux trace layout.
     In Flux traces this op is the leaf (no inner hipblaslt/aiter children)."""
