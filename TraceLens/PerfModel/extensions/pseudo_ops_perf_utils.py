@@ -23,17 +23,24 @@ from . import (
 def _get_moe_mappings():
     """MoE op registrations."""
     return {
+        # MoE pseudo ops - Fused
         "pseudo_op::moe_aiter_fused_1stage": moe_perf_model_extensions.moe_aiter_fused_1stage,
+        # MoE aiter 2 stage (cktile)
         "aiter::moe_cktile2stages_gemm1_ck": moe_perf_model_extensions.moe_aiter_unfused_up,
         "aiter::moe_cktile2stages_gemm2_ck": moe_perf_model_extensions.moe_aiter_unfused_down,
+        # MoE aiter 2 stage (ck)
         "aiter::ck_moe_stage1": moe_perf_model_extensions.moe_aiter_ck_stage1,
         "aiter::ck_moe_stage2": moe_perf_model_extensions.moe_aiter_ck_stage2,
+        # MoE - AITER FP8 block-scale fused (direct CPU op, no pseudo-op needed)
         "aiter::fmoe_fp8_blockscale_g1u1": moe_perf_model_extensions.moe_aiter_fused_blockscale,
         "aiter::fmoe_g1u1": moe_perf_model_extensions.moe_aiter_fused_blockscale,
+        # MoE pseudo ops - Unfused Triton (2-stage: up and down)
         "pseudo_op::moe_triton_unfused_up": moe_perf_model_extensions.moe_triton_unfused_up,
         "pseudo_op::moe_triton_unfused_down": moe_perf_model_extensions.moe_triton_unfused_down,
+        # MoE - GPTQ/AWQ quantized unfused implementation (vllm::outplace_fused_experts)
         "pseudo_op::moe_gptq_awq_up": moe_perf_model_extensions.moe_gptq_awq_up,
         "pseudo_op::moe_gptq_awq_down": moe_perf_model_extensions.moe_gptq_awq_down,
+        # MoE flydsl two-stage (under aiter::fused_moe_)
         "pseudo_op::moe_flydsl_stage1": moe_perf_model_extensions.moe_flydsl_stage1,
         "pseudo_op::moe_flydsl_stage2": moe_perf_model_extensions.moe_flydsl_stage2,
         "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel": moe_perf_model_extensions.moe_triton_invoke_grouped_gemm,
@@ -57,6 +64,8 @@ def _get_attention_mappings():
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
         "vllm::rocm_aiter_sparse_attn_indexer": attention_perf_model_extensions.rocm_aiter_sparse_attn_indexer,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
+        # Prefer the annotation-aware inference extension when annotations are
+        # present; it falls back to the core SDPA model for plain training rows.
         "aiter::fmha_v3_varlen_fwd": attention_perf_model_extensions.aiter_fmha_v3_varlen_fwd,
         "aiter::mha_batch_prefill": attention_perf_model_extensions.aiter_mha_batch_prefill,
         "sglang_profiler::attention_paged_attention_ragged": attention_perf_model_extensions.aiter_paged_attention_ragged,
@@ -65,6 +74,7 @@ def _get_attention_mappings():
         "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
         "aiter::mla_decode_v4_asm": attention_perf_model_extensions.mla_decode_v4_asm,
         "pseudo_vllm_sparse_attn_decode": attention_perf_model_extensions.vllm_sparse_attn_decode,
+        # DeepSeek-V4 sparse paged decode (mode-specific pseudo ops)
         "pseudo_v4_paged_decode_swa": attention_perf_model_extensions.pseudo_v4_paged_decode_swa,
         "pseudo_v4_paged_decode_csa": attention_perf_model_extensions.pseudo_v4_paged_decode_csa,
         "pseudo_v4_paged_decode_hca": attention_perf_model_extensions.pseudo_v4_paged_decode_hca,
@@ -149,8 +159,10 @@ def _get_norm_mappings():
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
         "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
         "aiter::_fuse_rmsnorm_fp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
+        ## Fused RMSNorm + per-group dynamic FP8 quant.
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
         "aiter::fused_add_rmsnorm_pad_": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
+        ## AITER GroupNorm (same math as aten::group_norm, different event layout)
         "aiter::_groupnorm_run": _core_perf_model.GroupNorm,
     }
 
@@ -202,6 +214,8 @@ def _get_misc_mappings():
         "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
         "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
         "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
+        ## gsplat 3DGS autograd ops (carry tensor shapes in the trace);
+        # projection/intersect kernels are matched by substring in torch_op_mapping.
         "_SphericalHarmonics": gsplat_perf_model_extensions.gsplat_spherical_harmonics,
         "_RasterizeToPixels": gsplat_perf_model_extensions.gsplat_rasterize_to_pixels,
         "primus_flux::quantize_mxfp4_h16_dual": primus_flux_perf_model_extensions.quantize_mxfp4_h16_dual,

@@ -6158,6 +6158,10 @@ class hipblaslt_gemm_fp4(GEMM):
         assert (
             bpeA is not None and bpeB is not None
         ), f"Data types of A and B are not supported: {dtype_A_B}"
+        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
+        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
+        # bypass it and compute bytes explicitly so we can fold in the
+        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
         M, N, K = self.M, self.N, self.K
         block = self.MXFP4_BLOCK_SIZE
         scales_per_row = (K + block - 1) // block
@@ -6282,11 +6286,6 @@ class aiter_gemm_a4w4(GEMM):
     The internal `aiter::_gemm_a4w4_asm` cpu_op (the leaf launching the GPU
     kernel) uses the same first 4 slots plus an output tensor at slot 4;
     both events share this class. See `op_to_perf_model_class_map`.
-
-    In Megatron/vLLM traces, `primus_turbo::gemm_fp4_impl` is a pass-through
-    dispatcher whose children (`hipblaslt_gemm_fp4` or this class) are the
-    GPU-kernel-launching leaves. In Flux traces, `gemm_fp4_impl` itself is
-    the leaf (no inner ops); see `gemm_fp4_impl` below.
     """
 
     @staticmethod
