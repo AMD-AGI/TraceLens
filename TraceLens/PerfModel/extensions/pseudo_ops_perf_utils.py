@@ -101,6 +101,8 @@ def get_pseudo_op_mappings():
         "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
         "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip_bounded,
         "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
+        "aiter::batched_gemm_a8w8_mxscale_bpreshuffle": perf_model_extensions.batched_gemm_a8w8_mxscale_bpreshuffle,
+        "aiter::_mxfp8_mxfp8_gemm_asm": perf_model_extensions.mxfp8_mxfp8_gemm_asm,
         "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_asm,

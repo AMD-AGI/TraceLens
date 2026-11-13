@@ -581,6 +581,150 @@ class TestPerfModelExtensions:
         assert tiled_model.flops() == 2 * 2 * 16 * 1024 * 4096 + 2 * 16 * 1024 * 32
         assert tiled_model.bytes() == model.bytes()
 
+    def test_deepseek_v4_mx128_bmm_counts_logical_gemm(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [1, 16, 4096],
+                    [16, 1024, 4096],
+                    [1, 16, 32],
+                    [16, 8, 32],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "unsigned char",
+                    "unsigned char",
+                    "ScalarType",
+                ],
+                "Concrete Inputs": ["", "", "", "", "15"],
+            },
+        }
+        model = pext.batched_gemm_a8w8_mxscale_bpreshuffle(event)
+        assert (model.B, model.M, model.N, model.K) == (16, 1, 1024, 4096)
+        assert model.get_compute_precision() == "fp8"
+        assert model.param_details["output_shape"] == (1, 16, 1024)
+        # Logical GEMM only: kernel tile padding is not part of the op.
+        assert model.flops() == 16 * 2 * 1 * 1024 * 4096
+        assert model.bytes() == (
+            16 * (4096 + 1024 * 4096 + 1024 * 2) + 16 * 32 + 16 * 8 * 32
+        )
+
+        named = dict(event)
+        named["kernel_details"] = [
+            {"name": "batched_gemm_a8w8_mx128_t32x256x128_mw1_nw4_nb2_sk1_cm1_cn1_mbn"}
+        ]
+        named_model = pext.batched_gemm_a8w8_mxscale_bpreshuffle(named)
+        assert named_model.flops() == model.flops()
+        assert named_model.bytes() == model.bytes()
+
+        strided = dict(event)
+        strided["args"] = dict(
+            event["args"],
+            **{"Input Strides": [[131072, 8192, 1], [], [], [], []]},
+        )
+        assert pext.batched_gemm_a8w8_mxscale_bpreshuffle(strided).bytes() is None
+        unknown = dict(event)
+        unknown["args"] = dict(
+            event["args"],
+            **{"Input type": ["opaque"] + event["args"]["Input type"][1:]},
+        )
+        assert pext.batched_gemm_a8w8_mxscale_bpreshuffle(unknown).bytes() is None
+
+        assert (
+            get_pseudo_op_mappings()["aiter::batched_gemm_a8w8_mxscale_bpreshuffle"]
+            is pext.batched_gemm_a8w8_mxscale_bpreshuffle
+        )
+
+    def test_deepseek_v4_mxfp8_asm_gemm_counts_splitk_partials(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [512, 16384],
+                    [7168, 16384],
+                    [512, 512],
+                    [7168, 512],
+                    [4, 512, 7168],
+                    [],
+                    [],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e8m0fnu",
+                    "c10::Float8_e8m0fnu",
+                    "c10::BFloat16",
+                    "",
+                    "Scalar",
+                    "Scalar",
+                ],
+                "Input Strides": [
+                    [16384, 1],
+                    [16384, 1],
+                    [512, 1],
+                    [512, 1],
+                    [3670016, 7168, 1],
+                    [],
+                    [],
+                    [],
+                ],
+                "Concrete Inputs": ["", "", "", "", "", "", "0", "4"],
+            },
+        }
+        model = pext.mxfp8_mxfp8_gemm_asm(event)
+        assert (model.M, model.N, model.K) == (512, 7168, 16384)
+        assert model.param_details["split_k"] == 4
+        assert model.get_compute_precision() == "fp8"
+        assert model.flops() == 2 * 512 * 7168 * 16384
+        assert model.bytes() == (
+            512 * 16384 + 7168 * 16384 + 4 * 512 * 7168 * 2 + 512 * 512 + 7168 * 512
+        )
+
+        named = dict(event)
+        named["kernel_details"] = [
+            {"name": "aiter::f8gemm_bf16_mxfp8fp8_BpreShuffle_256x256_4x2_ps"}
+        ]
+        named_model = pext.mxfp8_mxfp8_gemm_asm(named)
+        assert named_model.flops() == model.flops()
+        assert named_model.bytes() == model.bytes()
+
+        odd = dict(named)
+        odd["args"] = dict(event["args"], **{"Input Strides": []})
+        odd["args"]["Input Dims"] = [
+            [8, 1536],
+            [8192, 1536],
+            [8, 48],
+            [8192, 48],
+            [8, 8192],
+            [],
+            [],
+            [],
+        ]
+        odd["args"]["Concrete Inputs"] = ["", "", "", "", "", "", "0", "1"]
+        odd_model = pext.mxfp8_mxfp8_gemm_asm(odd)
+        # Short M is the op's M; the kernel's 256-row tile is not counted.
+        assert odd_model.flops() == 2 * 8 * 8192 * 1536
+
+        strided = dict(event)
+        strided["args"] = dict(
+            event["args"],
+            **{"Input Strides": [[32768, 1]] + event["args"]["Input Strides"][1:]},
+        )
+        assert pext.mxfp8_mxfp8_gemm_asm(strided).bytes() is None
+        unknown = dict(event)
+        unknown["args"] = dict(
+            event["args"],
+            **{"Input type": ["opaque"] + event["args"]["Input type"][1:]},
+        )
+        assert pext.mxfp8_mxfp8_gemm_asm(unknown).bytes() is None
+
+        assert (
+            get_pseudo_op_mappings()["aiter::_mxfp8_mxfp8_gemm_asm"]
+            is pext.mxfp8_mxfp8_gemm_asm
+        )
+
     def test_deepseek_v4_mla_decode_uses_page_indices(self):
         num_kv = 67072
         event = {
@@ -1307,6 +1451,19 @@ class TestPerfModelExtensions:
         # No tile; M pads 1->16 to the MFMA tile the hardware runs.
         assert logical.flops() == 2 * 16 * 2048 * 7168 + 16 * 2048 * (7168 // 128)
         assert logical.bytes() == 14760672 - 2 * 4 * 1 * 2048 * 4
+        # MX128 kernel names carry a tile and split-K. Those are the kernel's,
+        # so the op is costed from its shapes, the same as with no kernel name.
+        for kernel_name in (
+            "gemm_a8w8_mx128_t16x1024x128_mw1_nw4_nb2_sk1_cm1_cn1",
+            "gemm_a8w8_mx128_t16x256x128_mw1_nw4_nb2_sk2_cm1_cn1",
+            "gemm_a8w8_mx128_compute_t128x256x128_mw2_nw2_nb4_sk2_cm4_cn2_fsk",
+        ):
+            mx128_model = pext.gemm_a8w8_blockscale_bpreshuffle(
+                {"args": gemm["args"], "kernel_details": [{"name": kernel_name}]}
+            )
+            assert mx128_model.param_details["tile"] is None
+            assert mx128_model.flops() == logical.flops()
+            assert mx128_model.bytes() == logical.bytes()
         assert (
             pext.gemm_a8w8_blockscale_bpreshuffle(
                 {"args": {"Input Dims": [[1, 8], [], [], []], "Input type": []}}
