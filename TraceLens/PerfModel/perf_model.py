@@ -6344,11 +6344,11 @@ class aiter_gemm_a4w4(GEMM):
 
 class gemm_fp4_impl(GEMM):
     """
-    primus_turbo::gemm_fp4_impl — MXFP4 GEMM dispatcher (Flux trace leaf).
+    primus_turbo::gemm_fp4_impl — MXFP4 GEMM dispatcher.
 
-    In Flux MLPerf traces, this op appears as the leaf cpu_op (no inner
-    ``hipblaslt_gemm_fp4`` or ``aiter_gemm_a4w4`` children). It dispatches to
-    the MFMA_F32_32x32x64_F4 matrix instruction on gfx950.
+    When this op appears as the leaf cpu_op (no inner ``hipblaslt_gemm_fp4``
+    or ``aiter_gemm_a4w4`` children), it dispatches directly to the
+    MFMA_F32_32x32x64_F4 matrix instruction on gfx950.
 
     Dual MXFP4 GEMM: Y[M, N] = dequant(A[M, K]) @ dequant(B[N, K]).T
     where A and B are FP4 E2M1 packed as Float4_e2m1fn_x2 (two values per byte)
