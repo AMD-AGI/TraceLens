@@ -6441,6 +6441,7 @@ class gemm_fp4_impl(GEMM):
     def get_param_details(event):
         dims = event["args"]["Input Dims"]
         types = event["args"].get("Input type", []) or []
+        concrete = event["args"].get("Concrete Inputs", []) or []
         M = dims[0][0]
         K_packed = dims[0][1]
         K = K_packed * 2  # Float4_e2m1fn_x2 packs two FP4 values per byte
@@ -6455,9 +6456,7 @@ class gemm_fp4_impl(GEMM):
             "dtype_A_B": (
                 types[0],
                 types[3],
-                # Output dtype is not in Input type (it is a return value).
-                # Concrete Inputs[6] holds the ScalarType enum (15 = bfloat16),
-                "c10::bfloat16",
+                concrete[6] if len(concrete) > 6 else None,
             ),
             "bias_dtype": types[11] if has_bias else None,
             "a_scale_shape": tuple(dims[1]),
@@ -6471,12 +6470,11 @@ class gemm_fp4_impl(GEMM):
         M, N, K = self.M, self.N, self.K
         bpe_A = name2bpe(dtype_A_B[0])
         bpe_B = name2bpe(dtype_A_B[1])
-        bpe_output = name2bpe(dtype_A_B[2])
+        bpe_output = scalar_type_bpe(dtype_A_B[2])
         bytes_A = M * (K // 2) * bpe_A
         bytes_B = N * (K // 2) * bpe_B
         bytes_output = M * N * bpe_output
-        bias_dtype = self.param_details["bias_dtype"] or dtype_A_B[2]
-        bytes_bias = N * name2bpe(bias_dtype) if self.param_details["bias"] else 0
+        bytes_bias = N * name2bpe(self.param_details["bias_dtype"]) if self.param_details["bias"] else 0
         bpe_scale = name2bpe(self.param_details["scale_dtype"])
         bytes_b_scale = prod(self.param_details["b_scale_shape"]) * bpe_scale
         return bytes_A + bytes_B + bytes_output + bytes_bias + bytes_b_scale

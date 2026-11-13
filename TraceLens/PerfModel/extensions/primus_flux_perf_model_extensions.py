@@ -56,9 +56,7 @@ class a6w4_mm_qa(GEMM):
             "dtype_A_B": (
                 types[0],
                 types[2],
-                # Output dtype is not in Input type (it is a return value).
-                # Concrete Inputs[6] holds the ScalarType enum (15 = bfloat16),
-                "c10::bfloat16",
+                "c10::bfloat16",  # output dtype not available in trace args
             ),
             "scale_shape": tuple(dims[1]),
             "scale_dtype": types[1],
@@ -127,9 +125,7 @@ class a6w4_mm_qa_prequant_w(GEMM):
             "dtype_A_B": (
                 types[0],
                 types[2],
-                # Output dtype is not in Input type (it is a return value).
-                # Concrete Inputs[6] holds the ScalarType enum (15 = bfloat16)
-                "c10::bfloat16",
+                "c10::bfloat16",  # output dtype not available in trace args
             ),
         }
 

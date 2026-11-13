@@ -13,7 +13,6 @@ import re
 from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
     get_bwd_ops_for_fwd_op,
     inject_pseudo_op_above_launcher,
-    set_bookkeeping_attr,
 )
 
 
@@ -81,6 +80,17 @@ def _link_checkpoint_fwd_bwd(trace_tree):
                     fwd_op["bwd_events"] = [bwd_op["UID"]]
 
 
+def _find_layernorm_backward_targets(trace_tree, bwd_op):
+    """Return _LayerNormLinearBackward events from bwd_op or its children."""
+    if bwd_op.get("name") == "_LayerNormLinearBackward":
+        return [bwd_op]
+    return [
+        trace_tree.get_UID2event(uid)
+        for uid in bwd_op.get("children", [])
+        if trace_tree.get_UID2event(uid).get("name") == "_LayerNormLinearBackward"
+    ]
+
+
 def _annotate_layernorm_backward_shapes(trace_tree):
     """Annotate _LayerNormLinearBackward events with the LayerNorm input shape.
 
@@ -101,16 +111,10 @@ def _annotate_layernorm_backward_shapes(trace_tree):
 
         bwd_ops = get_bwd_ops_for_fwd_op(trace_tree, fwd_event)
         for bwd_op in bwd_ops:
-            if bwd_op.get("name") == "_LayerNormLinearBackward":
-                bwd_op["args"]["_ln_input_shape"] = ln_input_shape
-                bwd_op["args"]["_ln_weight_shape"] = ln_weight_shape
-            else:
-                # bwd_op may be the autograd wrapper; check children
-                for child_uid in bwd_op.get("children", []):
-                    child = trace_tree.get_UID2event(child_uid)
-                    if child.get("name") == "_LayerNormLinearBackward":
-                        child["args"]["_ln_input_shape"] = ln_input_shape
-                        child["args"]["_ln_weight_shape"] = ln_weight_shape
+            targets = _find_layernorm_backward_targets(trace_tree, bwd_op)
+            for target in targets:
+                target["args"]["_ln_input_shape"] = ln_input_shape
+                target["args"]["_ln_weight_shape"] = ln_weight_shape
 
 
 def tree_postprocess_extension(trace_tree):
@@ -175,142 +179,118 @@ def is_gemm_kernel(kernel_event: dict) -> bool:
     return is_rocm_gemm or is_cuda_gemm
 
 
-def _create_host_mm_ops_common(
-    trace_tree,
-    fwd_op_event: dict,
-    expected_name: str,
-    w_idx: int,
-    x_idx: int,
-    fp8_bool_idx: int,
-):
-    """
-    Create pseudo matmul ops for forward and backward passes.
-    fwd pass:
-        Y = X.matmul(W^T) + B
-    bwd pass gemm:
-        X_grad = Y_grad.matmul(W)
-        W_grad = Y_grad^T.matmul(X)
-        B_grad = Y_grad.sum(dim=0)
-    """
-    if fwd_op_event.get("name") != expected_name:
-        logging.warning(
-            f"[Warning] Expected op name {expected_name}, found {fwd_op_event['name']}"
-        )
-        return
-    prefix = expected_name
-
+def _find_single_fwd_gemm_kernel(trace_tree, fwd_op_event):
+    """Return the single GEMM GPU kernel from a forward op, or None."""
     fwd_gpu_event_ids = fwd_op_event.get("gpu_events", [])
     if not fwd_gpu_event_ids:
         logging.warning(
             f"[Warning] No GPU events found for fwd UID {fwd_op_event['UID']}"
         )
-        return
-
+        return None
     fwd_gpu_events = [trace_tree.get_UID2event(uid) for uid in fwd_gpu_event_ids]
     fwd_gemm_kernels = [e for e in fwd_gpu_events if is_gemm_kernel(e)]
-
     if len(fwd_gemm_kernels) != 1:
         logging.warning(
             f"[Warning] Expected 1 GEMM kernel in fwd, found {len(fwd_gemm_kernels)}"
         )
-        return
+        return None
+    return fwd_gemm_kernels[0]
 
-    yfwd_kernel = fwd_gemm_kernels[0]
 
-    # Link to backward
+def _find_bwd_gemm_kernel_pair(trace_tree, fwd_op_event):
+    """Return (xgrad_kernel, wgrad_kernel) from the backward pass, or None."""
     bwd_ops = get_bwd_ops_for_fwd_op(trace_tree, fwd_op_event)
     if not bwd_ops:
         logging.warning(
             f"[Warning] No backward op found for fwd UID {fwd_op_event['UID']}"
         )
-        return
-
+        return None
     bprop_gpu_event_ids = [
         uid for bwd_op in bwd_ops for uid in bwd_op.get("gpu_events", [])
     ]
     bprop_gpu_events = [trace_tree.get_UID2event(uid) for uid in bprop_gpu_event_ids]
     bprop_gemm_kernels = [e for e in bprop_gpu_events if is_gemm_kernel(e)]
-
-    def get_launcher_start(kernel_evt):
-        launcher = trace_tree.get_parent_event(kernel_evt)
-        return launcher.get("ts")
-
-    bprop_gemm_kernels = sorted(
-        bprop_gemm_kernels, key=lambda e: get_launcher_start(e)
-    )  # which
-
+    bprop_gemm_kernels.sort(key=lambda e: trace_tree.get_parent_event(e).get("ts"))
     if len(bprop_gemm_kernels) != 2:
         logging.warning(
             f"[Warning] Expected 2 GEMM kernels in bwd, found {len(bprop_gemm_kernels)}"
         )
-        return
+        return None
+    return bprop_gemm_kernels[0], bprop_gemm_kernels[1]
 
-    # Transformer Engine first launches xgrad, then wgrad
-    # ref: https://github.com/NVIDIA/TransformerEngine/blob/91405eb4a184b962edb7a211626b7e58a4a87cbc/transformer_engine/pytorch/module/linear.py#L405
-    # ref: https://github.com/NVIDIA/TransformerEngine/blob/91405eb4/transformer_engine/pytorch/module/layernorm_linear.py#L472
-    xgrad_kernel, wgrad_kernel = bprop_gemm_kernels
+
+def _extract_gemm_shapes(fwd_op_event, w_idx, x_idx, fp8_bool_idx):
+    """Extract W, X, Y_grad shapes and dtype from a TE forward event."""
+    input_dims = fwd_op_event["args"]["Input Dims"]
+    input_types = fwd_op_event["args"]["Input type"]
+    W_shape, inp_shape = input_dims[w_idx], input_dims[x_idx]
+    inp_dtype = input_types[x_idx]
+    assert inp_shape[-1] == W_shape[1]
+    assert input_types[w_idx] == inp_dtype
+    if fwd_op_event["args"]["Concrete Inputs"][fp8_bool_idx] == "True":
+        inp_dtype = "fp8"
+    X_shape = (math.prod(inp_shape[:-1]), inp_shape[-1])
+    Y_grad_shape = (X_shape[0], W_shape[0])
+    return W_shape, X_shape, Y_grad_shape, inp_dtype
+
+
+def _create_host_mm_ops_common(
+    trace_tree,
+    fwd_op_event,
+    expected_name,
+    w_idx,
+    x_idx,
+    fp8_bool_idx,
+):
+    """Create pseudo matmul ops for forward and backward passes."""
+    if fwd_op_event.get("name") != expected_name:
+        return
+    prefix = expected_name
+
+    yfwd_kernel = _find_single_fwd_gemm_kernel(trace_tree, fwd_op_event)
+    if yfwd_kernel is None:
+        return
+    bwd_pair = _find_bwd_gemm_kernel_pair(trace_tree, fwd_op_event)
+    if bwd_pair is None:
+        return
+    xgrad_kernel, wgrad_kernel = bwd_pair
 
     try:
-        input_dims = fwd_op_event["args"]["Input Dims"]
-        input_types = fwd_op_event["args"]["Input type"]
-        W_shape, inp_shape = input_dims[w_idx], input_dims[x_idx]
-        W_dtype, inp_dtype = input_types[w_idx], input_types[x_idx]
-    except Exception as e:
+        W_shape, X_shape, Y_grad_shape, inp_dtype = _extract_gemm_shapes(
+            fwd_op_event,
+            w_idx,
+            x_idx,
+            fp8_bool_idx,
+        )
+    except (KeyError, IndexError) as e:
         logging.warning(
             f"[Warning] Missing shape info in fwd UID {fwd_op_event['UID']}: {e}"
         )
         return
 
-    assert inp_shape[-1] == W_shape[1]
-    assert W_dtype == inp_dtype
-
-    is_fp8 = fwd_op_event["args"]["Concrete Inputs"][fp8_bool_idx] == "True"
-    if is_fp8:
-        inp_dtype = "fp8"
-
-    X_shape = (math.prod(inp_shape[:-1]), inp_shape[-1])
-    Y_grad_shape = (X_shape[0], W_shape[0])
-
-    # Check if pseudo ops already exist
     seq_num = fwd_op_event["args"]["Sequence number"]
     seq_num_uids = trace_tree.seq_num2event_uids_map.get(seq_num, [])
-    seq_num_evts = [trace_tree.get_UID2event(uid) for uid in seq_num_uids]
-
-    existing = [e for e in seq_num_evts if e["name"] == f"{prefix}Backward_xgrad_mm"]
-    if existing:
+    if any(
+        trace_tree.get_UID2event(u)["name"] == f"{prefix}Backward_xgrad_mm"
+        for u in seq_num_uids
+    ):
         return
 
-    # Create pseudo host ops
-    inject_pseudo_op_above_launcher(
-        trace_tree,
-        yfwd_kernel,
-        f"{prefix}_yfwd_mm",
-        seq_num,
-        [X_shape, W_shape[::-1]],
-        [inp_dtype, inp_dtype],
-        [],
-        [],
-    )
-    inject_pseudo_op_above_launcher(
-        trace_tree,
-        xgrad_kernel,
-        f"{prefix}Backward_xgrad_mm",
-        seq_num,
-        [Y_grad_shape, W_shape],
-        [inp_dtype, inp_dtype],
-        [],
-        [],
-    )
-    inject_pseudo_op_above_launcher(
-        trace_tree,
-        wgrad_kernel,
-        f"{prefix}Backward_wgrad_mm",
-        seq_num,
-        [Y_grad_shape[::-1], X_shape],
-        [inp_dtype, inp_dtype],
-        [],
-        [],
-    )
+    for kernel, label, dims in [
+        (yfwd_kernel, f"{prefix}_yfwd_mm", [X_shape, W_shape[::-1]]),
+        (xgrad_kernel, f"{prefix}Backward_xgrad_mm", [Y_grad_shape, W_shape]),
+        (wgrad_kernel, f"{prefix}Backward_wgrad_mm", [Y_grad_shape[::-1], X_shape]),
+    ]:
+        inject_pseudo_op_above_launcher(
+            trace_tree,
+            kernel,
+            label,
+            seq_num,
+            dims,
+            [inp_dtype, inp_dtype],
+            [],
+            [],
+        )
 
 
 def create_host_mm_ops_from_linear_op(trace_tree, fwd_op_event: dict):

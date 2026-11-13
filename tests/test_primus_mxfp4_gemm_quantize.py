@@ -664,7 +664,7 @@ def _gemm_fp4_impl_event(M=3072, N=3072, K=3072, has_bias=False):
             "Input Dims": dims,
             "Input type": types,
             "Input Strides": [[] for _ in dims],
-            "Concrete Inputs": [""] * len(dims),
+            "Concrete Inputs": ["", "", "", "", "", "", "15"] + [""] * (len(dims) - 7),
         },
     }
 
