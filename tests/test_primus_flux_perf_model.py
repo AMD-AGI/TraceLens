@@ -646,3 +646,162 @@ def test_collect_gemm_descendants_nested():
     result = _collect_gemm_descendants(tree, root)
     assert len(result) == 1
     assert result[0]["name"] == "primus_turbo::gemm_fp4_impl"
+
+
+def test_a6w4_mm_qa_compute_precision():
+    from TraceLens.PerfModel.utils import torch_dtype_map
+
+    model = a6w4_mm_qa(_a6w4_mm_qa_event())
+    assert model.get_compute_precision() == torch_dtype_map("mxfp4")
+
+
+def test_a6w4_mm_qa_prequant_w_compute_precision():
+    from TraceLens.PerfModel.utils import torch_dtype_map
+
+    model = a6w4_mm_qa_prequant_w(_a6w4_mm_qa_prequant_w_event())
+    assert model.get_compute_precision() == torch_dtype_map("mxfp4")
+
+
+def test_tree_postprocess_skips_already_processed():
+    """Second GEMM with same UID is skipped by processed_uids."""
+    tree = _FakeTree()
+    fwd_parent = {
+        "name": "_MXFP4LinearFunction",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 100,
+        "dur": 50,
+        "args": {"Sequence number": 1},
+        "children": [],
+        "bwd_events": [],
+    }
+    fwd_uid = tree.add_event(fwd_parent)
+    gemm1 = {
+        "name": "primus_turbo::gemm_fp4_impl",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 110,
+        "dur": 10,
+        "args": {
+            "Input Dims": [[1024, 512]] + [[]] * 13,
+            "Input type": ["c10::Float4_e2m1fn_x2"] + [""] * 13,
+            "Input Strides": [[] for _ in range(14)],
+            "Concrete Inputs": [""] * 14,
+            "Sequence number": 1,
+        },
+        "parent": fwd_uid,
+        "children": [],
+        "gpu_events": [],
+    }
+    gemm_uid = tree.add_event(gemm1)
+    fwd_parent["children"].append(gemm_uid)
+    fwd_parent["children"].append(gemm_uid)  # duplicate UID
+
+    tree_postprocess_extension(tree)
+    pseudo_count = sum(
+        1 for e in tree.events if e.get("args", {}).get("Pseudo op") is True
+    )
+    assert pseudo_count == 1
+
+
+def test_label_bwd_gemms_skips_already_processed():
+    """Backward GEMMs already in processed_uids are skipped."""
+    tree = _FakeTree()
+    fwd_parent = {
+        "name": "_MXFP4LinearFunction",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 100,
+        "dur": 50,
+        "args": {"Sequence number": 1},
+        "children": [],
+        "bwd_events": [],
+    }
+    tree.add_event(fwd_parent)
+
+    bwd_parent = {
+        "name": "_MXFP4LinearFunctionBackward",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 200,
+        "dur": 80,
+        "args": {"Sequence number": 2},
+        "children": [],
+    }
+    bwd_uid = tree.add_event(bwd_parent)
+    fwd_parent["bwd_events"] = [bwd_uid]
+
+    bwd_gemm = {
+        "name": "primus_turbo::gemm_fp4_impl",
+        "ph": "X",
+        "cat": "cpu_op",
+        "pid": 0,
+        "tid": 0,
+        "ts": 210,
+        "dur": 10,
+        "args": {
+            "Input Dims": [[1024, 512]] + [[]] * 13,
+            "Input type": ["c10::Float4_e2m1fn_x2"] + [""] * 13,
+            "Input Strides": [[] for _ in range(14)],
+            "Concrete Inputs": [""] * 14,
+            "Sequence number": 2,
+        },
+        "parent": bwd_uid,
+        "children": [],
+        "gpu_events": [],
+    }
+    gemm_uid = tree.add_event(bwd_gemm)
+    bwd_parent["children"].append(gemm_uid)
+
+    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
+        _label_bwd_gemms,
+    )
+
+    processed = {gemm_uid}
+    _label_bwd_gemms(tree, fwd_parent, "_MXFP4Linear", processed)
+    pseudo_count = sum(
+        1 for e in tree.events if e.get("args", {}).get("Pseudo op") is True
+    )
+    assert pseudo_count == 0
+
+
+def test_collect_gemm_descendants_no_children_key():
+    """_collect_gemm_descendants handles events without a children key."""
+    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
+        _collect_gemm_descendants,
+    )
+
+    tree = _FakeTree()
+    root = {"name": "root", "children": [], "ts": 0}
+    tree.add_event(root)
+    leaf = {"name": "primus_turbo::gemm_fp4_impl", "ts": 1}
+    leaf_uid = tree.add_event(leaf)
+    root["children"].append(leaf_uid)
+    result = _collect_gemm_descendants(tree, root)
+    assert len(result) == 1
+
+
+def test_quantize_mxfp4_base_flops_single():
+    """_QuantizeMxfp4Base.flops() returns 2 * nelems for single quantization."""
+    model = quantize_mxfp4_h16_dual(_quantize_mxfp4_event(M=16, N=32))
+    base_flops = _QuantizeMxfp4Base.flops(model)
+    assert base_flops == 2 * 16 * 32
+
+
+def test_quantize_mxfp4_base_bytes_single():
+    """_QuantizeMxfp4Base.bytes() returns read + single FP4 write + single scale write."""
+    model = quantize_mxfp4_h16_dual(_quantize_mxfp4_event(M=32, N=64))
+    base_bytes = _QuantizeMxfp4Base.bytes(model)
+    bpe_in = 2
+    bpe_fp4 = 0.5
+    bpe_scale = 1
+    expected = 32 * 64 * bpe_in + 32 * 64 * bpe_fp4 + max(1, 32 * 64 // 32) * bpe_scale
+    assert base_bytes == expected
