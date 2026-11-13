@@ -6463,12 +6463,12 @@ class FP4GemmMXFunction(GEMM):
     Roofline -- FLOPs:
         flops = 2 * M * N * K            (inherited from GEMM base)
 
-    Roofline -- bytes moved (FP4 operands + E8M0 scales + BF16 output, same
-    convention as gemm_fp4_impl; the internal BF16->FP4 quantize and the
-    transpose-quant saves are not modelled):
-        read_fp4   = (M*K + N*K) * 0.5
-        read_scale = (M*K + N*K) / 32
-        write_out  = M * N * 2
+    Roofline -- bytes moved (BF16 GEMM roofline; operand bpe from the trace
+    Input type, output dtype fixed -- the internal FP4 quantization is not
+    modelled):
+        read_A    = M * K * bpe(A)
+        read_B    = N * K * bpe(B)
+        write_out = M * N * bpe(out)
 
     Notes:
         Caches its shapes by Sequence number for FP4GemmMXFunctionBackward.
@@ -6503,21 +6503,16 @@ class FP4GemmMXFunction(GEMM):
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
-        # FP4 operands + E8M0 block scales + BF16 output, same convention as
-        # gemm_fp4_impl / gemm_afp4wfp4.
-        fp4 = name2bpe("c10::float4_e2m1fn_x2") / 2  # FP4 E2M1 -> 0.5 B/elem
-        operand_output = super().bytes(
-            bpe_mat1=fp4,
-            bpe_mat2=fp4,
-            bpe_bias=fp4,
-            bpe_output=name2bpe(self.param_details["dtype_A_B"][2]),
+        # Operand bpe comes from the trace Input type (BF16 -- the op takes BF16
+        # and quantizes to FP4 internally); only the output dtype, absent from the
+        # trace, is fixed. Same shape as aten_mm.
+        d = self.param_details["dtype_A_B"]
+        return super().bytes(
+            bpe_mat1=name2bpe(d[0]),
+            bpe_mat2=name2bpe(d[1]),
+            bpe_bias=name2bpe(d[0]),
+            bpe_output=name2bpe(d[2]),
         )
-        scales = (
-            (self.M * self.K + self.N * self.K)
-            / hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
-            * name2bpe("c10::float8_e8m0fnu")
-        )
-        return operand_output + scales
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
@@ -6553,9 +6548,8 @@ class FP4GemmMXFunctionBackward(GEMM):
                                           via GEMM.flops_bwd)
 
     Roofline -- bytes moved:
-        FP4 operand reads  = (2*M*N + N*K + M*K) * 0.5   # dgrad + wgrad
-        E8M0 scale reads   = (2*M*N + N*K + M*K) / 32
-        write grads BF16   = (M*K + N*K) * 2
+        BF16 backward GEMM (dgrad + wgrad) via GEMM.bytes_bwd; operand bpe from
+        the trace.
 
     Notes:
         K is unavailable in the backward event; recovered from
@@ -6599,16 +6593,8 @@ class FP4GemmMXFunctionBackward(GEMM):
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
         if self.K is None or self.N is None:
             return None
-        M, N, K = self.M, self.N, self.K
-        fp4 = name2bpe("c10::float4_e2m1fn_x2") / 2
-        block = hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
-        bf16 = name2bpe(self.param_details["dtype_A_B"][2])
-        # dgrad + wgrad: FP4 operand reads + E8M0 scales + BF16 gradient writes.
-        fp4_elems = 2 * M * N + N * K + M * K
-        operands = fp4_elems * fp4
-        scales = fp4_elems / block * name2bpe("c10::float8_e8m0fnu")
-        grads = (M * K + N * K) * bf16
-        return operands + scales + grads
+        # BF16 backward GEMM (dgrad + wgrad); operand bpe from the trace.
+        return self.bytes_bwd(name2bpe(self.param_details["dtype_A_B"][0]))
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
@@ -6640,12 +6626,10 @@ class FP4GroupedMLPMXFunc(GEMM):
         flops = 2*T*N1*K1 + 2*T*N2*K2
         (sum over experts of 2*m_e*N*K collapses to 2*T*N*K since sum(m_e)=T)
 
-    Roofline -- bytes moved (two grouped GEMMs; FP4 operand reads + E8M0 scales
-    + BF16 outputs, matching gemm_fp4_impl. The GLU intermediate is GEMM1's
-    output; the on-the-fly quant and transpose-quant saves are not modelled):
-        operands = (T*K1 + E*N1*K1 + T*I + E*N2*K2) * 0.5
-        scales   = (T*K1 + E*N1*K1 + T*I + E*N2*K2) / 32
-        outputs  = (T*N1 + T*N2) * 2
+    Roofline -- bytes moved (BF16; operand bpe from the trace, internal FP4
+    quantization not modelled). Two grouped GEMMs:
+        operands = (T*K1 + E*N1*K1 + T*I + E*N2*K2) * bpe
+        outputs  = (T*N1 + T*N2) * bpe
 
     Notes:
         N1 is the full gate_up output width (= 2*I for SwiGLU). Caches shapes by
@@ -6665,6 +6649,7 @@ class FP4GroupedMLPMXFunc(GEMM):
     @staticmethod
     def get_param_details(event):
         dims = event["args"]["Input Dims"]
+        dtypes = event["args"]["Input type"]
         T = dims[0][0]
         E, N1, K1 = dims[2][0], dims[2][1], dims[2][2]
         _E2, N2, K2 = dims[3][0], dims[3][1], dims[3][2]
@@ -6675,7 +6660,9 @@ class FP4GroupedMLPMXFunc(GEMM):
             "N": N1,
             "K": K1,
             "bias": False,
-            "dtype_A_B": ("mxfp4", "mxfp4", "c10::BFloat16"),
+            # Real BF16 operand/weight dtypes from the trace (compute precision
+            # is MXFP4, set by get_compute_precision).
+            "dtype_A_B": (dtypes[0], dtypes[2], "c10::BFloat16"),
             "T": T,
             "E": E,
             "N1": N1,
@@ -6694,16 +6681,13 @@ class FP4GroupedMLPMXFunc(GEMM):
         p = self.param_details
         T, E = p["T"], p["E"]
         N1, K1, N2, K2, I = p["N1"], p["K1"], p["N2"], p["K2"], p["I"]
-        fp4 = name2bpe("c10::float4_e2m1fn_x2") / 2
-        block = hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
-        bf16 = name2bpe("c10::bfloat16")
-        # Two grouped GEMMs: FP4 operand reads (activation, GLU intermediate, both
-        # expert weights) + E8M0 scales + BF16 outputs.
-        fp4_elems = T * K1 + E * N1 * K1 + T * I + E * N2 * K2
-        operands = fp4_elems * fp4
-        scales = fp4_elems / block * name2bpe("c10::float8_e8m0fnu")
-        outputs = T * N1 * bf16 + T * N2 * bf16
-        return operands + scales + outputs
+        d = p["dtype_A_B"]
+        bpe, bpe_out = name2bpe(d[0]), name2bpe(d[2])  # BF16, from the trace
+        # Two grouped GEMMs: operand reads (activation, GLU intermediate, both
+        # expert weights) + outputs. Internal quantization is not modelled.
+        operands = (T * K1 + E * N1 * K1 + T * I + E * N2 * K2) * bpe
+        outputs = (T * N1 + T * N2) * bpe_out
+        return operands + outputs
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
@@ -6736,8 +6720,8 @@ class FP4GroupedMLPMXFuncBackward(GEMM):
         flops = 2 * (2*T*N1*K1 + 2*T*N2*K2) = 4*T*(N1*K1 + N2*K2)
 
     Roofline -- bytes moved:
-        Four grouped GEMMs (dgrad+wgrad per fwd GEMM): ~2x the fwd FP4 operand
-        reads + E8M0 scales + BF16 gradient writes.
+        Four grouped GEMMs (dgrad+wgrad per fwd GEMM): ~2x the fwd operand reads
+        + BF16 gradient writes.
 
     Notes:
         Expert dims recovered from FP4GroupedMLPMXFunc.fwd_pass_cache via the
@@ -6776,16 +6760,12 @@ class FP4GroupedMLPMXFuncBackward(GEMM):
             return None
         T, E = p["T"], p["E"]
         N1, K1, N2, K2, I = p["N1"], p["K1"], p["N2"], p["K2"], p["I"]
-        fp4 = name2bpe("c10::float4_e2m1fn_x2") / 2
-        block = hipblaslt_gemm_fp4.MXFP4_BLOCK_SIZE
-        bf16 = name2bpe("c10::bfloat16")
-        # Four grouped GEMMs (dgrad+wgrad per fwd GEMM): ~2x the fwd FP4 operand
-        # reads + E8M0 scales + BF16 gradient writes.
-        fp4_elems = 2 * (T * K1 + E * N1 * K1 + T * I + E * N2 * K2)
-        operands = fp4_elems * fp4
-        scales = fp4_elems / block * name2bpe("c10::float8_e8m0fnu")
-        grads = (T * K1 + E * N1 * K1 + E * N2 * K2) * bf16
-        return operands + scales + grads
+        bpe = name2bpe(p["dtype_A_B"][0])  # BF16, from the forward
+        # Four grouped GEMMs (dgrad+wgrad per fwd GEMM): ~2x the fwd operand reads
+        # + BF16 gradient writes.
+        operands = 2 * (T * K1 + E * N1 * K1 + T * I + E * N2 * K2) * bpe
+        grads = (T * K1 + E * N1 * K1 + E * N2 * K2) * bpe
+        return operands + grads
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
