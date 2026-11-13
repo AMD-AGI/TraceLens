@@ -105,6 +105,11 @@ def _get_gemm_mappings():
         "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
         "primus_turbo::gemm_fp4_impl": _core_perf_model.gemm_fp4_impl,
+        # gpt-oss / primus-megatron MXFP4 autograd ops (classes in perf_model.py).
+        "FP4GemmMXFunction": _core_perf_model.FP4GemmMXFunction,
+        "FP4GemmMXFunctionBackward": _core_perf_model.FP4GemmMXFunctionBackward,
+        "FP4GroupedMLPMXFunc": _core_perf_model.FP4GroupedMLPMXFunc,
+        "FP4GroupedMLPMXFuncBackward": _core_perf_model.FP4GroupedMLPMXFuncBackward,
         "primus_flux::a6w4_mm_qa": primus_flux_perf_model_extensions.a6w4_mm_qa,
         "primus_flux::a6w4_mm_qa_prequant_w": primus_flux_perf_model_extensions.a6w4_mm_qa_prequant_w,
         "_MXFP4Linear_yfwd_gemm": _core_perf_model.gemm_fp4_impl,

@@ -6426,3 +6426,378 @@ class gemm_fp4_impl(GEMM):
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]
+
+
+# ---------------------------------------------------------------------------
+# Primus-Turbo MXFP4 training ops (gpt-oss / primus-megatron).
+#
+# torch.autograd.Function ops that take logical BF16 inputs and quantize to
+# MXFP4 (E2M1 + E8M0 per-32-elem block scales) internally. Forward and backward
+# surface as separate trace op names; the backward recovers K from the forward
+# via the Sequence-number fwd_pass_cache (same pattern as ConvBias_ above).
+# ---------------------------------------------------------------------------
+MX_BLOCK = 32
+# FP4 E2M1 element occupies half a byte (two packed per byte).
+FP4_BPE = 0.5
+# E8M0 block scale is one byte.
+MX_SCALE_BPE = 1
+BF16_BPE = 2
+
+
+def _mx_gemm_bytes(M, N, K, bpe_in, bpe_out):
+    """HBM traffic for one MXFP4 GEMM ``Y[M, N] = A[M, K] @ B[N, K]^T``.
+
+    Counts the BF16 operand reads consumed by the on-the-fly quantize, the FP4
+    operand + E8M0 scale reads consumed by the GEMM, and the output write.
+    """
+    bytes_in_bf16 = (M * K + N * K) * bpe_in
+    bytes_fp4 = (M * K + N * K) * FP4_BPE
+    bytes_scales = (M * K + N * K) / MX_BLOCK * MX_SCALE_BPE
+    bytes_out = M * N * bpe_out
+    # Forward also materializes transpose-quantized (col-major) FP4 copies of A
+    # and B, written to HBM and saved for the backward's dgrad/wgrad GEMMs
+    # (primus_turbo gemm_fp4.py: ctx.save_for_backward(a_col, a_col_scale, ...)).
+    bytes_transpose_quant = (M * K + N * K) * (FP4_BPE + MX_SCALE_BPE / MX_BLOCK)
+    return (
+        bytes_in_bf16 + bytes_fp4 + bytes_scales + bytes_out + bytes_transpose_quant
+    )
+
+
+class FP4GemmMXFunction(GEMM):
+    """
+    Performance model for FP4GemmMXFunction.
+
+    Reference implementation:
+        primus_turbo/pytorch/ops/gemm_fp4.py
+
+    MXFP4 linear GEMM ``Y[M, N] = A[M, K] @ B[N, K]^T`` (NT layout). ``A`` is the
+    activation, ``B`` the weight; both arrive BF16 and are quantized to FP4 with
+    MX per-block E8M0 scales inside the op.
+
+    Signature: gemm_fp4(a, b, trans_a, trans_b, out_dtype, config, ...) -> Y
+        a  - shape [M, K], BF16 activation
+        b  - shape [N, K], BF16 weight (NT layout)
+
+    Expected Input Dims from trace:
+        [(M, K), (N, K), ...optional residual..., (), (), ()]
+        e.g. ((32768, 4096), (2880, 4096), (), (), (), ())
+
+    Expected Input type from trace:
+        ['c10::BFloat16', 'c10::BFloat16', ...]
+
+    Roofline -- FLOPs:
+        flops = 2 * M * N * K            (inherited from GEMM base)
+
+    Roofline -- bytes moved (see module docstring):
+        read_bf16  = (M*K + N*K) * 2     # on-the-fly quantize input read
+        read_fp4   = (M*K + N*K) * 0.5   # GEMM FP4 operand read
+        read_scale = (M*K + N*K) / 32    # E8M0 per-block scales
+        write_out  = M * N * 2           # BF16 output
+        Total      = read_bf16 + read_fp4 + read_scale + write_out
+
+    Notes:
+        output_bpe (BF16, 2) != input element bpe (FP4, 0.5). Caches its shapes
+        by Sequence number for FP4GemmMXFunctionBackward.
+
+    Vendor roofline reference:
+        primus_turbo/tests/pytorch/ops/test_gemm_fp4.py
+    """
+
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
+        seq = event["args"].get("Sequence number")
+        if seq is not None:
+            FP4GemmMXFunction.fwd_pass_cache[seq] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        dtypes = event["args"]["Input type"]
+        a_shape, b_shape = dims[0], dims[1]
+        M, K = a_shape[0], a_shape[1]
+        N = b_shape[0]
+        return {
+            "B": 1,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            # (A, B, output). A/B are BF16 in the trace but quantized to FP4.
+            "dtype_A_B": (dtypes[0], dtypes[1], "c10::BFloat16"),
+        }
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        bpe_out = name2bpe(self.param_details["dtype_A_B"][2]) or BF16_BPE
+        return _mx_gemm_bytes(self.M, self.N, self.K, BF16_BPE, bpe_out)
+
+    def get_compute_precision(self):
+        return torch_dtype_map("mxfp4")
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "FP4GemmMXFunction backward is modelled by FP4GemmMXFunctionBackward."
+        )
+
+    def bytes_bwd(self, bytes_per_element=None):
+        raise NotImplementedError(
+            "FP4GemmMXFunction backward is modelled by FP4GemmMXFunctionBackward."
+        )
+
+
+class FP4GemmMXFunctionBackward(GEMM):
+    """
+    Performance model for FP4GemmMXFunctionBackward.
+
+    Reference implementation:
+        primus_turbo/pytorch/ops/gemm_fp4.py  (FP4GemmMXFunction.backward)
+
+    Backward of the MXFP4 linear GEMM. Two FP4 GEMMs:
+        grad_a[M, K] = grad_out[M, N] @ b[N, K]        (dgrad)
+        grad_b[N, K] = grad_out[M, N]^T @ a[M, K]      (wgrad)
+
+    Expected Input Dims from trace:
+        ((M, N),)   # grad_output only; K is recovered from the forward op
+        e.g. ((32768, 5120),)
+
+    Roofline -- FLOPs:
+        flops = 4 * M * N * K            (dgrad 2*M*N*K + wgrad 2*M*N*K,
+                                          via GEMM.flops_bwd)
+
+    Roofline -- bytes moved:
+        read grad_out BF16   = M * N * 2
+        FP4 operand reads    = (2*M*N + N*K + M*K) * 0.5
+        E8M0 scale reads     = (2*M*N + N*K + M*K) / 32
+        write grads BF16     = (M*K + N*K) * 2
+
+    Notes:
+        K is unavailable in the backward event; recovered from
+        FP4GemmMXFunction.fwd_pass_cache via the autograd Sequence number.
+        Returns None for flops/bytes when the forward was not seen.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        seq = event["args"].get("Sequence number")
+        fwd = FP4GemmMXFunction.fwd_pass_cache.get(seq)
+        if fwd is not None:
+            return {
+                "B": 1,
+                "M": fwd["M"],
+                "N": fwd["N"],
+                "K": fwd["K"],
+                "bias": False,
+                "dtype_A_B": fwd["dtype_A_B"],
+                "linked_fwd": True,
+            }
+        # Fallback: only grad_output (M, N) is known; K is unrecoverable.
+        dims = event["args"]["Input Dims"]
+        go = dims[0]
+        dtype = event["args"]["Input type"][0]
+        return {
+            "B": 1,
+            "M": go[0],
+            "N": go[1] if len(go) > 1 else None,
+            "K": None,
+            "bias": False,
+            "dtype_A_B": (dtype, dtype, "c10::BFloat16"),
+            "linked_fwd": False,
+        }
+
+    def flops(self):
+        if self.K is None or self.N is None:
+            return None
+        return self.flops_bwd()
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        if self.K is None or self.N is None:
+            return None
+        M, N, K = self.M, self.N, self.K
+        read_grad_out = M * N * BF16_BPE
+        fp4_elems = 2 * M * N + N * K + M * K
+        read_fp4 = fp4_elems * FP4_BPE
+        read_scales = fp4_elems / MX_BLOCK * MX_SCALE_BPE
+        write_grads = (M * K + N * K) * BF16_BPE
+        return read_grad_out + read_fp4 + read_scales + write_grads
+
+    def get_compute_precision(self):
+        return torch_dtype_map("mxfp4")
+
+
+class FP4GroupedMLPMXFunc(GEMM):
+    """
+    Performance model for FP4GroupedMLPMXFunc.
+
+    Reference implementation:
+        primus_turbo/pytorch/ops/grouped_mlp_fp4.py
+
+    MoE expert MLP in MXFP4: ``fc2(act(gate) * up * probs)`` over variable
+    per-expert token groups. Two grouped GEMMs over all T routed tokens:
+        GEMM1 (gate_up, GLU):  [T, K1] @ [E, N1, K1]^T -> [T, N1]   (N1 = 2*I)
+        GEMM2 (down):          [T, K2] @ [E, N2, K2]^T -> [T, N2]
+    The GLU activation (silu/gelu * up) halves N1 -> I before GEMM2; its
+    elementwise FLOPs are negligible next to the GEMMs and are not counted.
+
+    Expected Input Dims from trace:
+        [(T, H), (T,), (E, N1, K1), (E, N2, K2), (), (), (), (E,), (E+1,), ...]
+        e.g. ((131072, 2880), (131072,), (32, 5760, 2880), (32, 2880, 2880),
+              (), (), (), (32,), (33,), ...)
+        [0] routed token activations (T tokens, H = K1 hidden)
+        [2] W1 gate_up weights   [3] W2 down weights
+        [7] group_lens (tokens per expert)   [8] group_offs (cumsum)
+
+    Roofline -- FLOPs:
+        flops = 2*T*N1*K1 + 2*T*N2*K2
+        (sum over experts of 2*m_e*N*K collapses to 2*T*N*K since sum(m_e)=T)
+
+    Roofline -- bytes moved:
+        act_in     = T*K1 * (2 + 0.5 + 1/32)   # BF16 read + FP4 + scales
+        W1         = E*N1*K1 * (2 + 0.5 + 1/32)
+        W2         = E*N2*K2 * (2 + 0.5 + 1/32)
+        intermediate = T*N1 * 2 (write) + T*I * 2 (read by GEMM2)  # BF16
+        out        = T*N2 * 2
+        (weights dominate; the op is strongly compute-bound.)
+
+    Notes:
+        N1 is the full gate_up output width (= 2*I for SwiGLU). Caches shapes by
+        Sequence number for FP4GroupedMLPMXFuncBackward. M/N/K in param_details
+        are set to GEMM1's (T, N1, K1) to satisfy the GEMM base; flops/bytes are
+        computed over both GEMMs.
+    """
+
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
+        seq = event["args"].get("Sequence number")
+        if seq is not None:
+            FP4GroupedMLPMXFunc.fwd_pass_cache[seq] = self.param_details
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        T = dims[0][0]
+        E, N1, K1 = dims[2][0], dims[2][1], dims[2][2]
+        _E2, N2, K2 = dims[3][0], dims[3][1], dims[3][2]
+        return {
+            "B": 1,
+            # Representative GEMM1 dims so the GEMM base/param columns are valid.
+            "M": T,
+            "N": N1,
+            "K": K1,
+            "bias": False,
+            "dtype_A_B": ("mxfp4", "mxfp4", "c10::BFloat16"),
+            "T": T,
+            "E": E,
+            "N1": N1,
+            "K1": K1,
+            "N2": N2,
+            "K2": K2,
+            # SwiGLU-style GLU halves the gate_up width before the down GEMM.
+            "I": N1 // 2,
+        }
+
+    def flops(self):
+        p = self.param_details
+        return 2 * p["T"] * p["N1"] * p["K1"] + 2 * p["T"] * p["N2"] * p["K2"]
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        p = self.param_details
+        T, E = p["T"], p["E"]
+        N1, K1, N2, K2, I = p["N1"], p["K1"], p["N2"], p["K2"], p["I"]
+        per_elem = BF16_BPE + FP4_BPE + MX_SCALE_BPE / MX_BLOCK  # quant-read + FP4 + scale
+        act_in = T * K1 * per_elem
+        w1 = E * N1 * K1 * per_elem
+        w2 = E * N2 * K2 * per_elem
+        intermediate = T * N1 * BF16_BPE + T * I * BF16_BPE
+        out = T * N2 * BF16_BPE
+        # Transpose-quantized (col-major) FP4 copies saved for the backward:
+        # the input activation, the GLU intermediate, and both expert weights.
+        tq = (FP4_BPE + MX_SCALE_BPE / MX_BLOCK)
+        transpose_quant = (T * K1 + T * I + E * N1 * K1 + E * N2 * K2) * tq
+        return act_in + w1 + w2 + intermediate + out + transpose_quant
+
+    def get_compute_precision(self):
+        return torch_dtype_map("mxfp4")
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "FP4GroupedMLPMXFunc backward is modelled by FP4GroupedMLPMXFuncBackward."
+        )
+
+    def bytes_bwd(self, bytes_per_element=None):
+        raise NotImplementedError(
+            "FP4GroupedMLPMXFunc backward is modelled by FP4GroupedMLPMXFuncBackward."
+        )
+
+
+class FP4GroupedMLPMXFuncBackward(GEMM):
+    """
+    Performance model for FP4GroupedMLPMXFuncBackward.
+
+    Reference implementation:
+        primus_turbo/pytorch/ops/grouped_mlp_fp4.py  (FP4GroupedMLPMXFunc.backward)
+
+    Backward of the MXFP4 MoE MLP. Four grouped GEMMs: dgrad + wgrad for each of
+    the two forward GEMMs (down and gate_up), i.e. twice the forward GEMM FLOPs.
+
+    Expected Input Dims from trace:
+        ((T, H),)   # grad_output only; expert weight shapes from the forward op
+
+    Roofline -- FLOPs:
+        flops = 2 * (2*T*N1*K1 + 2*T*N2*K2) = 4*T*(N1*K1 + N2*K2)
+
+    Roofline -- bytes moved:
+        ~2x the forward operand traffic (grads for act + both weight matrices,
+        plus grad_output and intermediate reads). Modelled as 2x the forward
+        GEMM operand terms; strongly compute-bound.
+
+    Notes:
+        Expert dims recovered from FP4GroupedMLPMXFunc.fwd_pass_cache via the
+        autograd Sequence number; returns None when the forward was not seen.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        seq = event["args"].get("Sequence number")
+        fwd = FP4GroupedMLPMXFunc.fwd_pass_cache.get(seq)
+        if fwd is not None:
+            p = dict(fwd)
+            p["linked_fwd"] = True
+            return p
+        dims = event["args"]["Input Dims"]
+        go = dims[0]
+        return {
+            "B": 1,
+            "M": go[0],
+            "N": None,
+            "K": None,
+            "bias": False,
+            "dtype_A_B": ("mxfp4", "mxfp4", "c10::BFloat16"),
+            "linked_fwd": False,
+        }
+
+    def flops(self):
+        p = self.param_details
+        if not p.get("linked_fwd"):
+            return None
+        return 4 * p["T"] * (p["N1"] * p["K1"] + p["N2"] * p["K2"])
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        p = self.param_details
+        if not p.get("linked_fwd"):
+            return None
+        T, E = p["T"], p["E"]
+        N1, K1, N2, K2, I = p["N1"], p["K1"], p["N2"], p["K2"], p["I"]
+        per_elem = BF16_BPE + FP4_BPE + MX_SCALE_BPE / MX_BLOCK
+        # dgrad + wgrad for each GEMM reads the operands roughly twice over.
+        operand = (T * K1 + E * N1 * K1 + E * N2 * K2) * per_elem
+        grads = (T * K1 + E * N1 * K1 + E * N2 * K2) * BF16_BPE
+        intermediate = (T * N1 + T * I) * BF16_BPE
+        return 2 * operand + grads + intermediate
+
+    def get_compute_precision(self):
+        return torch_dtype_map("mxfp4")
+
+

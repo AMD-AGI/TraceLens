@@ -700,7 +700,158 @@ class custom_grouped_gemm(GroupedGemm):
 
 
 # Step 2: Register the new Perf Model class in the mapping
+# ---------------------------------------------------------------------------
+# Megatron tensor-parallel linear (gpt-oss / primus-megatron). BF16 GEMM; the
+# backward recovers K from the forward via the Sequence-number fwd_pass_cache.
+# ---------------------------------------------------------------------------
+from math import prod
+from TraceLens.PerfModel import GEMM
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
+
+
+class LinearWithGradAccumulationAndAsyncCommunication(GEMM):
+    """
+    Performance model for LinearWithGradAccumulationAndAsyncCommunication.
+
+    Reference implementation:
+        primus/backends/megatron/core/tensor_parallel/layers.py
+
+    Megatron tensor-parallel linear forward ``Y[M, N] = X[M, K] @ W[N, K]^T``
+    (column/row-parallel, with gradient accumulation and async all-gather /
+    reduce-scatter fused around the GEMM). BF16 compute.
+
+    Expected Input Dims from trace:
+        [(S, B, K), (N, K), (), (), (), (), (), ()]
+        e.g. ((8192, 4, 2880), (128256, 2880), ...)  -> M = S*B, N, K
+
+    Roofline -- FLOPs:
+        flops = 2 * M * N * K            (inherited from GEMM base; M = S*B)
+
+    Notes:
+        This forward is usually not a kernel-bearing summary row (its GPU time is
+        attributed to child GEMM kernels); it is registered mainly so its shapes
+        cache by Sequence number for the backward op. BF16 throughout.
+    """
+
+    fwd_pass_cache = {}
+
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
+        seq = event["args"].get("Sequence number")
+        if seq is not None:
+            LinearWithGradAccumulationAndAsyncCommunication.fwd_pass_cache[seq] = (
+                self.param_details
+            )
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        dtypes = event["args"]["Input type"]
+        x_shape, w_shape = dims[0], dims[1]
+        M = prod(x_shape[:-1])  # flatten leading (S, B, ...) dims
+        K = x_shape[-1]
+        N = w_shape[0]
+        return {
+            "B": 1,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "dtype_A_B": (dtypes[0], dtypes[1], dtypes[0]),
+        }
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        bpe = name2bpe(self.param_details["dtype_A_B"][0])
+        return super().bytes(
+            bpe_mat1=bpe, bpe_mat2=bpe, bpe_bias=bpe, bpe_output=bpe
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError(
+            "Backward is modelled by "
+            "LinearWithGradAccumulationAndAsyncCommunicationBackward."
+        )
+
+    def bytes_bwd(self, bytes_per_element=None):
+        raise NotImplementedError(
+            "Backward is modelled by "
+            "LinearWithGradAccumulationAndAsyncCommunicationBackward."
+        )
+
+
+class LinearWithGradAccumulationAndAsyncCommunicationBackward(GEMM):
+    """
+    Performance model for LinearWithGradAccumulationAndAsyncCommunicationBackward.
+
+    Reference implementation:
+        primus/backends/megatron/core/tensor_parallel/layers.py
+
+    Backward of the Megatron tensor-parallel linear. Two BF16 GEMMs:
+        grad_X[M, K] = grad_Y[M, N] @ W[N, K]      (dgrad)
+        grad_W[N, K] = grad_Y[M, N]^T @ X[M, K]    (wgrad)
+
+    Expected Input Dims from trace:
+        ((S, B, N),)   # grad_output only; K recovered from the forward op
+        e.g. ((8192, 4, 128256),)  -> M = S*B, N = 128256
+
+    Roofline -- FLOPs:
+        flops = 4 * M * N * K            (dgrad + wgrad, via GEMM.flops_bwd)
+
+    Roofline -- bytes moved:
+        BF16 bytes_bwd (dgrad + wgrad operands and outputs at 2 bytes/elem).
+
+    Notes:
+        K (hidden) is unavailable in the backward event; recovered from
+        LinearWithGradAccumulationAndAsyncCommunication.fwd_pass_cache via the
+        autograd Sequence number. Returns None when the forward was not seen.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        seq = event["args"].get("Sequence number")
+        fwd = LinearWithGradAccumulationAndAsyncCommunication.fwd_pass_cache.get(seq)
+        if fwd is not None:
+            return {
+                "B": 1,
+                "M": fwd["M"],
+                "N": fwd["N"],
+                "K": fwd["K"],
+                "bias": False,
+                "dtype_A_B": fwd["dtype_A_B"],
+                "linked_fwd": True,
+            }
+        dims = event["args"]["Input Dims"]
+        go = dims[0]
+        dtype = event["args"]["Input type"][0]
+        return {
+            "B": 1,
+            "M": prod(go[:-1]) if len(go) > 1 else go[0],
+            "N": go[-1] if len(go) > 1 else None,
+            "K": None,
+            "bias": False,
+            "dtype_A_B": (dtype, dtype, dtype),
+            "linked_fwd": False,
+        }
+
+    def flops(self):
+        if self.K is None or self.N is None:
+            return None
+        return self.flops_bwd()
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        if self.K is None or self.N is None:
+            return None
+        bpe = name2bpe(self.param_details["dtype_A_B"][0])
+        return self.bytes_bwd(bpe)
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_A_B", [None])[0]
+        return torch_dtype_map(dtype) if dtype else None
+
+
 perf_model_extension = {
+    "LinearWithGradAccumulationAndAsyncCommunication": LinearWithGradAccumulationAndAsyncCommunication,
+    "LinearWithGradAccumulationAndAsyncCommunicationBackward": LinearWithGradAccumulationAndAsyncCommunicationBackward,
     "_Linear_yfwd_mm": tev2_pseudo_gemm,
     "_LinearBackward_xgrad_mm": tev2_pseudo_gemm,
     "_LinearBackward_wgrad_mm": tev2_pseudo_gemm,
