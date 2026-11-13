@@ -6,7 +6,7 @@
 
 import logging
 
-from .pseudo_ops_utils import inject_pseudo_op_above_event
+from .pseudo_ops_utils import inject_pseudo_op_above_cpu_op
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def create_pseudo_ops_moe_flydsl(trace_tree):
                 seq_num = fused_moe_evt.get("args", {}).get(
                     "Sequence number", fused_moe_evt["UID"]
                 )
-                inject_pseudo_op_above_event(
+                inject_pseudo_op_above_cpu_op(
                     trace_tree,
                     stage_evt,
                     pseudo_name,

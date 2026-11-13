@@ -317,6 +317,12 @@ class _FakeTree:
             return []
         return [self.get_UID2event(uid) for uid in event["children"]]
 
+    def get_parent_event(self, event):
+        parent_uid = event.get("parent")
+        if parent_uid is None:
+            return None
+        return self.events_by_uid.get(parent_uid)
+
     def get_subtree_bwd_events(self, uid):
         return self.events_by_uid[uid].get("bwd_events", [])
 
@@ -526,10 +532,10 @@ def test_quantize_mxfp4_dual_bytes_none_bpe():
     assert model.bytes() is None
 
 
-def test_inject_pseudo_op_no_parent():
-    """_inject_pseudo_op is a no-op when the event has no parent."""
-    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
-        _inject_pseudo_op,
+def test_inject_pseudo_op_above_cpu_op_no_parent():
+    """inject_pseudo_op_above_cpu_op returns None when event has no parent."""
+    from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+        inject_pseudo_op_above_cpu_op,
     )
 
     tree = _FakeTree()
@@ -552,14 +558,15 @@ def test_inject_pseudo_op_no_parent():
     }
     tree.add_event(evt)
     before = len(tree.events)
-    _inject_pseudo_op(tree, evt, "test_pseudo")
+    result = inject_pseudo_op_above_cpu_op(tree, evt, "test_pseudo")
+    assert result is None
     assert len(tree.events) == before
 
 
-def test_inject_pseudo_op_child_not_in_parent_children():
-    """_inject_pseudo_op appends to parent children when orig UID is not in the list."""
-    from TraceLens.PerfModel.extensions.primus_flux_perf_model_extensions import (
-        _inject_pseudo_op,
+def test_inject_pseudo_op_above_cpu_op_rewires_parent():
+    """inject_pseudo_op_above_cpu_op inserts pseudo between parent and child."""
+    from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+        inject_pseudo_op_above_cpu_op,
     )
 
     tree = _FakeTree()
@@ -589,16 +596,21 @@ def test_inject_pseudo_op_child_not_in_parent_children():
             "Input Strides": [],
             "Concrete Inputs": [],
             "Sequence number": 0,
-            "External id": 0,
         },
         "parent": parent_uid,
         "children": [],
         "gpu_events": [],
     }
-    tree.add_event(child)
-    # Deliberately don't add child to parent["children"]
-    _inject_pseudo_op(tree, child, "test_pseudo")
-    assert len(parent["children"]) == 1
+    child_uid = tree.add_event(child)
+    parent["children"].append(child_uid)
+    pseudo = inject_pseudo_op_above_cpu_op(
+        tree, child, "test_pseudo", shape_donor_evt=child
+    )
+    assert pseudo is not None
+    assert pseudo["name"] == "test_pseudo"
+    assert child["parent"] == pseudo["UID"]
+    assert pseudo["UID"] in parent["children"]
+    assert child_uid not in parent["children"]
 
 
 def test_collect_gemm_children_empty():

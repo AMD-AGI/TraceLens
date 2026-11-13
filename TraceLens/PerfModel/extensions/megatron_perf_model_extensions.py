@@ -12,6 +12,7 @@ import re
 
 from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
     get_bwd_ops_for_fwd_op,
+    inject_pseudo_op_above_launcher,
     set_bookkeeping_attr,
 )
 
@@ -280,7 +281,7 @@ def _create_host_mm_ops_common(
         return
 
     # Create pseudo host ops
-    inject_pseudo_op(
+    inject_pseudo_op_above_launcher(
         trace_tree,
         yfwd_kernel,
         f"{prefix}_yfwd_mm",
@@ -290,7 +291,7 @@ def _create_host_mm_ops_common(
         [],
         [],
     )
-    inject_pseudo_op(
+    inject_pseudo_op_above_launcher(
         trace_tree,
         xgrad_kernel,
         f"{prefix}Backward_xgrad_mm",
@@ -300,7 +301,7 @@ def _create_host_mm_ops_common(
         [],
         [],
     )
-    inject_pseudo_op(
+    inject_pseudo_op_above_launcher(
         trace_tree,
         wgrad_kernel,
         f"{prefix}Backward_wgrad_mm",
@@ -336,73 +337,6 @@ def create_host_mm_ops_from_layernormlinear_op(trace_tree, fwd_op_event: dict):
         x_idx=0,
         fp8_bool_idx=7,
     )
-
-
-def inject_pseudo_op(
-    tree,
-    kernel_evt,
-    name,
-    seq_num,
-    dims=None,
-    types=None,
-    strides=None,
-    concrete_inputs=None,
-):
-    """
-    Create a pseudo host-side op for `kernel_evt` and make the *original*
-    CPU op point to it instead of the kernel-launcher stub.
-
-    Parameters
-    ----------
-    tree : TraceTree
-    kernel_evt : dict          # the GPU kernel event
-    name : str                 # pseudo-op name
-    seq_num : int
-    dims : list, optional  # 'Input Dims'
-    types : list, optional  # 'Input type'
-    strides : list, optional   # 'Input Strides'
-    concrete_inputs : list, optional  # 'Concrete Inputs'
-    """
-    # ── climb two levels: kernel -> launcher -> original CPU op ───────────
-    launcher_evt = tree.get_parent_event(kernel_evt)  # cpu-launch stub
-    orig_cpu_evt = tree.get_parent_event(launcher_evt)  # high-level op
-
-    pseudo_evt = {
-        "ph": "X",
-        "name": name,
-        "cat": "cpu_op",
-        "pid": orig_cpu_evt["pid"],
-        "tid": orig_cpu_evt["tid"],
-        "args": {
-            "Input Dims": orig_cpu_evt["args"]["Input Dims"] if dims is None else dims,
-            "Input type": (
-                orig_cpu_evt["args"]["Input type"] if types is None else types
-            ),
-            "Input Strides": (
-                orig_cpu_evt["args"]["Input Strides"] if strides is None else strides
-            ),
-            "Concrete Inputs": (
-                orig_cpu_evt["args"]["Concrete Inputs"]
-                if concrete_inputs is None
-                else concrete_inputs
-            ),
-            "Sequence number": seq_num,
-            "External id": kernel_evt["args"]["correlation"],
-            "Pseudo op": True,
-        },
-        "parent": orig_cpu_evt["UID"],  # Set pseudo op's parent to original CPU op
-        "children": [launcher_evt["UID"]],  # we still nest the launcher
-        "gpu_events": [kernel_evt["UID"]],
-    }
-    set_bookkeeping_attr(tree, pseudo_evt)
-    # ── re-wire the original CPU op ───────────────────────────────────────
-    children = orig_cpu_evt["children"]
-    children.remove(launcher_evt["UID"])
-    children.append(pseudo_evt["UID"])
-    # ── re-wire the launcher's parent to point to pseudo op ────────────────
-    launcher_evt["parent"] = pseudo_evt[
-        "UID"
-    ]  # Change launcher's parent from orig_cpu_evt to pseudo_evt
 
 
 # we also need to

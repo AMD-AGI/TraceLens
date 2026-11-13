@@ -5,7 +5,7 @@
 ###############################################################################
 
 import logging
-from .pseudo_ops_utils import inject_pseudo_op
+from .pseudo_ops_utils import inject_pseudo_op_above_launcher
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def _create_pseudo_op_moe_fused_aiter(trace_tree, moe_op_event: dict):
     moe_kernel = moe_kernels[0]
     seq_num = moe_op_event["args"].get("Sequence number", moe_op_event["UID"])
 
-    inject_pseudo_op(
+    inject_pseudo_op_above_launcher(
         trace_tree,
         moe_kernel,
         "pseudo_op::moe_aiter_fused_1stage",

@@ -8,7 +8,7 @@ import logging
 
 from TraceLens.PerfModel.utils import optional_int
 
-from .pseudo_ops_utils import inject_pseudo_op
+from .pseudo_ops_utils import inject_pseudo_op_above_launcher
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,7 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
             "MoE topk": topk,
         }
 
-        inject_pseudo_op(
+        inject_pseudo_op_above_launcher(
             trace_tree,
             kernel,
             pseudo_op_name,
@@ -193,7 +193,7 @@ def _create_pseudo_op_moe_unfused_triton(trace_tree, moe_op_event: dict):
         return
     if len(finalize_matmul_scatter_kernel) == 1:
         finalize_matmul_scatter_kernel = finalize_matmul_scatter_kernel[0]
-        inject_pseudo_op(
+        inject_pseudo_op_above_launcher(
             trace_tree,
             finalize_matmul_scatter_kernel,
             "pseudo_op::moe_triton_unfused_finalize_matmul_scatter",

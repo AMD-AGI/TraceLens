@@ -55,7 +55,7 @@ def set_bookkeeping_attr(tree, event: dict):
         tree.seq_num2event_uids_map[seq_num].append(UID)
 
 
-def inject_pseudo_op(
+def inject_pseudo_op_above_launcher(
     tree,
     kernel_evt,
     name,
@@ -139,7 +139,7 @@ def inject_pseudo_op_wrap_children(
     Create pseudo op that wraps all children of a parent event.
     Creates: Parent → Pseudo Op → [all original children]
 
-    Unlike inject_pseudo_op (which isolates a single kernel), this wraps
+    Unlike inject_pseudo_op_above_launcher (which isolates a single kernel), this wraps
     the entire subtree under a parent into a single pseudo op.
 
     Args:
@@ -203,7 +203,7 @@ def inject_pseudo_op_wrap_children(
     tree.cpu_root_nodes.append(pseudo_evt["UID"])
 
 
-def inject_pseudo_op_above_event(
+def inject_pseudo_op_above_cpu_op(
     tree,
     target_evt,
     name,
@@ -232,7 +232,7 @@ def inject_pseudo_op_above_event(
     parent_evt = tree.get_parent_event(target_evt)
     if parent_evt is None:
         logger.warning(
-            f"inject_pseudo_op_above_event: target UID {target_evt.get('UID')} "
+            f"inject_pseudo_op_above_cpu_op: target UID {target_evt.get('UID')} "
             f"has no parent; skipping injection of {name}"
         )
         return None

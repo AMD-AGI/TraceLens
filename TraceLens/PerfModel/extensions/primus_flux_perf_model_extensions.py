@@ -231,7 +231,7 @@ import collections
 
 from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
     get_bwd_ops_for_fwd_op,
-    set_bookkeeping_attr,
+    inject_pseudo_op_above_cpu_op,
 )
 
 _GEMM_OP_NAMES = frozenset(
@@ -247,46 +247,6 @@ def _suffix_for_op(name):
     if "a6w4" in name:
         return "a6w4"
     return "gemm"
-
-
-def _inject_pseudo_op(tree, orig_event, pseudo_name):
-    """Wrap *orig_event* in a pseudo CPU op named *pseudo_name*."""
-    parent_uid = orig_event.get("parent")
-    if parent_uid is None:
-        return
-    parent_event = tree.get_UID2event(parent_uid)
-
-    pseudo_evt = {
-        "ph": "X",
-        "name": pseudo_name,
-        "cat": "cpu_op",
-        "pid": orig_event["pid"],
-        "tid": orig_event["tid"],
-        "ts": orig_event["ts"],
-        "dur": orig_event.get("dur", 0),
-        "args": {
-            "Input Dims": orig_event["args"].get("Input Dims", []),
-            "Input type": orig_event["args"].get("Input type", []),
-            "Input Strides": orig_event["args"].get("Input Strides", []),
-            "Concrete Inputs": orig_event["args"].get("Concrete Inputs", []),
-            "Sequence number": orig_event["args"].get("Sequence number", 0),
-            "External id": orig_event["args"].get("External id", 0),
-            "Pseudo op": True,
-        },
-        "parent": parent_uid,
-        "children": [orig_event["UID"]],
-        "gpu_events": orig_event.get("gpu_events", []),
-    }
-    set_bookkeeping_attr(tree, pseudo_evt)
-
-    children = parent_event.get("children", [])
-    if orig_event["UID"] in children:
-        idx = children.index(orig_event["UID"])
-        children[idx] = pseudo_evt["UID"]
-    else:
-        children.append(pseudo_evt["UID"])
-
-    orig_event["parent"] = pseudo_evt["UID"]
 
 
 def _collect_gemm_children(tree, parent_event):
@@ -319,7 +279,9 @@ def _label_fwd_gemms(tree, fwd_event, prefix, processed_uids):
             continue
         processed_uids.add(gemm_evt["UID"])
         suffix = _suffix_for_op(gemm_evt["name"])
-        _inject_pseudo_op(tree, gemm_evt, f"{prefix}_yfwd_{suffix}")
+        inject_pseudo_op_above_cpu_op(
+            tree, gemm_evt, f"{prefix}_yfwd_{suffix}", shape_donor_evt=gemm_evt
+        )
 
 
 def _label_bwd_gemms(tree, fwd_event, prefix, processed_uids):
@@ -331,7 +293,12 @@ def _label_bwd_gemms(tree, fwd_event, prefix, processed_uids):
             processed_uids.add(gemm_evt["UID"])
             suffix = _suffix_for_op(gemm_evt["name"])
             label = "xgrad" if i == 0 else "wgrad"
-            _inject_pseudo_op(tree, gemm_evt, f"{prefix}Backward_{label}_{suffix}")
+            inject_pseudo_op_above_cpu_op(
+                tree,
+                gemm_evt,
+                f"{prefix}Backward_{label}_{suffix}",
+                shape_donor_evt=gemm_evt,
+            )
 
 
 def tree_postprocess_extension(trace_tree):
