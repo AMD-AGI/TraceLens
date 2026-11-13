@@ -8,7 +8,8 @@
 
 Covers ``TraceLens/TraceUtils/kernel_shape_tool/sitecustomize.py``: env-flag
 gating, lazy profiler resolution, the ``torch.profiler`` start/stop wrapping and
-``record_shapes`` forcing, and the pending-patch import hook. The module is
+``record_shapes`` forcing, the SGLang startup-discovery hook, and the
+pending-patch import hook. The module is
 loaded under a private name (never the real ``sitecustomize``) and every global
 it patches (``builtins.__import__``, ``torch.profiler`` internals) is captured
 and restored so the shim cannot leak into the rest of the test session.
@@ -17,6 +18,7 @@ and restored so the shim cannot leak into the rest of the test session.
 import builtins
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -96,6 +98,7 @@ def hermetic_engine(monkeypatch):
 
     monkeypatch.setattr(ksp, "_force_import_submodules", lambda _prefix: None)
     monkeypatch.setattr(ksp, "_KERNEL_ENTRY_POINTS", [])
+    monkeypatch.setattr(ksp, "_discovered_entry_points", None)
     return ksp
 
 
@@ -259,6 +262,95 @@ class TestProfilerPatching:
         finally:
             if ksp.is_enabled():
                 ksp.disable()
+
+
+# ---------------------------------------------------------------------------
+# Startup discovery from the SGLang scheduler
+# ---------------------------------------------------------------------------
+
+_SCHED_MOD = "sglang.srt.managers.scheduler"
+
+
+class TestSchedulerHook:
+    @pytest.fixture
+    def scheduler_cls(self, monkeypatch):
+        class Scheduler:
+            def get_init_info(self, tag="ready"):
+                return {"status": tag}
+
+        mod = types.ModuleType(_SCHED_MOD)
+        mod.Scheduler = Scheduler
+        monkeypatch.setitem(sys.modules, _SCHED_MOD, mod)
+        return Scheduler
+
+    @pytest.fixture
+    def prepares(self, site, monkeypatch):
+        calls = []
+        fake = types.SimpleNamespace(prepare=lambda: calls.append(1))
+        monkeypatch.setattr(site, "_get_profiler", lambda: fake)
+        return calls
+
+    def test_waits_while_module_is_executing(self, site, monkeypatch):
+        # The import hook can fire before ``class Scheduler`` has been executed.
+        monkeypatch.setitem(sys.modules, _SCHED_MOD, types.ModuleType(_SCHED_MOD))
+        assert site._patch_sglang_scheduler() is False
+
+    def test_prepares_once_per_scheduler(
+        self, site, monkeypatch, scheduler_cls, prepares
+    ):
+        assert site._patch_sglang_scheduler() is True
+        assert site._patch_sglang_scheduler() is True  # already patched
+        monkeypatch.setenv("TRACELENS_SHAPE_DISCOVERY", "1")
+
+        sched = scheduler_cls()
+        assert sched.get_init_info(tag="up") == {"status": "up"}
+        assert sched.get_init_info() == {"status": "ready"}
+        assert prepares == [1]
+        scheduler_cls().get_init_info()
+        assert prepares == [1, 1]
+
+    def test_skips_prepare_when_flag_off(self, site, scheduler_cls, prepares):
+        site._patch_sglang_scheduler()
+        assert scheduler_cls().get_init_info() == {"status": "ready"}
+        assert prepares == []
+
+    def test_prepare_errors_do_not_block_startup(
+        self, site, monkeypatch, scheduler_cls
+    ):
+        def boom():
+            raise RuntimeError("discovery failed")
+
+        monkeypatch.setattr(
+            site, "_get_profiler", lambda: types.SimpleNamespace(prepare=boom)
+        )
+        monkeypatch.setenv("TRACELENS_SHAPE_DISCOVERY", "1")
+        site._patch_sglang_scheduler()
+        assert scheduler_cls().get_init_info() == {"status": "ready"}
+
+    def test_prepare_drives_real_engine(
+        self, site, monkeypatch, scheduler_cls, hermetic_engine
+    ):
+        ksp = hermetic_engine
+        calls = []
+        monkeypatch.setattr(
+            ksp, "_discover_kernel_entry_points", lambda: calls.append(1) or []
+        )
+        monkeypatch.setenv("TRACELENS_SHAPE_DISCOVERY", "1")
+        site._patch_sglang_scheduler()
+
+        scheduler_cls().get_init_info()
+        assert calls == [1]
+        assert ksp.is_enabled() is False
+        # The first window reuses the startup discovery.
+        try:
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ):
+                assert ksp.is_enabled() is True
+        finally:
+            if ksp.is_enabled():
+                ksp.disable()
+        assert calls == [1]
 
 
 # ---------------------------------------------------------------------------

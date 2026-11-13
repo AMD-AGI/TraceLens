@@ -60,8 +60,8 @@ def _enable_profiler() -> None:
     try:
         if _shape_discovery_on():
             _get_profiler().enable()
-    except Exception:
-        pass
+    except Exception as e:
+        sys.stderr.write(f"[tracelens-shape] enable failed: {e!r}\n")
 
 
 def _disable_profiler() -> None:
@@ -187,11 +187,40 @@ def _patch_torch_cuda_profiler() -> bool:
     return True
 
 
-# Pending-patch registry + import hook. Only profiler entry points are patched
-# here; launcher wrapping is done by kernel_shape_profiler.enable() on demand.
+# Run discovery when an SGLang scheduler finishes init: the model is loaded and graphs
+# are captured, and the scheduler hasn't reported ready, so the scan delays startup
+# instead of stalling the first profiler window. get_init_info() is called right
+# before the ready message; __init__ could already be running when this patch lands.
+def _patch_sglang_scheduler() -> bool:
+    mod = sys.modules.get("sglang.srt.managers.scheduler")
+    cls = getattr(mod, "Scheduler", None)
+    orig = getattr(cls, "get_init_info", None)
+    if orig is None:
+        return False  # module still executing; retried on the next import
+    if getattr(cls, "_tracelens_prepare_patched", False):
+        return True
+
+    def _get_init_info(self, *a, **kw):
+        if _shape_discovery_on() and not getattr(self, "_tracelens_prepared", False):
+            self._tracelens_prepared = True
+            try:
+                _get_profiler().prepare()
+            except Exception as e:
+                sys.stderr.write(f"[tracelens-shape] prepare failed: {e!r}\n")
+        return orig(self, *a, **kw)
+
+    cls.get_init_info = _get_init_info
+    cls._tracelens_prepare_patched = True
+    return True
+
+
+# Pending-patch registry + import hook. Only profiler entry points and the startup
+# discovery hook are patched here; launcher wrapping is done by
+# kernel_shape_profiler.enable() on demand.
 _PENDING_PATCHES = {
     "torch.profiler": _patch_torch_profiler_both,
     "torch.cuda.profiler": _patch_torch_cuda_profiler,
+    "sglang.srt.managers.scheduler": _patch_sglang_scheduler,
 }
 
 

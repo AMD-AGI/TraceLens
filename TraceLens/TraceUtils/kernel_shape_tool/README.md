@@ -31,7 +31,7 @@ serving-framework source is patched.
 | File | Role |
 |------|------|
 | `kernel_shape_profiler.py` | Wraps launcher functions as custom ops and rebinds every module-level reference to them. |
-| `sitecustomize.py` | Auto-loaded shim that drives `enable()` / `disable()` from the torch-profiler window so nothing is wrapped outside a profiling run. |
+| `sitecustomize.py` | Auto-loaded shim that drives `enable()` / `disable()` from the torch-profiler window so nothing is wrapped outside a profiling run, and runs discovery at SGLang scheduler startup. |
 
 ## Activation
 
@@ -47,12 +47,39 @@ so the server and all TP workers pick it up. When `TRACELENS_SHAPE_DISCOVERY`
 is unset or `0`, every hook short-circuits, so it is safe to leave the directory
 on `PYTHONPATH` permanently.
 
+### When discovery runs
+
+Auto-discovery imports and scans every module under the target prefixes, which
+takes several seconds on a large server. On SGLang it runs once per scheduler
+process, at the end of scheduler init (from `Scheduler.get_init_info()`, just
+before the scheduler reports ready), so it adds to startup instead of stalling
+the first profiler window. Each window's `enable()` then only rebinds
+references (well under a second). On other servers, or if the hook can't be installed,
+the first `enable()` runs discovery itself; the result is cached for later
+windows either way. `kernel_shape_profiler.prepare()` is the same step for
+callers that want to trigger it themselves.
+
+Each log line reports the split, for example:
+
+```
+kernel_shape_profiler prepared: 3590 entry points (41 explicit + 3549 auto-discovered), 3553 wrappers; 6.4 s (discover 6.3)
+kernel_shape_profiler enabled: 5644 references patched across 3590 entry points (41 explicit + 3549 auto-discovered), 0 of them decorator closures; 0.1 s (discover 0.0, wrap 0.0, patch 0.1)
+```
+
 ### Optional knobs
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
 | `TRACELENS_SHAPE_DISCOVERY` | `0` | Master switch |
 | `TRACELENS_SHAPE_FORCE_RECORD_SHAPES` | `1` | Force `record_shapes=True` on the profiler (`Input Dims` only surface when shapes are recorded). Set `0` to respect the server's own setting. |
+
+### Launchers with unannotated tensors
+
+Discovery and custom-op registration read tensor params from type annotations.
+A launcher whose tensors are bare can't be registered from its signature alone;
+`_TENSOR_PARAM_HINTS` names their schema types (aiter's `unified_attention`
+annotates only its flags). A launcher with some params unannotated falls back
+to the source check instead of being excluded by its non-tensor annotations.
 
 > Note on CUDA graphs: kernels that only run inside replayed graphs execute no
 > Python, so their shapes are recorded at graph **capture** time. A decode-path
