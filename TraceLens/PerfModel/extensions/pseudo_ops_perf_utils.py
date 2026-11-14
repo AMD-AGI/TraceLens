@@ -83,6 +83,9 @@ def _get_attention_mappings():
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
         "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
         "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,
+        "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
+        "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
+        "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
     }
 
 

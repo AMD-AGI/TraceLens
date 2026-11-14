@@ -136,6 +136,9 @@ from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
     pseudo_v4_paged_decode_hca,
     pseudo_v4_paged_decode_swa,
     sgl_kernel_fast_topk_transform_fused,
+    sgl_kernel_deepseek_v4_topk_transform_512,
+    sgl_kernel_fast_topk,
+    fused_k_norm_rope_q_flashmla,
     vllm_unified_mla_attention_with_output,
 )
 from TraceLens.PerfModel.kernel_name_parser import parse_rocm_gemm
@@ -197,6 +200,12 @@ class TestPseudoOpsPerfUtils:
             mappings["sgl_kernel::fast_topk_transform_fused"]
             is sgl_kernel_fast_topk_transform_fused
         )
+        assert (
+            mappings["sgl_kernel::deepseek_v4_topk_transform_512"]
+            is sgl_kernel_deepseek_v4_topk_transform_512
+        )
+        assert mappings["sgl_kernel::fast_topk"] is sgl_kernel_fast_topk
+        assert mappings["fused_k_norm_rope_q_flashmla"] is fused_k_norm_rope_q_flashmla
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -7072,3 +7081,114 @@ def test_fused_fp8_bmm_rope_cat_and_cache_mla():
     write_q = 12 * 8 * (512 + 64) * 1
     write_kv = 12 * 1 * (512 + 64) * 1
     assert model.bytes() == read_q + read_w + read_k + write_q + write_kv
+
+
+class TestFlashDSv41PerfModels:
+    _ANN = (
+        "execute_8_context_0(sq0sk0sqsq0sqsk0)"
+        "_generation_8(sq8sk815046sqsq8sqsk815046)"
+    )
+
+    def test_deepseek_v4_topk_transform_512(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {
+                "Input Dims": [(8, 1048640), (8,), (8, 8194), (8, 512), (), ()],
+                "Input type": ["float", "int", "int", "int", "Scalar", ""],
+            },
+        }
+        model = sgl_kernel_deepseek_v4_topk_transform_512(event)
+        # Annotation sqsk compressed by CSA stride 4.
+        assert model.flops() == (815046 + 3) // 4
+        assert model.param_details["topk"] == 512
+        assert model.get_compute_precision() == "fp32"
+        assert model.bytes() > 0
+        assert model.get_maf_type() == "vector"
+        # DSV4-Pro topk comes from dst page-table width (1024), not the op name.
+        pro = sgl_kernel_deepseek_v4_topk_transform_512(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": [(8, 1048640), (8,), (8, 8194), (8, 1024), (), ()],
+                    "Input type": ["float", "int", "int", "int", "Scalar", ""],
+                },
+            }
+        )
+        assert pro.param_details["topk"] == 1024
+        assert pro.flops() == model.flops()
+        no_ann = sgl_kernel_deepseek_v4_topk_transform_512(
+            {"annotation": "NA", "args": event["args"]}
+        )
+        assert no_ann.flops() is None
+        assert no_ann.bytes() is None
+        unknown_dtype = sgl_kernel_deepseek_v4_topk_transform_512(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": event["args"]["Input Dims"],
+                    "Input type": ["not_a_dtype", "int", "int", "int"],
+                },
+            }
+        )
+        assert unknown_dtype.bytes() is None
+        with pytest.raises(NotImplementedError):
+            model.flops_bwd()
+        with pytest.raises(NotImplementedError):
+            model.bytes_bwd()
+
+    def test_sgl_kernel_fast_topk(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {
+                "Input Dims": [(8, 131584), (8, 2048), (8,), ()],
+                "Input type": ["float", "int", "int", ""],
+            },
+        }
+        model = sgl_kernel_fast_topk(event)
+        assert model.flops() == (815046 + 3) // 4
+        assert model.bytes() > 0
+        assert model.get_maf_type() == "vector"
+        assert model.get_compute_precision() == "fp32"
+        no_ann = sgl_kernel_fast_topk({"annotation": "NA", "args": event["args"]})
+        assert no_ann.flops() is None
+        assert no_ann.bytes() is None
+        unknown_dtype = sgl_kernel_fast_topk(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": event["args"]["Input Dims"],
+                    "Input type": ["not_a_dtype", "int"],
+                },
+            }
+        )
+        assert unknown_dtype.bytes() is None
+        with pytest.raises(NotImplementedError):
+            model.flops_bwd()
+        with pytest.raises(NotImplementedError):
+            model.bytes_bwd()
+
+    def test_fused_k_norm_rope_q_flashmla(self):
+        rope = fused_k_norm_rope_q_flashmla(
+            {"annotation": self._ANN, "args": {"d_h": 512, "rope_dim": 64}}
+        )
+        assert rope.flops() > 0
+        assert rope.bytes() > 0
+        assert rope.get_compute_precision() == "bf16"
+        assert rope.get_maf_type() == "vector"
+        # Fallback to stamped num_tokens when annotation is not parseable.
+        stamped = fused_k_norm_rope_q_flashmla(
+            {"annotation": "NA", "args": {"num_tokens": 8, "d_h": 512, "rope_dim": 64}}
+        )
+        assert stamped.flops() > 0
+        assert stamped.bytes() > 0
+        # No tokens → _no_perf path.
+        empty = fused_k_norm_rope_q_flashmla({"annotation": "NA", "args": {}})
+        assert empty.flops() is None
+        assert empty.bytes() is None
+        assert empty.get_compute_precision() is None
+        # Outer except: non-int geometry stamps.
+        bad = fused_k_norm_rope_q_flashmla(
+            {"annotation": "NA", "args": {"num_tokens": "x", "d_h": "y"}}
+        )
+        assert bad.param_details.get("_no_perf")
+        assert bad.flops() is None
