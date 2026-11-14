@@ -126,6 +126,7 @@ def inject_pseudo_op_above_launcher(
     children = orig_cpu_evt["children"]
     children.remove(launcher_evt["UID"])
     children.append(pseudo_evt["UID"])
+    launcher_evt["parent"] = pseudo_evt["UID"]
 
 
 def inject_pseudo_op_wrap_children(
