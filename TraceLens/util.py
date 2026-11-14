@@ -39,6 +39,14 @@ _NATIVE_LOG_NOISE = re.compile(
 
 
 @contextlib.contextmanager
+
+def optional_int(value, default=None):
+    """Parse *value* as int, returning *default* when conversion fails."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 def suppress_native_hlo_logs():
     """Filter benign native XLA ``id > INT_MAX`` stderr during a call.
 

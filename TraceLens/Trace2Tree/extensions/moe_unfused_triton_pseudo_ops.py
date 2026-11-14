@@ -6,7 +6,7 @@
 
 import logging
 
-from TraceLens.PerfModel.utils import optional_int
+from TraceLens.util import optional_int
 
 from .pseudo_ops_utils import inject_pseudo_op_above_launcher
 
