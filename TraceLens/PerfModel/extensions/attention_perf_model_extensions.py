@@ -1387,3 +1387,266 @@ class rocm_aiter_sparse_attn_indexer(InferenceAttention):
 
     def get_maf_type(self):
         return "matrix"
+
+
+def _compressed_indexer_valid_scores(stats, stride=None):
+    """Causal-corrected sq*sk mapped into compressed indexer slots.
+
+    Annotation ``sk`` is in token space. Flash CSA lightning-indexer scores
+    against keys compressed by ``stride`` (default
+    ``_V4PagedDecodeBase.CSA_COMPRESS_STRIDE``). Using uncompressed sqsk
+    over-counts decode bytes vs hardware counters by roughly that factor.
+    """
+    if stride is None:
+        stride = _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+    stride = max(int(stride), 1)
+    total = 0
+    for phase in ("c", "g"):
+        dense = (
+            stats[f"{phase}_sqsk"]
+            - (stats[f"{phase}_sqsq"] - stats[f"{phase}_sq"]) // 2
+        )
+        if dense > 0:
+            total += (int(dense) + stride - 1) // stride
+    return total
+
+
+class sgl_kernel_deepseek_v4_topk_transform_512:
+    """
+    Perf model for ``sgl_kernel::deepseek_v4_topk_transform_512``.
+
+    Flash / DeepSeek-V4 indexer path: select top-k score indices and rewrite
+    them into a paged dst page-table (optionally gathering from a src table).
+    Despite the ``_512`` suffix in the op name, ``topk`` is the dst page-table
+    width from ``Input Dims`` (commonly 512 on Flash, 1024 on DSV4-Pro).
+
+    Approximate signature (SGLang / sgl_kernel)::
+
+        deepseek_v4_topk_transform_512(
+            score,           # [rows, L_max], score dtype (often float/fp32)
+            lengths,         # [rows], int — valid score count per row
+            src_page_table,  # [rows, aux] or similar, int indices
+            dst_page_table,  # [rows, topk], int — top-k / page indices
+            ...              # scalars / unused trailing args
+        )
+
+    Expected ``Input Dims`` / ``Input type``:
+        [0] score (rows, L_max) — dtype score
+        [1] lengths (rows,) — int
+        [2] src/aux indices — int
+        [3] dst / topk indices (rows, topk) — int; ``topk`` from this width
+    Non-tensor: step annotation supplies causal sq/sk; valid score traffic is
+    compressed by the CSA indexer stride (see ``_compressed_indexer_valid_scores``).
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            rows = dims[0][0]
+            # topk from dst page-table width (Flash 512 / Pro 1024), not the op name.
+            topk = dims[3][1] if len(dims) > 3 and dims[3] and len(dims[3]) > 1 else 512
+            params = {
+                "rows": rows,
+                "topk": topk,
+                "dtype_score": types[0],
+                "dtype_page_table": types[3] if len(types) > 3 else "int",
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params.update(stats)
+        params["valid_scores"] = _compressed_indexer_valid_scores(stats)
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["valid_scores"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_score = name2bpe(p["dtype_score"])
+        bpe_idx = name2bpe(p["dtype_page_table"]) or 4
+        if bpe_score is None:
+            return None
+        rows, topk = p["rows"], p["topk"]
+        gathered = min(topk, p["valid_scores"] / rows) if rows else 0
+        read_scores = p["valid_scores"] * bpe_score
+        return read_scores + rows * (gathered + topk) * bpe_idx
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class sgl_kernel_fast_topk:
+    """
+    Perf model for ``sgl_kernel::fast_topk`` (Flash decode indexer selection).
+
+    Selects the top-k score indices per row from a (possibly padded) score
+    buffer; used on the Flash decode indexer path alongside
+    ``deepseek_v4_topk_transform_512``.
+
+    Approximate signature (SGLang / sgl_kernel)::
+
+        fast_topk(
+            score,      # [rows, L_max], score dtype (often float/fp32)
+            topk_idx,   # [rows, topk], int — written top-k indices
+            lengths,    # [rows], int — valid score count per row
+            ...
+        )
+
+    Expected ``Input Dims`` / ``Input type``:
+        [0] score (rows, L_max) — dtype score
+        [1] topk_idx (rows, topk) — int; ``topk`` from this width
+        [2] lengths (rows,) — int
+    Non-tensor: step annotation supplies causal sq/sk; valid score traffic is
+    compressed by the CSA indexer stride (see ``_compressed_indexer_valid_scores``).
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            rows, l_max = dims[0][0], dims[0][1]
+            topk = dims[1][1] if len(dims) > 1 and dims[1] and len(dims[1]) > 1 else 0
+            params = {
+                "rows": rows,
+                "l_max": l_max,
+                "topk": topk,
+                "dtype_score": types[0],
+                "dtype_idx": types[1] if len(types) > 1 else "int",
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params.update(stats)
+        params["valid_scores"] = _compressed_indexer_valid_scores(stats)
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["valid_scores"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_score = name2bpe(p["dtype_score"])
+        bpe_idx = name2bpe(p["dtype_idx"]) or 4
+        if bpe_score is None:
+            return None
+        rows, topk = p["rows"], p["topk"]
+        return p["valid_scores"] * bpe_score + rows * topk * bpe_idx
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for fast_topk is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for fast_topk is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class fused_k_norm_rope_q_flashmla:
+    """
+    FlashMLA fused K-RMSNorm + RoPE + Q prep
+    (`fused_k_norm_rope_q_flashmla` / `fused_k_norm_rope_flashmla_with_q`).
+
+    Geometry from injector stamps (tokens, head_dim=512, rope_dim=64 defaults).
+    """
+
+    category = "FusedRoPE"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            args = event.get("args") or {}
+            annotation = str(event.get("annotation", "NA"))
+            try:
+                stats = InferenceAttention._parse_chunk_stats(annotation)
+                tokens = stats["c_sq"] + stats["g_sq"]
+            except (NotImplementedError, ValueError, TypeError):
+                tokens = int(args.get("num_tokens") or 0)
+            d_h = int(args.get("d_h") or 512)
+            rope_dim = int(args.get("rope_dim") or 64)
+            if tokens <= 0:
+                return {"_no_perf": True}
+            return {
+                "tokens": tokens,
+                "d_h": d_h,
+                "rope_dim": rope_dim,
+                "dtype": "c10::BFloat16",
+            }
+        except (ValueError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # RMSNorm ~2*d_h + RoPE ~6*rope_dim per token (sin/cos apply pair)
+        return p["tokens"] * (2 * p["d_h"] + 6 * p["rope_dim"])
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe = name2bpe(p["dtype"]) or 2
+        # read K + write rotated K (+ optional Q touch ~ same width)
+        return 3 * p["tokens"] * p["d_h"] * bpe
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "bf16"
+
+    def get_maf_type(self):
+        return "vector"
