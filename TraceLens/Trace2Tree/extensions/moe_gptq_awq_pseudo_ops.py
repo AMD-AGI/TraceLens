@@ -6,9 +6,9 @@
 
 import logging
 
-from TraceLens.PerfModel.utils import optional_int
+from TraceLens.util import optional_int
 
-from .pseudo_ops_utils import inject_pseudo_op
+from .pseudo_ops_utils import inject_pseudo_op_above_launcher
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ def _create_pseudo_op_moe_gptq_awq(trace_tree, moe_op_event: dict):
             "MoE topk": topk,
         }
 
-        inject_pseudo_op(
+        inject_pseudo_op_above_launcher(
             trace_tree,
             kernel,
             pseudo_op_name,

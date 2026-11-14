@@ -6349,13 +6349,6 @@ class aiter_gemm_a4w4(GEMM):
     The internal `aiter::_gemm_a4w4_asm` cpu_op (the leaf launching the GPU
     kernel) uses the same first 4 slots plus an output tensor at slot 4;
     both events share this class. See `op_to_perf_model_class_map`.
-
-    `primus_turbo::gemm_fp4_impl` (the dispatcher wrapper around either this
-    op or `hipblaslt_gemm_fp4`) is intentionally NOT registered: it is a
-    pass-through that never launches a kernel of its own, so the tree-perf
-    leaf-walker attributes all GPU time to the inner cpu_op (this class or
-    `hipblaslt_gemm_fp4`) and the dispatcher contributes 0 GPU time to any
-    category breakdown.
     """
 
     @staticmethod
@@ -6410,6 +6403,90 @@ class aiter_gemm_a4w4(GEMM):
         # param_details (dtype_A_B, dtype_scaleA, dtype_scaleB), all of which
         # this class populates identically.
         return hipblaslt_gemm_fp4.bytes(self)
+
+
+class gemm_fp4_impl(GEMM):
+    """
+    primus_turbo::gemm_fp4_impl — MXFP4 GEMM dispatcher.
+
+    When this op appears as the leaf cpu_op (no inner ``hipblaslt_gemm_fp4``
+    or ``aiter_gemm_a4w4`` children), it dispatches directly to the
+    MFMA_F32_32x32x64_F4 matrix instruction on gfx950.
+
+    Dual MXFP4 GEMM: Y[M, N] = dequant(A[M, K]) @ dequant(B[N, K]).T
+    where A and B are FP4 E2M1 packed as Float4_e2m1fn_x2 (two values per byte)
+    with per-32-element E8M0 block scales.
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 2 * M * N * K   (standard GEMM)
+
+    Roofline calculation -- Bytes:
+        bytes_A      = M * K * 0.5                # FP4 packed
+        bytes_B      = N * K * 0.5                # FP4 packed
+        bytes_output = M * N * bpe(output)         # BF16 -> 2 bytes
+        bytes_bias   = N * bpe(bias) if bias
+        bytes_A_scale = dims[1] elems * bpe(types[1])   # E8M0 per-group scales
+        bytes_B_scale = dims[4] elems * bpe(types[4])   # E8M0 per-group scales
+
+    Expected Input Dims from trace:
+        [[M, K//2], [M, K//32], [], [N, K//2], [N, K//32],
+         [], [], [], [], [], [], [N]_or_[], []_or_[M,K//32], []_or_[N,K//32]]
+
+    Expected Input type from trace:
+        [Float4_e2m1fn_x2, Float8_e8m0fnu, Scalar, Float4_e2m1fn_x2,
+         Float8_e8m0fnu, Scalar, ...]
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        concrete = event["args"].get("Concrete Inputs", []) or []
+        M = dims[0][0]
+        K_packed = dims[0][1]
+        K = K_packed * 2  # Float4_e2m1fn_x2 packs two FP4 values per byte
+        N = dims[3][0]
+        has_bias = len(dims[11]) > 0
+        return {
+            "B": 1,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": has_bias,
+            "dtype_A_B": (
+                types[0],
+                types[3],
+                concrete[6] if len(concrete) > 6 else None,
+            ),
+            "bias_dtype": types[11] if has_bias else None,
+            "a_scale_shape": tuple(dims[1]),
+            "b_scale_shape": tuple(dims[4]),
+            "scale_dtype": types[1],
+            "has_out_scales": (len(dims) > 12 and dims[12] and len(dims[12]) > 0),
+        }
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        dtype_A_B = self.param_details["dtype_A_B"]
+        M, N, K = self.M, self.N, self.K
+        bpe_A = name2bpe(dtype_A_B[0])
+        bpe_B = name2bpe(dtype_A_B[1])
+        bpe_output = scalar_type_bpe(dtype_A_B[2])
+        bytes_A = M * (K // 2) * bpe_A
+        bytes_B = N * (K // 2) * bpe_B
+        bytes_output = M * N * bpe_output
+        bytes_bias = (
+            N * name2bpe(self.param_details["bias_dtype"])
+            if self.param_details["bias"]
+            else 0
+        )
+        bpe_scale = name2bpe(self.param_details["scale_dtype"])
+        bytes_b_scale = prod(self.param_details["b_scale_shape"]) * bpe_scale
+        return bytes_A + bytes_B + bytes_output + bytes_bias + bytes_b_scale
+
+    def get_compute_precision(self):
+        return torch_dtype_map(
+            "mxfp4"
+        )  # Compute precision not in trace; determined by GPU MFMA instruction selection.
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

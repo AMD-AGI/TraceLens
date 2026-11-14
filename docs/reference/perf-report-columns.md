@@ -824,7 +824,7 @@ Extending with custom operations: performance metrics sheets are only generated 
 2. Implementing `get_param_details()`, `flops()`, and `bytes()` methods.
 3. Passing an extension file using `--extension_file` when generating the report.
 
-See [`examples/example_megatron_extension.py`](https://github.com/AMD-AGI/TraceLens/blob/main/examples/example_megatron_extension.py) for a complete example of extending TraceLens with custom Megatron operations.
+See [`TraceLens/PerfModel/extensions/megatron_perf_model_extensions.py`](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/PerfModel/extensions/megatron_perf_model_extensions.py) for a complete example of extending TraceLens with custom Megatron operations.
 
 ```{note}
 If your custom operation is frequently used across multiple projects, it can be added as a native operation in TraceLens. Open an issue or reach out to discuss integration.

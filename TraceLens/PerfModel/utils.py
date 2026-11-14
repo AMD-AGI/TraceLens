@@ -8,13 +8,7 @@
 Utils. for perf. model.
 """
 
-
-def optional_int(value, default=None):
-    """Parse *value* as int, returning *default* when conversion fails."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+from TraceLens.util import optional_int  # noqa: F401
 
 
 def optional_float(value, default=0.0):
@@ -256,6 +250,7 @@ def name2bpe(name):
     element (two FP4 values). ``fp4`` is one logical value, half a byte, for
     callers that have already unpacked K.
     """
+
     if name is None:
         return None
     key = str(name).strip().lower().split("::")[-1]
@@ -284,6 +279,10 @@ def scalar_type_bpe(token):
         return None
     return name2bpe(name)
 
+
+# MXFP4 block size: number of FP4 elements that share one E8M0 scale value.
+# Fixed at 32 by the OCP Microscaling spec.
+MXFP4_GROUP_SIZE = 32
 
 # Keys are stored without a namespace, because torch_dtype_map strips one off
 # its input before looking it up. That way "c10::Half" and the already-stripped

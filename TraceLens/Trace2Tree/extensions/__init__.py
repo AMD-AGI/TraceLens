@@ -6,14 +6,14 @@
 
 from .pseudo_ops_registry import apply_pseudo_op_extensions
 from .pseudo_ops_utils import (
-    inject_pseudo_op,
-    inject_pseudo_op_above_event,
+    inject_pseudo_op_above_launcher,
+    inject_pseudo_op_above_cpu_op,
     set_bookkeeping_attr,
 )
 
 __all__ = [
     "apply_pseudo_op_extensions",
-    "inject_pseudo_op",
-    "inject_pseudo_op_above_event",
+    "inject_pseudo_op_above_launcher",
+    "inject_pseudo_op_above_cpu_op",
     "set_bookkeeping_attr",
 ]
