@@ -163,6 +163,7 @@ def get_pseudo_op_mappings():
         "aiter::dynamic_per_group_scaled_quant_fp4": perf_model_extensions.aiter_dynamic_per_group_scaled_quant_fp4,
         "aiter::_gemm_a8w8_blockscale_bpreshuffle_asm": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::mhc_post": perf_model_extensions.mhc_post,
+        "sglang_profiler::hc_combine_hc_combine_split": perf_model_extensions.sglang_hc_combine_split,
         "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
         "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
         "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,
