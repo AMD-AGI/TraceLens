@@ -308,6 +308,31 @@ class TestRmsNormExtensions:
         assert model.flops() > 0
         assert model.bytes() > 0
 
+    def test_fused_norm_residual_triton(self):
+        # Backfilled Synthetic Op: fp32 residual + bf16 hidden, both [M, N].
+        event = {
+            "name": (
+                "launcher_shapes::forward_triton->"
+                "_fused_norm_residual_triton_kernel (Synthetic Op)"
+            ),
+            "args": {
+                "Input Dims": [(1360, 8192), (1360, 8192)],
+                "Input type": ("float", "c10::BFloat16"),
+                "Input Strides": [(8192, 1), (8192, 1)],
+            },
+        }
+        model = rms_ext.fused_norm_residual_triton(event)
+        M, N = 1360, 8192
+        assert model.num_channels == N
+        assert model.num_elems == M * N
+        assert model.get_compute_precision() == "bf16"
+        assert model.get_maf_type() == "vector"
+        # residual-add (num_elems) + RMSNorm (inherited)
+        assert model.flops() == M * N + (M * (2 * N + 2) + M * N * 2)
+        # 2 * num_elems * (bpe_fp32 + bpe_bf16) + affine weight (N * bpe_bf16)
+        assert model.bytes() == 2 * M * N * (4 + 2) + N * 2
+        assert model.flops() / model.bytes() < 1  # memory-bound
+
 
 class TestCustomCollectivesExtensions:
     def test_custom_ar_all_reduce(self):
@@ -392,6 +417,74 @@ class TestAttentionExtensions:
         expected_flops = 64 * 8 * 7 * 128 * 64
         assert model.flops() == expected_flops
         assert model.bytes() > 0
+
+    def test_muse_extend_synthetic(self):
+        # Backfilled Synthetic Op: head geometry and dtypes come from
+        # Input Dims / Input type, token aggregates from the step[EXTEND ...]
+        # annotation. Dims are the real ones captured from the backfill report.
+        event = {
+            "name": (
+                "launcher_shapes::muse_extend_attention->"
+                "_muse_extend_kernel (Synthetic Op)"
+            ),
+            "annotation": (
+                "step[EXTEND bs=1 c_sq=1360 c_sqsq=1849600 " "c_sqsk=1849600 c_sk=1360]"
+            ),
+            "args": {
+                "Input Dims": [
+                    (1360, 16, 64),  # Q: tokens, H_Q, d_h_qk
+                    (1005413, 16, 2, 64),  # K cache: blocks, block, H_KV, d
+                    (1005413, 16, 2, 64),  # V cache
+                    (1360, 16, 64),  # output: tokens, H_Q, d_h_v
+                    (2,),
+                    (1,),
+                    (1, 10426),
+                    (1,),
+                    (1,),
+                    (1,),
+                ],
+                "Input type": (
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "long int",
+                    "int",
+                    "float",
+                    "float",
+                    "float",
+                ),
+            },
+        }
+        model = aext.muse_extend_synthetic(event, arch={})
+        assert model.H_Q == 16
+        assert model.H_KV == 2  # paged cache [num_blocks, block, H_KV, head_dim]
+        assert model.d_h_qk == 64
+        assert model.d_h_v == 64
+        assert model.param_details["dtype_Q"] == "c10::Float8_e4m3fn"
+        assert model.param_details["dtype_KV"] == "c10::Float8_e4m3fn"
+        assert model.param_details["causal"] is True
+        assert model.get_compute_precision() == "fp8"
+        # H_Q * (d_h_qk + d_h_v) * (2 * c_sqsk - c_sqsq)
+        assert model.flops() == 16 * (64 + 64) * (2 * 1849600 - 1849600)
+        assert model.bytes() > 0
+
+    def test_muse_extend_synthetic_no_dims_abstains(self):
+        # The bare hipModuleLaunchKernel launch carries no Input Dims, so the
+        # model abstains rather than guessing.
+        event = {
+            "name": "hipModuleLaunchKernel->_muse_extend_kernel (Synthetic Op)",
+            "annotation": (
+                "step[EXTEND bs=1 c_sq=1360 c_sqsq=1849600 " "c_sqsk=1849600 c_sk=1360]"
+            ),
+            "args": {"Input Dims": None, "Input type": None},
+        }
+        model = aext.muse_extend_synthetic(event, arch={})
+        assert model.param_details.get("_no_perf") is True
+        assert model.flops() is None
+        assert model.bytes() is None
+        assert model.get_compute_precision() is None
 
 
 class TestPerfModelExtensions:
@@ -6967,63 +7060,6 @@ class TestSyntheticOpPerfModels:
         events = [{"name": "some_op"}, {"name": self.AR_NAME}, {"name": "another_op"}]
         assert _detect_run_arch(events).get("tp_world_size") == 4
         assert _detect_run_arch([{"name": "no_allreduce"}]).get("tp_world_size") is None
-
-    def test_detect_kv_cache_dtype(self):
-        from TraceLens.TreePerf.tree_perf import (
-            _detect_kv_cache_dtype,
-            _detect_run_arch,
-        )
-
-        fp8 = {
-            "name": "sglang::store_cache",
-            "args": {"Input type": ["unsigned char", "unsigned char", "long int"]},
-        }
-        bf16 = {
-            "name": "reshape_and_cache",
-            "args": {"Input type": ["c10::BFloat16", "long int"]},
-        }
-        assert _detect_kv_cache_dtype(fp8) == "unsigned char"
-        assert _detect_kv_cache_dtype(bf16) == "c10::BFloat16"
-        assert _detect_kv_cache_dtype({"name": "aten::mm", "args": {}}) is None
-        # Orchestrator gathers both facts in one pass
-        facts = _detect_run_arch([{"name": self.AR_NAME}, fp8])
-        assert facts == {"tp_world_size": 4, "kv_cache_dtype": "unsigned char"}
-
-    def test_detect_kv_cache_width(self):
-        from TraceLens.TreePerf.tree_perf import _detect_kv_cache_width
-
-        # store_cache: 2-D [tokens, H_KV*head_dim]
-        store = {
-            "name": "sglang::store_cache",
-            "args": {"Input Dims": [[16384, 128], [16384, 128], [42928, 128]]},
-        }
-        # reshape_and_cache: 3-D [tokens, H_KV, head_dim]
-        mqa = {
-            "name": "reshape_and_cache_flash",
-            "args": {"Input Dims": [[16384, 1, 128], [16384, 1, 128]]},
-        }
-        gqa = {"name": "reshape_and_cache", "args": {"Input Dims": [[2048, 8, 128]]}}
-        assert _detect_kv_cache_width(store) == 128  # 2-D second dim
-        assert _detect_kv_cache_width(mqa) == 128  # 3-D: 1 * 128
-        assert _detect_kv_cache_width(gqa) == 1024  # 3-D: 8 * 128
-        assert _detect_kv_cache_width({"name": "store_cache", "args": {}}) is None
-        assert (
-            _detect_kv_cache_width(
-                {"name": "aten::mm", "args": {"Input Dims": [[2, 2]]}}
-            )
-            is None
-        )
-
-    def test_detect_model_hidden(self):
-        from TraceLens.TreePerf.tree_perf import _detect_model_hidden
-
-        events = [
-            {"name": "aiter::rmsnorm", "args": {"Input Dims": [[2048, 4096]]}},
-            {"name": "aten::_fused_rms_norm", "args": {"Input Dims": [[16384, 8192]]}},
-            {"name": "aten::mm", "args": {"Input Dims": [[8, 999999]]}},  # ignored
-        ]
-        assert _detect_model_hidden(events) == 8192  # widest RMSNorm wins
-        assert _detect_model_hidden([{"name": "aten::mm", "args": {}}]) is None
 
     def test_propagate_annotation(self):
         from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops

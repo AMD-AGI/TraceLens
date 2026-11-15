@@ -70,6 +70,7 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r".*(?:paged_)?mqa_logits"), "InferenceAttention"),
     (re.compile(r".*_muse_extend_kernel"), "InferenceAttention"),
     (re.compile(r".*mfma_moe1_silu_mul"), "MoE_unfused"),
+    (re.compile(r".*_fused_norm_residual_triton_kernel"), "RMSNorm"),
 ]
 
 
@@ -534,6 +535,25 @@ def _match_mfma_moe1(name):
 
 
 register_perf_model_matcher(_match_mfma_moe1)
+
+
+def _match_fused_norm_residual(name):
+    """Resolve the Muse-Spark fused residual-add + RMSNorm Triton kernel
+    (``_fused_norm_residual_triton_kernel``) when it appears as a Synthetic Op.
+    Excludes python_function source frames so the parent is not intercepted
+    before the Synthetic Op is created."""
+    if ".py(" in name:
+        return None
+    if "_fused_norm_residual_triton_kernel" in name:
+        from TraceLens.PerfModel.extensions import (
+            rmsnorm_perf_model_extensions as _r,
+        )
+
+        return _r.fused_norm_residual_triton
+    return None
+
+
+register_perf_model_matcher(_match_fused_norm_residual)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,

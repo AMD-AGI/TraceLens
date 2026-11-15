@@ -9,6 +9,7 @@ Performance models for RMSNorm pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+from TraceLens.PerfModel.utils import name2bpe
 
 
 class RMSNorm(CoreRMSNorm):
@@ -683,3 +684,56 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         bytes_write_out = M * self.n_out * self.bpe_in
         bytes_write_res = M * N * self.bpe_in
         return bytes_read + bytes_write_out + bytes_write_res
+
+
+class fused_norm_residual_triton(RMSNorm):
+    """
+    Performance model for ``_fused_norm_residual_triton_kernel`` (Muse-Spark),
+    the fused residual-add + RMSNorm issued through ``forward_triton``.
+
+    Backfilled Synthetic Op: the ``launcher_shapes::forward_triton`` launcher
+    records the two data tensors, both ``[M, N]`` (N = hidden width):
+        0  residual  [M, N]  fp32   (residual stream kept in fp32)
+        1  hidden    [M, N]  bf16    (layer input / activation)
+    The affine weight ``[N]`` and the two outputs (updated fp32 residual and the
+    bf16 normed output) are not separately recorded; they are modelled from the
+    fused op's semantics:
+        new_residual = residual + hidden                  (fp32, written back)
+        out          = rmsnorm(new_residual) * weight      (bf16)
+
+    FLOPs: residual-add (``num_elems``) + RMSNorm (inherited).
+    Bytes: each ``[M, N]`` tensor is read once and its same-dtype output written
+    once, plus the small affine weight:
+        2 * num_elems * (bpe_residual + bpe_hidden) + N * bpe_hidden
+    Memory-bound (FLOPs/byte << 1), so the roofline is bandwidth-limited. The
+    byte model is symmetric in the two tensor dtypes, so it is robust to the
+    order the residual and hidden tensors appear in.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        op_shape = tuple(dims[0])  # [M, N]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (types[1], types[1]),  # bf16 activation I/O
+            "stride_input": tuple(event["args"]["Input Strides"][0]),
+            "stride_output": None,
+            "num_channels": op_shape[-1],  # N (normalized dim)
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+            "_bpe_tensors": (name2bpe(types[0]), name2bpe(types[1])),
+        }
+
+    def flops(self):
+        # residual add (num_elems) + RMSNorm (inherited)
+        return self.num_elems + super().flops()
+
+    def bytes(self):
+        bpe0, bpe1 = self.param_details["_bpe_tensors"]
+        # each [M, N] tensor read once + its same-dtype output written once
+        data = 2 * self.num_elems * (bpe0 + bpe1)
+        weight = self.num_channels * self.bpe_out  # bf16 affine weight
+        return data + weight

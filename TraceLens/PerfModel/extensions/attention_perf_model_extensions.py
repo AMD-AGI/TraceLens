@@ -1420,113 +1420,55 @@ class paged_mqa_logits_preshuffle_synthetic:
 
 
 class muse_extend_synthetic(InferenceAttention):
-    """
-    Performance model for _muse_extend_kernel.
+    """Perf model for ``_muse_extend_kernel`` (Muse-Spark target-model EXTEND).
 
-    Reference implementation:
-        sglang/srt/rocm_muse_spark/muse_extend_gluon.py
+    Target-model EXTEND / speculative-verify attention for Muse-Spark, issued
+    through the aiter extend backend (``_forward_extend_unified``). Standard
+    causal GQA attention over a paged KV cache; not MLA.
 
-    Target-model EXTEND (chunked-prefill / speculative-verify) attention for
-    MuseSparkForConditionalGeneration, issued through the aiter extend backend
-    (``_forward_extend_unified``) with Ulysses sequence parallelism. Standard
-    causal attention with an MQA KV cache; not MLA.
+    The kernel launches without a cpu_op parent, so it surfaces as a Synthetic
+    Op. The report's shape-backfill wraps it in a
+    ``launcher_shapes::muse_extend_attention`` launcher that carries the
+    kernel's tensor shapes, so head geometry and dtypes are read straight from
+    ``Input Dims`` / ``Input type`` (the standard InferenceAttention path) --
+    no architecture side-channels needed. The per-request sequence aggregates
+    still come from the enclosing ``step[EXTEND ...]`` iteration annotation.
 
-    Appears as an orphan Synthetic Op with no Input Dims, so head geometry is
-    taken from the model architecture and the token aggregates come from the
-    enclosing ``step[EXTEND ...]`` iteration annotation (context terms only;
-    generation terms are zero).
+    Arg layout (sglang kernels/ops/attention/muse_extend_gluon.py):
+        0  Q        (N_Q, H_Q, d_h_qk)                    fp8 e4m3
+        1  K cache  (num_blocks, block_size, H_KV, d_h)   fp8 e4m3  (paged)
+        2  V cache  (num_blocks, block_size, H_KV, d_h)   fp8 e4m3  (paged)
+        3  output   (N_Q, H_Q, d_h_v)                     bf16
+        4..9        scalars / metadata (scales, cu_seqlens)
 
-    Expected annotation:
-        step[EXTEND bs=.. c_sq=.. c_sqsq=.. c_sqsk=.. c_sk=..]
+    H_Q query heads and H_KV key/value heads per rank (GQA). The base
+    ``k_shape[-3:]`` slice reads ``(block_size, H_KV, d_h)`` from the 4-D paged
+    cache, yielding the correct ``H_KV`` and head dim. FLOPs and bytes are
+    inherited from :class:`InferenceAttention`: fp8 Q/K/V reads, bf16 output,
+    and the chunked-prefill FLOPs formula applies the intra-chunk causal
+    correction.
 
-    Geometry (derived from trace side-channels, not hardcoded):
-        The FLOPs/bytes depend only on two products -- the per-rank query width
-        ``H_Q*head_dim`` and the KV width ``H_KV*head_dim`` -- and both are read
-        from the trace:
-            H_Q*head_dim = model_hidden / TP   (widest RMSNorm, divided by TP)
-            H_KV*head_dim = KV-cache width     (sglang::store_cache K tensor)
-        ``HEAD_DIM`` is only a nominal splitter: it factors those widths into
-        (heads, head_dim) for honest ``param_details`` and the base formulas, but
-        the roofline numbers depend solely on the derived widths, so a variant
-        with a different head count / KV-head count is handled correctly. MQA
-        KV cache; not MLA.
-
-    Appears as an orphan Synthetic Op with no Input Dims; the token aggregates
-    come from the enclosing ``step[EXTEND ...]`` iteration annotation (context
-    terms only; generation terms are zero).
-
-    Expected annotation:
-        step[EXTEND bs=.. c_sq=.. c_sqsq=.. c_sqsk=.. c_sk=..]
-
-    Roofline -- FLOPs (inherited from InferenceAttention.flops_func):
-        H_Q * (d_h_qk + d_h_v) * (2 * c_sqsk - c_sqsq)
-
-    Roofline -- bytes moved (inherited from InferenceAttention.bytes_func):
-        Q / output / current-chunk K,V in bf16; cached K,V in the KV-cache dtype.
-
-    Notes:
-        TP, KV-cache dtype, KV-cache width, and model hidden are all gathered
-        from the event stream into ``arch`` (see tree_perf). If any is
-        undetectable -- or ``HEAD_DIM`` does not divide the derived widths (an
-        unexpected variant) -- the model returns no perf estimate rather than
-        guess. SWA layers are modeled as full causal (upper bound for windowed
-        layers, exact for full layers).
+    If the shapes are absent -- an un-backfilled report, e.g. the bare
+    ``hipModuleLaunchKernel->_muse_extend_kernel`` launch with no Input Dims --
+    the base returns no perf estimate rather than guessing.
     """
 
     category = "InferenceAttention"
     bwd_category = None
 
-    HEAD_DIM = 128  # nominal splitter only; does not affect FLOPs/bytes
-
-    def __init__(self, event, arch=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event, arch)
-        self.B = self.param_details["B"]
-        self.N_Q = self.param_details["N_Q"]
-        self.H_Q = self.param_details["H_Q"]
-        self.N_KV = self.param_details["N_KV"]
-        self.H_KV = self.param_details["H_KV"]
-        self.d_h_qk = self.param_details["d_h_qk"]
-        self.d_h_v = self.param_details["d_h_v"]
-
     @classmethod
     def get_param_details(cls, event, arch=None):
+        # Backfilled Input Dims/type make this a vanilla InferenceAttention, so
+        # delegate Q/K geometry and dtype parsing to the base. Patch only the
+        # two muse specifics: the value/output head dim (from the output
+        # tensor, arg 3) and the causal flag.
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
         try:
-            annotation = str(event.get("annotation"))
-            stats = InferenceAttention._parse_chunk_stats(annotation)
-            arch = arch or {}
-            tp = arch.get("tp_world_size")
-            dtype_KV = arch.get("kv_cache_dtype")
-            model_hidden = arch.get("model_hidden")
-            kv_width = arch.get("kv_cache_width")
-            if not tp or not dtype_KV or not model_hidden or not kv_width:
-                return InferenceAttention.no_perf_param_details()
-            # FLOPs/bytes need the per-rank Q width (H_Q*head_dim) and the KV
-            # width (H_KV*head_dim); HEAD_DIM only splits them back into heads.
-            q_width = model_hidden // tp
-            d = cls.HEAD_DIM
-            if q_width % d or kv_width % d:
-                return InferenceAttention.no_perf_param_details()
-            return {
-                "B": 1,
-                "N_Q": stats["c_sq"],
-                "H_Q": q_width // d,
-                "N_KV": stats["c_sk"],
-                "H_KV": kv_width // d,
-                "d_h_qk": d,
-                "d_h_v": d,
-                "dropout": 0.0,
-                "causal": True,
-                "flash_impl": True,
-                **stats,
-                "dtype_Q": "c10::BFloat16",
-                "dtype_KV": dtype_KV,
-            }
-        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
-            return InferenceAttention.no_perf_param_details()
-
-    def get_compute_precision(self):
-        if self.param_details.get("_no_perf"):
-            return None
-        return torch_dtype_map("c10::BFloat16")
+            out_shape = event["args"]["Input Dims"][3]
+            params["d_h_v"] = out_shape[-1]
+        except (IndexError, KeyError, TypeError):
+            pass
+        params["causal"] = True
+        return params

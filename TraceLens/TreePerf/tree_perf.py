@@ -196,80 +196,18 @@ def _detect_tp_world_size(event):
     return None
 
 
-def _detect_kv_cache_dtype(event):
-    """KV-cache storage dtype from a cache-write op on this event, or None if it
-    is not one. ``sglang::store_cache`` / ``reshape_and_cache`` both take the
-    K/V data tensors first, so the first arg's dtype is the cache dtype."""
-    name = event.get("name", "")
-    if "store_cache" not in name and "reshape_and_cache" not in name:
-        return None
-    types = (event.get("args") or {}).get("Input type") or []
-    return types[0] if types else None
-
-
-def _store_cache_kv_width(event):
-    """``sglang::store_cache`` K tensor is 2-D ``[tokens, H_KV*head_dim]`` -- the
-    KV-cache width is the second dim."""
-    dims = (event.get("args") or {}).get("Input Dims") or []
-    if dims and len(dims[0]) == 2 and isinstance(dims[0][1], int):
-        return dims[0][1]
-    return None
-
-
-def _reshape_and_cache_kv_width(event):
-    """``reshape_and_cache`` K tensor is 3-D ``[tokens, H_KV, head_dim]`` -- the
-    KV-cache width is ``H_KV * head_dim``."""
-    dims = (event.get("args") or {}).get("Input Dims") or []
-    if dims and len(dims[0]) == 3:
-        _, h_kv, head_dim = dims[0]
-        if isinstance(h_kv, int) and isinstance(head_dim, int):
-            return h_kv * head_dim
-    return None
-
-
-def _detect_kv_cache_width(event):
-    """KV-cache width (= H_KV * head_dim) from a cache-write op's K tensor, or
-    None. Each op stores K in its own layout, so extract per op."""
-    name = event.get("name", "")
-    if "store_cache" in name:
-        return _store_cache_kv_width(event)
-    if "reshape_and_cache" in name:
-        return _reshape_and_cache_kv_width(event)
-    return None
-
-
 # Global run/arch facts gathered from the event stream for perf models: an
 # ``arch`` key -> a per-event detector returning its value or None. Each value
 # is a global run property, so the first event that yields one wins. Add an
 # entry here to gather another fact in the same single pass.
 _ARCH_DETECTORS = {
     "tp_world_size": _detect_tp_world_size,
-    "kv_cache_dtype": _detect_kv_cache_dtype,
-    "kv_cache_width": _detect_kv_cache_width,
 }
-
-
-def _detect_model_hidden(events):
-    """Model hidden width (= TOTAL query heads * head_dim) as the widest RMSNorm
-    in the trace. The residual-stream norm runs at the full hidden; narrower
-    norms (e.g. the MoE-reduced expert hidden) are smaller, so the max wins.
-    Returns None if no RMSNorm is found."""
-    best = None
-    for e in events:
-        name = e.get("name", "")
-        if "rms_norm" not in name and "rmsnorm" not in name:
-            continue
-        dims = (e.get("args") or {}).get("Input Dims") or []
-        if dims and dims[0] and len(dims[0]) >= 2 and isinstance(dims[0][-1], int):
-            width = dims[0][-1]
-            if best is None or width > best:
-                best = width
-    return best
 
 
 def _detect_run_arch(events):
     """Single pass over ``events`` gathering the global run/arch facts in
-    ``_ARCH_DETECTORS`` (TP world size, KV-cache dtype, ...). Returns a dict of
+    ``_ARCH_DETECTORS`` (currently TP world size). Returns a dict of
     the facts found; the scan stops early once every detector has a value."""
     found = {}
     for e in events:
@@ -2104,9 +2042,6 @@ class TreePerfAnalyzer:
             events = self.collect_unified_perf_events(include_nccl=include_nccl)
 
         arch_facts = _detect_run_arch(events)
-        model_hidden = _detect_model_hidden(events)
-        if model_hidden is not None:
-            arch_facts["model_hidden"] = model_hidden
         if arch_facts:
             if self.arch is None:
                 self.arch = {}
