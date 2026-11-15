@@ -138,7 +138,7 @@ Measured with rocprofv3 hardware counters. Ratios are measured over predicted. E
 - <ratio header> <value> (<shape>), <ratio header> <value> (<shape>): <cause>.
 ```
 
-If a row is not `OK`, the op is categorize-only, or Step 2 (Decide) needs the user, the outcome is `blocked`. Write `<op_dir>/perf_model_issue.md`:
+If a row is not `OK`, the op is categorize-only, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring guide's stability and cost check, write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
 
 ```markdown
 ## Operator
@@ -155,6 +155,12 @@ If a row is not `OK`, the op is categorize-only, or Step 2 (Decide) needs the us
 
 - <reason>
 
+## Pseudo Op Check
+
+| Pseudo Op | Brittleness | Paths Checked | Differing Paths | Complexity | Events Added |
+|---|---|---|---|---|---|
+| `<name>` | stable / fragile | <count and list> | <paths, or none> | O(...) | <count> |
+
 ## Validation
 
 Measured with rocprofv3 hardware counters. Ratios are measured over predicted.
@@ -165,7 +171,8 @@ Measured with rocprofv3 hardware counters. Ratios are measured over predicted.
 ```
 
 Template rules:
-- Keep the sections in order. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, and the issue's Validation when there are no validation rows.
+- Keep the sections in order. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, the issue's Pseudo Op Check when no pseudo op is proposed, and the issue's Validation when there are no validation rows.
+- The measured overhead of a pseudo op stays in `<op_dir>/pseudo_op_check.md`; the issue carries only its complexity and the events it adds.
 - Table values come from the validation CSV unchanged.
 - Name no model, GPU, gfx target, host, topology, person or trace, and no local path or branch. No runtime or time-share numbers.
 - Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause. Take causes from the validation guide's Known ratio sources where one fits.

@@ -92,16 +92,6 @@ def load_rows(path: Path) -> Tuple[List[Row], str]:
             f"{path}: no runtime column; expected one of {RUNTIME_COLUMNS}, got {fields}"
         )
 
-    # Older pipelines kept the call stack in a companion file keyed by row index.
-    legacy = path.parent / "unified_perf_callstacks.csv"
-    if not {"call_stack_full", "call_stack"} & set(fields) and legacy.is_file():
-        with legacy.open(newline="", encoding="utf-8", errors="replace") as f:
-            by_id = {
-                r.get("row_id", ""): r.get("call_stack", "") for r in csv.DictReader(f)
-            }
-        for i, r in enumerate(rows):
-            r["call_stack"] = by_id.get(str(i), "")
-
     for r in rows:
         stacks = ((r.get(c) or "").strip() for c in CALL_STACK_COLUMNS)
         r["call_stack"] = next((s for s in stacks if s), "")
