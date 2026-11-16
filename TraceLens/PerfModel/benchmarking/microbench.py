@@ -41,7 +41,6 @@ Examples:
 import argparse
 import json
 import logging
-import math
 import re
 import time
 from pathlib import Path
@@ -530,6 +529,8 @@ else:
         for _ in range(REPEAT // UNROLL):
             for _ in tl.static_range(UNROLL):
                 acc = tl.math.fma(acc, x, y)  # acc = acc * x + y
+        for _ in tl.static_range(REPEAT % UNROLL):
+            acc = tl.math.fma(acc, x, y)
 
         tl.store(out_ptr + offs, acc, mask=mask)
 
@@ -599,7 +600,7 @@ else:
                 BLOCK_SIZE=block,
                 REPEAT=repeat,
                 ACC_FP32=(1 if acc_fp32 else 0),
-                UNROLL=math.gcd(repeat, VECTOR_FMA_UNROLL),
+                UNROLL=VECTOR_FMA_UNROLL,
                 PIN_VGPR=torch.version.hip is not None,
                 num_warps=8,
             ),
