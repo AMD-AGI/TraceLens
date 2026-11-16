@@ -10,6 +10,9 @@ Detail for [SKILL.md](SKILL.md). Read each section when its step needs it.
 
 ## Entry points — pick one to begin
 
+Only in standalone use, when the op is not given. A caller that supplies the op
+skips this section.
+
 ### EP1 — CSV-driven: top ops missing a perf model
 
 Use when a `unified_perf_summary.csv` is available and you want to prioritize by
@@ -36,7 +39,7 @@ python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops \
 ```
 
 **After printing the table**, confirm the candidate list with the user before
-proceeding to authoring.
+proceeding to authoring (standalone use only).
 
 
 ### EP2 — Manual op
@@ -80,7 +83,7 @@ call chain to kernel, and any sibling `test_<op>` / `benchmark_<op>` files
 For deep or ambiguous chains, instruct an explore sub-agent to traverse the
 repo (same technique used to map FlyDSL ops).
 
-**Confirm the candidate table with the user before proceeding.**
+**Confirm the candidate table with the user before proceeding** (standalone use only).
 
 The scanner covers aiter, vLLM, and SGLang. For ATOM, use an explore sub-agent
 on `atom/model_ops/` and the model files: ATOM mostly calls aiter ops, so the
@@ -91,9 +94,10 @@ differ, and those names will show up in other traces.
 
 ---
 
-## Per-op choices (confirm with user before authoring)
+## Per-op choices
 
-For **each** candidate op the user picks:
+Each op gets a depth and an output mode. Use the defaults from SKILL.md's Inputs
+unless the caller (or, in standalone use, the user) chooses otherwise:
 
 | Choice | What to produce |
 |--------|----------------|
@@ -423,15 +427,14 @@ Report it like this:
 
 ---
 
-## Validate with hardware counters (ask the user)
+## Validate with hardware counters
 
-After authoring, **always ask** (in unattended use, do not ask; always
-validate):
+Validation is on by default. Only in standalone use, ask first:
 
 > "Do you want to validate these perf models against hardware counters using
 > the `validate-perf-model` skill (rocprofv3 on a real AMD GPU)?"
 
-If yes, hand off to
+To validate, hand off to
 the validate-perf-model skill
 (`TraceLens/Agent/PerfModel/skills/validate-perf-model/SKILL.md`). The
 validator only loads perf models integrated into TraceLens core, so an
@@ -656,7 +659,7 @@ FlashAttention does not use `TL_MODEL` or `TL_TP`.
 | Adding perf model for `(Synthetic Op)` name | Categorize only; names are unstable |
 | Editing TraceLens core in extension-only mode | Only edit extension file; pass via `--extension_file` |
 | Trusting `--check-mapping` "False" as gap | It checks core map before `apply_extension`; extensions show False there |
-| Using system `python3` for TraceLens import | Ask for conda/venv Python first |
+| Using system `python3` for TraceLens import | Use the given environment or command prefix; in standalone use, ask for the conda/venv Python |
 | Skipping vendor test_*/benchmark_* check | Always look for roofline reference before writing formulas |
 | Wrapper, kernel, and vendor formula disagree | Investigate; do not pick the convenient number |
 | Modeling one dtype from one trace | Cover every dtype the binding can emit |

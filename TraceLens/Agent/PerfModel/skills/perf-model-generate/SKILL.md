@@ -1,13 +1,14 @@
 ---
 name: perf-model-generate
 description: >-
-  Authors TraceLens perf models for cpu_ops missing coverage. Starts from a
-  unified_perf_summary.csv top-ops ranking, a manually named op, or a static scan
-  of a vendor framework (aiter, vLLM, SGLang, ATOM). For each op it writes a full
-  perf model or a category-only mapping, integrated into TraceLens/PerfModel/
-  extensions or as a standalone extension file, then hands off to the
-  validate-perf-model skill. Use when the user asks to add or fix a perf model,
-  cover ops without a perf model, or follow the perf-model authoring skill.
+  Authors a TraceLens perf model for a cpu_op that has none: locates its binding
+  and kernel, writes FLOPs, bytes and compute precision (or a category-only
+  mapping), registers it in TraceLens/PerfModel/extensions or a standalone
+  extension file, regenerates the report, and hands off to the validate-perf-model
+  skill. Runs from the inputs it is given and stops with a reason when one is
+  missing; standalone, it can also find candidate ops from a unified_perf_summary.csv
+  or a framework scan. Use to add or fix a perf model, cover ops without one, or
+  follow the perf-model-generate skill.
 license: MIT
 ---
 
@@ -31,9 +32,14 @@ workflow index below names the section for every step.
 
 ## Inputs
 
-- An op: its profiler `name`, kernel names and call stack, from a `unified_perf_summary.csv` (EP1), the user (EP2) or a framework scan (EP3).
-- The vendor framework source the op comes from.
-- A TraceLens checkout to edit, and a Python environment that imports it.
+| Input | Required | Default |
+|---|---|---|
+| The op: profiler `name`, kernel names and call stack (its rows in a `unified_perf_summary.csv`, or given directly) | yes | — |
+| The vendor framework source the op comes from | yes | — |
+| A TraceLens checkout to edit, and a Python environment (or command prefix) that imports it | yes | — |
+| Depth: full model or categorize-only | no | full; categorize-only for a `(Synthetic Op)` name |
+| Output mode: integrate or extension-only | no | integrate |
+| Validate with hardware counters | no | yes, with the validate-perf-model skill |
 
 ## Outputs
 
@@ -43,8 +49,7 @@ The perf model for the op in the chosen depth and mode, and a regenerated report
 
 | Step | What | reference.md section |
 |---|---|---|
-| 0 | Pick an entry point: CSV ranking, manual op, or framework scan | Entry points |
-| 1 | Confirm the candidates, then full or categorize-only, and integrate or extension-only | Per-op choices |
+| 1 | Apply the depth and output mode | Per-op choices |
 | 2 | Locate the binding and kernel; find the vendor roofline reference | Step 1, Step 2 |
 | 3 | Map `Input Dims` to the signature; pick the base class | Step 3, Step 4 |
 | 4 | Implement FLOPs, bytes, precision and annotation use; write the docstring | Step 5, Perf model class docstring template |
@@ -59,23 +64,20 @@ A pseudo op is never part of this flow by default: see "Pseudo ops" in reference
 - `get_param_details` returns every value `flops()` and `bytes()` use, including annotation-derived ones; validation runs from them.
 - Every registered class has the docstring from the template.
 - No perf model class for a `(Synthetic Op)` name; categorize it only.
-- Never add a pseudo op on your own judgment; run its stability and cost check and let the user decide.
 - Check reference.md's Pitfalls before finishing.
 
-## Error handling
+## Stop rules
 
-- The kernel source cannot be found: stop and report the op and the paths searched. Do not guess FLOPs or bytes.
-- The wrapper, the kernel and the vendor formula disagree and the cause is unresolved: stop and report the disagreement.
+Stop and report the reason, rather than guess, when:
+- a required input is missing;
+- the kernel source cannot be found: report the op and the paths searched. Do not guess FLOPs or bytes;
+- the wrapper, the kernel and the vendor formula disagree and the cause is unresolved: report the disagreement;
+- the op needs a pseudo op: never add one yourself. Run its stability and cost check ("Pseudo ops" in reference.md) and report the table as a decision for the user.
 
-## Unattended use
+## Standalone use
 
-A caller without a user, such as the model-bringup skill, supplies the op and the paths. Ask nothing and answer as below. Where an answer needs information the caller did not give, stop and report that question as the reason.
-
-| Ask | Answer |
-|---|---|
-| Confirm the candidate list (EP1, EP3) | The caller's op is the candidate |
-| Name, kernel and call stack (EP2) | The op's rows in the caller's CSV |
-| Depth and output mode (Per-op choices) | full and integrate; categorize-only for a `(Synthetic Op)` name |
-| Python environment | The caller's command prefix |
-| Validate with hardware counters | Always validate |
-| Whether to add a pseudo op (stability and cost check) | Never decide. Do not add the pseudo op; report the check's table to the caller as a decision for the user |
+When a user runs this skill directly, without the inputs above, the entry points
+in reference.md find the op, and these are the only questions to ask:
+- **CSV ranking (EP1) or framework scan (EP3):** confirm the candidate list.
+- **Manual op (EP2):** the profiler `name`, and optionally the kernel name and call stack.
+- **Any entry point:** depth and output mode, if the user wants other than the defaults; the Python environment; whether to validate; and whether to add a pseudo op after its stability and cost check.

@@ -57,7 +57,7 @@ Build, validate and draft the perf model for one op that has none. The model-bri
 ## Guardrails
 
 - Exactly one op. Write only under `<op_worktree>` and `<op_dir>`; temp files and tool caches (such as `BLACK_CACHE_DIR`) go in `<op_dir>/scratch`. Commit only in `<op_worktree>`, on its checked-out branch.
-- Never push, run `gh`, or ask the user. Answer every guide question per its Unattended use section; a choice that needs the user becomes outcome `blocked`.
+- Never push, run `gh`, or ask the user. Run each skill from the inputs this prompt gives: the authoring skill's Inputs defaults and Stop rules, and the validation skill's Unattended use. A choice that needs the user becomes outcome `blocked`.
 - Run worktree code as `cd <op_worktree> && PYTHONPATH=<op_worktree> python3 ...` through the prefix.
 - Run git in your own shell as `git -C <op_worktree> ...`, one git command per call, never through the prefix.
 
@@ -83,7 +83,7 @@ Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
 <prefix> python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops <analysis_dir>/perf_report_csvs/unified_perf_summary.csv --mode top-ops --threshold 0 --include-covered --check-mapping
 ```
 
-This shows whether a built-in perf model already fits. Then choose the depth the authoring skill's Unattended use names. A categorize-only op is categorized, not modeled.
+This shows whether a built-in perf model already fits. Then use the depth and output mode defaults from the authoring skill's Inputs. A categorize-only op is categorized, not modeled.
 
 ### Step 3: Build
 
