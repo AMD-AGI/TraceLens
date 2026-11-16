@@ -104,6 +104,14 @@ class InferenceAttention:
         return IterationAnnotation(annotation).chunk_stats()
 
     @staticmethod
+    def _causal_kv_pairs(stats):
+        """(query, key) pairs a causal scorer visits, from the sq/sk aggregates."""
+        return sum(
+            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
+            for p in ("c", "g")
+        )
+
+    @staticmethod
     def get_param_details(event):
         try:
             annotation = str(event.get("annotation"))
@@ -1249,10 +1257,7 @@ class sgl_kernel_fast_topk_transform_fused:
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         params.update(stats)
-        params["valid_scores"] = sum(
-            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
-            for p in ("c", "g")
-        )
+        params["valid_scores"] = InferenceAttention._causal_kv_pairs(stats)
         return params
 
     def flops(self):
@@ -1286,6 +1291,84 @@ class sgl_kernel_fast_topk_transform_fused:
 
     def get_maf_type(self):
         return "vector"
+
+
+class pa_mqa_logits_mxfp4:
+    """HBM bytes of the MXFP4 query, its e8m0 scales and per-head BF16 weights, and per scored key its MXFP4 row, scale, page id share and FP32 logit.
+
+    Each row scores ``out[r, k] = sum_h relu(q[r, h] . K[k]) * w[r, h]`` over its
+    CSA-compressed context. The cache and logits buffers are sized for the
+    longest context, so the scored keys come from the step annotation: the
+    causal (query, key) pairs over the CSA compression stride. The
+    ``q_per_block`` rows of a CTA share each KV tile they load.
+
+    Expected Input Dims (aiter::_fwd_sched_raw):
+        [1] q (T, H, D/2) uint8          [2] q_scale (T, H, D/32) uint8
+        [3] kv_cache (pages, P, D/2)     [4] kv_scale (pages, P, D/32)
+        [6] weights (T, H) bf16          Concrete Inputs[16] = q_per_block
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    _PAGE_ID_BYTES = 4
+    _LOGIT_BYTES = 4
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            rows, heads, q_row = dims[1]
+            params = {
+                "rows": min(stats["c_sq"] + stats["g_sq"], rows),
+                "heads": heads,
+                "head_dim": 2 * q_row,
+                "q_row_bytes": q_row + dims[2][2],
+                "kv_row_bytes": dims[3][2] + dims[4][2],
+                "page_size": dims[3][1],
+                "weight_bytes": name2bpe(event["args"]["Input type"][6]),
+                "q_per_block": max(int(event["args"]["Concrete Inputs"][16]), 1),
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params["keys"] = (
+            InferenceAttention._causal_kv_pairs(stats)
+            // _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+        )
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # Per head: a head_dim dot product, then the ReLU-weighted head sum.
+        return p["keys"] * p["heads"] * (2 * p["head_dim"] + 2)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf") or p["weight_bytes"] is None:
+            return None
+        query = p["rows"] * p["heads"] * (p["q_row_bytes"] + p["weight_bytes"])
+        kv_per_key = p["kv_row_bytes"] + self._PAGE_ID_BYTES / p["page_size"]
+        return query + p["keys"] * (kv_per_key / p["q_per_block"] + self._LOGIT_BYTES)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def get_compute_precision(self):
+        return None if self.param_details.get("_no_perf") else torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return None if self.param_details.get("_no_perf") else "matrix"
 
 
 class rocm_aiter_sparse_attn_indexer(InferenceAttention):
