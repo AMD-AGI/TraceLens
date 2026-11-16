@@ -6,8 +6,8 @@
 
 """Gates for the model-bringup skill.
 
-Each gate exits 0 (pass), 1 (fail) or 2 (input error). All but ``cases`` and
-``op-result`` write ``<bringup_dir>/gates/<name>.json``::
+Each gate exits 0 (pass), 1 (fail) or 2 (input error). All but ``gaps``, ``cases``
+and ``op-result`` write ``<bringup_dir>/gates/<name>.json``::
 
     python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates <subcommand> --bringup-dir B ...
 """

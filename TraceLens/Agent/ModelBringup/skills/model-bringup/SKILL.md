@@ -3,10 +3,10 @@ name: model-bringup
 description: >-
   Brings a new model up on TraceLens without stopping for input: profiles it with Magpie
   (fixed-sequence or AgentX), gates profile and report health, runs the analysis
-  orchestrator, finds ops without a perf model, and drafts a validated perf-model PR,
-  a category-mapping PR or an issue per op. Publishes approved drafts on a later prompt. Use when the user asks to
-  bring up a model, follow the model-bringup skill, run it from a bringup_config.yaml, or
-  publish a finished bringup.
+  orchestrator, finds ops without a perf model, and drafts a validated perf-model PR, a
+  category-mapping PR or an issue per op. Publishes approved drafts on a later prompt. Use
+  when the user asks to bring up a model, follow the model-bringup skill, run it from a
+  bringup_config.yaml, or publish a finished bringup.
 license: MIT
 ---
 
@@ -45,7 +45,7 @@ Read [reference.md](reference.md) before Step 0 and run every step from it.
   on `AMD-AGI/TraceLens` for the op slugs its prompt names.
 - Never commit in `<tracelens_dir>`. Commits go only on `<op_branch>` in `<op_worktree>`.
 - Run git in your own shell, never through `<prefix>`.
-- Read only the files each step names, such as `result.json`, `gates/*.json` and `gaps.json`, never the instruction file of a skill or sub-agent a step launches, or a PerfModel guide.
+- Read only the files each step names, such as `result.json`, `gates/*.json` and `gaps.json`, never the instruction file of a skill or sub-agent a step launches, or a PerfModel skill.
 - Never analyze a trace or author or validate a perf model by hand to work around a failed step.
 
 ## Primary outputs

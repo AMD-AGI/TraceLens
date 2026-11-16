@@ -40,7 +40,7 @@ Derived:
 | `<bench_dir>`, `<mixed_split>`, `<capture_folder>` | printed by `prepare` | 2 |
 | `<job>` | `trace_path=<mixed_split>,platform=<platform>[,capture_folder=<capture_folder>]` | 2 |
 | `<analysis_dir>` | `<bringup_dir>/analysis` | 3 |
-| `<op>`, `<op_slug>` | `ops[]` in `<bringup_dir>/gaps.json` | 5 |
+| `<op>`, `<op_slug>`, `<categorize_only>` | `ops[]` in `<bringup_dir>/gaps.json` | 5 |
 | `<gpu_index>` | a free index in 0..`<gpu_count>`-1, one per running sub-agent | 6 |
 | `<op_branch>` | `feat/perfmodel/<op_slug>` | 6 |
 | `<op_worktree>`, `<op_dir>` | `<bringup_dir>/worktrees/pm_<op_slug>`, `<bringup_dir>/perf_models/<op_slug>` | 6 |
@@ -180,7 +180,7 @@ and the first line the gate printed as the reason.
     <prefix> <bringup_gates> report-health --phase report --bringup-dir <bringup_dir> --triage-dir <analysis_dir> [--accept <check> ...]
 
 Ignore the runner's exit code. The gate JSON carries each blocking tag with its remedy and
-the graph capture merge mapping.
+the graph capture merge summary.
 
 **Gate:** exit 0. Otherwise stop with `REPORT_HEALTH_BLOCKED`.
 
@@ -209,7 +209,7 @@ Pass `--threshold` only when `min_share` is set. Do not edit `gaps.json`. An emp
        **Execution Context:**
        - Op: <op>, op slug: <op_slug>
        - Op worktree (already created): <op_worktree>
-       - Categorize only: <categorize_only from gaps.json>
+       - Categorize only: <categorize_only>
        - Op output dir: <op_dir>; bringup dir: <bringup_dir>; baseline analysis dir: <analysis_dir>
        - Baseline job: <job>
        - GPU arch: <gfx_arch>; GPU index: <gpu_index>

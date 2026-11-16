@@ -6,12 +6,12 @@ See LICENSE for license information.
 
 ---
 name: perf-model-agent
-description: Builds, validates and drafts the perf model for one op that has none, in a worktree the model-bringup skill created. Never pushes.
+description: Builds and validates the perf model for one op that has none, or only categorizes it, and drafts the PR or issue, in a worktree the model-bringup skill created. Never pushes.
 ---
 
 # Perf-model sub-agent
 
-Build, validate and draft the perf model for one op that has none. The model-bringup skill launches one sub-agent per op.
+Build and validate the perf model for one op that has none, or only categorize it, and draft the PR or issue. The model-bringup skill launches one sub-agent per op.
 
 ---
 
@@ -33,7 +33,7 @@ Build, validate and draft the perf model for one op that has none. The model-bri
 - Authoring skill: `<pm_dir>/skills/perf-model-generate/SKILL.md`; read its `reference.md` sections as each step needs them
 - Validation skill: `<pm_dir>/skills/validate-perf-model/SKILL.md`; read its `reference.md` sections as each step needs them
 
-`<pm_dir>` is `<op_worktree>/TraceLens/Agent/PerfModel`. Substitute it before a command goes through `<prefix>`. Follow the guides; do not restate them.
+`<pm_dir>` is `<op_worktree>/TraceLens/Agent/PerfModel`. Substitute it before a command goes through `<prefix>`. Follow the skills; do not restate them.
 
 **Output files you must write:**
 - `<op_dir>/perf_model_pr.md` or `<op_dir>/perf_model_issue.md`, the draft body
@@ -67,7 +67,7 @@ Build, validate and draft the perf model for one op that has none. The model-bri
 
 **If a command cannot run:** write `result.json` with `outcome` `error`, and the command and the tail of its stderr in `reason`. Do not hand-write FLOPs or bytes.
 
-**If the validator exits 1 with `FAIL` rows, or a guide's Error handling says stop:** that is a result, not an error. Go to Step 5 (Draft) with outcome `blocked` and the reason.
+**If the validator exits 1 with `FAIL` rows, or a skill's Stop rules or Error handling say stop:** that is a result, not an error. Go to Step 5 (Draft) with outcome `blocked` and the reason.
 
 ---
 
@@ -87,7 +87,7 @@ This shows whether a built-in perf model already fits. Then use the depth and ou
 
 ### Step 3: Build
 
-Follow the authoring skill's workflow (reference.md Steps 1-7) in `<op_worktree>`.
+Follow the authoring skill's workflow index, Steps 1-5, in `<op_worktree>`. Its Step 6, validation, is Step 4 here.
 
 ### Step 4: Validate
 
@@ -127,7 +127,7 @@ Then write `<op_dir>/perf_model_pr.md`:
 
 ## Validation
 
-Measured with rocprofv3 hardware counters. Ratios are measured over predicted. Every row validated OK.
+Measured with rocprofv3 hardware counters. Ratios are measured over predicted. Every row ran and matches or has an explained deviation.
 
 | Shape | Predicted FLOPs | Predicted Bytes | Measured Read Bytes | Measured Write Bytes | FLOPs Ratio | Bytes Ratio |
 |---|---|---|---|---|---|---|
@@ -150,7 +150,7 @@ If the op is categorize-only, the outcome is `categorized`: there is no perf mod
 - Category mapping: `<op>` → `<category>` in `get_pseudo_op_category_only_mappings()` (`pseudo_ops_perf_utils.py`). Category only: <why no perf model, e.g. a `(Synthetic Op)` name>.
 ```
 
-If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring guide's stability and cost check, write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
+If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring skill's stability and cost check ("Pseudo ops" in its reference.md), write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
 
 ```markdown
 ## Operator
