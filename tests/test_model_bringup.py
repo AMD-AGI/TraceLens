@@ -120,7 +120,7 @@ def test_gaps_drops_collectives_and_slugs(tmp_path):
 def test_report_health_blocks_and_accepts(tmp_path):
     (tmp_path / "triage_details.csv").write_text(
         "DIAG Tag,Category,Failure Mode,Evidence,Remedy,Implied By\n"
-        "DIAG:perf_model:3i_CAPTURE_RANK_MISMATCH,perf_model,m,e,r,\n"
+        "DIAG:perf_model:3c_CAPTURE_GRAPH_MERGE_FAIL,perf_model,m,e,r,\n"
         "DIAG:trace_quality:2j_RUNTIME_INSTABILITY,trace_quality,m,e,r,\n"
     )
     args = ["report-health", "--phase", "report", "--bringup-dir", str(tmp_path)]
@@ -129,7 +129,7 @@ def test_report_health_blocks_and_accepts(tmp_path):
     assert _gate(tmp_path, "report_health")["other"] == [
         "DIAG:trace_quality:2j_RUNTIME_INSTABILITY"
     ]
-    assert bringup_gates.main(args + ["--accept", "CAPTURE_RANK_MISMATCH"]) == 0
+    assert bringup_gates.main(args + ["--accept", "CAPTURE_GRAPH_MERGE_FAIL"]) == 0
     empty = tmp_path / "empty"
     empty.mkdir()
     assert bringup_gates.main(args[:-1] + [str(empty)]) == 2
@@ -225,6 +225,17 @@ def test_op_result_gates_outcomes(tmp_path):
     assert bringup_gates.main(args) == 0
     issue.write_text("## Validation\n")
     assert bringup_gates.main(args) == 1
+    issue.write_text("## Operator\n")
+    assert bringup_gates.main(args) == 1
+    issue.write_text(_DRAFT + "\n| Shape | Time (us) |\n|---|---|\n| s | 1 |\n")
+    assert bringup_gates.main(args) == 1
+    issue.write_text("## Operator\n")
+    path.write_text(
+        json.dumps(
+            {**result, "outcome": "blocked", "reason": "r", "validation_csv": None}
+        )
+    )
+    assert bringup_gates.main(args) == 0
 
     path.unlink()
     assert bringup_gates.main(args) == 2

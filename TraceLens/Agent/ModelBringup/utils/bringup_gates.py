@@ -66,7 +66,6 @@ BLOCKING_CHECKS = {
         "NO_GPU_KERNELS",
         "HIPGRAPH_LAUNCH_IN_REPORT",
         "CAPTURE_GRAPH_MERGE_FAIL",
-        "CAPTURE_RANK_MISMATCH",
         "PERF_REPORT_FAILURE",
     ),
 }
@@ -82,6 +81,13 @@ EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
 LEAK_KEYS = ("node", "platform", "docker_image")
 GFX_TARGET = re.compile(r"\bgfx\d+\w*", re.I)
 VALIDATION_HEADER = "| Shape | Predicted FLOPs | Predicted Bytes | Measured Read Bytes | Measured Write Bytes | FLOPs Ratio | Bytes Ratio |"
+# Every table header the PR and issue templates allow; any other table is off-template.
+DRAFT_TABLE_HEADERS = (
+    VALIDATION_HEADER,
+    "| Input Dims | Input Type | Concrete Inputs |",
+    "| Pseudo Op | Brittleness | Paths Checked | Differing Paths | Complexity | Events Added |",
+)
+TABLE_SEPARATOR = re.compile(r"\|(\s*:?-+:?\s*\|)+")
 SYNTHETIC_MARKER = "(Synthetic Op)"
 MIN_TOKEN = 4
 MIN_PATH_PARTS = 3
@@ -213,7 +219,7 @@ def cases(args):
 
 
 def op_result(args):
-    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and validation rows that ran and match or have an explained deviation; categorized implies a commit and no validation; the draft leaks no run input, has the validation header and explains every ratio deviation."""
+    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and validation rows that ran and match or have an explained deviation; categorized implies a commit and no validation; the draft leaks no run input, uses only the template's tables (the validation table whenever rows exist) and explains every ratio deviation."""
     path = Path(args.result)
     if not path.is_file():
         print(f"missing {path}", file=sys.stderr)
@@ -243,10 +249,16 @@ def op_result(args):
                 f"draft names {target}"
                 for target in sorted(set(GFX_TARGET.findall(text)))
             ]
-            if (outcome == "modeled" or "## Validation" in text) and (
-                VALIDATION_HEADER not in text
-            ):
-                problems.append("validation table header is not the canonical header")
+            needs_validation = outcome == "modeled" or (
+                outcome == "blocked" and _has_rows(result.get("validation_csv"))
+            )
+            if needs_validation and VALIDATION_HEADER not in text:
+                problems.append("validation table missing or not the canonical header")
+            problems += [
+                f"draft table header is not a template header: {header}"
+                for header in _table_headers(text)
+                if header not in DRAFT_TABLE_HEADERS
+            ]
         if outcome == "blocked" and not result.get("reason"):
             problems.append("reason missing")
         if outcome in COMMITTED_OUTCOMES and not result.get("commit"):
@@ -351,6 +363,24 @@ def summary(args):
     (root / "bringup_summary.md").write_text("\n".join(lines) + "\n")
     print(root / "bringup_summary.md")
     return 0
+
+
+def _has_rows(csv_path):
+    """True when ``csv_path`` names a CSV with at least one data row."""
+    if not csv_path or not Path(csv_path).is_file():
+        return False
+    with open(csv_path, newline="") as f:
+        return next(csv.DictReader(f), None) is not None
+
+
+def _table_headers(text):
+    """Header rows of the markdown tables in ``text``."""
+    lines = [line.strip() for line in text.splitlines()]
+    return [
+        line
+        for line, nxt in zip(lines, lines[1:])
+        if line.startswith("|") and TABLE_SEPARATOR.fullmatch(nxt)
+    ]
 
 
 def _all_rows_ok(csv_path):

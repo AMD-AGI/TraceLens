@@ -3,8 +3,8 @@ name: model-bringup
 description: >-
   Brings a new model up on TraceLens without stopping for input: profiles it with Magpie
   (fixed-sequence or AgentX), gates profile and report health, runs the analysis
-  orchestrator, finds ops without a perf model, and drafts one validated perf-model PR or
-  issue per op. Publishes approved drafts on a later prompt. Use when the user asks to
+  orchestrator, finds ops without a perf model, and drafts a validated perf-model PR,
+  a category-mapping PR or an issue per op. Publishes approved drafts on a later prompt. Use when the user asks to
   bring up a model, follow the model-bringup skill, run it from a bringup_config.yaml, or
   publish a finished bringup.
 license: MIT

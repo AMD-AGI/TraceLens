@@ -14,7 +14,8 @@ in one unattended run:
 2. It gates profile health and report health with the
    [triage checks](../Analysis/triage/README.md).
 3. It runs the [analysis orchestrator](../Analysis/README.md).
-4. It drafts one validated perf-model PR or issue per op without a perf model.
+4. It drafts a validated perf-model PR, a category-mapping PR or an issue per op without a
+   perf model.
 
 A later Publish prompt files the drafts you approve on `AMD-AGI/TraceLens`.
 
