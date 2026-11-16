@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -10,8 +10,12 @@ Start with RMSNorm (reduction kernel, clear expected FLOPs/bytes).
 More cases (V1 wrapper-parsing, multi-word ops, fallback) in follow-ups.
 """
 
+import pytest
+
+from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
 from TraceLens.PerfModel.triton_compiled_perf_model import (
     TritonCompiledPerfModel,
+    TritonTemplateGemmPerfModel,
     _meta_from_trace_args,
     _parse_kernel_name,
 )
@@ -83,3 +87,68 @@ def test_bytes_rmsnorm():
     # = 134,217,728 + 4,096 + 134,217,728 = 268,439,552
     expected = (8 * 4096 * 2048 * 2) + (2048 * 2) + (8 * 4096 * 2048 * 2)
     assert model.bytes() == expected
+
+
+# ---------------------------------------------------------------------------
+# Inductor mm template with a fused div + SiLU epilogue (bf16), from an SGLang
+# MoE-gate trace: A[M,10240] @ B[320,10240]^T -> C[M,320].
+# ---------------------------------------------------------------------------
+def _mm_silu_event(m, concrete_scalars):
+    return {
+        "name": "triton_tem_fused_div_mm_silu_t_0",
+        "args": {
+            "Concrete Inputs": ["", "", ""] + concrete_scalars,
+            "Input Dims": [[m, 10240], [320, 10240], [m, 320]]
+            + [[]] * len(concrete_scalars),
+            "Input type": ["c10::BFloat16"] * 3 + ["Scalar"] * len(concrete_scalars),
+        },
+    }
+
+
+def test_parse_kernel_name_template():
+    ops = _parse_kernel_name("triton_tem_fused_div_mm_silu_t_0")
+    assert ops == ["aten.div", "aten.mm", "aten.silu", "aten.t"]
+
+
+def test_resolve_template_gemm():
+    assert (
+        resolve_perf_model_class("triton_tem_fused_div_mm_silu_t_0")
+        is TritonTemplateGemmPerfModel
+    )
+
+
+@pytest.mark.parametrize(
+    "m, scalars", [(32, ["20", "1", "1"]), (2048, ["2048", "1280", "1", "1"])]
+)
+def test_template_gemm_mm_silu(m, scalars):
+    event = _mm_silu_event(m, scalars)
+    assert TritonTemplateGemmPerfModel.can_model(event)
+    model = TritonTemplateGemmPerfModel(event)
+    assert (model.M, model.N, model.K) == (m, 320, 10240)
+    # mm: 2*M*N*K; epilogue: div=1 + silu=4 flops per output element
+    assert model.flops() == 2 * m * 320 * 10240 + 5 * m * 320
+    assert model.bytes() == (m * 10240 + 320 * 10240 + m * 320) * 2
+    assert model.get_maf_type() == "matrix"
+    assert model.get_compute_precision() == "bf16"
+    assert model.param_details["fused_epilogue"] == "aten.div, aten.silu, aten.t"
+
+
+def test_template_gemm_without_mm_not_modeled():
+    event = _mm_silu_event(32, ["20"])
+    event["name"] = "triton_tem_fused_convolution_0"
+    assert not TritonTemplateGemmPerfModel.can_model(event)
+
+
+def test_template_gemm_single_tensor_not_modeled():
+    event = _mm_silu_event(32, ["20"])
+    event["args"]["Input Dims"] = [[32, 10240]]
+    event["args"]["Input type"] = ["c10::BFloat16"]
+    assert not TritonTemplateGemmPerfModel.can_model(event)
+
+
+def test_template_gemm_backward_not_implemented():
+    model = TritonTemplateGemmPerfModel(_mm_silu_event(32, ["20", "1", "1"]))
+    with pytest.raises(NotImplementedError):
+        model.flops_bwd()
+    with pytest.raises(NotImplementedError):
+        model.bytes_bwd()
