@@ -10,40 +10,48 @@ This file is the detailed specification for the TraceLens **magpie-benchmark-pro
 
 ## Workflow overview
 
-Steps **0–6**: collect SSH/conda details, read the Magpie YAML, optionally build a TraceLens-patched inference Docker image, enable and tune the PyTorch profiler (targeted steady-state vs full run), run `python -m Magpie benchmark` on the remote node, verify trace quality, then split rank-0 traces with `split_trace.main` and print the suggested `generate_perf_report_pytorch_inference.py` command for downstream analysis.
+Steps **0–6**: collect node and environment details, read the Magpie YAML, optionally build a TraceLens-patched inference Docker image, enable and tune the PyTorch profiler (targeted steady-state vs full run), run `python -m Magpie benchmark` on the target node (local or remote), verify trace quality, then split rank-0 traces with `split_trace.main` and print the suggested `generate_perf_report_pytorch_inference.py` command for downstream analysis.
 
 ---
 
 ## Prerequisites
 
-- SSH access to a GPU node with Docker and AMD/NVIDIA GPUs
-- A conda environment with Magpie installed (`pip install -e .` from the Magpie repo root)
-- TraceLens installed on the host if TraceLens analysis is desired (`pip install -e .` from `TraceLens/`)
+- A GPU node with Docker and AMD/NVIDIA GPUs: the current machine, or one reachable over SSH
+- A conda or virtual environment with Magpie installed (`pip install -e .` from the Magpie repo root)
+- A TraceLens checkout, and a conda or virtual environment with it installed (`pip install -e .` from the checkout). This is always required: the image patches, build scripts and kernel shape tool come from the checkout, and the trace split runs from it. It can be the same environment as Magpie's
 - HuggingFace model weights cached or an `HF_TOKEN` for gated models
 
 ## Workflow
 
 ### Step 0: Gather Execution Environment Details
 
-Before doing anything else, check whether the user has provided all three of these:
+Before doing anything else, check whether the user has provided all of these:
 
-1. **Target node** — the hostname or IP to SSH into (e.g., `gpu-node-3`)
-2. **Conda environment name** — the env where Magpie is installed
-3. **Conda install path** — defaults to `~/miniconda3`; ask only if conda activation fails
+1. **Target node** — `local` for the current machine, or the hostname or IP to SSH into (e.g., `gpu-node-3`)
+2. **Magpie environment** — a conda env name, or the path of a virtual environment, with Magpie installed. For conda, the install path defaults to `~/miniconda3`; ask only if activation fails
+3. **TraceLens root** — the path of the TraceLens checkout (`<TraceLens_repo>`)
+4. **TraceLens environment** — a conda env name or virtual environment path with TraceLens installed. Often the same as the Magpie environment
 
 If any are missing, ask the user before proceeding. Example:
 
 > "To run the benchmark I need a few details about your execution environment:
-> 1. Which node should I SSH into?
-> 2. What is the name of the conda environment with Magpie installed?
-> 3. Is conda installed at `~/miniconda3`, or a different path?"
+> 1. Should I run on this machine, or which node should I SSH into?
+> 2. Which conda env or virtual environment has Magpie installed?
+> 3. Where is your TraceLens checkout?
+> 4. Which conda env or virtual environment has TraceLens installed, or is it the same one as Magpie's?"
 
 Do not guess node names or environment names — these are site-specific and getting them wrong wastes time on SSH failures or missing-package errors.
+
+Commands below activate an environment with `<magpie_activate>` or `<tracelens_activate>`. Each is one of:
+- conda: `source <conda_prefix>/etc/profile.d/conda.sh && conda activate <env>`, with `<conda_prefix>` defaulting to `~/miniconda3`;
+- virtual environment: `source <venv>/bin/activate`.
+
+Commands in this file are written for a remote node as `ssh <node> "<command>"`. When the target is `local` (or the hostname matches `hostname` on the current machine), run `<command>` directly in the current shell, without `ssh` and without the outer quotes. Everything else, including paths, is the same: the node is simply the machine you are on. This is unrelated to Magpie's `--run-mode local`, which runs the benchmark outside Docker.
 
 Also settle the **workload**: `fixed_seq` (random prompts at a fixed ISL/OSL) or `agentx` (InferenceX agentic replay through AIPerf). AgentX needs a Magpie build with bounded AgentX capture; check it before anything else:
 
 ```bash
-ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
+ssh <node> "<magpie_activate> && \
   python -c 'import inspect, Magpie.modes.benchmark.agentx_profiling as m; assert \"start_seconds\" in inspect.getsource(m)'"
 ```
 
@@ -58,7 +66,7 @@ When the caller (for example the model-bringup skill) asks for unattended mode:
 - Run Step 1b with the rule below.
 - Edit only the copy of the YAML the caller names.
 - Keep the cleanup's script restores but skip the YAML restore.
-- Run Magpie and the AgentX check through the caller's Magpie command instead of the conda activation shown in Steps 0 and 3 (no conda env is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log | tail -n 40`.
+- Run Magpie and the AgentX check through the caller's Magpie command instead of `<magpie_activate>` in Steps 0 and 3 (no Magpie environment is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log | tail -n 40`.
 - Skip Step 5.
 - Stop after the Step 6 split, which runs through the caller's container command prefix.
 - Do not print the TraceLens command.
@@ -68,17 +76,8 @@ When the caller (for example the model-bringup skill) asks for unattended mode:
 Step 1b without asking:
 
 1. Read the framework version from the image without a GPU: `docker run --rm --network=host --entrypoint python3 <image> -c "import importlib.metadata as m; print(m.version('<framework>'))"`. If that fails, stop.
-2. These images are used as is:
-   - vLLM v0.26.0+;
-   - an ATOM nightly from 2026-07-22 onward (date from the `nightly_<YYYYMMDD…>` tag);
-   - SGLang whose source already has the options (true for 0.5.21 and 0.5.22). Check without a GPU; exit 0 means ready:
-
-     ```bash
-     docker run --rm --network=host --entrypoint bash <image> -c 'f=$(find / -path /proc -prune -o -path "*sglang/srt/managers/io_struct.py" -print 2>/dev/null | head -1); [ -n "$f" ] && grep -q detailed_annotations "$f" && grep -rq enable_profile_cuda_graph "${f%/managers/io_struct.py}"'
-     ```
-
-   Every other image is patched.
-3. Build it with the build script's arm for that version (for SGLang, with the `--gpu-type` from the node's GPU: `gfx942` is `mi300`, `gfx950` is `mi355`). Tag it `tracelens-<framework>:<version>`, and skip the build if `docker image inspect` finds that tag. If the script has no arm for the version, or the build fails, stop.
+2. Decide from the TraceLens checkout, not from a fixed version list (see **Which versions get a patch** under Step 1b). If the build script has an entry for the version and its patch file or folder exists, the image is patched. If the version is newer than every entry, the image is used as is. If it is older than the newest entry but has no entry, stop: that version is unsupported.
+3. To patch, build with the script's entry for that version (for SGLang, with the `--gpu-type` from the node's GPU: `gfx942` is `mi300`, `gfx950` is `mi355`). Tag it `tracelens-<framework>:<version>`, and skip the build if `docker image inspect` finds that tag. If the build fails, stop.
 4. Set `docker_image` in the YAML copy to the image used.
 
 ### Step 1: Read the Benchmark Config
@@ -116,11 +115,21 @@ benchmark:
 
 After reading the config, work out whether the image needs profiling patches at all. The patches only exist to expose the profiler options used in Step 2b; TraceLens itself does **not** need to be installed inside the container, because the server only writes traces and every analysis step in this workflow runs on the host against the mounted output directory.
 
-**For vLLM, check the version first.** Both profiler options ship in upstream vLLM from **v0.26.0** onwards ([vllm-project/vllm#37524](https://github.com/vllm-project/vllm/pull/37524)), so a stock v0.26.0+ image is ready as-is — skip the rest of this step and go to Step 2. Only **v0.14-v0.25** need a patched image.
+#### Which versions get a patch
 
-**For ATOM, check the build date first.** The detailed annotations and the graph-capture profiler ship in upstream ATOM on **nightly builds from 2026-07-22 onward** ([ROCm/ATOM#477](https://github.com/ROCm/ATOM/pull/477) merged 2026-07-21), so a stock `rocm/atom-dev:nightly_*` image from that date onward is ready as-is — skip the rest of this step and go to Step 2. The merge landed after `release/v0.1.6` was branched, so **every tagged release (0.1.3 through 0.1.6rc) needs a patched image**.
+The TraceLens checkout is the only source of truth: patches keep landing for newer framework versions, so never decide from a remembered cutoff. Read the framework version from the image (step 1 of the unattended rule above), then look it up in `<TraceLens_repo>/examples/custom_workflows/inference_analysis/`:
 
-If the framework is SGLang, the vLLM version is below v0.26.0 or unknown, or the ATOM build predates 2026-07-22 or is unknown, ask:
+| Framework | Build script entry | Patch it applies |
+|---|---|---|
+| vLLM `0.X.Y` | arm `vX)` in `build_docker_vllm.sh` | `vllm_patches/config_vllm_v0.X.*.patch` (its `PATCH_FILE`) |
+| SGLang `0.5.N` | a version `normalize_version()` accepts in `build_docker_sglang.sh`, with a `resolve_base_image()` row for the GPU type | `sglang_roofline_patches/sglang_0_5_N/` |
+| ATOM `0.1.N` release | arm `v1N)` (or `v16rc)`) in `build_docker_atom.sh` | `atom_roofline_patches/atom_0_1_*/` (its `PATCH_DIR`) |
+
+- **Entry exists and its patch is present:** build a patched image. This includes recent versions: for example, the vLLM v26+ patches still add graph-capture tracing that upstream lacks.
+- **Version newer than every entry:** use the image as is. The script's fallback message explains why (for example, ATOM nightlies from 2026-07-22 have the options upstream). The trace checks (Step 5, or the caller's own check in unattended mode) catch anything still missing.
+- **Version older than the newest entry but without one:** unsupported. Tell the user; do not look for a workaround.
+
+If the version cannot be read from the image, ask:
 
 > "Does the Docker image in your config (or the default image Magpie will select) already have the profiling patches applied? If you're unsure, I can build a patched image for you."
 
@@ -143,7 +152,7 @@ Read `examples/custom_workflows/inference_analysis/build_docker_vllm.sh` and ext
 > | 1 | `vXX` | `<base image from script>` |
 > | ... | ... | ... |"
 
-Once the user selects a version, build the patched image on the remote node:
+Once the user selects a version, build the patched image on the target node:
 
 ```bash
 ssh <node> "cd <TraceLens_repo> && \
@@ -173,7 +182,7 @@ Present the discovered matrix to the user as a table and ask them to pick one ro
 > | 1 | `<version>` | `<gpu_type>` | `<base image from script>` |
 > | ... | ... | ... | ... |"
 
-Once the user selects, build the patched image on the remote node using the explicit flag form:
+Once the user selects, build the patched image on the target node using the explicit flag form:
 
 ```bash
 ssh <node> "cd <TraceLens_repo> && \
@@ -197,7 +206,7 @@ Read `examples/custom_workflows/inference_analysis/build_docker_atom.sh` and ext
 > | 1 | `<tag>` | `<base image from script>` |
 > | ... | ... | ... |"
 
-Once the user selects a version, build the patched image on the remote node:
+Once the user selects a version, build the patched image on the target node:
 
 ```bash
 ssh <node> "cd <TraceLens_repo> && \
@@ -535,7 +544,7 @@ ssh <node> "cd <ifx> && \
 
 Then edit the user's YAML config to remove the profiler flags from `EXTRA_VLLM_ARGS` (or restore the original value if it had pre-existing flags).
 
-**For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`), the kernel shape tool was copied into the InferenceX checkout, and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the remote files before patching:
+**For SGLang:** The YAML config was modified (to add profiling env vars and `EXTRA_SGLANG_ARGS`), the kernel shape tool was copied into the InferenceX checkout, and `benchmark_serving.py` was patched (common flags). If using targeted window (Option A), `benchmark_lib.sh` was also patched. Back up the files before patching:
 
 ```bash
 ssh <node> "cd <ifx> && \
@@ -543,7 +552,7 @@ ssh <node> "cd <ifx> && \
   cp <bench_serving> <bench_serving>.bak"
 ```
 
-After the benchmark completes, restore the remote files:
+After the benchmark completes, restore the patched files:
 
 ```bash
 ssh <node> "cd <ifx> && \
@@ -554,18 +563,17 @@ ssh <node> "cd <ifx> && \
 
 Then edit the user's YAML config to remove the profiling env vars (`SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPES`, `SGLANG_GRAPH_BATCH_CAPTURE`, `TRACELENS_SHAPE_DISCOVERY`, `PYTHONPATH`) and the `EXTRA_SGLANG_ARGS` profiler flags (or restore the original values if they had pre-existing content).
 
-**For ATOM:** Only the YAML config was modified (to add `ATOM_PROFILER_MORE`, `ATOM_ENABLE_DETAILED_ANNOTATION`, and `EXTRA_ATOM_ARGS`). No remote script is patched in either profiling mode, so there is nothing to back up or restore — just remove those entries from the YAML (or restore the original values if they had pre-existing content).
+**For ATOM:** Only the YAML config was modified (to add `ATOM_PROFILER_MORE`, `ATOM_ENABLE_DETAILED_ANNOTATION`, and `EXTRA_ATOM_ARGS`). No script is patched in either profiling mode, so there is nothing to back up or restore — just remove those entries from the YAML (or restore the original values if they had pre-existing content).
 
 Alternatively, if InferenceX is a git checkout, use `git checkout -- <file>` to discard changes. Or delete the entire `InferenceX` directory — Magpie re-clones it on the next run.
 
 ### Step 3: Run the Benchmark
 
-SSH into the target node, activate the conda environment, and run:
+On the target node (over SSH, or directly when it is `local`), activate the Magpie environment and run:
 
 ```bash
 ssh <node> "cd <magpie_repo_root> && \
-  source ~/miniconda3/etc/profile.d/conda.sh && \
-  conda activate <env_name> && \
+  <magpie_activate> && \
   python -m Magpie benchmark --benchmark-config <path/to/config.yaml> 2>&1"
 ```
 
@@ -638,7 +646,7 @@ All vLLM, sglang, and ATOM traces — regardless of whether they were collected 
 Run trace preprocessing on the rank-0 trace file:
 
 ```bash
-ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && \
+ssh <node> "<tracelens_activate> && \
   cd <TraceLens_repo> && \
   python -m TraceLens.TraceUtils.split_trace.main \
     <workspace>/torch_trace/<rank-0-trace>.pt.trace.json.gz \
@@ -647,7 +655,7 @@ ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> &
     --CONC <conc> --OSL <osl> --R <r>"
 ```
 
-For AgentX, keep `--num-steps 32` (the analysis window, not the capture length) and drop `--OSL`/`--R`. The AgentX trace is under `torch_trace/<capture_id>/`, so write the split next to it.
+For AgentX, keep `--num-steps 32` (the analysis window, not the capture length) and use `--OSL 1024 --R 0.2`. AgentX has no fixed output length, so these are representative values for choosing the mixed window. The AgentX trace is under `torch_trace/<capture_id>/`, so write the split next to it.
 
 Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
 
@@ -705,7 +713,7 @@ The benchmark subcommand does not accept `--log-level`. Passing it causes an arg
 
 ### 2. No output during Docker container startup
 
-The main Magpie process emits a "Running benchmark in container with image: ..." log line and then goes silent for several minutes while Docker starts the container, loads the model, and runs warmup. This is normal. Monitor progress by checking `docker logs` on the remote node rather than waiting for the main process.
+The main Magpie process emits a "Running benchmark in container with image: ..." log line and then goes silent for several minutes while Docker starts the container, loads the model, and runs warmup. This is normal. Monitor progress by checking `docker logs` on the target node rather than waiting for the main process.
 
 ### 3. Large models need long timeouts
 
@@ -721,7 +729,7 @@ The container runs with `--rm`, so it disappears after completion. If you need t
 
 ### 6. SSH command quoting
 
-When running the benchmark over SSH via the Shell tool, quote the entire remote command as a single string. Conda activation requires sourcing the conda init script explicitly:
+When running the benchmark over SSH via the Shell tool, quote the entire remote command as a single string (on a `local` node, run the inner command directly). A conda environment needs its init script sourced explicitly (a virtual environment just needs `source <venv>/bin/activate`):
 
 ```bash
 ssh <node> "cd <repo> && source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> && python -m Magpie benchmark ... 2>&1"

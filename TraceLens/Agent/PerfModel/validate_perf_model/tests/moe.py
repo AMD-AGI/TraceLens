@@ -47,6 +47,7 @@ from ._dtypes import (
     resolve_dtype as _resolve_dtype,
     resolve_quant_type as _resolve_quant_type,
 )
+from ._measure import prepare_measured_call
 
 # ---------------------------------------------------------------------------
 # Shared MoE input builders
@@ -246,6 +247,7 @@ def test_fmoe_fp8_blockscale_g1u1(
         _run()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _run()
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -409,6 +411,7 @@ def test_moe_cktile2stages_gemm1_ck(
         _run()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _run()
     torch.cuda.synchronize()
     print(f"test: done, shape={Y.shape}", flush=True)
@@ -508,6 +511,7 @@ def test_moe_cktile2stages_gemm2_ck(
         _run()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _run()
     torch.cuda.synchronize()
     print(f"test: done, shape={Y.shape}", flush=True)
@@ -629,6 +633,7 @@ def test_ck_moe_stage1(
         _run()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _run()
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -708,6 +713,7 @@ def test_ck_moe_stage2(
         _run()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _run()
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -851,6 +857,7 @@ def test_sglang_fused_moe_triton_invoke(
         _run()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _run()
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -871,124 +878,6 @@ def tl_dtype_for(torch_dtype):
 # ---------------------------------------------------------------------------
 # DSV3 / DSV4 MoE router + sort harnesses
 # ---------------------------------------------------------------------------
-
-
-def test_dsv3_fused_append_shared_experts(M, K=8, E=256, num_warmup=3, **_):
-    """``sglang ... fused_moe_triton_kernels.fused_append_shared_experts``.
-
-    Appends ``num_fused_shared_experts=1`` shared-expert entries onto an
-    existing ``(topk_ids, topk_weights)`` pair shaped ``(M, K)``.
-
-    Parameters
-    ----------
-    M : int -- number of tokens
-    K : int -- topk experts per token (default 8 matches DSV3)
-    E : int -- routed expert base id (N kwarg in sglang); default 256.
-    """
-    import torch
-    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels import (
-        fused_append_shared_experts,
-    )
-
-    device = "cuda"
-    print(f"test: dsv3_fused_append_shared_experts M={M} K={K} N_base={E}", flush=True)
-
-    topk_ids = torch.randint(0, E, (M, K), dtype=torch.int32, device=device)
-    topk_weights = torch.randn(M, K, dtype=torch.float32, device=device)
-
-    for _ in range(num_warmup):
-        out_ids, out_weights = fused_append_shared_experts(
-            topk_ids,
-            topk_weights,
-            num_fused_shared_experts=1,
-            scale_factor=1,
-            N=E,
-        )
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    out_ids, out_weights = fused_append_shared_experts(
-        topk_ids,
-        topk_weights,
-        num_fused_shared_experts=1,
-        scale_factor=1,
-        N=E,
-    )
-    torch.cuda.synchronize()
-    print(f"test: done, out_ids={out_ids.shape}", flush=True)
-
-
-def test_dsv4_topk_softplus(M=1819, N=384, topk=6, num_warmup=3, **_):
-    """``aiter.topk_softplus`` — MoE router top-k with sqrt(softplus) scoring."""
-    import torch
-    import aiter
-
-    num_tokens, num_experts = M, N
-    print(
-        f"test: dsv4_topk_softplus tokens={num_tokens} experts={num_experts} topk={topk}",
-        flush=True,
-    )
-    gating = (
-        torch.arange(-1, 1, 2.0 / num_experts, device="cuda")[:num_experts]
-        .repeat(num_tokens, 1)
-        .to(torch.bfloat16)
-    )
-    perm = torch.argsort(torch.rand_like(gating.float()), dim=-1)
-    gating = torch.gather(gating, dim=-1, index=perm).contiguous()
-    bias = torch.randn(num_experts, device="cuda", dtype=torch.bfloat16) * 0.1
-    topk_weights = torch.empty(num_tokens, topk, device="cuda", dtype=torch.float32)
-    topk_ids = torch.empty(num_tokens, topk, device="cuda", dtype=torch.int32)
-
-    for _ in range(num_warmup):
-        aiter.topk_softplus(topk_weights, topk_ids, gating, bias, True, 2.5)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    aiter.topk_softplus(topk_weights, topk_ids, gating, bias, True, 2.5)
-    torch.cuda.synchronize()
-    print(f"test: done weights={tuple(topk_weights.shape)}", flush=True)
-
-
-def test_dsv4_fused_dynamic_mx_quant_moe_sort(
-    M=32, N=7168, E=384, topk=6, group_size=32, block_m=32, num_warmup=3, **_
-):
-    """``aiter.fused_dynamic_mx_quant_moe_sort`` — fused MX-FP8 quant + MoE sort."""
-    import torch
-    import aiter
-    from aiter.fused_moe import fused_topk, moe_sorting
-
-    token_num, model_dim = M, N
-    block_size = block_m
-    print(
-        f"test: dsv4_fused_dynamic_mx_quant_moe_sort tokens={token_num} dim={model_dim} "
-        f"E={E} topk={topk} block={block_size} group={group_size}",
-        flush=True,
-    )
-    input_t = torch.randn(token_num, model_dim, device="cuda", dtype=torch.bfloat16)
-    score = torch.randn(token_num, E, device="cuda", dtype=torch.bfloat16)
-    topk_weights, topk_ids = fused_topk(input_t, score, topk, True)
-    sort_ret = moe_sorting(
-        topk_ids, topk_weights, E, model_dim, torch.bfloat16, block_size=block_size
-    )
-    sorted_ids, num_valid_ids = sort_ret[0], sort_ret[3]
-
-    def _call():
-        aiter.fused_dynamic_mx_quant_moe_sort(
-            input_t,
-            sorted_ids,
-            num_valid_ids,
-            token_num,
-            1,
-            block_size,
-            quant_dtype=aiter.dtypes.fp8,
-            group_size=group_size,
-        )
-
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    _call()
-    torch.cuda.synchronize()
-    print(f"test: done sorted_ids={tuple(sorted_ids.shape)}", flush=True)
 
 
 def _gen_flydsl_a4w4_data(token, model_dim, inter_dim, E, topk, block_m, dtype=None):
@@ -1149,6 +1038,7 @@ def test_dsv3_moe_flydsl_stage1(
         _call()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _call()
     torch.cuda.synchronize()
     print("test: done dsv3_moe_flydsl_stage1", flush=True)
@@ -1213,6 +1103,7 @@ def test_dsv3_moe_flydsl_stage2(
         _call()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _call()
     torch.cuda.synchronize()
     print("test: done dsv3_moe_flydsl_stage2", flush=True)

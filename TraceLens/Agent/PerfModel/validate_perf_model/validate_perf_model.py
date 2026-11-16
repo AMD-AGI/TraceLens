@@ -39,20 +39,26 @@ import re
 import subprocess
 import sys
 import textwrap
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from perf_model_harnesses import (
+from TraceLens.Agent.PerfModel.validate_perf_model.perf_model_harnesses import (
     OP_REGISTRY,
     TRACE_NAME_TO_OP,
+    chunk_stats_annotation,
     model_source,
     run_perf_model_from_event,
     tuple_to_list,
 )
-from tests._runner import INT_FLAGS, STR_FLAGS
+from TraceLens.Agent.PerfModel.validate_perf_model.tests._runner import (
+    INT_FLAGS,
+    STR_FLAGS,
+)
 from TraceLens.Agent.PerfModel.ratio_bands import (
     BAND_COLUMNS,
     RATIO_MATCH,
+    match_status,
     ratio_band,
 )
 
@@ -167,9 +173,19 @@ CSV_COLUMNS = [
     "flops_ratio",
     "bytes_ratio",
     *BAND_COLUMNS.values(),
-    "status",
+    "run_status",
+    "match_status",
     "comment",
 ]
+
+
+def _rocprof_env(out_dir):
+    """Environment for a rocprofv3 launch whose working directory is ``out_dir``.
+
+    ``cwd=`` alone leaves ``PWD`` at the caller's directory (the op worktree),
+    and rocprofv3 writes its ``.rocprofv3/`` scratch directory there.
+    """
+    return {**os.environ, "PWD": out_dir}
 
 
 def run_rocprofv3(
@@ -203,7 +219,12 @@ def run_rocprofv3(
     print(f'{"============================================================"}')
     with open(stdout_log, "w") as f_out, open(stderr_log, "w") as f_err:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=out_dir
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=out_dir,
+            env=_rocprof_env(out_dir),
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -268,7 +289,12 @@ def discover_kernel_name(
     print(f'{"============================================================"}')
     with open(stdout_log, "w") as f_out, open(stderr_log, "w") as f_err:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=out_dir
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=out_dir,
+            env=_rocprof_env(out_dir),
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -454,6 +480,16 @@ def format_number(val, unit):
     return f"{val:.0f}"
 
 
+def _arch_ops_counters(arch):
+    """Ops counters ``arch`` collects, or an empty set for an unknown arch."""
+    cfg = ARCH_COUNTER_CONFIGS.get(arch, {})
+    return {
+        name
+        for key in ("ops_counters", "ops_derived_16", "ops_derived_32")
+        for name in cfg.get(key, [])
+    }
+
+
 def generate_report(
     op_name,
     arch,
@@ -565,6 +601,7 @@ def generate_report(
             f'{format_number(measured_total_bytes, "bytes"):>14s} {bytes_ratio:>10.4f}'
         )
     precision_result = "N/A"
+    precision_reason = None
     lines.append("")
     lines.append("--- Compute Precision Check ---")
     if predicted_precision and predicted_precision in PRECISION_TO_COUNTERS:
@@ -606,6 +643,13 @@ def generate_report(
                 lines.append(
                     f"  Result:               MISMATCH - expected {expected_label} but dominant is {dominant_counter}"
                 )
+                arch_counters = _arch_ops_counters(arch)
+                if arch_counters and not set(expected_counters) & arch_counters:
+                    precision_reason = (
+                        f"{predicted_precision} counter ({expected_label}) "
+                        f"is not available on {arch}"
+                    )
+                    lines.append(f"  Reason:               {precision_reason}")
                 lines.append("  All ops counters:")
                 for cname, cval in sorted(all_ops.items()):
                     if cval > 0:
@@ -723,6 +767,7 @@ def generate_report(
         "flops_ratio": flops_ratio,
         "bytes_ratio": bytes_ratio,
         "precision_result": precision_result,
+        "precision_reason": precision_reason,
         "rocprof_f4_ops": f4_ops
         * COUNTER_DISPLAY.get("SQ_INSTS_VALU_MFMA_MOPS_F6F4", (1,))[0],
         "rocprof_f8_ops": mfma_f8 * 512,
@@ -825,7 +870,7 @@ def run_single_op_validation(op_name, args, output_dir):
             "flops_ratio": None,
             "bytes_ratio": None,
             "precision": predicted_precision or "N/A",
-            "status": "MODEL_ONLY",
+            "run_status": "MODEL_ONLY",
         }
     step = 1
     total_steps = 8
@@ -986,7 +1031,8 @@ def run_single_op_validation(op_name, args, output_dir):
         "flops_ratio": report_data["flops_ratio"],
         "bytes_ratio": report_data["bytes_ratio"],
         "precision": report_data["precision_result"],
-        "status": "OK",
+        "precision_reason": report_data["precision_reason"],
+        "run_status": "OK",
     }
 
 
@@ -1005,7 +1051,7 @@ def load_cases(cases_path):
 
 
 def run_csv_op_validation(entry, args, output_dir):
-    """Run validation for a single op entry loaded from a report dir CSV."""
+    """Run validation for a single traced case from ``--cases``."""
     registry_key = entry["registry_key"]
     trace_name = entry["trace_name"]
     reg = OP_REGISTRY[registry_key]
@@ -1027,7 +1073,7 @@ def run_csv_op_validation(entry, args, output_dir):
                     entry["input_types"],
                     entry["input_strides"],
                     entry["concrete_inputs"],
-                    entry["attn_params"] or entry.get("perf_params"),
+                    entry.get("perf_params") or entry["attn_params"],
                 )
             )
         except Exception as e:
@@ -1053,7 +1099,7 @@ def run_csv_op_validation(entry, args, output_dir):
             "flops_ratio": None,
             "bytes_ratio": None,
             "precision": predicted_precision or "N/A",
-            "status": "MODEL_ONLY",
+            "run_status": "MODEL_ONLY",
         }
     step = 1
     total_steps = 8
@@ -1168,7 +1214,7 @@ def run_csv_op_validation(entry, args, output_dir):
                 entry["input_types"],
                 entry["input_strides"],
                 entry["concrete_inputs"],
-                entry["attn_params"] or entry.get("perf_params"),
+                entry.get("perf_params") or entry["attn_params"],
             )
         )
     except Exception as e:
@@ -1233,7 +1279,8 @@ def run_csv_op_validation(entry, args, output_dir):
         "flops_ratio": report_data["flops_ratio"],
         "bytes_ratio": report_data["bytes_ratio"],
         "precision": report_data["precision_result"],
-        "status": "OK",
+        "precision_reason": report_data["precision_reason"],
+        "run_status": "OK",
     }
 
 
@@ -1280,14 +1327,14 @@ def print_batch_summary(results):
     hdr = (
         f'  {"Op":<32s} {"Class":<32s} {"Source":<42s} {"Prec":>5s} {"Pred FLOPs":>12s} '
         f'{"Pred Bytes":>12s} {"F4 Ops":>12s} {"F8 Ops":>12s} {"16-bit":>12s} {"32-bit":>12s} '
-        f'{"Read":>12s} {"Write":>12s} {"FRatio":>8s} {"BRatio":>8s} {"Status":>10s}'
+        f'{"Read":>12s} {"Write":>12s} {"FRatio":>8s} {"BRatio":>8s} {"Run":>10s} {"Match":>14s}'
     )
     print(hdr)
     sep = (
         f'  {"--------------------------------"} {"--------------------------------"} '
         f'{"------------------------------------------"} {"-----"} {"------------"} {"------------"} '
         f'{"------------"} {"------------"} {"------------"} {"------------"} {"------------"} '
-        f'{"------------"} {"--------"} {"--------"} {"----------"}'
+        f'{"------------"} {"--------"} {"--------"} {"----------"} {"--------------"}'
     )
     print(sep)
     for r in results:
@@ -1336,12 +1383,13 @@ def print_batch_summary(results):
         prec = str(r.get("predicted_precision", "---"))[:5]
         src = f'{r.get("source_file", "?")}:{r.get("source_line", "?")}'
         cls_name = str(r.get("perf_model_class", "?"))[:32]
-        status = str(r.get("status", "---"))[:10]
+        status = str(r.get("run_status", "---"))[:10]
+        match = str(r.get("match_status") or "---")[:14]
         op_name = r["op"][:32]
         line = (
             f"  {op_name:<32s} {cls_name:<32s} {src:<42s} {prec:>5s} {pf:>12s} {pb:>12s} "
             f"{f4:>12s} {f8:>12s} {t16:>12s} {t32:>12s} {read:>12s} {write:>12s} "
-            f"{fr_s:>8s} {br_s:>8s} {status:>10s}"
+            f"{fr_s:>8s} {br_s:>8s} {status:>10s} {match:>14s}"
         )
         print(line)
     print(
@@ -1358,8 +1406,8 @@ def print_batch_summary(results):
     print(
         "----------------------------------------------------------------------------------------------------"
     )
-    ok_count = sum(1 for r in results if r["status"] == "OK")
-    model_only_count = sum(1 for r in results if r["status"] == "MODEL_ONLY")
+    ok_count = sum(1 for r in results if r["run_status"] == "OK")
+    model_only_count = sum(1 for r in results if r["run_status"] == "MODEL_ONLY")
     fail_count = len(results) - ok_count - model_only_count
     parts = [f"{ok_count} passed"]
     if model_only_count:
@@ -1367,6 +1415,9 @@ def print_batch_summary(results):
     if fail_count:
         parts.append(f"{fail_count} failed")
     print(f'\n  {", ".join(parts)} out of {len(results)} ops')
+    matches = Counter(r.get("match_status") for r in results if r.get("match_status"))
+    if matches:
+        print("  match: " + ", ".join(f"{n} {k}" for k, n in sorted(matches.items())))
     return None
 
 
@@ -1496,9 +1547,10 @@ def main():
     parser.add_argument(
         "--annotation",
         default=None,
-        help="vLLM iteration annotation passed through to ops that accept it "
-        "(e.g. unified_attention). Format: 'execute_<i>_context_<N>"
-        "(sq<S>sk<K>sqsq<Q>sqsk<P>)_generation_<M>(sq<S>sk<K>sqsq<Q>sqsk<P>)'.",
+        help="Detailed step annotation passed through to ops that accept it "
+        "(e.g. unified_attention), in any format TraceLens parses: vLLM "
+        "'execute_<i>_context_<N>(sq<S>sk<K>sqsq<Q>sqsk<P>)_generation_<M>(...)', "
+        "SGLang 'step[... c_sq=.. g_sq=.. ...]' or ATOM detailed.",
     )
     parser.add_argument(
         "--varlen_num_seqs",
@@ -1712,7 +1764,7 @@ def main():
                         "flops_ratio": None,
                         "bytes_ratio": None,
                         "precision": "---",
-                        "status": f"FAIL: {str(e)[:60]}",
+                        "run_status": f"FAIL: {str(e)[:60]}",
                     }
                 )
         _enrich_results(results)
@@ -1721,7 +1773,9 @@ def main():
         csv_path = os.path.join(base_output_dir, csv_filename)
         write_results_csv(results, csv_path)
         print_batch_summary(results)
-        return int(any(str(r.get("status", "")).startswith("FAIL") for r in results))
+        return int(
+            any(str(r.get("run_status", "")).startswith("FAIL") for r in results)
+        )
 
     if args.all:
         ops_to_run = list(OP_REGISTRY.keys())
@@ -1771,7 +1825,7 @@ def main():
                     "flops_ratio": None,
                     "bytes_ratio": None,
                     "precision": "---",
-                    "status": f"FAIL: {str(e)[:60]}",
+                    "run_status": f"FAIL: {str(e)[:60]}",
                 }
             )
     _enrich_results(results)
@@ -1875,7 +1929,10 @@ def _populate_varlen_attention_args(op_name, effective_args):
         return None
     # Imported lazily: tests.attention needs torch, which --discover and
     # perf-model-only runs do not.
-    from tests.attention import compute_varlen_annotation_stats, make_varlen_seqlens
+    from TraceLens.Agent.PerfModel.validate_perf_model.tests.attention import (
+        compute_varlen_annotation_stats,
+        make_varlen_seqlens,
+    )
 
     num_seqs = getattr(effective_args, "varlen_num_seqs", None) or 4
     seed = getattr(effective_args, "varlen_seed", None) or 42
@@ -2011,17 +2068,21 @@ def _extract_dims_for_existing_harness(
         ns.group_size = 128
         return ns
     if cat in ("attention", "vllm_attention"):
-        if attn_params:
-            ns.seq_len = int(attn_params.get("N_Q", 2048))
-            ns.num_heads_q = int(attn_params.get("H_Q", 32))
-            ns.num_heads_kv = int(attn_params.get("H_KV", 8))
-            ns.head_dim = int(attn_params.get("d_h_qk", 128))
-            c_sq = attn_params.get("c_sq")
-            c_sqsq = attn_params.get("c_sqsq")
+        # The perf model's own parsed params come first, so the harness runs
+        # the same sq/sk the model predicted for.
+        params = pp or attn_params
+        if params:
+            ns.seq_len = int(params.get("N_Q", 2048))
+            ns.num_heads_q = int(params.get("H_Q", 32))
+            ns.num_heads_kv = int(params.get("H_KV", 8))
+            ns.head_dim = int(params.get("d_h_qk", 128))
+            c_sq = params.get("c_sq")
+            c_sqsq = params.get("c_sqsq")
             if c_sq is not None and str(c_sq) not in ("nan", ""):
                 ns._varlen_c_sq = int(float(c_sq))
             if c_sqsq is not None and str(c_sqsq) not in ("nan", ""):
                 ns._varlen_c_sqsq = int(float(c_sqsq))
+            ns.annotation = chunk_stats_annotation(params)
             return ns
         if len(input_dims) > 0 and input_dims[0] and len(input_dims[0]) >= 3:
             dims = input_dims[0]
@@ -2091,9 +2152,9 @@ def _build_runner_argv_from_csv_entry(
 
 def _generate_comment(row):
     """Auto-generate a discrepancy comment from rule-based analysis."""
-    if row.get("status", "").startswith("FAIL"):
-        return f'Validation failed: {row["status"]}'
-    if row.get("status") == "MODEL_ONLY":
+    if row.get("run_status", "").startswith("FAIL"):
+        return f'Validation failed: {row["run_status"]}'
+    if row.get("run_status") == "MODEL_ONLY":
         return "Perf-model-only; no GPU measurement available"
     parts = []
     fr = row.get("flops_ratio")
@@ -2129,7 +2190,7 @@ def _generate_comment(row):
         if br_low <= br <= br_high:
             parts.append("Bytes: good match")
         elif br < br_low:
-            parts.append(f"Bytes {br:.2f}x: model may over-estimate (caching?)")
+            parts.append(f"Bytes {br:.2f}x: model over-predicts bytes")
         elif br_high < br <= 2:
             parts.append(f"Bytes {br:.2f}x: L2 replay or scale tensor overhead")
         elif br > 2:
@@ -2139,12 +2200,14 @@ def _generate_comment(row):
     prec = row.get("precision", "")
     if prec == "MISMATCH":
         parts.append(
-            "Precision mismatch: dominant HW counter differs from predicted dtype"
+            f"Precision mismatch: {row['precision_reason']}"
+            if row.get("precision_reason")
+            else "Precision mismatch: dominant HW counter differs from predicted dtype"
         )
     elif prec == "NO DATA":
         parts.append("No ops counters collected for precision check")
     if parts:
-        return "; ".join(parts)
+        return "hint: " + "; ".join(parts)
     return "OK"
 
 
@@ -2158,6 +2221,9 @@ def _enrich_results(results):
         r["comment"] = _generate_comment(r)
         for ratio_col, band_col in BAND_COLUMNS.items():
             r[band_col] = ratio_band(ratio_col, r.get(ratio_col))
+        r["match_status"] = match_status(
+            r.get("run_status"), [r[band] for band in BAND_COLUMNS.values()]
+        )
     return results
 
 

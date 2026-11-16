@@ -21,12 +21,12 @@ top-ops:
   total and has has_perf_model == False on some row.
 
 Usage:
-  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv
-  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv \\
+  python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops unified_perf_summary.csv
+  python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops unified_perf_summary.csv \\
     --mode top-ops
 
   # Write a starter extension next to the CSV (<stem>_triage_extension.py):
-  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv \\
+  python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops unified_perf_summary.csv \\
     --emit-extension [--extension-out PATH]
 """
 
@@ -48,6 +48,8 @@ from TraceLens.Agent.PerfModel.perf_model_generate.scan_framework_ops import (
 DEFAULT_THRESHOLD = 0.02
 RUNTIME_COLUMNS = ("Kernel Time (µs)_sum", "total_duration_us")
 MODEL_OUTPUT_COLUMNS = ("GFLOPS", "Data Moved (MB)")
+# Op category values that mean the op has no category yet.
+UNCATEGORIZED = ("", "other")
 # Newer TraceLens embeds the call stack in the summary CSV; prefer the full one.
 CALL_STACK_COLUMNS = ("call_stack_full", "call_stack", "trunc_call_stack")
 REPO_HINTS = (
@@ -92,16 +94,6 @@ def load_rows(path: Path) -> Tuple[List[Row], str]:
             f"{path}: no runtime column; expected one of {RUNTIME_COLUMNS}, got {fields}"
         )
 
-    # Older pipelines kept the call stack in a companion file keyed by row index.
-    legacy = path.parent / "unified_perf_callstacks.csv"
-    if not {"call_stack_full", "call_stack"} & set(fields) and legacy.is_file():
-        with legacy.open(newline="", encoding="utf-8", errors="replace") as f:
-            by_id = {
-                r.get("row_id", ""): r.get("call_stack", "") for r in csv.DictReader(f)
-            }
-        for i, r in enumerate(rows):
-            r["call_stack"] = by_id.get(str(i), "")
-
     for r in rows:
         stacks = ((r.get(c) or "").strip() for c in CALL_STACK_COLUMNS)
         r["call_stack"] = next((s for s in stacks if s), "")
@@ -122,6 +114,16 @@ def missing_perf_model_share(rows: List[Row]) -> float:
     total = sum(r["_us"] for r in rows)
     missing = sum(r["_us"] for r in rows if not row_has_perf_model(r))
     return missing / total if total > 0 else 0.0
+
+
+def categorized_names(rows: List[Row]) -> set:
+    """Op names whose category, on some row, is neither empty nor ``other``."""
+    return {
+        r.get("name", "")
+        for r in rows
+        if (r.get("op category") or r.get("op_category") or "").strip().lower()
+        not in UNCATEGORIZED
+    }
 
 
 def validation_cases(report_dir: Path) -> List[Dict]:
@@ -209,7 +211,7 @@ def report_other_bucket(
     picked, acc = greedy_prefix(other, args.fraction * total_other)
 
     print("=" * 72)
-    print("unified-perf-report-postprocess — other bucket triage")
+    print("perf-model-generate — other bucket triage")
     print("=" * 72)
     print(f"CSV: {path}")
     print(f"Runtime column: {runtime_col}")
@@ -311,7 +313,7 @@ def report_top_ops(path: Path, rows: List[Row], args) -> List[str]:
     """Print the top-ops candidate table; return the op names."""
     results = compute_top_ops(rows, args.threshold, args.include_covered)
     print("=" * 72)
-    print("unified-perf-report-postprocess — top-ops mode (EP1)")
+    print("perf-model-generate — top-ops mode (EP1)")
     print("=" * 72)
     print(f"CSV: {path}")
     print(

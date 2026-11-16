@@ -14,7 +14,8 @@ in one unattended run:
 2. It gates profile health and report health with the
    [triage checks](../Analysis/triage/README.md).
 3. It runs the [analysis orchestrator](../Analysis/README.md).
-4. It drafts one validated perf-model PR or issue per op without a perf model.
+4. It drafts a validated perf-model PR, a category-mapping PR or an issue per op without a
+   perf model.
 
 A later Publish prompt files the drafts you approve on `AMD-AGI/TraceLens`.
 
@@ -24,6 +25,7 @@ from config `<path>/bringup_config.yaml`".
 
 Code layout:
 - `utils/bringup_gates.py` holds the step gates.
-- `utils/unified_perf_ops.py` reads `unified_perf_summary.csv`: it ranks ops worth a perf
-  model, measures the share of kernel time without one, and builds validator cases.
-- Per-op authoring and validation stay in [`../PerfModel/`](../PerfModel/).
+- Perf-model authoring and validation live in [`../PerfModel/`](../PerfModel/), including
+  `perf_model_generate/unified_perf_ops.py`, which reads `unified_perf_summary.csv`: it
+  ranks ops worth a perf model, measures the share of kernel time without one, and builds
+  validator cases.

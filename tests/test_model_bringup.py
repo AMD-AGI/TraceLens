@@ -10,16 +10,16 @@ import pytest
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Agent.ModelBringup.utils import bringup_gates
-from TraceLens.Agent.ModelBringup.utils.unified_perf_ops import (
+from TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops import (
     load_rows,
     missing_perf_model_share,
     validation_cases,
 )
-from TraceLens.Agent.PerfModel.ratio_bands import ratio_band
+from TraceLens.Agent.PerfModel.ratio_bands import match_status, ratio_band
 
 _HEADER = "name,op category,Input Dims,Input type,Kernel Time (µs)_sum,has_perf_model,kernel_details_summary,GFLOPS\n"
-_BAND_HEADER = "status,flops_ratio,flops_band,bytes_ratio,bytes_band\n"
-_OK_ROW = "OK,1.0000,match,1.0000,match\n"
+_BAND_HEADER = "run_status,flops_ratio,flops_band,bytes_ratio,bytes_band,match_status\n"
+_OK_ROW = "OK,1.0000,match,1.0000,match,match\n"
 _DRAFT = f"## Operator\n\nOp a, data: None.\n\n## Validation\n\n{bringup_gates.VALIDATION_HEADER}\n"
 
 
@@ -58,14 +58,24 @@ def _modeled_op(bringup, csv_rows):
 @pytest.mark.parametrize(
     "column,below,low,high,above",
     [
-        ("flops_ratio", 0.94, 0.95, 1.05, 1.06),
-        ("bytes_ratio", 0.89, 0.9, 1.2, 1.21),
+        ("flops_ratio", 0.99, 1.0, 1.05, 1.06),
+        ("bytes_ratio", 0.99, 1.0, 1.2, 1.21),
     ],
 )
 def test_ratio_band(column, below, low, high, above):
     assert ratio_band(column, None) == ""
     assert ratio_band(column, low) == ratio_band(column, high) == "match"
-    assert ratio_band(column, below) == ratio_band(column, above) == "deviation"
+    assert ratio_band(column, above) == "deviation"
+    assert ratio_band(column, below) == "over-predicted"
+
+
+def test_match_status():
+    assert match_status("FAIL: x", ["match", "match"]) == ""
+    assert match_status("MODEL_ONLY", ["", ""]) == ""
+    assert match_status("OK", ["match", ""]) == "no prediction"
+    assert match_status("OK", ["deviation", "over-predicted"]) == "over-predicted"
+    assert match_status("OK", ["match", "deviation"]) == "deviation-suspect"
+    assert match_status("OK", ["match", "match"]) == "match"
 
 
 def test_unified_perf_ops_share_and_cases(tmp_path):
@@ -110,7 +120,7 @@ def test_gaps_drops_collectives_and_slugs(tmp_path):
 def test_report_health_blocks_and_accepts(tmp_path):
     (tmp_path / "triage_details.csv").write_text(
         "DIAG Tag,Category,Failure Mode,Evidence,Remedy,Implied By\n"
-        "DIAG:perf_model:3i_CAPTURE_RANK_MISMATCH,perf_model,m,e,r,\n"
+        "DIAG:perf_model:3c_CAPTURE_GRAPH_MERGE_FAIL,perf_model,m,e,r,\n"
         "DIAG:trace_quality:2j_RUNTIME_INSTABILITY,trace_quality,m,e,r,\n"
     )
     args = ["report-health", "--phase", "report", "--bringup-dir", str(tmp_path)]
@@ -119,7 +129,7 @@ def test_report_health_blocks_and_accepts(tmp_path):
     assert _gate(tmp_path, "report_health")["other"] == [
         "DIAG:trace_quality:2j_RUNTIME_INSTABILITY"
     ]
-    assert bringup_gates.main(args + ["--accept", "CAPTURE_RANK_MISMATCH"]) == 0
+    assert bringup_gates.main(args + ["--accept", "CAPTURE_GRAPH_MERGE_FAIL"]) == 0
     empty = tmp_path / "empty"
     empty.mkdir()
     assert bringup_gates.main(args[:-1] + [str(empty)]) == 2
@@ -132,7 +142,9 @@ def test_coverage_needs_all_rows_ok_and_summary(tmp_path):
     after = _write_csv(tmp_path / "after.csv", ["op_a,GEMM,,,10,True,,\n"])
     op_dir = tmp_path / "perf_models" / "op_a"
     op_dir.mkdir(parents=True)
-    (op_dir / "validation.csv").write_text("op,status\nop_a,OK\nop_a,MODEL_ONLY\n")
+    (op_dir / "validation.csv").write_text(
+        "op,run_status,match_status\nop_a,OK,match\nop_a,MODEL_ONLY,\n"
+    )
     (op_dir / "result.json").write_text(
         json.dumps(
             {
@@ -178,7 +190,17 @@ def test_op_result_gates_outcomes(tmp_path):
     result = json.loads(path.read_text())
     assert bringup_gates.main(args) == 0
 
-    csv.write_text(_BAND_HEADER + _OK_ROW + "MODEL_ONLY,,,,\n")
+    csv.write_text(_BAND_HEADER + _OK_ROW + "MODEL_ONLY,,,,,\n")
+    assert bringup_gates.main(args) == 1
+
+    csv.write_text(
+        _BAND_HEADER + "OK,0.9000,over-predicted,1.0000,match,over-predicted\n"
+    )
+    assert bringup_gates.main(args) == 1
+
+    csv.write_text(
+        _BAND_HEADER + "OK,1.3000,deviation,1.0000,match,deviation-suspect\n"
+    )
     assert bringup_gates.main(args) == 1
 
     csv.write_text(_BAND_HEADER + _OK_ROW)
@@ -203,6 +225,17 @@ def test_op_result_gates_outcomes(tmp_path):
     assert bringup_gates.main(args) == 0
     issue.write_text("## Validation\n")
     assert bringup_gates.main(args) == 1
+    issue.write_text("## Operator\n")
+    assert bringup_gates.main(args) == 1
+    issue.write_text(_DRAFT + "\n| Shape | Time (us) |\n|---|---|\n| s | 1 |\n")
+    assert bringup_gates.main(args) == 1
+    issue.write_text("## Operator\n")
+    path.write_text(
+        json.dumps(
+            {**result, "outcome": "blocked", "reason": "r", "validation_csv": None}
+        )
+    )
+    assert bringup_gates.main(args) == 0
 
     path.unlink()
     assert bringup_gates.main(args) == 2
@@ -217,7 +250,9 @@ def test_op_result_rejects_leaked_names(tmp_path):
 
 
 def test_op_result_requires_explained_deviations(tmp_path):
-    op_dir, args = _modeled_op(tmp_path, "OK,1.0000,match,2.3204,deviation\n")
+    op_dir, args = _modeled_op(
+        tmp_path, "OK,1.0000,match,2.3204,deviation,deviation-explained\n"
+    )
     draft = op_dir / "perf_model_pr.md"
     draft.write_text(_DRAFT + "| 2.3204 |\n")
     assert bringup_gates.main(args) == 1
@@ -246,3 +281,40 @@ def test_analysis_result_gates_outcome_and_outputs(tmp_path):
 
     (analysis / "perf_report.log").write_text("")
     assert bringup_gates.main(args) == 1
+
+
+def test_op_result_categorized_needs_commit_and_no_validation(tmp_path):
+    op_dir, args = _modeled_op(tmp_path, _OK_ROW)
+    path = op_dir / "result.json"
+    result = {**json.loads(path.read_text()), "outcome": "categorized"}
+    result["validation_csv"] = None
+    (op_dir / "perf_model_pr.md").write_text("## Operator\n\nOp a.\n\n## Changes\n")
+    path.write_text(json.dumps(result))
+    assert bringup_gates.main(args) == 0
+
+    path.write_text(json.dumps({**result, "commit": None}))
+    assert bringup_gates.main(args) == 1
+
+    path.write_text(json.dumps(result))
+    (op_dir / "perf_model_pr.md").write_text(_DRAFT)
+    assert bringup_gates.main(args) == 1
+
+
+@pytest.mark.parametrize("category,code", [("GEMM", 0), ("other", 1)])
+def test_coverage_needs_categorized_op_to_have_a_category(tmp_path, category, code):
+    after = _write_csv(tmp_path / "after.csv", [f"op_a,{category},,,10,False,,\n"])
+    op_dir = tmp_path / "perf_models" / "op_a"
+    op_dir.mkdir(parents=True)
+    (op_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "op": "op_a",
+                "op_slug": "op_a",
+                "outcome": "categorized",
+                "validation_csv": None,
+            }
+        )
+    )
+    args = ["coverage", "--bringup-dir", str(tmp_path)]
+    args += ["--before", str(after), "--after", str(after)]
+    assert bringup_gates.main(args) == code

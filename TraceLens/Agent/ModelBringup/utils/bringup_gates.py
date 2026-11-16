@@ -6,8 +6,8 @@
 
 """Gates for the model-bringup skill.
 
-Each gate exits 0 (pass), 1 (fail) or 2 (input error). All but ``cases`` and
-``op-result`` write ``<bringup_dir>/gates/<name>.json``::
+Each gate exits 0 (pass), 1 (fail) or 2 (input error). All but ``gaps``, ``cases``
+and ``op-result`` write ``<bringup_dir>/gates/<name>.json``::
 
     python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates <subcommand> --bringup-dir B ...
 """
@@ -27,20 +27,27 @@ from TraceLens.Agent.Analysis.triage.checks import (
     rank_of,
 )
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
-from TraceLens.Agent.ModelBringup.utils.unified_perf_ops import (
+from TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops import (
     DEFAULT_THRESHOLD,
+    categorized_names,
     compute_top_ops,
     load_rows,
     missing_perf_model_share,
     validation_cases,
 )
-from TraceLens.Agent.PerfModel.ratio_bands import BAND_COLUMNS
+from TraceLens.Agent.PerfModel.ratio_bands import (
+    BAND_COLUMNS,
+    DEVIATION_EXPLAINED,
+    MATCH,
+)
 from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
     CustomCollective,
 )
 from TraceLens.util import TraceEventUtils
 
 # Constants
+# Validation match statuses a modeled outcome accepts; every other row blocks it.
+PASSING_MATCH = (MATCH, DEVIATION_EXPLAINED)
 BLOCKING_CHECKS = {
     "profile": (
         "TRACE_MISSING",
@@ -59,16 +66,28 @@ BLOCKING_CHECKS = {
         "NO_GPU_KERNELS",
         "HIPGRAPH_LAUNCH_IN_REPORT",
         "CAPTURE_GRAPH_MERGE_FAIL",
-        "CAPTURE_RANK_MISMATCH",
         "PERF_REPORT_FAILURE",
     ),
 }
 CAPTURE_DIRS = ("capture_traces", "graph_capture_profile")
-DRAFT_FILES = {"modeled": "perf_model_pr.md", "blocked": "perf_model_issue.md"}
+DRAFT_FILES = {
+    "modeled": "perf_model_pr.md",
+    "categorized": "perf_model_pr.md",
+    "blocked": "perf_model_issue.md",
+}
+# Outcomes whose commit is merged in Step 7 and published as a PR.
+COMMITTED_OUTCOMES = ("modeled", "categorized")
 EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
 LEAK_KEYS = ("node", "platform", "docker_image")
 GFX_TARGET = re.compile(r"\bgfx\d+\w*", re.I)
 VALIDATION_HEADER = "| Shape | Predicted FLOPs | Predicted Bytes | Measured Read Bytes | Measured Write Bytes | FLOPs Ratio | Bytes Ratio |"
+# Every table header the PR and issue templates allow; any other table is off-template.
+DRAFT_TABLE_HEADERS = (
+    VALIDATION_HEADER,
+    "| Input Dims | Input Type | Concrete Inputs |",
+    "| Pseudo Op | Brittleness | Paths Checked | Differing Paths | Complexity | Events Added |",
+)
+TABLE_SEPARATOR = re.compile(r"\|(\s*:?-+:?\s*\|)+")
 SYNTHETIC_MARKER = "(Synthetic Op)"
 MIN_TOKEN = 4
 MIN_PATH_PARTS = 3
@@ -200,7 +219,7 @@ def cases(args):
 
 
 def op_result(args):
-    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and all-OK validation rows; the draft leaks no run input, has the validation header and explains every ratio deviation."""
+    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and validation rows that ran and match or have an explained deviation; categorized implies a commit and no validation; the draft leaks no run input, uses only the template's tables (the validation table whenever rows exist) and explains every ratio deviation."""
     path = Path(args.result)
     if not path.is_file():
         print(f"missing {path}", file=sys.stderr)
@@ -230,20 +249,31 @@ def op_result(args):
                 f"draft names {target}"
                 for target in sorted(set(GFX_TARGET.findall(text)))
             ]
-            if (outcome == "modeled" or "## Validation" in text) and (
-                VALIDATION_HEADER not in text
-            ):
-                problems.append("validation table header is not the canonical header")
+            needs_validation = outcome == "modeled" or (
+                outcome == "blocked" and _has_rows(result.get("validation_csv"))
+            )
+            if needs_validation and VALIDATION_HEADER not in text:
+                problems.append("validation table missing or not the canonical header")
+            problems += [
+                f"draft table header is not a template header: {header}"
+                for header in _table_headers(text)
+                if header not in DRAFT_TABLE_HEADERS
+            ]
         if outcome == "blocked" and not result.get("reason"):
             problems.append("reason missing")
+        if outcome in COMMITTED_OUTCOMES and not result.get("commit"):
+            problems.append("commit missing")
+        if outcome == "categorized" and text is not None and "## Validation" in text:
+            problems.append("categorized draft has a Validation section")
         if outcome == "modeled":
-            if not result.get("commit"):
-                problems.append("commit missing")
             csv_path = result.get("validation_csv")
             if not csv_path or not Path(csv_path).is_file():
                 problems.append("validation CSV missing")
             elif not _all_rows_ok(csv_path):
-                problems.append("validation CSV has a row that is not OK")
+                problems.append(
+                    "validation CSV has a row that did not run or whose match_status "
+                    "is not match or deviation-explained"
+                )
             elif text is not None:
                 problems += _unexplained_ratios(csv_path, text)
     for problem in problems:
@@ -276,17 +306,21 @@ def analysis_result(args):
 
 
 def coverage(args):
-    """Every modeled op is covered after the merge and validated with all rows OK."""
+    """After the merge, every modeled op is covered and validated, and every categorized op has a category."""
     after_rows, _ = load_rows(Path(args.after))
     covered = {
         op["name"]: op["covered"]
         for op in compute_top_ops(after_rows, 0.0, include_covered=True)
     }
+    categorized = categorized_names(after_rows)
     failing = []
     for result in _results(args.bringup_dir):
-        if result.get("outcome") != "modeled":
-            continue
-        if not covered.get(result["op"]) or not _all_rows_ok(result["validation_csv"]):
+        outcome = result.get("outcome")
+        if outcome == "modeled" and not (
+            covered.get(result["op"]) and _all_rows_ok(result["validation_csv"])
+        ):
+            failing.append(result["op"])
+        elif outcome == "categorized" and result["op"] not in categorized:
             failing.append(result["op"])
     return _gate(
         args,
@@ -331,9 +365,32 @@ def summary(args):
     return 0
 
 
-def _all_rows_ok(csv_path):
+def _has_rows(csv_path):
+    """True when ``csv_path`` names a CSV with at least one data row."""
+    if not csv_path or not Path(csv_path).is_file():
+        return False
     with open(csv_path, newline="") as f:
-        return {r.get("status") for r in csv.DictReader(f)} == {"OK"}
+        return next(csv.DictReader(f), None) is not None
+
+
+def _table_headers(text):
+    """Header rows of the markdown tables in ``text``."""
+    lines = [line.strip() for line in text.splitlines()]
+    return [
+        line
+        for line, nxt in zip(lines, lines[1:])
+        if line.startswith("|") and TABLE_SEPARATOR.fullmatch(nxt)
+    ]
+
+
+def _all_rows_ok(csv_path):
+    """Every row ran (``run_status`` OK) and matches or has an explained deviation."""
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    return bool(rows) and all(
+        r.get("run_status") == "OK" and r.get("match_status") in PASSING_MATCH
+        for r in rows
+    )
 
 
 def _norm(text):

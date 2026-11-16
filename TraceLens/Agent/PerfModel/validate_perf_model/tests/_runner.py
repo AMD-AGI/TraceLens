@@ -31,7 +31,7 @@ else:
 
 # Test modules searched for ``test_<op>``, in order. Add a module here when a
 # new op family gets its own file.
-MODULES = ("gemm", "moe", "attention", "rmsnorm", "other", "rope", "kimi")
+MODULES = ("gemm", "moe", "attention", "rmsnorm", "other", "rope")
 
 # Flags forwarded to test functions; validate_perf_model builds its runner
 # argv from the same lists.

@@ -8,13 +8,48 @@
 
 # Constants
 
-RATIO_MATCH = {"flops_ratio": (0.95, 1.05), "bytes_ratio": (0.9, 1.2)}
+# A model must never predict more than the hardware measured, so each range
+# starts at 1.0; the upper end allows for kernel artifacts.
+RATIO_MATCH = {"flops_ratio": (1.0, 1.05), "bytes_ratio": (1.0, 1.2)}
 BAND_COLUMNS = {"flops_ratio": "flops_band", "bytes_ratio": "bytes_band"}
+# Float rounding allowance below the 1.0 floor.
+RATIO_EPS = 1e-6
+MATCH = "match"
+OVER_PREDICTED = "over-predicted"
+DEVIATION_SUSPECT = "deviation-suspect"
+DEVIATION_EXPLAINED = "deviation-explained"
+NO_PREDICTION = "no prediction"
 
 
 def ratio_band(column, ratio):
-    """Return ``match`` or ``deviation`` for ``ratio``, empty when it is None."""
+    """Return the band of ``ratio``, empty when it is None.
+
+    ``match`` inside the range, ``deviation`` above it, and ``over-predicted``
+    below it (the model predicts more than was measured).
+    """
     if ratio is None:
         return ""
     low, high = RATIO_MATCH[column]
-    return "match" if low <= ratio <= high else "deviation"
+    if ratio < low - RATIO_EPS:
+        return "over-predicted"
+    return "match" if ratio <= high else "deviation"
+
+
+def match_status(run_status, bands):
+    """Combine a row's bands into one match status.
+
+    Empty unless the run status is ``OK``; ``no prediction`` when a ratio is
+    missing; ``over-predicted`` when any ratio is below its range;
+    ``deviation-suspect`` when any is above it; otherwise ``match``. Only the
+    investigating agent turns ``deviation-suspect`` into
+    ``deviation-explained``.
+    """
+    if run_status != "OK":
+        return ""
+    if "" in bands:
+        return NO_PREDICTION
+    if "over-predicted" in bands:
+        return OVER_PREDICTED
+    if "deviation" in bands:
+        return DEVIATION_SUSPECT
+    return MATCH

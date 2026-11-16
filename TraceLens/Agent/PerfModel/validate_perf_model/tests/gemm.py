@@ -22,6 +22,7 @@ by the validation harness.
 # (and side effects) of importing torch.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
+from ._measure import prepare_measured_call
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -119,6 +120,7 @@ def test_gemm_a8w8_blockscale(
         out = aiter.gemm_a8w8_blockscale(x_q, w_q, x_scale, w_scale)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     out = aiter.gemm_a8w8_blockscale(x_q, w_q, x_scale, w_scale)
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -189,6 +191,7 @@ def test_gemm_a16w16_atomic_(
         gemm_a16w16_asm(A, B, out)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     gemm_a16w16_asm(A, B, out)
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -245,6 +248,7 @@ def test_vllm_unquantized_gemm(
         gemm_a16w16_asm(A, B, out)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     gemm_a16w16_asm(A, B, out)
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -314,6 +318,7 @@ def test_vllm_gemm_with_dynamic_quant(
         out = fn(x, weight, weight_scale, False, out_t)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     out = fn(x, weight, weight_scale, False, out_t)
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -389,153 +394,7 @@ def test_gemm_afp4wfp4(
         _fn(a, b, a_scale, b_scale, out)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _fn(a, b, a_scale, b_scale, out)
     torch.cuda.synchronize()
     print(f"test: done, out={out.shape}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# 6. dsv3_flydsl_hgemm (aiter FlyDSL BF16 NT GEMM)
-# ---------------------------------------------------------------------------
-
-
-def test_dsv3_flydsl_hgemm(M, N, K, num_warmup=3, **_):
-    """``aiter.ops.flydsl.gemm_kernels.flydsl_hgemm`` (BF16 NT GEMM).
-
-    Computes ``out[M, N] = A[M, K] @ B[N, K]^T`` in BF16. The kernel produces
-    the ``hgemm_bf16_*_S2TN_AS_SPK*`` variants observed in DSV3 decode
-    (sglang_profiler::gemm_kernels_flydsl_hgemm_54).
-    """
-    import torch
-    from aiter.ops.flydsl.gemm_kernels import flydsl_hgemm
-    from aiter.ops.shuffle import shuffle_weight
-
-    device = "cuda"
-    dtype = torch.bfloat16
-    print(f"test: dsv3_flydsl_hgemm M={M} N={N} K={K}", flush=True)
-
-    a = torch.randn(M, K, dtype=dtype, device=device)
-    b = torch.randn(N, K, dtype=dtype, device=device)
-    b_shuf = shuffle_weight(b, layout=(16, 16))
-    out = torch.empty(M, N, dtype=dtype, device=device)
-
-    try:
-        flydsl_hgemm(a, b_shuf, out)
-        b_run = b_shuf
-    except Exception:
-        flydsl_hgemm(a, b, out)
-        b_run = b
-
-    for _ in range(num_warmup):
-        flydsl_hgemm(a, b_run, out)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    flydsl_hgemm(a, b_run, out)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# 7. dsv3_batched_gemm_a8w8 (aiter triton batched A8W8 GEMM)
-# ---------------------------------------------------------------------------
-
-
-def test_dsv3_batched_gemm_a8w8(M, N, K, E, group_size=128, num_warmup=3, **_):
-    """``aiter.ops.triton.gemm.batched.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant``.
-
-    Computes ``Y[B, M, N] = X[B, M, K] @ WQ[B, N, K]^T`` where X is BF16
-    (quantized to FP8 per token-group inside the kernel) and WQ is FP8 with
-    one scalar scale per batch (E experts).
-
-    Parameters use ``--E`` for the batch / expert dim (matches the DSV3 trace
-    where E=16 weight planes are paired with a 32-token activation batch).
-    """
-    import torch
-    from aiter.ops.triton.gemm.batched.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as bgemm,
-    )
-
-    device = "cuda"
-    fp8 = torch.float8_e4m3fn
-    print(
-        f"test: dsv3_batched_gemm_a8w8 B={E} M={M} N={N} K={K} group_size={group_size}",
-        flush=True,
-    )
-
-    X = torch.randn(E, M, K, dtype=torch.bfloat16, device=device)
-    WQ = (torch.randn(E, N, K, device=device) * 0.1).to(fp8)
-    w_scale = torch.ones((1,), dtype=torch.float32, device=device)
-
-    for _ in range(num_warmup):
-        Y = bgemm(X, WQ, w_scale, group_size=group_size)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    Y = bgemm(X, WQ, w_scale, group_size=group_size)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={Y.shape}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# 8. dsv4_opus_gemm_a16w16 (aiter opus batched BF16 GEMM, split-K)
-# ---------------------------------------------------------------------------
-
-
-def test_dsv4_opus_gemm_a16w16(M=1819, N=384, K=7168, num_warmup=3, **_):
-    """``aiter.ops.opus.gemm_a16w16_opus`` — batched BF16 GEMM (split-K).
-
-    The high-level dispatcher resolves a valid tuned kernel id and calls the
-    underlying ``_opus_gemm_a16w16_tune_raw`` kernel seen in the trace.
-    """
-    import torch
-    from aiter.ops.opus import gemm_a16w16_opus
-
-    print(f"test: dsv4_opus_gemm_a16w16 B=1 M={M} N={N} K={K}", flush=True)
-    A = torch.randn(1, M, K, device="cuda", dtype=torch.bfloat16)
-    B = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
-
-    for _ in range(num_warmup):
-        Y = gemm_a16w16_opus(A, B, None, torch.bfloat16)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    Y = gemm_a16w16_opus(A, B, None, torch.bfloat16)
-    torch.cuda.synchronize()
-    print(f"test: done Y={tuple(Y.shape)}", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# 9. dsv4_gemm_a8w8_blockscale_bpreshuffle_asm (FP8 block-scaled GEMM, ASM)
-# ---------------------------------------------------------------------------
-
-
-def test_dsv4_gemm_a8w8_blockscale_bpreshuffle_asm(
-    M=1819, N=2048, K=7168, num_warmup=3, **_
-):
-    """``aiter.gemm_a8w8_blockscale_bpreshuffle_asm`` — FP8 block-scaled GEMM (ASM)."""
-    import torch
-    import aiter
-    from aiter.ops.shuffle import shuffle_weight
-
-    block = 128
-    scale_k = (K + block - 1) // block
-    scale_n = (N + block - 1) // block
-    print(
-        f"test: dsv4_gemm_a8w8_blockscale_bpreshuffle_asm M={M} N={N} K={K}", flush=True
-    )
-
-    A = (torch.rand(M, K, device="cuda", dtype=torch.float32) / 10).to(aiter.dtypes.fp8)
-    B_raw = (torch.rand(N, K, device="cuda", dtype=torch.float32) / 10).to(
-        aiter.dtypes.fp8
-    )
-    B = shuffle_weight(B_raw, layout=(16, 16))
-    A_scale = torch.rand(M, scale_k, device="cuda", dtype=torch.float32)
-    A_scale = A_scale.transpose(0, 1).contiguous().view(M, scale_k)
-    B_scale = torch.rand(scale_n, scale_k, device="cuda", dtype=torch.float32)
-    out = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
-
-    for _ in range(num_warmup):
-        aiter.gemm_a8w8_blockscale_bpreshuffle_asm(A, B, out, A_scale, B_scale)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    aiter.gemm_a8w8_blockscale_bpreshuffle_asm(A, B, out, A_scale, B_scale)
-    torch.cuda.synchronize()
-    print(f"test: done out={tuple(out.shape)}", flush=True)
