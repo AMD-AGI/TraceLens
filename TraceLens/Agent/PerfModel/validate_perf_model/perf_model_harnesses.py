@@ -42,7 +42,7 @@ PERF_MODEL = "TraceLens.PerfModel.perf_model"
 CORE_OP_MAP = "TraceLens.PerfModel.torch_op_mapping"
 
 _PARENTS = Path(__file__).resolve().parents
-# <repo>/TraceLens/Agent/PerfModel/validate-perf-model/; staging copies of the
+# <repo>/TraceLens/Agent/PerfModel/validate_perf_model/; staging copies of the
 # skill may sit fewer than five levels deep.
 REPO_ROOT = str(_PARENTS[4] if len(_PARENTS) > 4 else _PARENTS[-1])
 if importlib.util.find_spec("TraceLens") is None:

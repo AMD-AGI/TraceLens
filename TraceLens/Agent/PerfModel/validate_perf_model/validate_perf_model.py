@@ -43,7 +43,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from perf_model_harnesses import (
+from TraceLens.Agent.PerfModel.validate_perf_model.perf_model_harnesses import (
     OP_REGISTRY,
     TRACE_NAME_TO_OP,
     chunk_stats_annotation,
@@ -51,7 +51,10 @@ from perf_model_harnesses import (
     run_perf_model_from_event,
     tuple_to_list,
 )
-from tests._runner import INT_FLAGS, STR_FLAGS
+from TraceLens.Agent.PerfModel.validate_perf_model.tests._runner import (
+    INT_FLAGS,
+    STR_FLAGS,
+)
 from TraceLens.Agent.PerfModel.ratio_bands import (
     BAND_COLUMNS,
     RATIO_MATCH,
@@ -1926,7 +1929,10 @@ def _populate_varlen_attention_args(op_name, effective_args):
         return None
     # Imported lazily: tests.attention needs torch, which --discover and
     # perf-model-only runs do not.
-    from tests.attention import compute_varlen_annotation_stats, make_varlen_seqlens
+    from TraceLens.Agent.PerfModel.validate_perf_model.tests.attention import (
+        compute_varlen_annotation_stats,
+        make_varlen_seqlens,
+    )
 
     num_seqs = getattr(effective_args, "varlen_num_seqs", None) or 4
     seed = getattr(effective_args, "varlen_seed", None) or 42

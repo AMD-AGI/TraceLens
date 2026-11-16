@@ -7,8 +7,9 @@ See LICENSE for license information.
 # Perf-model validation: reference
 
 Detail for [SKILL.md](SKILL.md). Read each section when its step needs it. The
-scripts live in `TraceLens/Agent/PerfModel/validate-perf-model/`; run the commands
-below from there.
+scripts live in `TraceLens/Agent/PerfModel/validate_perf_model/`. The commands below
+run from there; from anywhere else, replace `python validate_perf_model.py` with
+`python -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model`.
 
 ## Prerequisites
 
@@ -27,7 +28,7 @@ below from there.
 ## Layout
 
 ```
-validate-perf-model/
+validate_perf_model/
 ├── validate_perf_model.py   CLI: profiles ops under rocprofv3, compares, reports
 ├── perf_model_harnesses.py  Op registry: @register(...) event builders + perf models
 └── tests/
