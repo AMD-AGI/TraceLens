@@ -148,9 +148,7 @@ Every report has the same top-level structure, in this order:
 
 ### Reference snippets
 
-The snippets below are illustrative excerpts showing the format of the agent's analysis report in the standalone mode.
-
-*Note: All performance data shown here are example outputs from TraceLens, intended to illustrate the agent's capabilities. They are not official performance benchmarks.*
+The snippets below are illustrative excerpts showing the format of the agent's analysis report in the standalone mode. The performance data in them are example outputs that illustrate the agent's capabilities, not official performance benchmarks.
 
 #### Compute Analysis
 
@@ -205,6 +203,29 @@ The snippets below are illustrative excerpts showing the format of the agent's a
 > - Low end impact_score: 11.50
 > - High end impact_score: 15.50
 > <!-- impact-end -->
+
+#### System-Level Analysis
+
+> <a id="detailed-analysis-system-p1"></a>
+> <!-- reasoning-candidate tier=system rank=1 -->
+> #### 🔴 P1: Exposed Collective Communication
+>
+> **Identification:** The compute/communication overlap threshold tripped. Overlap is 0.0%, below the 70% target. The exposed-communication threshold did not trip, at 4.87% of GPU time against a 5% gate. The trace has 8064 collective all-reduce kernels (two ranks, bf16 payload). That is about 63 all-reduces per decode step over 128 steps. (source: `multi_kernel_metrics.json` → `overlap_assessment.overlap_percent` < 70, `nccl_blocking_assessment.exposed_percent_of_total`, `nccl_summary.total_count`, `nccl_summary.top_ops[].name`)
+>
+> **Data:**
+>
+> | Metric | Value |
+> |--------|-------|
+> | Exposed Communication Time | 188.72 ms |
+> | Exposed Communication % | 4.87% |
+> | Compute/Comm Overlap % | 0.0% |
+> | Total Communication Time | 188.72 ms |
+>
+> **Reasoning for Slowdown:** Exposed communication time equals total communication time (188.72 ms). No collective kernel ran concurrently with any compute kernel. Each tensor-parallel all-reduce is therefore a serial step between layers, and the GPU does no useful compute while it runs. The individual kernels are short (23.4 us on average, 49.36 us at most). The cost comes from the count: roughly 63 serialized all-reduces in every decode step. Exposed communication sits just under the 5% gate. Even so, it is the single largest overlappable block of time this analysis can see.
+>
+> **Resolution:** Splitting the batch into two micro-batches gives the GPU independent work during each all-reduce. While micro-batch A runs its all-reduce on the communication stream, micro-batch B can run its attention or MoE compute on the compute stream. This converts serialized collective time into overlapped time without changing the collective payload or algorithm. The expected movement is a higher compute/communication overlap ratio, up from 0.0%, and lower exposed communication time, down from 188.72 ms. Payload compression is not recommended here because the problem is scheduling (zero overlap), not the size of each transfer.
+>
+> **Impact estimate:** Impact estimate is not quantifiable from trace data.
 
 
 ### Programmatic Interface

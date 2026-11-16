@@ -1,0 +1,77 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+name: Code metrics
+
+on:
+  pull_request:
+    branches:
+      - main
+      - staging_agent
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+# One run per PR, so two quick pushes cannot both post a comment.
+concurrency:
+  group: code-metrics-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  code-metrics:
+    if: github.head_ref != 'main' && github.head_ref != 'staging_agent'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      # Marks the job's PR comments.
+      MARKER: "<!-- tracelens-code-metrics -->"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        filter: blob:none
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: pip install radon==6.0.1 complexipy==8.0.1 ruff==0.16.1  # Same versions locally
+
+    - name: Check code metrics
+      continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'waive-code-complexity') }}
+      run: |
+        set -o pipefail
+        python scripts/check_code_metrics.py --base origin/${{ github.base_ref }} | tee report.md | tee -a "$GITHUB_STEP_SUMMARY"
+
+    # The first report with findings is posted; later reports edit the latest
+    # comment while the verdict holds and post a new one when it flips, so a
+    # failure stays on record next to the PASSED that follows it.
+    # Fork PRs get a read-only token, so their report stays in the job summary.
+    - name: Comment on the PR
+      if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
+      run: |
+        set -euo pipefail
+        grep -q '^## Code metrics' report.md || exit 0
+        passed=false
+        grep -q '^## Code metrics: PASSED' report.md && passed=true
+        latest=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq '.[]
+          | select(.user.login == "github-actions[bot]" and (.body | startswith(env.MARKER)))
+          | "\(.id) \(.body | contains("## Code metrics: PASSED"))"' | tail -n1)
+        read -r id was_passed <<< "$latest" || true
+        printf '%s\n\n' "$MARKER" | cat - report.md > comment.md
+        if [ -n "$latest" ] && [ "$was_passed" = "$passed" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md > /dev/null
+        elif [ -n "$latest" ] || grep -q '^### ' report.md; then
+          gh pr comment "$PR" --repo "$REPO" --body-file comment.md
+        fi

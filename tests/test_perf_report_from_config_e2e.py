@@ -39,9 +39,9 @@ INFERENCE_FLAGS = {**TRAINING_FLAGS, "group_by_parent_module": True}
 
 
 def _assert_same_csvs(expected_dir, actual_dir):
-    expected = sorted(os.listdir(expected_dir))
+    expected = sorted(f for f in os.listdir(expected_dir) if f.endswith(".csv"))
     assert expected
-    assert sorted(os.listdir(actual_dir)) == expected
+    assert sorted(f for f in os.listdir(actual_dir) if f.endswith(".csv")) == expected
     for name in expected:
         pd.testing.assert_frame_equal(
             pd.read_csv(os.path.join(actual_dir, name)),

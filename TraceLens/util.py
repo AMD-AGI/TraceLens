@@ -70,6 +70,11 @@ def suppress_native_hlo_logs():
         tmp.close()
 
 
+def parse_bool_string(value) -> bool:
+    """Parse a string value as a boolean."""
+    return str(value if value is not None else "").lower() in ("1", "true")
+
+
 def merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """Merge a list of ``(start, end)`` intervals into a union of non-overlapping ones.
 
@@ -460,6 +465,38 @@ class DataLoader:
             with open(out_path, "w") as writefile:
                 json.dump(parsed, writefile)
         return parsed
+
+    @staticmethod
+    def load_trace_events(
+        filepath,
+        save_preprocessed=False,
+        capture_folder=None,
+        framework=None,
+    ):
+        run_checks = not parse_bool_string(
+            os.environ.get("TRACELENS_SKIP_QUALITY_CHECK")
+        )
+        if run_checks:
+            from .TraceUtils.utils import trace_check
+
+            # Pre-parse: flag oversized traces before paying the parse cost.
+            trace_check.run_pre_load_checks(filepath).log_findings()
+
+        data = DataLoader.load_data(filepath, save_preprocessed=save_preprocessed)
+        if isinstance(data, list):
+            return data, {}
+        metadata = {k: v for k, v in data.items() if k != "traceEvents"}
+        events = data.get("traceEvents", [])
+
+        if run_checks:
+            trace_check.run_trace_checks(
+                events,
+                capture_folder=capture_folder,
+                filepath=filepath,
+                framework=framework,
+            ).log_findings()
+
+        return events, metadata
 
 
 class JaxProfileProcessor:
@@ -1292,6 +1329,12 @@ class TraceEventUtils:
 GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
 GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
 GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
+GRAPH_LAUNCH_NAMES = frozenset({"cudaGraphLaunch", "hipGraphLaunch"})
+
+# Tolerance (µs) for timestamp imprecision when comparing event times — e.g.
+# event-boundary "bleed" during tree building, or kernel-vs-computation time
+# coverage, where differences below this are profiler/floating-point noise.
+TIMESTAMP_TOLERANCE_US = 1.0
 
 
 class RocprofParser:

@@ -78,6 +78,9 @@ def get_pseudo_op_mappings():
         # DeepSeek-V4 sparse MLA and its MXFP4 indexer logits
         "aiter::mla_sparse_prefill_fp8_asm_fwd": attention_perf_model_extensions.mla_sparse_prefill_fp8_asm_fwd,
         "aiter::_fwd_sched_raw": attention_perf_model_extensions.pa_mqa_logits_mxfp4,
+        "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
+        "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
+        "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
@@ -104,6 +107,8 @@ def get_pseudo_op_mappings():
         "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
         "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip_bounded,
         "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
+        "aiter::batched_gemm_a8w8_mxscale_bpreshuffle": perf_model_extensions.batched_gemm_a8w8_mxscale_bpreshuffle,
+        "aiter::_mxfp8_mxfp8_gemm_asm": perf_model_extensions.mxfp8_mxfp8_gemm_asm,
         "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_asm,

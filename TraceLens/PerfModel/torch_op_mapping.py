@@ -296,7 +296,6 @@ unary_elemwise_ops = [
     "aten::clamp_max",
     "aten::clamp_max_",
     "aten::sigmoid",
-    "aten::rsqrt",
     "aten::silu",
     "aten::neg",
     "aten::pow",
@@ -400,6 +399,16 @@ bilinear_upsample_ops = [
 
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
+for op in ("aten::rsqrt", "aten::rsqrt_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_rsqrt
+for op in ("aten::sqrt", "aten::sqrt_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_sqrt
+for op in ("aten::reciprocal", "aten::reciprocal_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_reciprocal
+for op in ("aten::to", "aten::_to_copy"):
+    op_to_perf_model_class_map[op] = perf_model.aten_to
+for op in ("aten::pad",):
+    op_to_perf_model_class_map[op] = perf_model.aten_pad
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
 for op_name, op_class in norm_ops.items():

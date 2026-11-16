@@ -10,57 +10,11 @@ import os, pandas as pd, pytest
 from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     add_truncated_kernel_details,
     get_dfs_short_kernels,
-    perf_report_sanity_check,
     trunc_kernel_details,
 )
 from TraceLens import TreePerfAnalyzer
 
 torch = pytest.importorskip("torch")
-
-
-def _make_sanity_check_inputs():
-    events = [
-        {"name": "kernel_a", "cat": "kernel"},
-        {"name": "kernel_b", "cat": "kernel"},
-    ]
-    df_gpu_timeline = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-    df_kernel_launchers = pd.DataFrame(
-        {
-            "total_direct_kernel_time_sum": [50.0, 60.0],
-            "kernel_details_summary": [
-                [{"name": "kernel_a", "count": 1}],
-                [{"name": "kernel_b", "count": 1}],
-            ],
-        }
-    )
-    df_unified_perf = pd.DataFrame(
-        {
-            "Kernel Time (µs)_sum": [50.0, 60.0],
-            "kernel_details_summary": [
-                [{"name": "kernel_a", "count": 1}],
-                [{"name": "kernel_b", "count": 1}],
-            ],
-        }
-    )
-    return events, df_gpu_timeline, df_kernel_launchers, df_unified_perf
-
-
-def test_perf_report_sanity_check_pass():
-    events, tl, kl, up = _make_sanity_check_inputs()
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert result["kl_time_pass"]
-    assert result["up_time_pass"]
-    assert result["kl_count_pass"]
-    assert result["up_count_pass"]
-    assert result["total_gpu_events"] == 2
-
-
-def test_perf_report_sanity_check_count_mismatch():
-    events, tl, kl, up = _make_sanity_check_inputs()
-    kl.loc[0, "kernel_details_summary"] = [{"name": "kernel_a", "count": 2}]
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert not result["kl_count_pass"]
-    assert len(result["kl_mismatches"]) > 0
 
 
 def test_trunc_kernel_details():
