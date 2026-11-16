@@ -34,13 +34,19 @@ from TraceLens.Agent.ModelBringup.utils.unified_perf_ops import (
     missing_perf_model_share,
     validation_cases,
 )
-from TraceLens.Agent.PerfModel.ratio_bands import BAND_COLUMNS
+from TraceLens.Agent.PerfModel.ratio_bands import (
+    BAND_COLUMNS,
+    DEVIATION_EXPLAINED,
+    MATCH,
+)
 from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
     CustomCollective,
 )
 from TraceLens.util import TraceEventUtils
 
 # Constants
+# Validation match statuses a modeled outcome accepts; every other row blocks it.
+PASSING_MATCH = (MATCH, DEVIATION_EXPLAINED)
 BLOCKING_CHECKS = {
     "profile": (
         "TRACE_MISSING",
@@ -200,7 +206,7 @@ def cases(args):
 
 
 def op_result(args):
-    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and all-OK validation rows; the draft leaks no run input, has the validation header and explains every ratio deviation."""
+    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and validation rows that ran and match or have an explained deviation; the draft leaks no run input, has the validation header and explains every ratio deviation."""
     path = Path(args.result)
     if not path.is_file():
         print(f"missing {path}", file=sys.stderr)
@@ -243,7 +249,10 @@ def op_result(args):
             if not csv_path or not Path(csv_path).is_file():
                 problems.append("validation CSV missing")
             elif not _all_rows_ok(csv_path):
-                problems.append("validation CSV has a row that is not OK")
+                problems.append(
+                    "validation CSV has a row that did not run or whose match_status "
+                    "is not match or deviation-explained"
+                )
             elif text is not None:
                 problems += _unexplained_ratios(csv_path, text)
     for problem in problems:
@@ -332,8 +341,13 @@ def summary(args):
 
 
 def _all_rows_ok(csv_path):
+    """Every row ran (``run_status`` OK) and matches or has an explained deviation."""
     with open(csv_path, newline="") as f:
-        return {r.get("status") for r in csv.DictReader(f)} == {"OK"}
+        rows = list(csv.DictReader(f))
+    return bool(rows) and all(
+        r.get("run_status") == "OK" and r.get("match_status") in PASSING_MATCH
+        for r in rows
+    )
 
 
 def _norm(text):

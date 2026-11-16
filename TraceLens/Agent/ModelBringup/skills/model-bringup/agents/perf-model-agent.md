@@ -104,7 +104,7 @@ If `rocprofv3` aborts torch processes (some ROCm SDK images load two LLVM copies
 
 ### Step 5: Draft
 
-If every validation row is `OK`, the outcome is `modeled`. Commit in `<op_worktree>`:
+First investigate every `deviation-suspect` row with the validation guide's "Investigating a deviation", which updates that row to `deviation-explained` when its cause is found. If every validation row then has `run_status` `OK` and `match_status` `match` or `deviation-explained`, the outcome is `modeled`. Commit in `<op_worktree>`:
 
 ```bash
 git -C <op_worktree> add <each file you changed>
@@ -138,7 +138,7 @@ Measured with rocprofv3 hardware counters. Ratios are measured over predicted. E
 - <ratio header> <value> (<shape>), <ratio header> <value> (<shape>): <cause>.
 ```
 
-If a row is not `OK`, the op is categorize-only, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring guide's stability and cost check, write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
+If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op is categorize-only, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring guide's stability and cost check, write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
 
 ```markdown
 ## Operator
@@ -175,7 +175,7 @@ Template rules:
 - The measured overhead of a pseudo op stays in `<op_dir>/pseudo_op_check.md`; the issue carries only its complexity and the events it adds.
 - Table values come from the validation CSV unchanged.
 - Name no model, GPU, gfx target, host, topology, person or trace, and no local path or branch. No runtime or time-share numbers.
-- Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause. Take causes from the validation guide's Known ratio sources where one fits.
+- Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause. Find each cause with the validation guide's "Investigating a deviation": the line names the mechanism, its source file and line (package-relative, e.g. `aiter/ops/...py:123`), and the arithmetic that reproduces the ratio. Known ratio sources and the CSV `comment` are only hypotheses. A ratio without that evidence is written as unexplained.
 
 ---
 
@@ -187,6 +187,6 @@ Write `<op_dir>/result.json`, then run:
 <prefix> <bringup_gates> op-result --bringup-dir <bringup_dir> --result <op_dir>/result.json
 ```
 
-On exit 1, fix the outcome or the draft (a non-`OK` row means `blocked`) and rerun. Never edit the validation CSV or name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
+On exit 1, fix the outcome or the draft (a row that did not run, or whose `match_status` is not `match` or `deviation-explained`, means `blocked`) and rerun. Edit the validation CSV only as "Investigating a deviation" allows (one row's `match_status` and `comment`, after the investigation), and never name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
 
 Return "DONE".

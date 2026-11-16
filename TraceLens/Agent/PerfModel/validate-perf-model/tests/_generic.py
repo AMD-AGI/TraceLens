@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Generic CSV-driven harness for ``--from-report-dir`` mode.
+"""Generic harness for ``--cases`` mode.
 
 For report rows whose op was not registered with ``csv_harness=True`` in
 ``perf_model_harnesses.py``, ``validate_perf_model.py`` forwards the raw
@@ -18,6 +18,8 @@ import inspect
 import json
 
 import torch
+
+from ._measure import prepare_measured_call
 
 C10_TO_TORCH = {
     "c10::Float8_e4m3fnuz": torch.float8_e4m3fnuz,
@@ -160,56 +162,6 @@ def _call_vllm_rmsnorm_add_fp8_group_quant(t):
     return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant(
         t[0], t[1], t[2], t[3], t[4], 1e-06, 128
     )
-
-
-def _call_dsv3_fused_qk_rope_cat_and_cache_mla(t):
-    from aiter.ops.triton.fusions.fused_kv_cache import (
-        fused_qk_rope_cat_and_cache_mla,
-    )
-
-    q_nope = t[0]
-    q_pe = t[1]
-    k_nope = t[2]
-    k_pe = t[3]
-    kv_cache = t[4]
-    cos = t[7]
-    sin = t[8]
-    T = q_nope.shape[0]
-    b_cache = kv_cache.shape[0]
-    slot = torch.randperm(b_cache, device="cuda", dtype=torch.int64)[:T].contiguous()
-    pos = torch.randint(0, cos.shape[0], (T,), device="cuda", dtype=torch.int64)
-    k_scale = torch.ones((1,), dtype=torch.float32, device="cuda")[0]
-    return fused_qk_rope_cat_and_cache_mla(
-        q_nope,
-        q_pe,
-        k_nope,
-        k_pe,
-        kv_cache,
-        slot,
-        pos,
-        cos,
-        sin,
-        k_scale,
-        is_neox=True,
-        num_decode_toks_for_zeros=0,
-        apply_scale=False,
-    )
-
-
-def _call_dsv3_dynamic_per_group_scaled_quant_fp4(t):
-    import aiter
-
-    x = t[1]
-    M, N = x.shape
-    out = torch.empty((M, N // 2), dtype=torch.uint8, device="cuda")
-    scales = torch.empty((M, N // 32), dtype=torch.uint8, device="cuda")
-    return aiter.dynamic_per_group_scaled_quant_fp4(out, x, scales, 32)
-
-
-def _call_dsv3_quant_dynamic_mxfp4_quant(t):
-    from aiter.utility.fp4_utils import dynamic_mxfp4_quant
-
-    return dynamic_mxfp4_quant(t[0])
 
 
 def _call_aiter_rmsnorm(t):
@@ -403,21 +355,6 @@ def _call_flash_attn_varlen_forward(t):
 
 
 OP_CALL_SPEC = {
-    "dsv3_fused_qk_rope_cat_and_cache_mla": {
-        "call": _call_dsv3_fused_qk_rope_cat_and_cache_mla,
-        "output_indices": [],
-        "skip_indices": [],
-    },
-    "dsv3_dynamic_per_group_scaled_quant_fp4": {
-        "call": _call_dsv3_dynamic_per_group_scaled_quant_fp4,
-        "output_indices": [],
-        "skip_indices": [0, 2],
-    },
-    "dsv3_quant_dynamic_mxfp4_quant": {
-        "call": _call_dsv3_quant_dynamic_mxfp4_quant,
-        "output_indices": [],
-        "skip_indices": [],
-    },
     "gemm_a8w8_blockscale": {
         "call": _call_gemm_a8w8_blockscale,
         "output_indices": [4],
@@ -674,6 +611,7 @@ def test_generic_simple_op(
         _call()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _call()
     torch.cuda.synchronize()
     print("test: done", flush=True)

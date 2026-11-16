@@ -22,6 +22,7 @@ for the canonical parameter combinations.
 # (and side effects) of importing torch.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
+from ._measure import prepare_measured_call
 
 
 def test_rms_norm(
@@ -57,6 +58,7 @@ def test_rms_norm(
         out = aiter.rms_norm(inp, weight, 1e-06)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     out = aiter.rms_norm(inp, weight, 1e-06)
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -93,6 +95,7 @@ def test_rmsnorm(
         rmsnorm(out, inp, weight, 1e-06)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     rmsnorm(out, inp, weight, 1e-06)
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -129,6 +132,7 @@ def test_add_rmsnorm(
         aiter.fused_add_rms_norm_cu(inp.clone(), residual.clone(), weight, 1e-06)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     aiter.fused_add_rms_norm_cu(inp.clone(), residual.clone(), weight, 1e-06)
     torch.cuda.synchronize()
     print("test: done", flush=True)
@@ -179,6 +183,7 @@ def test_rmsnorm_dynamicquant(
         rmsnorm2d_fwd_with_dynamicquant(out, inp, yscale, weight, 1e-06)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     rmsnorm2d_fwd_with_dynamicquant(out, inp, yscale, weight, 1e-06)
     torch.cuda.synchronize()
     print(f"test: done, shape={out.shape}", flush=True)
@@ -230,6 +235,7 @@ def test_vllm_rmsnorm_fp8_group_quant(
         x_q, x_scales = fn(x, weight, eps, group_size)
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     x_q, x_scales = fn(x, weight, eps, group_size)
     torch.cuda.synchronize()
     print(f"test: done, x_q={x_q.shape} x_scales={x_scales.shape}", flush=True)
@@ -273,6 +279,7 @@ def test_vllm_rmsnorm_add_fp8_group_quant(
         )
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     x_q, res_out, x_scales = fn(x.clone(), residual.clone(), weight, eps, group_size)
     torch.cuda.synchronize()
     print(f"test: done, x_q={x_q.shape} res={res_out.shape}", flush=True)
@@ -333,6 +340,7 @@ def test_fused_rms_mxfp4_quant(
         _call()
     torch.cuda.synchronize()
     print("test: measured iteration...", flush=True)
+    prepare_measured_call()
     _call()
     torch.cuda.synchronize()
     print("test: done", flush=True)

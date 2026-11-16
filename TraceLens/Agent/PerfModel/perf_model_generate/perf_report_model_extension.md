@@ -469,12 +469,16 @@ validate):
 > the `validate-perf-model` skill (rocprofv3 on a real AMD GPU)?"
 
 If yes, hand off to
-`TraceLens/Agent/PerfModel/validate-perf-model/validate_perf_model.md`.
+`TraceLens/Agent/PerfModel/validate-perf-model/validate_perf_model.md`. The
+validator only loads perf models integrated into TraceLens core, so an
+extension-only model must be integrated before it can be validated.
 Provide:
 - The `OP_REGISTRY` key (op name used in the validator)
 - The profiler trace `name(s)` (for `trace_names=` in its `register(...)` call
   in `perf_model_harnesses.py`)
 - The perf model class name and module path
+- Where to run it: the Python environment, Docker image or container name the
+  user gave
 - A representative shape and dtype for defaults
 - The traced cases to validate, one per unique shape. Each case carries the
   row's `Input Dims`, `Input type`, `Input Strides` and `Concrete Inputs`, plus:

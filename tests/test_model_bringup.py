@@ -15,11 +15,11 @@ from TraceLens.Agent.ModelBringup.utils.unified_perf_ops import (
     missing_perf_model_share,
     validation_cases,
 )
-from TraceLens.Agent.PerfModel.ratio_bands import ratio_band
+from TraceLens.Agent.PerfModel.ratio_bands import match_status, ratio_band
 
 _HEADER = "name,op category,Input Dims,Input type,Kernel Time (µs)_sum,has_perf_model,kernel_details_summary,GFLOPS\n"
-_BAND_HEADER = "status,flops_ratio,flops_band,bytes_ratio,bytes_band\n"
-_OK_ROW = "OK,1.0000,match,1.0000,match\n"
+_BAND_HEADER = "run_status,flops_ratio,flops_band,bytes_ratio,bytes_band,match_status\n"
+_OK_ROW = "OK,1.0000,match,1.0000,match,match\n"
 _DRAFT = f"## Operator\n\nOp a, data: None.\n\n## Validation\n\n{bringup_gates.VALIDATION_HEADER}\n"
 
 
@@ -58,14 +58,24 @@ def _modeled_op(bringup, csv_rows):
 @pytest.mark.parametrize(
     "column,below,low,high,above",
     [
-        ("flops_ratio", 0.94, 0.95, 1.05, 1.06),
-        ("bytes_ratio", 0.89, 0.9, 1.2, 1.21),
+        ("flops_ratio", 0.99, 1.0, 1.05, 1.06),
+        ("bytes_ratio", 0.99, 1.0, 1.2, 1.21),
     ],
 )
 def test_ratio_band(column, below, low, high, above):
     assert ratio_band(column, None) == ""
     assert ratio_band(column, low) == ratio_band(column, high) == "match"
-    assert ratio_band(column, below) == ratio_band(column, above) == "deviation"
+    assert ratio_band(column, above) == "deviation"
+    assert ratio_band(column, below) == "over-predicted"
+
+
+def test_match_status():
+    assert match_status("FAIL: x", ["match", "match"]) == ""
+    assert match_status("MODEL_ONLY", ["", ""]) == ""
+    assert match_status("OK", ["match", ""]) == "no prediction"
+    assert match_status("OK", ["deviation", "over-predicted"]) == "over-predicted"
+    assert match_status("OK", ["match", "deviation"]) == "deviation-suspect"
+    assert match_status("OK", ["match", "match"]) == "match"
 
 
 def test_unified_perf_ops_share_and_cases(tmp_path):
@@ -132,7 +142,9 @@ def test_coverage_needs_all_rows_ok_and_summary(tmp_path):
     after = _write_csv(tmp_path / "after.csv", ["op_a,GEMM,,,10,True,,\n"])
     op_dir = tmp_path / "perf_models" / "op_a"
     op_dir.mkdir(parents=True)
-    (op_dir / "validation.csv").write_text("op,status\nop_a,OK\nop_a,MODEL_ONLY\n")
+    (op_dir / "validation.csv").write_text(
+        "op,run_status,match_status\nop_a,OK,match\nop_a,MODEL_ONLY,\n"
+    )
     (op_dir / "result.json").write_text(
         json.dumps(
             {
@@ -178,7 +190,17 @@ def test_op_result_gates_outcomes(tmp_path):
     result = json.loads(path.read_text())
     assert bringup_gates.main(args) == 0
 
-    csv.write_text(_BAND_HEADER + _OK_ROW + "MODEL_ONLY,,,,\n")
+    csv.write_text(_BAND_HEADER + _OK_ROW + "MODEL_ONLY,,,,,\n")
+    assert bringup_gates.main(args) == 1
+
+    csv.write_text(
+        _BAND_HEADER + "OK,0.9000,over-predicted,1.0000,match,over-predicted\n"
+    )
+    assert bringup_gates.main(args) == 1
+
+    csv.write_text(
+        _BAND_HEADER + "OK,1.3000,deviation,1.0000,match,deviation-suspect\n"
+    )
     assert bringup_gates.main(args) == 1
 
     csv.write_text(_BAND_HEADER + _OK_ROW)
@@ -217,7 +239,9 @@ def test_op_result_rejects_leaked_names(tmp_path):
 
 
 def test_op_result_requires_explained_deviations(tmp_path):
-    op_dir, args = _modeled_op(tmp_path, "OK,1.0000,match,2.3204,deviation\n")
+    op_dir, args = _modeled_op(
+        tmp_path, "OK,1.0000,match,2.3204,deviation,deviation-explained\n"
+    )
     draft = op_dir / "perf_model_pr.md"
     draft.write_text(_DRAFT + "| 2.3204 |\n")
     assert bringup_gates.main(args) == 1
