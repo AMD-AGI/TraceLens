@@ -75,8 +75,7 @@ def get_pseudo_op_mappings():
         "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
-        # DeepSeek-V4 sparse MLA and its MXFP4 indexer logits
-        "aiter::mla_sparse_prefill_fp8_asm_fwd": attention_perf_model_extensions.mla_sparse_prefill_fp8_asm_fwd,
+        # DeepSeek-V4 MXFP4 indexer logits
         "aiter::_fwd_sched_raw": attention_perf_model_extensions.pa_mqa_logits_mxfp4,
         "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
         "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,

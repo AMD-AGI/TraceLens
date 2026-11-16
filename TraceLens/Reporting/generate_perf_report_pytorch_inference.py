@@ -71,7 +71,6 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "aiter::moe_sorting_opus_fwd",
     "pseudo_vllm_sparse_attn_decode",
     "sgl_kernel::fast_topk_transform_fused",
-    "aiter::mla_sparse_prefill_fp8_asm_fwd",
     "aiter::_fwd_sched_raw",
     "sgl_kernel::deepseek_v4_topk_transform_512",
     "sgl_kernel::fast_topk",
