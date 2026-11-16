@@ -180,6 +180,12 @@ def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     if match:
         return "_".join(["Radeon", *match.group(1).split()])
 
+    # Workstation parts report e.g. "AMD Radeon PRO W7900 Dual Slot" or
+    # "AMD Radeon AI PRO R9700": the model follows "PRO".
+    match = re.search(r"\bRadeon\s+(?:AI\s+)?Pro\s+(\w+)", gpu_name, re.IGNORECASE)
+    if match:
+        return match.group(1)
+
     # ROCm containers often report a generic device string; use memory tier as hint.
     mem = int(round(mem_gb))
     if mem >= 280:
