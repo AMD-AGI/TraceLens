@@ -2362,11 +2362,7 @@ class sglang_hc_combine_split(_MHCBase):
         if len(dims) < 4:
             return blank
         block_output, residual, weight = dims[0], dims[1], dims[3]
-        if (
-            len(block_output) != 2
-            or len(residual) != 2
-            or len(weight) != 2
-        ):
+        if len(block_output) != 2 or len(residual) != 2 or len(weight) != 2:
             return blank
         M, C = block_output
         n = weight[0]

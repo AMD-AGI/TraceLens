@@ -3133,10 +3133,7 @@ class TestPerfModelExtensionsCoverage:
         model = sglang_hc_combine_split(event)
         assert model.flops() == 2 * 32 * 4 * 2560 * 5
         assert model.bytes() == (
-            32 * 2560 * 2
-            + 3 * 32 * 10240 * 2
-            + 4 * 10240 * 2
-            + 2 * 32 * 8 * 4 * 4
+            32 * 2560 * 2 + 3 * 32 * 10240 * 2 + 4 * 10240 * 2 + 2 * 32 * 8 * 4 * 4
         )
         assert model.get_compute_precision() == "bf16"
         assert model.get_maf_type() == "vector"
