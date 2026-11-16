@@ -123,12 +123,6 @@ ARCH_TLOPS_KEYS: Tuple[str, ...] = (
     "vector_fp64",
 )
 
-# Marketing names of the two Radeon PRO W7900 boards (regular and Dual Slot),
-# lowercased. Both are the W7900 platform; only the cooler differs.
-W7900_MARKETING_NAMES = frozenset(
-    {"amd radeon pro w7900", "amd radeon pro w7900 dual slot"}
-)
-
 # GEMM shapes (M,N,K)
 GEMM_SHAPES: List[Tuple[int, int, int]] = [
     (8192, 8192, 8192),
@@ -180,15 +174,17 @@ def _bpe(dtype: torch.dtype) -> int:
 
 def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     """Short name to match arch JSONs like `MI300X.json` (e.g. 'MI300X')."""
-    # The last word of "AMD Radeon PRO W7900 Dual Slot" would be "Slot".
-    if " ".join(gpu_name.split()).lower() in W7900_MARKETING_NAMES:
-        return "W7900"
-
     # Client parts report e.g. "AMD Radeon 8060S Graphics": the model sits
     # between the brand and the trailing "Graphics", which names no model.
     match = re.search(r"\bRadeon\s+(.+?)\s+Graphics\b", gpu_name, re.IGNORECASE)
     if match:
         return "_".join(["Radeon", *match.group(1).split()])
+
+    # Workstation parts report e.g. "AMD Radeon PRO W7900 Dual Slot" or
+    # "AMD Radeon AI PRO R9700": the model follows "PRO".
+    match = re.search(r"\bRadeon\s+(?:AI\s+)?Pro\s+(\w+)", gpu_name, re.IGNORECASE)
+    if match:
+        return match.group(1)
 
     # ROCm containers often report a generic device string; use memory tier as hint.
     mem = int(round(mem_gb))

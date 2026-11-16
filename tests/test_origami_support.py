@@ -19,7 +19,7 @@ from TraceLens.PerfModel.op_projections import (
     add_op_projection_outputs,
     default_op_projections,
 )
-from TraceLens.PerfModel.origami_support import (
+from TraceLens.PerfModel.origami_helper import (
     OrigamiUnavailableError,
     origami_gfx_arch,
 )

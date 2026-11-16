@@ -60,7 +60,7 @@ HIP_VISIBLE_DEVICES=2 python -m TraceLens.PerfModel.benchmarking.microbench \
 python -m TraceLens.PerfModel.benchmarking.microbench --device 0 --warmup 5 --rep 20
 ```
 
-The output filename is used as the arch `name` heuristically (memory tier → `MI300X` / `MI355X`), so name the file after your platform. Both Radeon PRO W7900 boards (`AMD Radeon Pro W7900` and `AMD Radeon Pro W7900 Dual Slot`, any case) are named `W7900`.
+The output filename is used as the arch `name` heuristically (memory tier → `MI300X` / `MI355X`), so name the file after your platform. Radeon PRO boards are named after the model that follows `PRO`, so both Radeon PRO W7900 boards (`AMD Radeon Pro W7900` and `AMD Radeon Pro W7900 Dual Slot`) are named `W7900`.
 
 ### Key options
 
