@@ -1,54 +1,12 @@
----
-name: unified-perf-report-postprocess
-description: >-
-  Authors TraceLens perf models for cpu_ops missing coverage.  Driven from
-  three entry points: (1) CSV top-ops ranking from a unified_perf_summary.csv,
-  (2) manual op + optional kernel/callstack, (3) static scan of a vendor
-  framework repo (aiter/vLLM/SGLang/ATOM) with optional filter.  For each op the
-  user picks full perf model or categorization-only, and either integrates the
-  result into TraceLens/PerfModel/extensions/ or emits a standalone
-  extension file.  After authoring, asks the user whether to validate with
-  the validate-perf-model skill (rocprofv3 hardware counters); in unattended
-  use it always validates.
-  A generated class is a draft: confirm it against the kernel, several trace
-  events, and any model-specific config the trace does not contain.
----
-
 <!--
 Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 See LICENSE for license information.
 -->
 
-# Unified perf-model authoring
+# Perf-model authoring: reference
 
-## Inputs
-
-- An op: its profiler `name`, kernel names and call stack, from a `unified_perf_summary.csv` (EP1), the user (EP2) or a framework scan (EP3).
-- The vendor framework source the op comes from.
-- A TraceLens checkout to edit, and a Python environment that imports it.
-
-## Outputs
-
-The perf model for the op in the chosen depth and mode (see "Per-op choices"), and a regenerated report. For a full model the op has `has_perf_model` true; a categorize-only op keeps it false.
-
-## Error handling
-
-- The kernel source cannot be found: stop and report the op and the paths searched. Do not guess FLOPs or bytes.
-- The wrapper, the kernel and the vendor formula disagree and the cause is unresolved: stop and report the disagreement.
-
-## Unattended use
-
-A caller without a user, such as the model-bringup skill, supplies the op and the paths. Ask nothing and answer as below. Where an answer needs information the caller did not give, stop and report that question as the reason.
-
-| Ask | Answer |
-|---|---|
-| Confirm the candidate list (EP1, EP3) | The caller's op is the candidate |
-| Name, kernel and call stack (EP2) | The op's rows in the caller's CSV |
-| Depth and output mode (Per-op choices) | full and integrate; categorize-only for a `(Synthetic Op)` name |
-| Python environment | The caller's command prefix |
-| Validate with hardware counters | Always validate |
-| Whether to add a pseudo op (stability and cost check) | Never decide. Do not add the pseudo op; report the check's table to the caller as a decision for the user |
+Detail for [SKILL.md](SKILL.md). Read each section when its step needs it.
 
 ## Entry points — pick one to begin
 
@@ -58,7 +16,7 @@ Use when a `unified_perf_summary.csv` is available and you want to prioritize by
 runtime impact. The top-ops ranking reads each op's call stack from the CSV's
 `call_stack_full` column.
 
-**Run the top-ops ranking** (`unified_perf_ops.py`, next to this guide):
+**Run the top-ops ranking** (`perf_model_generate/unified_perf_ops.py`):
 ```bash
 python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops \
     /path/to/unified_perf_summary.csv \
@@ -341,6 +299,28 @@ rather than the Q dtype.
 - Document the `Input Dims` layout your class expects and that it needs a
   detailed (sq/sk) annotation.
 
+**Annotation use for other inference ops:**
+
+Inference ops often depend on the true KV length, while `Input Dims` only show
+the allocated buffer sizes (the KV cache pool, padded or maximum lengths).
+Modeling from those sizes overstates the work. Before making such an op
+category-only, check whether the step annotation can supply what is missing:
+its sq/sk sums give the query and KV lengths per step, as the existing
+attention models use. Where the annotation only bounds the value, for example
+for a per-request quantity, an approximation is acceptable if the class
+docstring says so.
+
+The annotation describes the whole step, not necessarily this op's inputs.
+Guard its use:
+- **Rows match:** use the sums only when the op covers the whole step, that is,
+  when Σ sq (`c_sq + g_sq`) equals the op's query or token rows in
+  `Input Dims`. Otherwise return no-perf.
+- **Cap at the buffer:** never let an annotation length exceed the matching
+  buffer dimension in `Input Dims`. Clamp it, and say so in `param_details`.
+- **Compressed inputs:** the sums count raw tokens. When the op works on
+  compressed or pooled KV (sparse indexers, compressed caches), scale `sk` by
+  the compression ratio, or return no-perf if that ratio is not known.
+
 ### Step 6 — Register the op
 
 **Integrate mode** — add to `pseudo_ops_perf_utils.py`:
@@ -362,9 +342,33 @@ op_category_extension = {
 }
 ```
 
-**Pseudo ops.** Never add one on your own judgment: run the stability and
-cost check below and let the user decide. The rest of this part says when one
-is a candidate and what it needs if the user approves.
+### Step 7 — Validate with py_compile
+
+```bash
+python3 -m py_compile /path/to/extension_or_module.py
+```
+
+Regenerate the report:
+```bash
+/path/to/env/python TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
+    --profile_json_path /path/to/profile.json \
+    --output_csvs_dir /path/to/perf_report_csvs \
+    --enable_pseudo_ops \
+    [--extension_file /path/to/extension.py]   # extension-only mode only
+```
+
+Re-check `has_perf_model`, `op category`, GFLOPS, Data Moved, and
+`param_details`. Using the model config and the parallelism strategy, confirm
+values such as topK, `num_experts`, and `hidden_size`. One trace is one
+example; do not hardcode a dtype, layout, or variant that the op can vary.
+
+---
+
+## Pseudo ops
+
+Never add a pseudo op on your own judgment: run the stability and
+cost check below and let the user decide. This section says when one is a
+candidate and what it needs if the user approves.
 
 **A pseudo op is a candidate only when the profiler event is the wrong unit.** A stable
 CPU op that already owns the runtime and the arguments needs a mapping, not a
@@ -380,26 +384,6 @@ If synthetic ops are among the top kernels, check the tree visually before
 modeling the synthetic name. `(Synthetic Op)` rows are usually category-only:
 the names embed templates and shapes, and the time is only part of the logical
 op.
-
-Inference ops often depend on the true KV length, while `Input Dims` only show
-the allocated buffer sizes (the KV cache pool, padded or maximum lengths).
-Modeling from those sizes overstates the work. Before making such an op
-category-only, check whether the step annotation can supply what is missing:
-its sq/sk sums give the query and KV lengths per step, as the existing
-attention models use. Where the annotation only bounds the value, for example
-for a per-request quantity, an approximation is acceptable if the class
-docstring says so.
-
-The annotation describes the whole step, not necessarily this op's inputs.
-Guard its use:
-- **Rows match:** use the sums only when the op covers the whole step, that is,
-  when Σ sq (`c_sq + g_sq`) equals the op's query or token rows in
-  `Input Dims`. Otherwise return no-perf.
-- **Cap at the buffer:** never let an annotation length exceed the matching
-  buffer dimension in `Input Dims`. Clamp it, and say so in `param_details`.
-- **Compressed inputs:** the sums count raw tokens. When the op works on
-  compressed or pooled KV (sparse indexers, compressed caches), scale `sk` by
-  the compression ratio, or return no-perf if that ratio is not known.
 
 If the user approves, a pseudo op needs both an injector in `TraceLens/Trace2Tree/extensions`
 (stable detection and a shape donor) and the same name in
@@ -437,26 +421,6 @@ Report it like this:
 |---|---|---|---|---|---|
 | `<name>` | stable / fragile | `<count and list>` | `<paths, or none>` | O(...) | `<seconds added on <trace>, events added>` |
 
-### Step 7 — Validate with py_compile
-
-```bash
-python3 -m py_compile /path/to/extension_or_module.py
-```
-
-Regenerate the report:
-```bash
-/path/to/env/python TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
-    --profile_json_path /path/to/profile.json \
-    --output_csvs_dir /path/to/perf_report_csvs \
-    --enable_pseudo_ops \
-    [--extension_file /path/to/extension.py]   # extension-only mode only
-```
-
-Re-check `has_perf_model`, `op category`, GFLOPS, Data Moved, and
-`param_details`. Using the model config and the parallelism strategy, confirm
-values such as topK, `num_experts`, and `hidden_size`. One trace is one
-example; do not hardcode a dtype, layout, or variant that the op can vary.
-
 ---
 
 ## Validate with hardware counters (ask the user)
@@ -468,7 +432,8 @@ validate):
 > the `validate-perf-model` skill (rocprofv3 on a real AMD GPU)?"
 
 If yes, hand off to
-`TraceLens/Agent/PerfModel/validate-perf-model/validate_perf_model.md`. The
+the validate-perf-model skill
+(`TraceLens/Agent/PerfModel/skills/validate-perf-model/SKILL.md`). The
 validator only loads perf models integrated into TraceLens core, so an
 extension-only model must be integrated before it can be validated.
 Provide:

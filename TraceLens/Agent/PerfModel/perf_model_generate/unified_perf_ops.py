@@ -199,7 +199,7 @@ def report_other_bucket(
     picked, acc = greedy_prefix(other, args.fraction * total_other)
 
     print("=" * 72)
-    print("unified-perf-report-postprocess — other bucket triage")
+    print("perf-model-generate — other bucket triage")
     print("=" * 72)
     print(f"CSV: {path}")
     print(f"Runtime column: {runtime_col}")
@@ -301,7 +301,7 @@ def report_top_ops(path: Path, rows: List[Row], args) -> List[str]:
     """Print the top-ops candidate table; return the op names."""
     results = compute_top_ops(rows, args.threshold, args.include_covered)
     print("=" * 72)
-    print("unified-perf-report-postprocess — top-ops mode (EP1)")
+    print("perf-model-generate — top-ops mode (EP1)")
     print("=" * 72)
     print(f"CSV: {path}")
     print(

@@ -30,8 +30,8 @@ Build, validate and draft the perf model for one op that has none. The model-bri
 
 **Input files:**
 - `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
-- Authoring guide: `<pm_dir>/perf_model_generate/perf_report_model_extension.md`
-- Validation guide: `<pm_dir>/validate-perf-model/validate_perf_model.md`
+- Authoring skill: `<pm_dir>/skills/perf-model-generate/SKILL.md`; read its `reference.md` sections as each step needs them
+- Validation skill: `<pm_dir>/skills/validate-perf-model/SKILL.md`; read its `reference.md` sections as each step needs them
 
 `<pm_dir>` is `<op_worktree>/TraceLens/Agent/PerfModel`. Substitute it before a command goes through `<prefix>`. Follow the guides; do not restate them.
 
@@ -83,15 +83,15 @@ Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
 <prefix> python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops <analysis_dir>/perf_report_csvs/unified_perf_summary.csv --mode top-ops --threshold 0 --include-covered --check-mapping
 ```
 
-This shows whether a built-in perf model already fits. Then choose the depth the authoring guide's Unattended use names. A categorize-only op is categorized, not modeled.
+This shows whether a built-in perf model already fits. Then choose the depth the authoring skill's Unattended use names. A categorize-only op is categorized, not modeled.
 
 ### Step 3: Build
 
-Follow authoring Steps 1-7 in `<op_worktree>`.
+Follow the authoring skill's workflow (reference.md Steps 1-7) in `<op_worktree>`.
 
 ### Step 4: Validate
 
-Register the op as the validation guide's "Adding an op" describes. The validator, `validate_perf_model.py`, reads only rows that have a perf model, so regenerate the report from the op worktree first:
+Register the op as the validation skill's "Adding an op" describes. The validator, `validate_perf_model.py`, reads only rows that have a perf model, so regenerate the report from the op worktree first:
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils build --scope standalone --analysis_mode inference --output_dir <op_dir>/report --job <job>
@@ -104,7 +104,7 @@ If `rocprofv3` aborts torch processes (some ROCm SDK images load two LLVM copies
 
 ### Step 5: Draft
 
-First investigate every `deviation-suspect` row with the validation guide's "Investigating a deviation", which updates that row to `deviation-explained` when its cause is found. If every validation row then has `run_status` `OK` and `match_status` `match` or `deviation-explained`, the outcome is `modeled`. Commit in `<op_worktree>`:
+First investigate every `deviation-suspect` row with the validation skill's "Investigating a deviation", which updates that row to `deviation-explained` when its cause is found. If every validation row then has `run_status` `OK` and `match_status` `match` or `deviation-explained`, the outcome is `modeled`. Commit in `<op_worktree>`:
 
 ```bash
 git -C <op_worktree> add <each file you changed>
@@ -175,7 +175,7 @@ Template rules:
 - The measured overhead of a pseudo op stays in `<op_dir>/pseudo_op_check.md`; the issue carries only its complexity and the events it adds.
 - Table values come from the validation CSV unchanged.
 - Name no model, GPU, gfx target, host, topology, person or trace, and no local path or branch. No runtime or time-share numbers.
-- Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause. Find each cause with the validation guide's "Investigating a deviation": the line names the mechanism, its source file and line (package-relative, e.g. `aiter/ops/...py:123`), and the arithmetic that reproduces the ratio. Known ratio sources and the CSV `comment` are only hypotheses. A ratio without that evidence is written as unexplained.
+- Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause. Find each cause with the validation skill's "Investigating a deviation": the line names the mechanism, its source file and line (package-relative, e.g. `aiter/ops/...py:123`), and the arithmetic that reproduces the ratio. Known ratio sources and the CSV `comment` are only hypotheses. A ratio without that evidence is written as unexplained.
 
 ---
 
