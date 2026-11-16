@@ -116,7 +116,8 @@ from TraceLens.PerfModel.perf_model import (
     Softmax,
     UnaryElementwise,
 )
-from TraceLens.PerfModel.utils import torch_dtype_map
+from TraceLens.PerfModel.triton_compiled_perf_model import _FLOPS_PER_ELEM
+from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 from TraceLens.TreePerf.tree_perf import compute_roofline_time_and_bound
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
     build_model_explorer_payload,
@@ -125,18 +126,14 @@ from TraceLens.Visualizer.model_explorer_export.shapes import parse_shape_dims
 
 # Constants
 
-# Bytes per element by TraceLens.PerfModel.utils.torch_dtype_map's normalized
-# simulation-precision name. torch_dtype_map already maps every spelling of a
-# dtype TraceLens' dtype strings use (float16/bfloat16/fp8_e4m3/...) onto one of
-# these; name2bpe duplicates this table but keyed on trace-event (c10::) names,
-# which operator-export dtype strings are not.
+# Bytes per element by torch_dtype_map's simulation-precision name.
 _BYTES_PER_ELEMENT: dict[str, float] = {
-    "fp64": 8,
-    "fp32": 4,
-    "fp16": 2,
-    "bf16": 2,
-    "fp8": 1,
-    "fp4": 0.5,
+    "fp64": name2bpe("fp64"),
+    "fp32": name2bpe("fp32"),
+    "fp16": name2bpe("fp16"),
+    "bf16": name2bpe("bf16"),
+    "fp8": name2bpe("fp8"),
+    "fp4": name2bpe("fp4"),
 }
 
 # GEMM computation labels, split by how the op reaches the export: an actual
@@ -238,6 +235,7 @@ _UNARY_POINTWISE_COMPUTATIONS = frozenset(
         "negate",
         "neg",
         "reciprocal",
+        "reciprocal sqrt",
         "sign",
         "cosine",
         "sine",
@@ -248,6 +246,13 @@ _UNARY_POINTWISE_COMPUTATIONS = frozenset(
         "cast",
     }
 )
+# Graph labels whose aten name is not the label itself. The flop weight still
+# comes from _FLOPS_PER_ELEM; a label the table does not name stays at
+# one flop per element rather than the fused kernel's "unknown op is zero".
+_UNARY_LABEL_TO_ATEN_SUFFIX = {
+    "negate": "neg",
+    "reciprocal sqrt": "rsqrt",
+}
 _BINARY_POINTWISE_COMPUTATIONS = frozenset(
     {
         "add",
@@ -3428,7 +3433,9 @@ def _dispatch_op_cost(
     if label in _BINARY_POINTWISE_COMPUTATIONS:
         return _binary_elementwise_cost(input_shapes, output_shape, bpe)
     if label in _UNARY_POINTWISE_COMPUTATIONS:
-        return _unary_elementwise_cost(output_shape, bpe)
+        return _unary_elementwise_cost(
+            output_shape, bpe, _unary_flops_per_element(label)
+        )
     if _is_embedding_lookup(computation):
         return _embedding_lookup_cost(input_shapes, output_shape, bpe)
     return None
@@ -3737,14 +3744,26 @@ def _softmax_cost(
     return "Softmax", "vector", flops, bytes_moved
 
 
+def _unary_flops_per_element(label: str) -> int:
+    """Per-element flops from ``_FLOPS_PER_ELEM``, or 1 when it has no row.
+
+    The table is the same one fused Triton kernels use. A missing row there
+    means "this name contributed nothing we could identify inside a fused
+    kernel," which is the wrong default for a standalone unary op.
+    """
+    suffix = _UNARY_LABEL_TO_ATEN_SUFFIX.get(label, label)
+    return _FLOPS_PER_ELEM.get(f"aten.{suffix}", 1)
+
+
 def _unary_elementwise_cost(
     output_shape: tuple[int, ...],
     bpe: float | None,
+    flops_per_elem: int = 1,
 ) -> tuple[str, str, float, float | None] | None:
     if not output_shape:
         return None
     nelems = prod(output_shape)
-    flops = UnaryElementwise.flops_func(nelems)
+    flops = flops_per_elem * nelems
     bytes_moved = (
         UnaryElementwise.bytes_func(nelems, bpe, bpe) if bpe is not None else None
     )

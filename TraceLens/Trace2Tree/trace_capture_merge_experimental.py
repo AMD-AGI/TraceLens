@@ -436,14 +436,19 @@ _capture_tree_cache: OrderedDict = OrderedDict()
 
 
 def _load_trace_tree_from_file(
-    profile_filepath: str, add_python_func: bool = False
+    profile_filepath: str,
+    add_python_func: bool = False,
+    capture_folder: str = None,
+    framework: str = None,
 ) -> TraceToTree:
     """Load a trace file into a built TraceToTree without TreePerfAnalyzer."""
     from ..util import DataLoader
 
-    data = DataLoader.load_data(profile_filepath)
-    trace_metadata = {key: value for key, value in data.items() if key != "traceEvents"}
-    events = data["traceEvents"]
+    events, trace_metadata = DataLoader.load_trace_events(
+        profile_filepath,
+        capture_folder=capture_folder,
+        framework=framework,
+    )
     tree = TraceToTree(
         events,
         event_to_category=TraceToTree.default_categorizer,
@@ -816,7 +821,10 @@ def merge_capture_trace_into_graph(
     """
     if graph_tree is None:
         graph_tree = _load_trace_tree_from_file(
-            graph_tree_filepath, add_python_func=True
+            graph_tree_filepath,
+            add_python_func=True,
+            capture_folder=capture_folder,
+            framework="pytorch",
         )
     else:
         graph_tree.build_tree(add_python_func=True)

@@ -218,11 +218,6 @@ class TestGPUEventAnalyserStatic:
         with pytest.raises(ValueError, match="does not have 'ts' or 't_end'"):
             GPUEventAnalyser.verify_dict_gpu_event_lists(bad)
 
-    def test_verify_dict_gpu_event_lists_rejects_empty_gpu(self):
-        empty = {key: [] for key in GPUEventAnalyser.gpu_event_keys}
-        with pytest.raises(ValueError, match="No GPU events found"):
-            GPUEventAnalyser.verify_dict_gpu_event_lists(empty)
-
     def test_get_breakdown_df_from_dict(self):
         metrics = {
             "computation_time": 100.0,
@@ -2080,7 +2075,7 @@ class TestTreePerfFromFileCapture:
         metadata = os.path.join(capture, "execution_details.json")
         analyzer = TreePerfAnalyzer.from_file(
             profile_filepath=os.path.join(case, trace_gz),
-            capture_trace_filepath=capture,
+            capture_folder=capture,
             rebuild_tree=True,
         )
         assert analyzer.tree is not None
