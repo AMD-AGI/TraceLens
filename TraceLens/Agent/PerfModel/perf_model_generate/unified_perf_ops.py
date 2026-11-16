@@ -21,12 +21,12 @@ top-ops:
   total and has has_perf_model == False on some row.
 
 Usage:
-  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv
-  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv \\
+  python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops unified_perf_summary.csv
+  python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops unified_perf_summary.csv \\
     --mode top-ops
 
   # Write a starter extension next to the CSV (<stem>_triage_extension.py):
-  python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops unified_perf_summary.csv \\
+  python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops unified_perf_summary.csv \\
     --emit-extension [--extension-out PATH]
 """
 

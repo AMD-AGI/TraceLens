@@ -58,10 +58,9 @@ Use when a `unified_perf_summary.csv` is available and you want to prioritize by
 runtime impact. The top-ops ranking reads each op's call stack from the CSV's
 `call_stack_full` column.
 
-**Run the top-ops ranking** (it lives with the model-bringup skill, which owns the
-CSV-driven flow):
+**Run the top-ops ranking** (`unified_perf_ops.py`, next to this guide):
 ```bash
-python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops \
+python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops \
     /path/to/unified_perf_summary.csv \
     --mode top-ops
 ```
@@ -74,7 +73,7 @@ starter `<csv_stem>_triage_extension.py` beside the CSV.
 Also run the legacy `other-bucket` mode (default) to catch ops in the "other"
 category even if they are individually below `--threshold`:
 ```bash
-python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops \
+python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops \
     /path/to/unified_perf_summary.csv --also-global-pareto
 ```
 

@@ -80,7 +80,7 @@ Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
 ### Step 2: Decide
 
 ```bash
-<prefix> python3 -m TraceLens.Agent.ModelBringup.utils.unified_perf_ops <analysis_dir>/perf_report_csvs/unified_perf_summary.csv --mode top-ops --threshold 0 --include-covered --check-mapping
+<prefix> python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops <analysis_dir>/perf_report_csvs/unified_perf_summary.csv --mode top-ops --threshold 0 --include-covered --check-mapping
 ```
 
 This shows whether a built-in perf model already fits. Then choose the depth the authoring guide's Unattended use names. A categorize-only op is categorized, not modeled.
