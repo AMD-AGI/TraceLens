@@ -1222,16 +1222,19 @@ class mla_decode_v4_asm(InferenceAttention):
 class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
     """HBM bytes of the FP8 NoPE and BF16 RoPE query, the BF16 output, and each attended KV row's FP8 NoPE, BF16 RoPE and int32 index; the page pool is not read.
 
-    The index buffers are sized for the largest CUDA-graph batch, so the
+    The index buffers are sized for the largest CUDA-graph batch, so decode
     attended rows come from a decode sq/sk step annotation: ``min(ctx, window)``
     plus ``min(ctx / 4, index_topk)`` CSA or ``ctx / 128`` HCA compressed rows,
-    with the layer mode stamped from its compress kernels. Other steps are
+    with the layer mode stamped from its compress kernels. Prefill has no
+    decode annotation and a non-empty sliding-window index (``Input Dims[8]``);
+    its attended rows are that length plus ``Input Dims[4]``. Other steps are
     no-perf. A NoPE row packs its values with their E8M0 scales, so the
     QK and PV head dim is the output's, not the NoPE row width plus RoPE.
 
         Input Dims[0] = q_nope (T, H, row)   Input Dims[1] = q_rope (T, H, RD)
         Input Dims[2] = kv_nope (rows, row)  Input Dims[3] = kv_rope (rows, RD)
-        Input Dims[4] = kv_indices (capacity,)  Input Dims[5], [9] = indptr (T + 1,)
+        Input Dims[4] = kv_indices           Input Dims[8] = swa_indices
+        Input Dims[5], [9] = indptr (T + 1,)
         Input Dims[10] = attn_sink (H,)      Input Dims[11] = out (T, H, D)
     """
 
@@ -1247,18 +1250,27 @@ class mla_sparse_prefill_fp8_asm_fwd(mla_decode_v4_asm):
             indptr_elems = int(dims[5][0]) + int(dims[9][0])
             sink_elems = int(dims[10][0])
             ann = IterationAnnotation(str(event.get("annotation")))
-            if not ann.has_sqsk or ann.c_sq or ann.g_sq <= 0 or tokens <= 0:
-                raise ValueError
-            mode = args["v4_mode"]
-            stride = cls.COMPRESS_STRIDE[mode]
-            window = int(args.get("v4_window") or cls.WINDOW)
-            index_topk = int(args.get("v4_index_topk") or cls.MAX_INDEX_TOPK)
-            mean_ctx = ann.g_sqsk / ann.g_sq
-            compressed = math.ceil(mean_ctx / stride) if stride else 0
-            if mode == "csa":
-                compressed = min(compressed, index_topk)
-            live = min(ann.g_sq, tokens)
-            num_kv = live * (min(math.ceil(mean_ctx), window) + compressed)
+            swa_pairs = int(dims[8][0])
+            decode = ann.has_sqsk and not ann.c_sq and ann.g_sq > 0 and tokens > 0
+            if swa_pairs > 0 and not decode:
+                if tokens <= 0:
+                    raise ValueError
+                num_kv = int(dims[4][0]) + swa_pairs
+                live = tokens
+                mode = None
+            else:
+                if not ann.has_sqsk or ann.c_sq or ann.g_sq <= 0 or tokens <= 0:
+                    raise ValueError
+                mode = args["v4_mode"]
+                stride = cls.COMPRESS_STRIDE[mode]
+                window = int(args.get("v4_window") or cls.WINDOW)
+                index_topk = int(args.get("v4_index_topk") or cls.MAX_INDEX_TOPK)
+                mean_ctx = ann.g_sqsk / ann.g_sq
+                compressed = math.ceil(mean_ctx / stride) if stride else 0
+                if mode == "csa":
+                    compressed = min(compressed, index_topk)
+                live = min(ann.g_sq, tokens)
+                num_kv = live * (min(math.ceil(mean_ctx), window) + compressed)
         except (IndexError, KeyError, TypeError, ValueError):
             return add_logical_batch_size(
                 InferenceAttention.no_perf_param_details(), event
