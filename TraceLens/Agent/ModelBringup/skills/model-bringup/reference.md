@@ -225,9 +225,9 @@ op. Otherwise relaunch that sub-agent once; if it fails again, the op is exclude
 
 ## Step 7: Coverage
 
-Skip when no op has outcome `modeled`.
+Skip when no op has outcome `modeled` or `categorized`.
 
-1. In your own shell, merge each `modeled` op's `<op_branch>` in `gaps.json` order:
+1. In your own shell, merge each `modeled` or `categorized` op's `<op_branch>` in `gaps.json` order:
 
        git -C <tracelens_dir> worktree add --detach <bringup_dir>/worktrees/pm_integration <base_branch>
        git -C <bringup_dir>/worktrees/pm_integration merge --no-edit <op_branch>
@@ -258,7 +258,7 @@ Runs only on a prompt that says publish, names `<bringup_dir>`, and lists op slu
 everything in your own shell. For each named op, read `<op_dir>/result.json`; skip it if
 `<op_dir>/published_url.txt` exists.
 
-- `modeled`:
+- `modeled` or `categorized`:
 
       git -C <op_worktree> push -u origin <op_branch>
       gh pr create --repo AMD-AGI/TraceLens --base <base_branch> --head <op_branch> --label perf_model \

@@ -270,3 +270,40 @@ def test_analysis_result_gates_outcome_and_outputs(tmp_path):
 
     (analysis / "perf_report.log").write_text("")
     assert bringup_gates.main(args) == 1
+
+
+def test_op_result_categorized_needs_commit_and_no_validation(tmp_path):
+    op_dir, args = _modeled_op(tmp_path, _OK_ROW)
+    path = op_dir / "result.json"
+    result = {**json.loads(path.read_text()), "outcome": "categorized"}
+    result["validation_csv"] = None
+    (op_dir / "perf_model_pr.md").write_text("## Operator\n\nOp a.\n\n## Changes\n")
+    path.write_text(json.dumps(result))
+    assert bringup_gates.main(args) == 0
+
+    path.write_text(json.dumps({**result, "commit": None}))
+    assert bringup_gates.main(args) == 1
+
+    path.write_text(json.dumps(result))
+    (op_dir / "perf_model_pr.md").write_text(_DRAFT)
+    assert bringup_gates.main(args) == 1
+
+
+@pytest.mark.parametrize("category,code", [("GEMM", 0), ("other", 1)])
+def test_coverage_needs_categorized_op_to_have_a_category(tmp_path, category, code):
+    after = _write_csv(tmp_path / "after.csv", [f"op_a,{category},,,10,False,,\n"])
+    op_dir = tmp_path / "perf_models" / "op_a"
+    op_dir.mkdir(parents=True)
+    (op_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "op": "op_a",
+                "op_slug": "op_a",
+                "outcome": "categorized",
+                "validation_csv": None,
+            }
+        )
+    )
+    args = ["coverage", "--bringup-dir", str(tmp_path)]
+    args += ["--before", str(after), "--after", str(after)]
+    assert bringup_gates.main(args) == code

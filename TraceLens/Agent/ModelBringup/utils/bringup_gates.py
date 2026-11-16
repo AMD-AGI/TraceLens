@@ -29,6 +29,7 @@ from TraceLens.Agent.Analysis.triage.checks import (
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops import (
     DEFAULT_THRESHOLD,
+    categorized_names,
     compute_top_ops,
     load_rows,
     missing_perf_model_share,
@@ -70,7 +71,13 @@ BLOCKING_CHECKS = {
     ),
 }
 CAPTURE_DIRS = ("capture_traces", "graph_capture_profile")
-DRAFT_FILES = {"modeled": "perf_model_pr.md", "blocked": "perf_model_issue.md"}
+DRAFT_FILES = {
+    "modeled": "perf_model_pr.md",
+    "categorized": "perf_model_pr.md",
+    "blocked": "perf_model_issue.md",
+}
+# Outcomes whose commit is merged in Step 7 and published as a PR.
+COMMITTED_OUTCOMES = ("modeled", "categorized")
 EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
 LEAK_KEYS = ("node", "platform", "docker_image")
 GFX_TARGET = re.compile(r"\bgfx\d+\w*", re.I)
@@ -206,7 +213,7 @@ def cases(args):
 
 
 def op_result(args):
-    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and validation rows that ran and match or have an explained deviation; the draft leaks no run input, has the validation header and explains every ratio deviation."""
+    """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and validation rows that ran and match or have an explained deviation; categorized implies a commit and no validation; the draft leaks no run input, has the validation header and explains every ratio deviation."""
     path = Path(args.result)
     if not path.is_file():
         print(f"missing {path}", file=sys.stderr)
@@ -242,9 +249,11 @@ def op_result(args):
                 problems.append("validation table header is not the canonical header")
         if outcome == "blocked" and not result.get("reason"):
             problems.append("reason missing")
+        if outcome in COMMITTED_OUTCOMES and not result.get("commit"):
+            problems.append("commit missing")
+        if outcome == "categorized" and text is not None and "## Validation" in text:
+            problems.append("categorized draft has a Validation section")
         if outcome == "modeled":
-            if not result.get("commit"):
-                problems.append("commit missing")
             csv_path = result.get("validation_csv")
             if not csv_path or not Path(csv_path).is_file():
                 problems.append("validation CSV missing")
@@ -285,17 +294,21 @@ def analysis_result(args):
 
 
 def coverage(args):
-    """Every modeled op is covered after the merge and validated with all rows OK."""
+    """After the merge, every modeled op is covered and validated, and every categorized op has a category."""
     after_rows, _ = load_rows(Path(args.after))
     covered = {
         op["name"]: op["covered"]
         for op in compute_top_ops(after_rows, 0.0, include_covered=True)
     }
+    categorized = categorized_names(after_rows)
     failing = []
     for result in _results(args.bringup_dir):
-        if result.get("outcome") != "modeled":
-            continue
-        if not covered.get(result["op"]) or not _all_rows_ok(result["validation_csv"]):
+        outcome = result.get("outcome")
+        if outcome == "modeled" and not (
+            covered.get(result["op"]) and _all_rows_ok(result["validation_csv"])
+        ):
+            failing.append(result["op"])
+        elif outcome == "categorized" and result["op"] not in categorized:
             failing.append(result["op"])
     return _gate(
         args,

@@ -48,6 +48,8 @@ from TraceLens.Agent.PerfModel.perf_model_generate.scan_framework_ops import (
 DEFAULT_THRESHOLD = 0.02
 RUNTIME_COLUMNS = ("Kernel Time (µs)_sum", "total_duration_us")
 MODEL_OUTPUT_COLUMNS = ("GFLOPS", "Data Moved (MB)")
+# Op category values that mean the op has no category yet.
+UNCATEGORIZED = ("", "other")
 # Newer TraceLens embeds the call stack in the summary CSV; prefer the full one.
 CALL_STACK_COLUMNS = ("call_stack_full", "call_stack", "trunc_call_stack")
 REPO_HINTS = (
@@ -112,6 +114,16 @@ def missing_perf_model_share(rows: List[Row]) -> float:
     total = sum(r["_us"] for r in rows)
     missing = sum(r["_us"] for r in rows if not row_has_perf_model(r))
     return missing / total if total > 0 else 0.0
+
+
+def categorized_names(rows: List[Row]) -> set:
+    """Op names whose category, on some row, is neither empty nor ``other``."""
+    return {
+        r.get("name", "")
+        for r in rows
+        if (r.get("op category") or r.get("op_category") or "").strip().lower()
+        not in UNCATEGORIZED
+    }
 
 
 def validation_cases(report_dir: Path) -> List[Dict]:

@@ -46,10 +46,10 @@ Build, validate and draft the perf model for one op that has none. The model-bri
 
 ```json
 {"op": "<op>", "op_slug": "<op_slug>",
- "outcome": "modeled | blocked | error",
+ "outcome": "modeled | categorized | blocked | error",
  "commit": "<sha or null>",
  "validation_csv": "<op_dir>/validation/validation_report_<ts>.csv | null",
- "reason": "<required unless outcome is modeled>"}
+ "reason": "<required unless outcome is modeled or categorized>"}
 ```
 
 ---
@@ -138,7 +138,19 @@ Measured with rocprofv3 hardware counters. Ratios are measured over predicted. E
 - <ratio header> <value> (<shape>), <ratio header> <value> (<shape>): <cause>.
 ```
 
-If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op is categorize-only, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring guide's stability and cost check, write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
+If the op is categorize-only, the outcome is `categorized`: there is no perf model to validate, so skip Step 4. Commit the category mapping in `<op_worktree>` the same way, with the message `feat(perfmodel): Categorize <op>`, set `validation_csv` to null, and write `<op_dir>/perf_model_pr.md` with only these sections (no Validation):
+
+```markdown
+## Operator
+
+`<op>`: what it computes and the kernels it launches. It had no category.
+
+## Changes
+
+- Category mapping: `<op>` → `<category>` in `get_pseudo_op_category_only_mappings()` (`pseudo_ops_perf_utils.py`). Category only: <why no perf model, e.g. a `(Synthetic Op)` name>.
+```
+
+If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring guide's stability and cost check, write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
 
 ```markdown
 ## Operator
@@ -171,7 +183,7 @@ Measured with rocprofv3 hardware counters. Ratios are measured over predicted.
 ```
 
 Template rules:
-- Keep the sections in order. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, the issue's Pseudo Op Check when no pseudo op is proposed, and the issue's Validation when there are no validation rows.
+- Keep the sections in order. A categorized PR has only Operator and Changes. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, the issue's Pseudo Op Check when no pseudo op is proposed, and the issue's Validation when there are no validation rows.
 - The measured overhead of a pseudo op stays in `<op_dir>/pseudo_op_check.md`; the issue carries only its complexity and the events it adds.
 - Table values come from the validation CSV unchanged.
 - Name no model, GPU, gfx target, host, topology, person or trace, and no local path or branch. No runtime or time-share numbers.
