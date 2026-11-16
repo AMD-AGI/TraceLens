@@ -147,7 +147,7 @@ This adds:
       --gpu_arch_platform MI300X
   ```
 
-- `--gpu_arch_platform` takes a bundled platform name (`MI300X`, `MI325X`, `W7900`, under
+- `--gpu_arch_platform` takes a bundled platform name (`MI300X`, `MI325X`, under
   `TraceLens/Agent/Analysis/utils/arch/`); use `--gpu_arch_json_path` to supply
   your own spec. The two flags are mutually exclusive.
 - Without either flag, the report has no roofline columns and logs a warning

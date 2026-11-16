@@ -79,10 +79,10 @@ name, frequency, memory bandwidth, and CU count), as consumed by
 Origami's Python bindings model gfx942 (MI300X, MI325X) and gfx950 (MI350X,
 MI355X) only. TraceLens takes the target from the JSON's `gfx_arch` field
 when it has one, and otherwise from its `name`; a JSON with neither is
-modeled as an MI300X. For any other target, for example the W7900 (gfx1100)
-spec, TraceLens prints "Origami simulation skipped: Origami is unavailable on
-gfx1100; ..." once and adds no Origami or SDPA Tile Origami columns. The
-roofline columns are unaffected.
+modeled as an MI300X. For any other target, for example a JSON with
+`"gfx_arch": "gfx1100"`, TraceLens prints "Origami simulation skipped: Origami
+is unavailable on gfx1100; ..." once and adds no Origami or SDPA Tile Origami
+columns. The roofline columns are unaffected.
 
 See [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 for the general format of the architecture JSON and its use in roofline

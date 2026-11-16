@@ -24,9 +24,18 @@ from TraceLens.PerfModel.origami_support import (
     origami_gfx_arch,
 )
 
-# The report adds these from the trace's deviceProperties; a W7900 trace
-# records numSms 48 (its WGPs) and maxSharedMemoryPerMultiProcessor 65536.
-W7900_FROM_TRACE = {**load_arch("W7900"), "num_cus": 48, "lds_capacity": 65536}
+# A W7900 spec passed with --gpu_arch_json_path, plus what the report adds from
+# the trace's deviceProperties: numSms 48 (its WGPs) and
+# maxSharedMemoryPerMultiProcessor 65536.
+W7900_FROM_TRACE = {
+    "name": "W7900",
+    "gfx_arch": "gfx1100",
+    "mem_bw_gbps": 717.8,
+    "memory_gb": 45.0,
+    "max_achievable_tflops": {"matrix_fp16": 68.4},
+    "num_cus": 48,
+    "lds_capacity": 65536,
+}
 
 
 @pytest.mark.parametrize(
@@ -51,7 +60,9 @@ def test_unnamed_spec_still_assumes_mi300x():
 @pytest.mark.parametrize(
     "arch,target",
     [
-        (load_arch("W7900"), "gfx1100"),
+        (W7900_FROM_TRACE, "gfx1100"),
+        # The microbench's W7900 JSON names the board but records no gfx_arch.
+        ({"name": "W7900"}, "w7900"),
         ({"name": "R9700"}, "r9700"),
         # The spec's gfx_arch wins over its name.
         ({"name": "MI300X", "gfx_arch": "gfx1201"}, "gfx1201"),
