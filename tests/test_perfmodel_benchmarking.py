@@ -173,6 +173,19 @@ class TestMicrobenchHelpers:
             ("Generic GPU", 280.0, "MI355X"),
             ("Some Card", 64.0, "Card"),
             ("", 0.0, "GPU"),
+            # Workstation boards are named after the model that follows "PRO".
+            # Both W7900 boards are one platform; only the cooler differs.
+            ("AMD Radeon Pro W7900", 45.0, "W7900"),
+            ("AMD Radeon PRO W7900 Dual Slot", 45.0, "W7900"),
+            ("AMD Radeon PRO  W7900  Dual Slot ", 45.0, "W7900"),
+            ("AMD Radeon Pro W7800", 32.0, "W7800"),
+            ("AMD Radeon Pro W7800 48GB", 48.0, "W7800"),
+            ("AMD Radeon AI PRO R9700", 32.0, "R9700"),
+            # RX boards and a bare gfx target keep the last-word fallback.
+            ("AMD Radeon RX 7900 XTX", 24.0, "XTX"),
+            ("AMD Radeon RX 7900 XT", 20.0, "XT"),
+            ("AMD Radeon RX 7900 GRE", 16.0, "GRE"),
+            ("gfx1100", 45.0, "gfx1100"),
         ],
     )
     def test_arch_product_name(self, gpu_name, mem_gb, expected):
