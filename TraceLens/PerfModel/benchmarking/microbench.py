@@ -54,6 +54,7 @@ from .microbench_utils import (
     check_gpu_idle,
     gfx_target,
     mx_peak_without_native_support,
+    vector_fma_block,
 )
 
 logger = logging.getLogger(__name__)
@@ -650,8 +651,7 @@ else:
         n_elements: int,
         repeat: int,
         device: int = 0,
-        # 8 independent FMA chains per thread at num_warps=8 on wave32.
-        block: int = 2048,
+        block: Optional[int] = None,
         mem_every: int = 0,
         acc_fp32: bool = False,
     ) -> Dict[str, float]:
@@ -659,8 +659,16 @@ else:
         Returns:
           - tflops: achieved TFLOPS for the FMA chain
           - stream_bw_gbps: achieved GB/s for the streaming loads (0 if disabled)
+
+        ``block`` defaults to the per-target size from :func:`vector_fma_block`.
         """
         dev = f"cuda:{device}"
+        if block is None:
+            block = vector_fma_block(
+                gfx_target(
+                    getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
+                )
+            )
 
         x = torch.randn(n_elements, device=dev, dtype=dtype)
         y = torch.randn(n_elements, device=dev, dtype=dtype)

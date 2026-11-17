@@ -21,6 +21,9 @@ from TraceLens.PerfModel.benchmarking.microbench_utils import (
     gfx_target,
     mx_peak_without_native_support,
     resolve_physical_device,
+    VECTOR_FMA_BLOCK,
+    VECTOR_FMA_BLOCK_DEFAULT,
+    vector_fma_block,
 )
 
 # These modules import torch; without it they stay None and the tests that use them skip in _require_torch.
@@ -154,6 +157,16 @@ class TestMxPeakWithoutNativeSupport:
     @pytest.mark.parametrize("gfx", ["gfx950", ""])
     def test_native_or_non_amd_targets_keep_measurement(self, gfx):
         assert mx_peak_without_native_support(gfx, self.MATRIX) is None
+
+
+class TestVectorFmaBlock:
+    @pytest.mark.parametrize("gfx", sorted(VECTOR_FMA_BLOCK))
+    def test_vector_fma_block_listed_target(self, gfx):
+        assert vector_fma_block(gfx) == VECTOR_FMA_BLOCK[gfx]
+
+    @pytest.mark.parametrize("gfx", ["gfx9999", ""])
+    def test_vector_fma_block_falls_back_to_default(self, gfx):
+        assert vector_fma_block(gfx) == VECTOR_FMA_BLOCK_DEFAULT
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")

@@ -24,6 +24,22 @@ from typing import Any, Mapping, Optional, Tuple
 NATIVE_MX_GFX_ARCHS = frozenset({"gfx950"})
 
 
+# Elements per program of the vector FMA chain benchmark, by gfx target. 2048
+# gives 8 independent FMA chains per thread at num_warps=8 on wave32. Targets
+# not listed use VECTOR_FMA_BLOCK_DEFAULT; add an entry when tuning a new one.
+VECTOR_FMA_BLOCK_DEFAULT = 2048
+VECTOR_FMA_BLOCK = {
+    "gfx942": 2048,
+    "gfx1151": 2048,
+    "gfx1201": 2048,
+}
+
+
+def vector_fma_block(gfx: str) -> int:
+    """Block size of the vector FMA chain benchmark for ``gfx``."""
+    return VECTOR_FMA_BLOCK.get(gfx, VECTOR_FMA_BLOCK_DEFAULT)
+
+
 def gfx_target(gcn_arch_name: Optional[str]) -> str:
     """Base gfx target of a ``gcnArchName`` such as ``gfx942:sramecc+:xnack-``."""
     return (gcn_arch_name or "").split(":")[0]
