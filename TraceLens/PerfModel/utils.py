@@ -8,17 +8,7 @@
 Utils. for perf. model.
 """
 
-from TraceLens.util import optional_int  # noqa: F401
-
-
-def optional_float(value, default=0.0):
-    """Parse *value* as float, returning *default* when conversion fails."""
-    if value in ("", "None", None):
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+from TraceLens.util import optional_float, optional_int, parse_bool  # noqa: F401
 
 
 def rates_for_duration(gflops, bytes_moved, time_us):
@@ -327,17 +317,3 @@ def torch_dtype_map(dtype):
     if dtype is None:
         return None
     return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
-
-
-def parse_bool(input):
-    if isinstance(input, bool):
-        return input
-    if input is None:
-        return False
-    if isinstance(input, str):
-        value = input.strip().lower()
-        if value in {"true", "1"}:
-            return True
-        if value in {"false", "0", ""}:
-            return False
-    return bool(input)

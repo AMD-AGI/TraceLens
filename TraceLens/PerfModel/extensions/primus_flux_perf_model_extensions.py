@@ -8,10 +8,15 @@
 Performance models for Primus Flux operations.
 """
 
+import collections
 from math import prod
 
 from TraceLens.PerfModel.perf_model import GEMM, UnaryElementwise
 from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
+from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
+    get_bwd_ops_for_fwd_op,
+    inject_pseudo_op_above_cpu_op,
+)
 
 
 class a6w4_mm_qa(GEMM):
@@ -222,13 +227,6 @@ class quantize_mxfp4_h16_dual(_QuantizeMxfp4Base):
 
 
 # ── Tree postprocess: fwd/bwd pseudo-op labeling ──────────────────────────
-
-import collections
-
-from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
-    get_bwd_ops_for_fwd_op,
-    inject_pseudo_op_above_cpu_op,
-)
 
 _GEMM_OP_NAMES = frozenset(
     {
