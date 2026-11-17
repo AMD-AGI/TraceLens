@@ -234,48 +234,39 @@ def op_result(args):
     if outcome not in DRAFT_FILES:
         problems.append(f"outcome is {outcome}: {result.get('reason')}")
     else:
-        draft = path.parent / DRAFT_FILES[outcome]
-        text = draft.read_text() if draft.is_file() else None
-        if text is None:
+        draft_path = path.parent / DRAFT_FILES[outcome]
+        draft = PerfModelDraft(draft_path.read_text()) if draft_path.is_file() else None
+        rows = _read_validation_csv(result.get("validation_csv"))
+        if draft is None:
             problems.append("draft file missing")
         else:
-            flat = _norm(text)
             problems += [
                 f"draft names {name}"
-                for token, name in _leak_tokens(args.bringup_dir).items()
-                if token in flat
+                for name in draft.leaks(_leak_tokens(args.bringup_dir))
             ]
-            problems += [
-                f"draft names {target}"
-                for target in sorted(set(GFX_TARGET.findall(text)))
-            ]
-            needs_validation = outcome == "modeled" or (
-                outcome == "blocked" and _has_rows(result.get("validation_csv"))
-            )
-            if needs_validation and VALIDATION_HEADER not in text:
+            needs_validation = outcome == "modeled" or (outcome == "blocked" and rows)
+            if needs_validation and not draft.has_validation_table():
                 problems.append("validation table missing or not the canonical header")
+            if outcome == "categorized" and draft.has_validation_table():
+                problems.append("categorized draft has a validation table")
             problems += [
                 f"draft table header is not a template header: {header}"
-                for header in _table_headers(text)
-                if header not in DRAFT_TABLE_HEADERS
+                for header in draft.off_template_tables()
             ]
         if outcome == "blocked" and not result.get("reason"):
             problems.append("reason missing")
         if outcome in COMMITTED_OUTCOMES and not result.get("commit"):
             problems.append("commit missing")
-        if outcome == "categorized" and text is not None and "## Validation" in text:
-            problems.append("categorized draft has a Validation section")
         if outcome == "modeled":
-            csv_path = result.get("validation_csv")
-            if not csv_path or not Path(csv_path).is_file():
-                problems.append("validation CSV missing")
-            elif not _all_rows_ok(csv_path):
+            if not rows:
+                problems.append("validation CSV missing or empty")
+            elif not _all_rows_ok(rows):
                 problems.append(
                     "validation CSV has a row that did not run or whose match_status "
                     "is not match or deviation-explained"
                 )
-            elif text is not None:
-                problems += _unexplained_ratios(csv_path, text)
+            elif draft is not None:
+                problems += draft.unexplained_ratios(rows)
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0
@@ -317,7 +308,8 @@ def coverage(args):
     for result in _results(args.bringup_dir):
         outcome = result.get("outcome")
         if outcome == "modeled" and not (
-            covered.get(result["op"]) and _all_rows_ok(result["validation_csv"])
+            covered.get(result["op"])
+            and _all_rows_ok(_read_validation_csv(result["validation_csv"]))
         ):
             failing.append(result["op"])
         elif outcome == "categorized" and result["op"] not in categorized:
@@ -365,28 +357,68 @@ def summary(args):
     return 0
 
 
-def _has_rows(csv_path):
-    """True when ``csv_path`` names a CSV with at least one data row."""
+class PerfModelDraft:
+    """A perf-model PR or issue draft and the checks op-result runs on it."""
+
+    def __init__(self, text):
+        self.text = text
+        self.normalized = _norm(text)
+        self.table_headers = self._table_headers(text)
+
+    def leaks(self, tokens):
+        """Run-specific names from ``tokens`` and gfx targets the draft names."""
+        names = [name for token, name in tokens.items() if token in self.normalized]
+        return names + sorted(set(GFX_TARGET.findall(self.text)))
+
+    def has_validation_table(self):
+        return VALIDATION_HEADER in self.table_headers
+
+    def off_template_tables(self):
+        return [h for h in self.table_headers if h not in DRAFT_TABLE_HEADERS]
+
+    def unexplained_ratios(self, rows):
+        """Problems for each deviation ratio in ``rows`` missing from the Ratio Deviations section."""
+        if not set(BAND_COLUMNS.values()) <= set(rows[0]):
+            return ["validation CSV has no band columns"]
+        found = re.search(
+            r"^## Ratio Deviations\n(.*?)(?=^## |\Z)", self.text, re.S | re.M
+        )
+        section = found.group(1) if found else ""
+        return [
+            f"ratio {row[ratio]} not explained"
+            for row in rows
+            for ratio, band in BAND_COLUMNS.items()
+            if row[band] == "deviation"
+            and not re.search(rf"(?<![\d.]){re.escape(row[ratio])}(?!\d)", section)
+        ]
+
+    @staticmethod
+    def _table_headers(text):
+        """Header rows of the markdown tables in ``text``, outside code fences."""
+        lines, in_fence = [], False
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("```"):
+                in_fence = not in_fence
+            elif not in_fence:
+                lines.append(line)
+        return [
+            line
+            for line, nxt in zip(lines, lines[1:])
+            if line.startswith("|") and TABLE_SEPARATOR.fullmatch(nxt)
+        ]
+
+
+def _read_validation_csv(csv_path):
+    """Rows of a validation CSV; [] when ``csv_path`` is unset or not a file."""
     if not csv_path or not Path(csv_path).is_file():
-        return False
+        return []
     with open(csv_path, newline="") as f:
-        return next(csv.DictReader(f), None) is not None
+        return list(csv.DictReader(f))
 
 
-def _table_headers(text):
-    """Header rows of the markdown tables in ``text``."""
-    lines = [line.strip() for line in text.splitlines()]
-    return [
-        line
-        for line, nxt in zip(lines, lines[1:])
-        if line.startswith("|") and TABLE_SEPARATOR.fullmatch(nxt)
-    ]
-
-
-def _all_rows_ok(csv_path):
+def _all_rows_ok(rows):
     """Every row ran (``run_status`` OK) and matches or has an explained deviation."""
-    with open(csv_path, newline="") as f:
-        rows = list(csv.DictReader(f))
     return bool(rows) and all(
         r.get("run_status") == "OK" and r.get("match_status") in PASSING_MATCH
         for r in rows
@@ -415,24 +447,6 @@ def _leak_tokens(bringup_dir):
     ]
     tokens = {_norm(n): n for n in names}
     return {t: n for t, n in tokens.items() if len(t) >= MIN_TOKEN}
-
-
-def _unexplained_ratios(csv_path, text):
-    """Problems for each deviation ratio in the CSV missing from the draft's Ratio Deviations section."""
-    with open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    if not set(BAND_COLUMNS.values()) <= set(reader.fieldnames):
-        return ["validation CSV has no band columns"]
-    found = re.search(r"^## Ratio Deviations\n(.*?)(?=^## |\Z)", text, re.S | re.M)
-    section = found.group(1) if found else ""
-    return [
-        f"ratio {row[ratio]} not explained"
-        for row in rows
-        for ratio, band in BAND_COLUMNS.items()
-        if row[band] == "deviation"
-        and not re.search(rf"(?<![\d.]){re.escape(row[ratio])}(?!\d)", section)
-    ]
 
 
 def _results(bringup_dir):

@@ -20,7 +20,8 @@ from TraceLens.Agent.PerfModel.ratio_bands import match_status, ratio_band
 _HEADER = "name,op category,Input Dims,Input type,Kernel Time (µs)_sum,has_perf_model,kernel_details_summary,GFLOPS\n"
 _BAND_HEADER = "run_status,flops_ratio,flops_band,bytes_ratio,bytes_band,match_status\n"
 _OK_ROW = "OK,1.0000,match,1.0000,match,match\n"
-_DRAFT = f"## Operator\n\nOp a, data: None.\n\n## Validation\n\n{bringup_gates.VALIDATION_HEADER}\n"
+_SEPARATOR = "|---|---|---|---|---|---|---|"
+_DRAFT = f"## Operator\n\nOp a, data: None.\n\n## Validation\n\n{bringup_gates.VALIDATION_HEADER}\n{_SEPARATOR}\n"
 
 
 def _write_csv(path, rows):
@@ -239,6 +240,19 @@ def test_op_result_gates_outcomes(tmp_path):
 
     path.unlink()
     assert bringup_gates.main(args) == 2
+
+
+def test_op_result_needs_a_real_validation_table(tmp_path):
+    op_dir, args = _modeled_op(tmp_path, _OK_ROW)
+    draft = op_dir / "perf_model_pr.md"
+    header = bringup_gates.VALIDATION_HEADER
+    draft.write_text(f"## Validation\n\nThe header is {header} here.\n")
+    assert bringup_gates.main(args) == 1
+    draft.write_text(f"## Validation\n\n```\n{header}\n{_SEPARATOR}\n```\n")
+    assert bringup_gates.main(args) == 1
+    (op_dir / "validation.csv").unlink()
+    draft.write_text(_DRAFT)
+    assert bringup_gates.main(args) == 1
 
 
 def test_op_result_rejects_leaked_names(tmp_path):
