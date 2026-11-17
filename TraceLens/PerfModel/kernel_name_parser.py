@@ -6,6 +6,15 @@
 
 import re
 
+# Constants
+GROUPED_RMSNORM_GROUP_SIZE_RE = re.compile(r"grouped_gemma_rmsnorm_kernel<(\d+)l?\b")
+
+
+def grouped_rmsnorm_group_size(kernel_name):
+    """Return the per-group element count templated into a grouped RMSNorm kernel, or None."""
+    m = GROUPED_RMSNORM_GROUP_SIZE_RE.search(kernel_name)
+    return int(m.group(1)) if m else None
+
 
 def gemm_name_parser(kernel_name):
     """
