@@ -58,7 +58,7 @@ workflow index below names the section for every step.
 `validation_report_<timestamp>.csv` with one row per op or shape, and a directory per op. Each row has two statuses:
 
 - `run_status`: whether the op could be measured. `OK`, `MODEL_ONLY` (predicted only, not run) or `FAIL: <reason>`. A `--cases` run exits 1 when any row is `FAIL`.
-- `match_status`: how the prediction compares, from the ratio bands in `TraceLens/Agent/PerfModel/ratio_bands.py`. Empty unless `run_status` is `OK`; otherwise:
+- `match_status`: how the prediction compares, from the ratio bands in `TraceLens/Agent/PerfModel/validate_perf_model/ratio_bands.py`. Empty unless `run_status` is `OK`; otherwise:
   - `match`: both ratios inside their ranges;
   - `over-predicted`: a ratio below its range, so the model predicts more than was measured. Never acceptable;
   - `deviation-suspect`: a ratio above its range, not yet explained. The validator writes this;
@@ -83,7 +83,7 @@ An op with no harness yet: see "Adding an op: where things go".
 ## Rules
 
 - Change the perf model only when the analytical model is wrong, never just to match a counter.
-- `over-predicted` is never acceptable, and `no prediction` means the perf model failed.
+- `over-predicted` is never acceptable.
 - Edit the validation CSV only as "Investigating a deviation" allows: one row's `match_status` and `comment`, after the investigation.
 - The harness must run the same kernel as the trace; check the kernel name before trusting a ratio.
 - Run only where the user said, with the GPU and output directory they gave.

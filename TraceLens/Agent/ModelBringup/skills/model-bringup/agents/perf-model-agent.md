@@ -32,6 +32,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 - `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
 - Authoring skill: `<pm_dir>/skills/perf-model-generate/SKILL.md`; read its `reference.md` sections as each step needs them
 - Validation skill: `<pm_dir>/skills/validate-perf-model/SKILL.md`; read its `reference.md` sections as each step needs them
+- Draft templates: `TraceLens/Agent/ModelBringup/skills/model-bringup/templates/perf_model_pr.md` and `perf_model_issue.md`; copy the body below the header comment
 
 `<pm_dir>` is `<op_worktree>/TraceLens/Agent/PerfModel`. Substitute it before a command goes through `<prefix>`. Follow the skills; do not restate them.
 
@@ -111,79 +112,14 @@ git -C <op_worktree> add <each file you changed>
 git -C <op_worktree> commit -m "feat(perfmodel): Add Performance Model for <op>"
 ```
 
-Then write `<op_dir>/perf_model_pr.md`:
+Then write `<op_dir>/perf_model_pr.md` from the PR template and fill it in.
 
-```markdown
-## Operator
+If the op is categorize-only, the outcome is `categorized`: there is no perf model to validate, so skip Step 4. Commit the category mapping in `<op_worktree>` the same way, with the message `feat(perfmodel): Categorize <op>`, set `validation_csv` to null, and write `<op_dir>/perf_model_pr.md` from the same template, keeping only Operator and Changes. Operator ends "It had no category."
 
-`<op>`: what it computes and the kernels it launches. It had no performance model.
-
-## Changes
-
-- Performance model: `<class>` in `<extension file>`, a subclass of `<base class>`. FLOPs are `<formula>`. Bytes are `<terms>`.
-- Category mapping: `<op>` in `get_pseudo_op_mappings()` (`pseudo_ops_perf_utils.py`).
-- Validator harness: `<name>` in `perf_model_harnesses.py`.
-- Tests: `<test class>` in `tests/test_perfmodel_extensions.py`.
-
-## Validation
-
-Measured with rocprofv3 hardware counters. Ratios are measured over predicted. Every row ran and matches or has an explained deviation.
-
-| Shape | Predicted FLOPs | Predicted Bytes | Measured Read Bytes | Measured Write Bytes | FLOPs Ratio | Bytes Ratio |
-|---|---|---|---|---|---|---|
-| <named dims and dtype> | <predicted_flops> | <predicted_bytes> | <rocprof_read_bytes> | <rocprof_write_bytes> | <flops_ratio> | <bytes_ratio> |
-
-## Ratio Deviations
-
-- <ratio header> <value> (<shape>), <ratio header> <value> (<shape>): <cause>.
-```
-
-If the op is categorize-only, the outcome is `categorized`: there is no perf model to validate, so skip Step 4. Commit the category mapping in `<op_worktree>` the same way, with the message `feat(perfmodel): Categorize <op>`, set `validation_csv` to null, and write `<op_dir>/perf_model_pr.md` with only these sections (no Validation):
-
-```markdown
-## Operator
-
-`<op>`: what it computes and the kernels it launches. It had no category.
-
-## Changes
-
-- Category mapping: `<op>` → `<category>` in `get_pseudo_op_category_only_mappings()` (`pseudo_ops_perf_utils.py`). Category only: <why no perf model, e.g. a `(Synthetic Op)` name>.
-```
-
-If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring skill's stability and cost check ("Pseudo ops" in its reference.md), write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user, and add the Pseudo Op Check section below to the issue. Write `<op_dir>/perf_model_issue.md`:
-
-```markdown
-## Operator
-
-`<op>`: what it computes, the framework call that launches it, and its kernels.
-
-## Observed Shapes
-
-| Input Dims | Input Type | Concrete Inputs |
-|---|---|---|
-| <Input Dims> | <Input type> | <Concrete Inputs> |
-
-## Blocking Reason
-
-- <reason>
-
-## Pseudo Op Check
-
-| Pseudo Op | Brittleness | Paths Checked | Differing Paths | Complexity | Events Added |
-|---|---|---|---|---|---|
-| `<name>` | stable / fragile | <count and list> | <paths, or none> | O(...) | <count> |
-
-## Validation
-
-Measured with rocprofv3 hardware counters. Ratios are measured over predicted.
-
-| Shape | Predicted FLOPs | Predicted Bytes | Measured Read Bytes | Measured Write Bytes | FLOPs Ratio | Bytes Ratio |
-|---|---|---|---|---|---|---|
-| <named dims and dtype> | <predicted_flops> | <predicted_bytes> | <rocprof_read_bytes> | <rocprof_write_bytes> | <flops_ratio> | <bytes_ratio> |
-```
+If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring skill's stability and cost check ("Pseudo ops" in its reference.md), write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user. Write `<op_dir>/perf_model_issue.md` from the issue template.
 
 Template rules:
-- Keep the sections in order. A categorized PR has only Operator and Changes. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, the issue's Pseudo Op Check when no pseudo op is proposed, and the issue's Validation when there are no validation rows.
+- Keep the sections in order. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, the issue's Pseudo Op Check when no pseudo op is proposed, and the issue's Validation when there are no validation rows.
 - The measured overhead of a pseudo op stays in `<op_dir>/pseudo_op_check.md`; the issue carries only its complexity and the events it adds.
 - Use only the template's tables, with their columns unchanged; the issue's Validation table has the same FLOPs and bytes columns as the PR's.
 - Table values come from the validation CSV unchanged.

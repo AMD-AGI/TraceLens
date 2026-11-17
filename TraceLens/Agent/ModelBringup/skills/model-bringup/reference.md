@@ -20,7 +20,7 @@ User inputs, the keys of `bringup_config.yaml` ([template](templates/bringup_con
 | `<tracelens_internal_dir>` | `tracelens_internal_dir` | TraceLens-internal checkout on `<node>` (arch files for GPUs not bundled in TraceLens) |
 | `<bringup_dir>` | `bringup_dir` | Output root on `<node>`. Steps pass data only through files under `<bringup_dir>`. |
 | `<benchmark_yaml>` | `benchmark_yaml` | Optional Magpie benchmark YAML; never edited |
-| `<model_id>`, `<framework>`, `<serving_image>`, `<hf_home>`, `<workload>` | `model`, `framework`, `docker_image`, `hf_cache_path`, `workload` | From `<benchmark_yaml>` when set, else from the config. `<workload>` is `fixed_seq` or `agentx` |
+| `<model_id>`, `<framework>`, `<serving_image>`, `<hf_home>`, `<workload>`, `<workload_params>` | `model`, `framework`, `docker_image`, `hf_cache_path`, `workload`, `workload_params` | From `<benchmark_yaml>` when set, else from the config. `<workload>` is `fixed_seq` or `agentx`. `<workload_params>` is read only without `<benchmark_yaml>` |
 
 Options under `options:` with their defaults: `min_share` the `gaps --threshold` default (Step 5 threshold),
 `max_profile_retries` 2, `accept_triage` none (triage check names, such as `CPU_CALL_STACK_MISSING`, that Steps 2 and 4 do not block on).
@@ -33,8 +33,9 @@ Derived:
 | `<container>` | `bringup_<basename of <bringup_dir>>` | 0 |
 | `<prefix>` | `ssh <node> "docker exec -i -w /tmp <container> bash -c '{CMD}'"` | 0 |
 | `<bringup_gates>` | `python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates` | 0 |
-| `<tl_extension>`, `<gpu_devices>`, `<framework_src>`, `<gfx_arch>`, `<platform>` | printed in Step 0 | 0 |
+| `<tl_extension>`, `<gpu_devices>`, `<framework_src>`, `<gfx_arch>`, `<platform>`, `<image_path>`, `<user>`, `<uid_gid>`, `<device_gids>` | printed in Step 0 | 0 |
 | `<gpu_count>` | the number of `<gpu_devices>` | 0 |
+| `<gpu_need>`, `<gpu_pin>` | `envs.TP` in `<benchmark_yaml>`, 1 when unset (Magpie's default), times `envs.PP_SIZE` and `envs.PCP_SIZE` (each 1 when unset) for AgentX; without `<benchmark_yaml>`, `workload_params.tp`, 8 when unset (the profiling templates' default). `<gpu_pin>` is 0 to `<gpu_need>`-1, comma-separated | 0 |
 | `<base_branch>` | `git -C <tracelens_dir> rev-parse --abbrev-ref HEAD` | 6, Publish |
 | `<profile_dir>` | `<bringup_dir>/profile/attempt_<n>`, `<n>` from 1 | 1 |
 | `<bench_dir>`, `<mixed_split>`, `<capture_folder>` | printed by `prepare` | 2 |
@@ -66,27 +67,29 @@ To stop at any step after Step 0: `<prefix> <bringup_gates> summary --bringup-di
    <magpie_prefix> python3 -c "import yaml, numpy, Magpie"
    ssh <node> "set -o pipefail; mkdir -p <bringup_dir>/cache && ls -d <tracelens_internal_dir>/*/Agent/Analysis/utils/arch | sed 's|.*/\([^/]*\)/Agent/Analysis/utils/arch|tl_extension=\1|'"
    ssh <node> "grep -ls '^simd_count [1-9]' /sys/class/kfd/kfd/topology/nodes/*/properties | xargs -r grep -h '^drm_render_minor' | sed 's|drm_render_minor |/dev/dri/renderD|'"
+   ssh <node> "docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <serving_image> | sed -n 's/^PATH=/image_path=/p'"
+   ssh <node> 'echo user=$(id -un) uid_gid=$(id -u):$(id -g); stat -c device_gid=%g /dev/kfd <gpu_devices> | sort -u'
    ```
 
-   The last command prints `<gpu_devices>`, your job's GPUs on `<node>`.
+   The third command prints `<gpu_devices>`, your job's GPUs on `<node>`, the fourth `<image_path>`. The last prints `<user>`, `<uid_gid>` and `<device_gids>`.
 
    Write `<magpie_prefix>` and `<prefix>` to `cache/magpie_prefix.txt` and `cache/cmd_prefix.txt`, and the effective inputs to `cache/bringup_config.yaml`.
 
 3. **Container.**
 
    ```bash
-   ssh <node> "docker inspect -f '{{.Config.Image}} {{.State.Running}} {{range .HostConfig.Devices}}{{.PathOnHost}} {{end}}' <container> 2>/dev/null"
+   ssh <node> "docker inspect -f '{{.Config.Image}} {{.State.Running}} user={{.Config.User}} {{range .HostConfig.Devices}}{{.PathOnHost}} {{end}}' <container> 2>/dev/null"
    ```
 
-   No output: start it as below, with one `--device=<path>` per `<gpu_devices>` entry.
-   Image `<serving_image>`, devices `/dev/kfd` plus exactly `<gpu_devices>`: `docker start` it if stopped, else reuse it.
+   No output: start it as below, with one `--device=<path>` per `<gpu_devices>` entry and one `--group-add <gid>` per `<device_gids>` entry.
+   Image `<serving_image>`, user `<uid_gid>`, devices `/dev/kfd` plus exactly `<gpu_devices>`: `docker start` it if stopped, else reuse it.
    Anything else: end with `[DIAG:bringup:STEP0_CONTAINER_MISMATCH]`, the inspect output and `ssh <node> "docker rm -f <container>"`; Step 8 does not run.
 
    ```bash
-   ssh <node> "docker run -d --name <container> --device=/dev/kfd --device=<path> --group-add video \
+   ssh <node> "docker run -d --name <container> --device=/dev/kfd --device=<path> --user <uid_gid> --group-add <gid> \
      --ipc=host --network=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
      -v <bringup_dir>:<bringup_dir> -v <hf_home>:<hf_home> -v <tracelens_dir>:<tracelens_dir> \
-     -v <tracelens_internal_dir>:<tracelens_internal_dir> -e HF_HOME=<hf_home> -e TL_EXTENSION=<tl_extension> \
+     -v <tracelens_internal_dir>:<tracelens_internal_dir> -e HOME=/tmp -e PATH=/tmp/.local/bin:<image_path> -e USER=<user> -e HF_HOME=<hf_home> -e TL_EXTENSION=<tl_extension> \
      -e PYTHONDONTWRITEBYTECODE=1 --entrypoint tail <serving_image> -f /dev/null"
    ```
 
@@ -95,6 +98,8 @@ To stop at any step after Step 0: `<prefix> <bringup_gates> summary --bringup-di
    ```bash
    <prefix> pip install -e <tracelens_dir> && pip install --no-deps -e <tracelens_internal_dir>
    ```
+
+   As `<uid_gid>`, pip installs to `/tmp/.local`, with its console scripts on the container PATH.
 
    On `No module named <m>` later, `<prefix> pip install <m>` and retry.
 
@@ -106,7 +111,7 @@ To stop at any step after Step 0: `<prefix> <bringup_gates> summary --bringup-di
 
    Append `platform` to `cache/bringup_config.yaml`.
 
-**Gate:** every command succeeds, `<gpu_devices>` and `platform` are set, and every GPU index pinned in `<benchmark_yaml>` is below `<gpu_count>` (Magpie numbers your GPUs from 0). Otherwise end with `[DIAG:bringup:STEP0_ENV_CHECK_FAILED]` and the failure; Step 8 does not run.
+**Gate:** every command succeeds, `<gpu_devices>` and `platform` are set, every GPU index pinned in `<benchmark_yaml>` is below `<gpu_count>` (Magpie numbers your GPUs from 0), and `<gpu_need>` is at most `<gpu_count>`. Otherwise end with `[DIAG:bringup:STEP0_ENV_CHECK_FAILED]` and the failure; Step 8 does not run.
 
 ## Step 1: Profile
 
@@ -119,7 +124,9 @@ Then launch one sub-agent:
 
     **Execution Context:**
     - Mode: unattended
-    - Workload: <workload>; benchmark YAML: <benchmark_yaml> (or model <model_id>, framework <framework>, image <serving_image>, HF cache <hf_home>), copy to <profile_dir>/benchmark.yaml
+    - Workload: <workload>; benchmark YAML: <benchmark_yaml> (or model <model_id>, framework <framework>, image <serving_image>, HF cache <hf_home>, workload params <workload_params>), copy to <profile_dir>/benchmark.yaml
+    - Workload params: without a benchmark YAML, in the copy set `tp`, `conc`, `isl`, `osl` from <workload_params> as `envs.TP`, `envs.CONC`, `envs.ISL`, `envs.OSL` (`tp` 8 when unset), and the other keys under `profiler.torch_profiler`.
+    - GPU pin: if the copy has no non-empty `HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES` in `envs`, set `envs.HIP_VISIBLE_DEVICES: "<gpu_pin>"` in it.
     - Node: <node>; Magpie command: <magpie_prefix> python3 -m Magpie benchmark ... --output-dir <profile_dir>
     - Container: <container>; command prefix: Read <bringup_dir>/cache/cmd_prefix.txt and substitute {CMD}
     - TraceLens repo: <tracelens_dir>

@@ -36,8 +36,9 @@ from TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops import (
     missing_perf_model_share,
     validation_cases,
 )
-from TraceLens.Agent.PerfModel.ratio_bands import (
+from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
     BAND_COLUMNS,
+    DEVIATION,
     DEVIATION_EXPLAINED,
     MATCH,
 )
@@ -81,13 +82,7 @@ COMMITTED_OUTCOMES = ("modeled", "categorized")
 EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
 LEAK_KEYS = ("node", "platform", "docker_image")
 GFX_TARGET = re.compile(r"\bgfx\d+\w*", re.I)
-VALIDATION_HEADER = "| Shape | Predicted FLOPs | Predicted Bytes | Measured Read Bytes | Measured Write Bytes | FLOPs Ratio | Bytes Ratio |"
-# Every table header the PR and issue templates allow; any other table is off-template.
-DRAFT_TABLE_HEADERS = (
-    VALIDATION_HEADER,
-    "| Input Dims | Input Type | Concrete Inputs |",
-    "| Pseudo Op | Brittleness | Paths Checked | Differing Paths | Complexity | Events Added |",
-)
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "skills/model-bringup/templates"
 TABLE_SEPARATOR = re.compile(r"\|(\s*:?-+:?\s*\|)+")
 SYNTHETIC_MARKER = "(Synthetic Op)"
 MIN_TOKEN = 4
@@ -439,10 +434,10 @@ class PerfModelDraft:
         return names + sorted(set(GFX_TARGET.findall(self.text)))
 
     def has_validation_table(self):
-        return VALIDATION_HEADER in self.table_headers
+        return _template_headers()[0] in self.table_headers
 
     def off_template_tables(self):
-        return [h for h in self.table_headers if h not in DRAFT_TABLE_HEADERS]
+        return [h for h in self.table_headers if h not in _template_headers()[1]]
 
     def unexplained_ratios(self, rows):
         """Problems for each deviation ratio in ``rows`` missing from the Ratio Deviations section."""
@@ -456,7 +451,7 @@ class PerfModelDraft:
             f"ratio {row[ratio]} not explained"
             for row in rows
             for ratio, band in BAND_COLUMNS.items()
-            if row[band] == "deviation"
+            if row[band] == DEVIATION
             and not re.search(rf"(?<![\d.]){re.escape(row[ratio])}(?!\d)", section)
         ]
 
@@ -483,6 +478,19 @@ def _read_validation_csv(csv_path):
         return []
     with open(csv_path, newline="") as f:
         return list(csv.DictReader(f))
+
+
+@functools.cache
+def _template_headers():
+    """The PR template's Validation table header, and every table header in both templates."""
+    texts = {
+        name: (TEMPLATES_DIR / name).read_text() for name in set(DRAFT_FILES.values())
+    }
+    pr_validation = texts[DRAFT_FILES["modeled"]].split("## Validation")[1]
+    validation = PerfModelDraft._table_headers(pr_validation)[0]
+    return validation, {
+        h for text in texts.values() for h in PerfModelDraft._table_headers(text)
+    }
 
 
 def _all_rows_ok(rows):
