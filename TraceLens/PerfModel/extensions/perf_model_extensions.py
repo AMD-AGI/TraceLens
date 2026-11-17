@@ -2301,3 +2301,61 @@ class topk_softplus_sqrt(topk_gating_fwd):
         if self.param_details.get("use_hash"):
             total += self.M * bpe_i + self.M * topk * bpe_i
         return total
+
+
+class bf16_splitk_gemm_partials(GEMM):
+    """
+    Performance model for Muse-Spark's split-K GEMM partials kernel
+    (``bf16_splitk_gemm_partials -> _dense_partial``).
+
+    Computes partial matmul outputs ``Y[M, N] = A[M, K] @ B[N, K].T`` split
+    across ``split_k`` K-slices; each slice writes its own FP32 partial sum to
+    ``[split_k, M, N]`` (reduced to the final ``[M, N]`` by a later op). bf16
+    inputs, fp32 partials. Seen on the decode path where M (token count) is tiny
+    and N, K are large, so it is bandwidth-bound (the B read dominates).
+
+    Backfilled Synthetic Op. Expected Input Dims / type:
+        [[M, K], [N, K], [split_k, M, N]]        (A, B, partials)
+        (bf16, bf16, float)
+
+    FLOPs (inherited from GEMM): ``2 * M * N * K`` -- split-K only distributes the
+    K reduction across thread blocks; the total MAC count is unchanged.
+
+    Bytes:
+        read  A         = M * K * bpe(A)               (bf16)
+        read  B         = N * K * bpe(B)               (bf16)
+        write partials  = split_k * M * N * bpe(out)   (fp32; split_k copies)
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type", []) or []
+        a_shape, b_shape, out_shape = dims[0], dims[1], dims[2]
+        M, K = a_shape[0], a_shape[1]
+        N = b_shape[0]  # B is [N, K]
+        split_k = out_shape[0]  # partials [split_k, M, N]
+        return {
+            "B": 1,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "split_k": split_k,
+            "dtype_A_B": (
+                types[0] if len(types) > 0 else "c10::bfloat16",
+                types[1] if len(types) > 1 else "c10::bfloat16",
+                types[2] if len(types) > 2 else "float",
+            ),
+        }
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        d = self.param_details["dtype_A_B"]
+        bpe_a, bpe_b, bpe_out = name2bpe(d[0]), name2bpe(d[1]), name2bpe(d[2])
+        if None in (bpe_a, bpe_b, bpe_out):
+            return None
+        return (
+            self.M * self.K * bpe_a  # A read
+            + self.N * self.K * bpe_b  # B read
+            + self.param_details["split_k"] * self.M * self.N * bpe_out  # partials
+        )

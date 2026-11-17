@@ -728,8 +728,13 @@ class fused_norm_residual_triton(RMSNorm):
         }
 
     def flops(self):
-        # residual add (num_elems) + RMSNorm (inherited)
-        return self.num_elems + super().flops()
+        # Residual add (num_elems) + TWO RMSNorms. The kernel runs both the
+        # post-norm (on branch) and the pre-norm (on new_stream); the base
+        # RMSNorm.flops() is one norm, so count it twice. (Confirmed against the
+        # compiled kernel: it executes ~2 norms + add worth of fp32 FLOPs; the
+        # rocprofv3 TOTAL_32_OPS counter under-reports because it does not
+        # double-count packed fp32 (v_pk_*) instructions -- see the PR doc.)
+        return self.num_elems + 2 * super().flops()
 
     def bytes(self):
         bpe0, bpe1 = self.param_details["_bpe_tensors"]

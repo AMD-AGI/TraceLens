@@ -1468,7 +1468,68 @@ class muse_extend_synthetic(InferenceAttention):
         try:
             out_shape = event["args"]["Input Dims"][3]
             params["d_h_v"] = out_shape[-1]
+            params["dtype_out"] = event["args"]["Input type"][3]
         except (IndexError, KeyError, TypeError):
             pass
         params["causal"] = True
         return params
+
+    def bytes(self, bytes_per_element=None):
+        """Correct the output write to its real dtype.
+
+        The shared :meth:`InferenceAttention.bytes` counts the output write in
+        the Q-dtype bucket (fp8 for muse); the muse output is bf16
+        (``Input type[3]``). Add the extra bytes for the output elements.
+        """
+        base = super().bytes(bytes_per_element)
+        if base is None:
+            return None
+        dtype_out = self.param_details.get("dtype_out")
+        if not dtype_out:
+            return base
+        bpe_out = name2bpe(dtype_out)
+        bpe_q = (
+            bytes_per_element
+            if bytes_per_element is not None
+            else (name2bpe(self.param_details.get("dtype_Q")) or 2)
+        )
+        if not bpe_out or bpe_out == bpe_q:
+            return base
+        pd = self.param_details
+        out_elems = pd["B"] * (pd["c_sq"] + pd["g_sq"]) * pd["H_Q"] * pd["d_h_v"]
+        return base + out_elems * (bpe_out - bpe_q)
+
+
+class muse_extend_fly_synthetic(muse_extend_synthetic):
+    """Perf model for ``muse_extend_fly`` (FlyDSL extend attention).
+
+    Identical attention to the Gluon :class:`muse_extend_synthetic`
+    (``_muse_extend_kernel``) -- same causal GQA over a paged fp8 KV cache, same
+    API, same result -- but this op always dispatches to the FlyDSL kernel,
+    which computes the softmax denominator (the per-row sum of P) on the matrix
+    core as a ``ones x P^T`` MFMA rather than with VALU adds. That is an extra
+    contraction of depth ``D_ROWSUM = 32`` (the single ``ones`` row padded to a
+    32-wide MFMA fragment) over the same query-key interactions as ``P.V``, and
+    the kernel always issues it, so it is counted in this op's FLOPs:
+
+        flops = H_Q * I * (d_h_qk + d_h_v + D_ROWSUM)
+
+    i.e. ``(d_qk + d_v + 32) / (d_qk + d_v)`` x the base attention FLOPs
+    (= 160/128 = 1.25x for the d=64 geometry). Bytes are unchanged: the ``ones``
+    vector is kernel-generated and P is already resident from the P.V pass, so
+    the denominator adds no HBM traffic (confirmed: measured bytes match the
+    Gluon kernel exactly).
+    """
+
+    D_ROWSUM = 32
+
+    def flops(self):
+        base = super().flops()
+        if base is None:
+            return None
+        depth = self.d_h_qk + self.d_h_v
+        if depth <= 0:
+            return base
+        # base = H_Q * I * (d_h_qk + d_h_v); add the ones x P^T denominator as an
+        # extra depth-D_ROWSUM contraction over the same interaction count I.
+        return base // depth * (depth + self.D_ROWSUM)

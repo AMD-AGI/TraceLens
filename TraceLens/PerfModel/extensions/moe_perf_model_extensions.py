@@ -1345,10 +1345,38 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
 
     @classmethod
     def get_param_details(cls, event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims")
+        # Preferred: the ``run_a4w4`` shape-backfill records the stage-1 launcher
+        # tensor args, so num_tokens / hidden / top_k come straight from shapes:
+        #   0  x / hidden states  (num_tokens, hidden)   bf16
+        #   1  scores             (num_tokens, top_k)    float
+        #   2  ids                (num_tokens, top_k)    int
+        #   3  norm_weight        (hidden,)              bf16
+        # The intermediate size and expert count are not carried by the
+        # launcher, so they stay Muse-Spark constants.
+        if dims:
+            try:
+                num_tokens, hidden = dims[0][0], dims[0][1]
+                topk = dims[1][1] if len(dims[1]) > 1 else cls.TOPK
+            except (IndexError, TypeError):
+                return {"_no_perf": True}
+            if num_tokens <= 0 or hidden <= 0 or topk <= 0:
+                return {"_no_perf": True}
+            return {
+                "num_tokens": num_tokens * topk,  # routed token-expert rows
+                "hidden_dim": hidden,
+                "inter_dim": cls.INTER_DIM,
+                "num_experts": cls.NUM_EXPERTS,
+                "topk": 1,
+                "gated": True,
+            }
+        # Fallback (orphan op, no backfill): num_tokens from the step annotation,
+        # local experts from the launch grid, EP-sharded row count.
         try:
             stats = IterationAnnotation(str(event.get("annotation"))).chunk_stats()
             num_tokens = stats["c_sq"] + stats["g_sq"]
-            local_experts = int(((event.get("args") or {}).get("grid") or [])[0])
+            local_experts = int((args.get("grid") or [])[0])
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         if num_tokens <= 0 or not 0 < local_experts <= cls.NUM_EXPERTS:
@@ -2386,3 +2414,106 @@ def _optional_tensor_bytes(dims, types, index):
     if bpe is None:
         return None
     return prod(dims[index]) * bpe
+
+
+class compact_a4_experts_synthetic:
+    """
+    Performance model for Muse-Spark's MXFP4 MoE expert kernel
+    (``compact_a4_experts -> _expert_a4`` (Synthetic Op)).
+
+    Runs the full routed-expert MLP in one launch: the gate+up projection with
+    SwiGLU, then the down projection, over the compacted (token, expert) rows.
+    fp4 activations x fp4 expert weights with MX (e8m0) block scales, bf16
+    output. On the decode path the whole local expert weight set is streamed to
+    process only a handful of tokens, so it is strongly weight-/bandwidth-bound.
+
+    Backfilled Synthetic Op. Input Dims / type:
+        0 act         [num_tokens, hidden]              bf16
+        1 ids         [num_tokens, top_k]               int
+        2 w1 (gate+up)[num_experts, 2*inter, hidden/2]  fp4 (uint8-packed)
+        3 w2 (down)   [num_experts, hidden, inter/2]    fp4
+        4 w1 scale    [num_experts, 2*inter, hidden/32] e8m0 (uint8)
+        5 w2 scale    [num_experts, hidden, inter/32]   e8m0
+        6 act_q       [num_tokens, hidden/2]            fp4
+        7 act scale   [num_tokens, hidden/32]           e8m0
+
+    num_rows = num_tokens * top_k  (compacted routed token-expert pairs).
+
+    FLOPs (two grouped GEMMs; the SwiGLU activation is O(num_rows*inter),
+    negligible for roofline):
+        up   = 2 * num_rows * (2*inter) * hidden
+        down = 2 * num_rows * hidden    * inter
+             = 2 * num_rows * hidden * (2*inter + inter)
+
+    Bytes = every recorded input tensor read once (the expert fp4 weights + MX
+    scales dominate) + the bf16 expert output ``[num_rows, hidden]``.
+    """
+
+    category = "MoE_unfused"
+    bwd_category = None
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            num_tokens, hidden = dims[0][0], dims[0][1]
+            top_k = dims[1][1]
+            num_experts = dims[2][0]
+            two_inter = dims[2][1]
+            return {
+                "num_tokens": num_tokens,
+                "hidden": hidden,
+                "top_k": top_k,
+                "num_experts": num_experts,
+                "two_inter": two_inter,
+                "inter": two_inter // 2,
+                "num_rows": num_tokens * top_k,
+                "dims": dims,
+                "types": types,
+            }
+        except (IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        rows, hidden, two_inter, inter = (
+            p["num_rows"],
+            p["hidden"],
+            p["two_inter"],
+            p["inter"],
+        )
+        return 2 * rows * hidden * (two_inter + inter)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        total = 0
+        for shape, dtype in zip(p["dims"], p["types"]):
+            bpe = name2bpe(dtype)
+            if bpe and shape:
+                total += prod(shape) * bpe
+        total += p["num_rows"] * p["hidden"] * 2  # bf16 expert output
+        return total
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward not defined for compact_a4_experts.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward not defined for compact_a4_experts.")

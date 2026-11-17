@@ -69,7 +69,10 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r".*allreduce_fusion_kernel_1stage"), "CustomCollective"),
     (re.compile(r".*(?:paged_)?mqa_logits"), "InferenceAttention"),
     (re.compile(r".*_muse_extend_kernel"), "InferenceAttention"),
+    (re.compile(r".*muse_extend_fly"), "InferenceAttention"),
+    (re.compile(r".*_dense_partial"), "GEMM"),
     (re.compile(r".*mfma_moe1_silu_mul"), "MoE_unfused"),
+    (re.compile(r".*_expert_a4"), "MoE_unfused"),
     (re.compile(r".*_fused_norm_residual_triton_kernel"), "RMSNorm"),
 ]
 
@@ -502,21 +505,46 @@ register_perf_model_matcher(_match_mqa_logits)
 
 def _match_muse_extend(name):
     """Resolve the Muse-Spark target-model EXTEND (chunked-prefill / verify)
-    attention Triton kernel when it appears as a Synthetic Op. Excludes
-    python_function source-line frames (e.g. 'muse_extend_gluon.py(348): ...')
-    so the parent is not intercepted before the Synthetic Op is created."""
+    attention kernel when it appears as a Synthetic Op. Covers the Gluon kernel
+    (``_muse_extend_kernel``) and the FlyDSL variant (``muse_extend_fly``); both
+    have identical Input Dims (GQA, paged fp8 KV cache) and share the same
+    attention roofline, but the FlyDSL kernel also runs the softmax-denominator
+    row sum on the matrix core, so it routes to ``muse_extend_fly_synthetic``
+    (base model + the ``ones x P^T`` MFMA term). Excludes python_function
+    source-line frames (e.g. 'muse_extend_gluon.py(348): ...') so the parent is
+    not intercepted before the Synthetic Op is created."""
     if ".py(" in name:
         return None
-    if "_muse_extend_kernel" in name:
-        from TraceLens.PerfModel.extensions import (
-            attention_perf_model_extensions as _a,
-        )
+    from TraceLens.PerfModel.extensions import (
+        attention_perf_model_extensions as _a,
+    )
 
+    if "muse_extend_fly" in name:
+        return _a.muse_extend_fly_synthetic
+    if "_muse_extend_kernel" in name:
         return _a.muse_extend_synthetic
     return None
 
 
 register_perf_model_matcher(_match_muse_extend)
+
+
+def _match_dense_partial(name):
+    """Resolve the Muse-Spark bf16 split-K GEMM partials kernel
+    (``_dense_partial``) when it appears as a Synthetic Op. Excludes
+    python_function source frames."""
+    if ".py(" in name:
+        return None
+    if "_dense_partial" in name:
+        from TraceLens.PerfModel.extensions import (
+            perf_model_extensions as _p,
+        )
+
+        return _p.bf16_splitk_gemm_partials
+    return None
+
+
+register_perf_model_matcher(_match_dense_partial)
 
 
 def _match_mfma_moe1(name):
@@ -535,6 +563,24 @@ def _match_mfma_moe1(name):
 
 
 register_perf_model_matcher(_match_mfma_moe1)
+
+
+def _match_expert_a4(name):
+    """Resolve the Muse-Spark MXFP4 MoE full-expert kernel (``_expert_a4``,
+    from ``compact_a4_experts``) when it appears as a Synthetic Op. Excludes
+    python_function source frames."""
+    if ".py(" in name:
+        return None
+    if "_expert_a4" in name:
+        from TraceLens.PerfModel.extensions import (
+            moe_perf_model_extensions as _m,
+        )
+
+        return _m.compact_a4_experts_synthetic
+    return None
+
+
+register_perf_model_matcher(_match_expert_a4)
 
 
 def _match_fused_norm_residual(name):
