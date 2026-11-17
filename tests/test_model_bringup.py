@@ -10,7 +10,7 @@ import pytest
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Agent.ModelBringup.utils import bringup_gates
-from TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops import (
+from TraceLens.Agent.PerfModel.utils.unified_perf_ops import (
     load_rows,
     missing_perf_model_share,
     validation_cases,
@@ -19,7 +19,7 @@ from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
     match_status,
     ratio_band,
 )
-from TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model import (
+from TraceLens.Agent.PerfModel.validate_perf_model.validator import (
     measured_bytes,
 )
 

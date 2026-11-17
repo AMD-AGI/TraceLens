@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Registry of the ops that ``validate_perf_model.py`` can validate.
+"""Registry of the ops that ``validator.py`` can validate.
 
 Each op is declared once with :func:`register`. The decorated builder turns
 CLI dimensions (an ``argparse.Namespace``) into a synthetic TraceLens event,
@@ -443,7 +443,7 @@ def _varlen_annotation(args):
     """Return ``(annotation, total_q, total_kv)`` for a varlen prefill call.
 
     The ``_varlen_*`` attributes are filled in by
-    ``validate_perf_model._populate_varlen_attention_args`` from the same seed
+    ``validator._populate_varlen_attention_args`` from the same seed
     and scenario the test uses; without them the call is one ``seq_len``
     sequence. The generation block is zero because the kernels are
     prefill-only; ``c_sqsk`` equals ``c_sqsq`` for self-attention.

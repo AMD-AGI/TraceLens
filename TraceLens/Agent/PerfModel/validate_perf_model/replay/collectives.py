@@ -39,7 +39,7 @@ path measured by rocprofv3.  The inter-GPU communication bytes are *not*
 captured by hardware counters and are excluded from the perf model's roofline.
 
 This module is not in ``_runner.MODULES`` and its ops are not registered in
-``perf_model_harnesses.py``; wire both up before validating collectives.
+``harnesses.py``; wire both up before validating collectives.
 """
 
 # NOTE: torch is imported lazily inside each function so that this module can

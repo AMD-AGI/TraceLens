@@ -10,27 +10,27 @@ Perf-model validation script.
 Runs the ``replay/_runner.py`` GPU harness for a registered op under rocprofv3
 with hardware counters, then compares measured ops/bytes against the perf
 model's predictions. Ops, their perf models and their trace names are
-registered in ``perf_model_harnesses.py``; this script only orchestrates
+registered in ``harnesses.py``; this script only orchestrates
 profiling and reporting.
 
 Usage (single op):
-    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator \
         --op gemm_a8w8_blockscale \
         --M 2048 --N 4096 --K 8192 \
         --arch gfx942 --output-dir /tmp/perf_validation
 
 Usage (batch):
-    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator \
         --all --arch gfx942 --output-dir /tmp/perf_val
-    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator \
         --category activation --arch gfx942 --output-dir /tmp/perf_val
 
 Usage (traced shapes; build the cases file with ModelBringup's bringup_gates cases):
-    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator \
         --cases cases.json --arch gfx942 --output-dir /tmp/perf_val
 
 Usage (discover missing coverage):
-    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --discover
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --discover
 """
 
 import argparse
@@ -45,7 +45,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from TraceLens.Agent.PerfModel.validate_perf_model.perf_model_harnesses import (
+from TraceLens.Agent.PerfModel.validate_perf_model.harnesses import (
     OP_REGISTRY,
     TRACE_NAME_TO_OP,
     chunk_stats_annotation,
@@ -1349,7 +1349,7 @@ def main():
         "--in_dtype",
         default=None,
         choices=DTYPE_CHOICES,
-        help="Activation/input dtype (default per-op; see perf_model_harnesses).",
+        help="Activation/input dtype (default per-op; see harnesses).",
     )
     parser.add_argument(
         "--w_dtype",

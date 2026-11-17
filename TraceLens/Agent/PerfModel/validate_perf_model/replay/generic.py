@@ -7,7 +7,7 @@
 """Generic harness for ``--cases`` mode.
 
 For report rows whose op was not registered with ``csv_harness=True`` in
-``perf_model_harnesses.py``, ``validate_perf_model.py`` forwards the raw
+``harnesses.py``, ``validator.py`` forwards the raw
 ``Input Dims`` and ``Input type`` columns from the trace's
 ``unified_perf_summary.csv``. ``test_generic_simple_op`` builds random
 tensors of those shapes and dtypes and returns the call to the op's

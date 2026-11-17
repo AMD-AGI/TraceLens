@@ -13,7 +13,7 @@ See LICENSE for license information.
 - Performance model: `<class>` in `<extension file>`, a subclass of `<base class>`. FLOPs are `<formula>`. Bytes are `<terms>`.
 - Category mapping: `<op>` in `get_pseudo_op_mappings()` (`pseudo_ops_perf_utils.py`).
 - Category mapping: `<op>` → `<category>` in `get_pseudo_op_category_only_mappings()` (`pseudo_ops_perf_utils.py`). Category only: <why no perf model, e.g. a `(Synthetic Op)` name>.
-- Validator harness: `<name>` in `perf_model_harnesses.py`.
+- Validator harness: `<name>` in `harnesses.py`.
 - Tests: `<test class>` in `tests/test_perfmodel_extensions.py`.
 
 ## Validation

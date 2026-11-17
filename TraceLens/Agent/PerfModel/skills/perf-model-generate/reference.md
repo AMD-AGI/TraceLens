@@ -19,9 +19,9 @@ Use when a `unified_perf_summary.csv` is available and you want to prioritize by
 runtime impact. The top-ops ranking reads each op's call stack from the CSV's
 `call_stack_full` column.
 
-**Run the top-ops ranking** (`perf_model_generate/unified_perf_ops.py`):
+**Run the top-ops ranking** (`utils/unified_perf_ops.py`):
 ```bash
-python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops \
+python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops \
     /path/to/unified_perf_summary.csv \
     --mode top-ops
 ```
@@ -34,7 +34,7 @@ starter `<csv_stem>_triage_extension.py` beside the CSV.
 Also run the legacy `other-bucket` mode (default) to catch ops in the "other"
 category even if they are individually below `--threshold`:
 ```bash
-python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops \
+python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops \
     /path/to/unified_perf_summary.csv --also-global-pareto
 ```
 
@@ -61,7 +61,7 @@ Use when the user asks to enumerate cpu_ops for a whole framework (aiter, vLLM,
 SGLang, or ATOM), optionally filtered (e.g. "attention kernels").
 
 ```bash
-python3 -m TraceLens.Agent.PerfModel.perf_model_generate.scan_framework_ops \
+python3 -m TraceLens.Agent.PerfModel.utils.scan_framework_ops \
     --aiter /path/to/aiter \
     --filter attention
 ```
@@ -442,7 +442,7 @@ extension-only model must be integrated before it can be validated.
 Provide:
 - The `OP_REGISTRY` key (op name used in the validator)
 - The profiler trace `name(s)` (for `trace_names=` in its `register(...)` call
-  in `perf_model_harnesses.py`)
+  in `harnesses.py`)
 - The perf model class name and module path
 - Where to run it: the Python environment, Docker image or container name the
   user gave

@@ -37,7 +37,7 @@ MODULES = ("gemm", "moe", "attention", "rmsnorm", "other", "rope")
 # Larger than the L2 and on-package cache of the supported GPUs.
 L2_FLUSH_BYTES = 512 * 1024 * 1024
 
-# Flags forwarded to test functions; validate_perf_model builds its runner
+# Flags forwarded to test functions; the validator builds its runner
 # argv from the same lists.
 INT_FLAGS = (
     "M",
