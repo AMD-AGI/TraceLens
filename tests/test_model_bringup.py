@@ -255,6 +255,17 @@ def test_op_result_needs_a_real_validation_table(tmp_path):
     assert bringup_gates.main(args) == 1
 
 
+@pytest.mark.parametrize("config", [None, "model: [unclosed\n", ""])
+def test_op_result_bad_config_is_input_error(tmp_path, config):
+    _, args = _modeled_op(tmp_path, _OK_ROW)
+    path = tmp_path / "cache" / "bringup_config.yaml"
+    if config is None:
+        path.unlink()
+    else:
+        path.write_text(config)
+    assert bringup_gates.main(args) == 2
+
+
 def test_op_result_rejects_leaked_names(tmp_path):
     op_dir, args = _modeled_op(tmp_path, _OK_ROW)
     assert bringup_gates.main(args) == 0

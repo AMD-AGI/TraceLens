@@ -14,6 +14,7 @@ and ``op-result`` write ``<bringup_dir>/gates/<name>.json``::
 
 import argparse
 import csv
+import functools
 import json
 import re
 import sys
@@ -106,8 +107,8 @@ def prepare(args):
     benches = sorted(Path(args.profile_dir).glob("*/torch_trace"))
     bench = benches[-1].parent if benches else None
     if bench is None:
-        return _gate(
-            args, "prepare", False, error=f"no torch_trace under {args.profile_dir}"
+        return args.bringup.write_gate(
+            "prepare", False, error=f"no torch_trace under {args.profile_dir}"
         )
     splits = sorted(bench.rglob("mixed_steady_state*.json.gz"))
     replay_rank = rank_of(splits[-1].name) if splits else None
@@ -118,7 +119,7 @@ def prepare(args):
     ]
     capture_folder = ""
     if captures:
-        folder = Path(args.bringup_dir) / f"capture_rank{replay_rank}"
+        folder = args.bringup.capture_folder(replay_rank)
         folder.mkdir(parents=True, exist_ok=True)
         for p in captures:
             link = folder / p.name
@@ -134,7 +135,7 @@ def prepare(args):
     }
     for key, value in values.items():
         print(f"{key}={value}")
-    return _gate(args, "prepare", bool(splits), **values)
+    return args.bringup.write_gate("prepare", bool(splits), **values)
 
 
 def report_health(args):
@@ -143,7 +144,7 @@ def report_health(args):
     triage_csv = Path(args.triage_dir) / "triage_details.csv"
     if not triage_csv.is_file():
         print(f"missing {triage_csv}", file=sys.stderr)
-        _gate(args, name, False, error=f"missing {triage_csv}")
+        args.bringup.write_gate(name, False, error=f"missing {triage_csv}")
         return 2
     specs = {
         s.name: s for s in (PROFILE_CHECKS if args.phase == "profile" else ALL_CHECKS)
@@ -161,8 +162,7 @@ def report_health(args):
         if r["DIAG Tag"] in blocking
     ]
     merge_json = Path(args.triage_dir) / "graph_merge_check.json"
-    return _gate(
-        args,
+    return args.bringup.write_gate(
         name,
         not blocked,
         blocking=blocked,
@@ -204,7 +204,7 @@ def gaps(args):
             }
         )
     out = {"ops": ops, "comm_excluded": sorted(comm)}
-    (Path(args.bringup_dir) / "gaps.json").write_text(json.dumps(out, indent=2))
+    args.bringup.gaps_json.write_text(json.dumps(out, indent=2))
     for op in ops:
         print(f"{op['op_slug']}  {op['pct_global']}%  {op['name']}")
     return 0
@@ -242,7 +242,7 @@ def op_result(args):
         else:
             problems += [
                 f"draft names {name}"
-                for name in draft.leaks(_leak_tokens(args.bringup_dir))
+                for name in draft.leaks(args.bringup.leak_tokens())
             ]
             needs_validation = outcome == "modeled" or (outcome == "blocked" and rows)
             if needs_validation and not draft.has_validation_table():
@@ -293,7 +293,7 @@ def analysis_result(args):
             problems.append(f"missing or empty {name}")
     for problem in problems:
         print(problem, file=sys.stderr)
-    return _gate(args, "analysis", not problems, problems=problems)
+    return args.bringup.write_gate("analysis", not problems, problems=problems)
 
 
 def coverage(args):
@@ -305,7 +305,7 @@ def coverage(args):
     }
     categorized = categorized_names(after_rows)
     failing = []
-    for result in _results(args.bringup_dir):
+    for result in args.bringup.results():
         outcome = result.get("outcome")
         if outcome == "modeled" and not (
             covered.get(result["op"])
@@ -314,8 +314,7 @@ def coverage(args):
             failing.append(result["op"])
         elif outcome == "categorized" and result["op"] not in categorized:
             failing.append(result["op"])
-    return _gate(
-        args,
+    return args.bringup.write_gate(
         "coverage",
         not failing,
         failing=failing,
@@ -328,18 +327,16 @@ def coverage(args):
 
 def summary(args):
     """Render bringup_summary.md from the gate and result files only."""
-    root = Path(args.bringup_dir)
+    bringup = args.bringup
     stop = STOP_TAG.format(step=args.step, code=args.code) if args.code else None
-    _gate(args, "summary", stop is None, stop=stop, reason=args.reason)
+    bringup.write_gate("summary", stop is None, stop=stop, reason=args.reason)
     lines = ["# Model bringup summary", ""]
     if stop:
         lines += [f"**Stopped:** {stop} {args.reason or ''}".rstrip(), ""]
     lines += ["| Gate | Status |", "|---|---|"]
     for name in ("prepare", "profile_health", "analysis", "report_health", "coverage"):
-        path = root / "gates" / f"{name}.json"
-        status = json.loads(path.read_text())["status"] if path.is_file() else "not_run"
-        lines.append(f"| {name} | {status} |")
-    results = _results(root)
+        lines.append(f"| {name} | {bringup.gate_status(name)} |")
+    results = bringup.results()
     lines += ["", "| Op | Outcome | Reason |", "|---|---|---|"]
     lines += [
         f"| {r['op_slug']} | {r['outcome']} | {r.get('reason') or ''} |"
@@ -350,11 +347,82 @@ def summary(args):
         lines += [
             "",
             "Publish with: `Follow the model-bringup skill installed with TraceLens and "
-            f"publish {root} for ops {' '.join(drafted)}`",
+            f"publish {bringup.root} for ops {' '.join(drafted)}`",
         ]
-    (root / "bringup_summary.md").write_text("\n".join(lines) + "\n")
-    print(root / "bringup_summary.md")
+    bringup.summary_md.write_text("\n".join(lines) + "\n")
+    print(bringup.summary_md)
     return 0
+
+
+class BringupInputError(Exception):
+    """A missing or malformed bringup input; the gate exits 2."""
+
+
+class BringupDir:
+    """Paths under ``<bringup_dir>`` and its effective config, loaded once."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.gaps_json = self.root / "gaps.json"
+        self.summary_md = self.root / "bringup_summary.md"
+
+    @functools.cached_property
+    def config(self):
+        path = self.root / EFFECTIVE_CONFIG
+        try:
+            config = yaml.safe_load(path.read_text())
+        except FileNotFoundError:
+            raise BringupInputError(f"missing {path}") from None
+        except yaml.YAMLError as e:
+            raise BringupInputError(f"malformed {path}: {e}") from None
+        if not isinstance(config, dict):
+            raise BringupInputError(f"{path} is not a mapping")
+        return config
+
+    def capture_folder(self, rank):
+        return self.root / f"capture_rank{rank}"
+
+    def gate_path(self, name):
+        return self.root / "gates" / f"{name}.json"
+
+    def gate_status(self, name):
+        path = self.gate_path(name)
+        return json.loads(path.read_text())["status"] if path.is_file() else "not_run"
+
+    def write_gate(self, name, passed, **fields):
+        """Write ``gates/<name>.json``; return the gate's exit code (0 pass, 1 fail)."""
+        path = self.gate_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"status": "pass" if passed else "fail", **fields}, indent=2)
+        )
+        return 0 if passed else 1
+
+    def results(self):
+        """Every perf-model sub-agent's ``result.json``, in op-slug order."""
+        return [
+            json.loads(p.read_text())
+            for p in sorted(self.root.glob("perf_models/*/result.json"))
+        ]
+
+    def leak_tokens(self):
+        """Normalized run-specific names (and their raw form) a public draft must not carry."""
+        config = self.config
+        names = [
+            self.root.name,
+            (config.get("model") or "").rsplit("/", 1)[-1],
+            *list_platforms(),
+            *(str(config[k]) for k in LEAK_KEYS if config.get(k)),
+            *(
+                v
+                for v in config.values()
+                if isinstance(v, str)
+                and Path(v).is_absolute()
+                and len(Path(v).parts) >= MIN_PATH_PARTS
+            ),
+        ]
+        tokens = {_norm(n): n for n in names}
+        return {t: n for t, n in tokens.items() if len(t) >= MIN_TOKEN}
 
 
 class PerfModelDraft:
@@ -429,42 +497,6 @@ def _norm(text):
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def _leak_tokens(bringup_dir):
-    """Normalized run-specific names (and their raw form) a public draft must not carry."""
-    config = yaml.safe_load((Path(bringup_dir) / EFFECTIVE_CONFIG).read_text())
-    names = [
-        Path(bringup_dir).name,
-        (config.get("model") or "").rsplit("/", 1)[-1],
-        *list_platforms(),
-        *(str(config[k]) for k in LEAK_KEYS if config.get(k)),
-        *(
-            v
-            for v in config.values()
-            if isinstance(v, str)
-            and Path(v).is_absolute()
-            and len(Path(v).parts) >= MIN_PATH_PARTS
-        ),
-    ]
-    tokens = {_norm(n): n for n in names}
-    return {t: n for t, n in tokens.items() if len(t) >= MIN_TOKEN}
-
-
-def _results(bringup_dir):
-    return [
-        json.loads(p.read_text())
-        for p in sorted(Path(bringup_dir).glob("perf_models/*/result.json"))
-    ]
-
-
-def _gate(args, name, passed, **fields):
-    path = Path(args.bringup_dir) / "gates" / f"{name}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"status": "pass" if passed else "fail", **fields}, indent=2)
-    )
-    return 0 if passed else 1
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -500,7 +532,13 @@ def main(argv=None):
         parser.error("--step and --code go together")
     if args.command == "summary" and args.reason and args.code is None:
         parser.error("--reason needs --step and --code")
-    return args.fn(args)
+    if args.command != "cases":
+        args.bringup = BringupDir(args.bringup_dir)
+    try:
+        return args.fn(args)
+    except BringupInputError as e:
+        print(e, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
