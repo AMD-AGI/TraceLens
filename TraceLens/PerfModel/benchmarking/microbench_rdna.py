@@ -31,9 +31,19 @@ own sections, so that keys are comparable across boards and runs:
 import statistics
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import torch
 from triton.testing import do_bench
@@ -102,19 +112,22 @@ RDNA_DEEP_K_SHAPES: List[Tuple[int, int, int]] = [
 # shape takes seconds per call; more shapes add run time, not signal.
 RDNA_FP64_SHAPES: List[Tuple[int, int, int]] = [(4096, 4096, 4096)]
 # Vector FMA kernels, best of: the suite's chain ``fma(acc, x, y)`` at these
-# (BLOCK, num_warps), and a [ILP, BLOCK] tile of accumulators updated as
-# ``fma(x, y, acc)`` with x and y broadcast over ILP. Only the tile's form
-# compiles to ``v_fmac_f32``, which VOPD pairs (wave32 dual issue); at 2
-# elements per lane it pairs every FMA on gfx1100, gfx1151 and gfx1201. The
-# tile runs the chain's FLOPs over 1/ILP of its elements, each with ILP chains
-# of REPEAT FMAs in a loop unrolled by VECTOR_TILE_UNROLL: at the chain's
-# element count its loads and stores take half of gfx1201's DRAM bandwidth.
+# (BLOCK, num_warps), which include the suite's own launch (its
+# ``vector_fma_block`` with 8 warps), and a [ILP, BLOCK] tile of accumulators
+# updated as ``fma(x, y, acc)`` with x and y broadcast over ILP. Only the
+# tile's form compiles to ``v_fmac_f32``, which VOPD pairs (wave32 dual
+# issue); at 2 elements per lane it pairs every FMA on gfx1100, gfx1151 and
+# gfx1201. The tile runs the chain's FLOPs over 1/ILP of its elements, each
+# with ILP chains of REPEAT FMAs in a loop unrolled by VECTOR_TILE_UNROLL: at
+# the chain's element count its loads and stores take half of gfx1201's DRAM
+# bandwidth.
 VECTOR_CONFIGS_RDNA: List[Tuple[int, int]] = [
     (256, 4),
     (256, 8),
     (512, 4),
     (512, 8),
     (1024, 8),
+    (2048, 8),
 ]
 VECTOR_TILE_ILP = 8
 VECTOR_TILE_UNROLL = 16
@@ -157,13 +170,16 @@ class SuiteParts:
     """
     What the protocol reuses from :mod:`microbench`, passed in because this
     module may not import it (import-linter forbids the cycle): the suite's
-    GEMM shapes, its FMA chain kernel (today's vector config is one of the
-    candidates) and its FP8 dtype probe for ``torch._scaled_mm``.
+    GEMM shapes, its FMA chain kernel (the suite's launch is one of the
+    candidates), its FP8 dtype probe for ``torch._scaled_mm``, and the chain's
+    compile-time arguments besides ``BLOCK_SIZE``, ``REPEAT`` and ``ACC_FP32``,
+    as the suite passes them.
     """
 
     gemm_shapes: Sequence[Tuple[int, int, int]]
     chain_kernel: Any
     resolve_fp8_dtype: Callable[[int, int, int, int], Optional[torch.dtype]]
+    chain_args: Mapping[str, Any] = field(default_factory=dict)
 
 
 if triton is not None and tl is not None:
@@ -595,6 +611,7 @@ def _vector_call(
     dev: str,
     repeat: int,
     chain_kernel: Any = None,
+    chain_args: Optional[Mapping[str, Any]] = None,
 ):
     n = VECTOR_N_ELEMENTS if kernel == "chain" else VECTOR_N_ELEMENTS // VECTOR_TILE_ILP
     x, y, z = (torch.randn(n, device=dev, dtype=dtype) for _ in range(3))
@@ -610,6 +627,7 @@ def _vector_call(
             BLOCK_SIZE=block,
             REPEAT=repeat,
             ACC_FP32=int(dtype == torch.float32),
+            **(chain_args or {}),
             num_warps=warps,
         )
     return lambda: _fma_tile_kernel[grid](
@@ -627,7 +645,7 @@ def _vector_call(
 
 
 def _vector_candidates(
-    dtype: torch.dtype, dev: str, repeat: int, chain_kernel: Any
+    dtype: torch.dtype, dev: str, repeat: int, suite: SuiteParts
 ) -> List[_Candidate]:
     configs = [("chain", b, w) for b, w in VECTOR_CONFIGS_RDNA] + [
         ("tile", b, w) for b, w in VECTOR_TILE_CONFIGS_RDNA
@@ -641,7 +659,15 @@ def _vector_candidates(
                 **({"ilp": VECTOR_TILE_ILP} if kernel == "tile" else {}),
             },
             partial(
-                _vector_call, kernel, block, warps, dtype, dev, repeat, chain_kernel
+                _vector_call,
+                kernel,
+                block,
+                warps,
+                dtype,
+                dev,
+                repeat,
+                suite.chain_kernel,
+                suite.chain_args,
             ),
             2 * repeat * VECTOR_N_ELEMENTS,
         )
@@ -670,7 +696,7 @@ def bench_vector_rdna(
         ("vector_fp32", torch.float32),
         ("vector_fp64", torch.float64),
     ):
-        candidates = _vector_candidates(dtype, dev, repeat, suite.chain_kernel)
+        candidates = _vector_candidates(dtype, dev, repeat, suite)
         print(f"\n  [{key}]  best of {len(candidates)} configs")
         best, rows = proto.best_of(candidates)
         results[key] = round(best["rate"], 1) if best else 0.0

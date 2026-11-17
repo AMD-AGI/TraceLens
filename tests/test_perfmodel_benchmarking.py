@@ -37,6 +37,9 @@ from TraceLens.PerfModel.benchmarking.microbench_utils import (
     resolve_physical_device,
     resolve_rdna_window,
     run_python_probe,
+    VECTOR_FMA_BLOCK,
+    VECTOR_FMA_BLOCK_DEFAULT,
+    vector_fma_block,
     vopd_share,
 )
 
@@ -542,6 +545,16 @@ class TestPlatformRecord:
         assert record["dpm_levels_mhz"] == {"sclk": None, "mclk": None, "fclk": None}
 
 
+class TestVectorFmaBlock:
+    @pytest.mark.parametrize("gfx", sorted(VECTOR_FMA_BLOCK))
+    def test_vector_fma_block_listed_target(self, gfx):
+        assert vector_fma_block(gfx) == VECTOR_FMA_BLOCK[gfx]
+
+    @pytest.mark.parametrize("gfx", ["gfx9999", ""])
+    def test_vector_fma_block_falls_back_to_default(self, gfx):
+        assert vector_fma_block(gfx) == VECTOR_FMA_BLOCK_DEFAULT
+
+
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestMicrobenchHelpers:
     def test_gemm_flops(self):
@@ -663,10 +676,30 @@ class TestMicrobenchHelpers:
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestRdnaProtocolHelpers:
-    def test_vector_configs_include_the_default_launch(self):
+    @pytest.mark.parametrize("gfx", ["gfx1100", "gfx1151", "gfx1201"])
+    def test_vector_configs_include_the_default_launch(self, gfx):
         rd = _import_microbench_rdna()
-        assert (1024, 8) in rd.VECTOR_CONFIGS_RDNA
+        assert (vector_fma_block(gfx), 8) in rd.VECTOR_CONFIGS_RDNA
         assert all(block % (32 * warps) == 0 for block, warps in rd.VECTOR_CONFIGS_RDNA)
+
+    def test_chain_launch_sets_every_constexpr_of_the_suite_kernel(self, monkeypatch):
+        mb = _import_microbench()
+        rd = _import_microbench_rdna()
+        if mb.triton is None:
+            pytest.skip("triton not installed")
+        suite = mb._rdna_suite_parts()
+        launched = {}
+
+        class _Recorder:
+            def __getitem__(self, grid):
+                return lambda *args, **kwargs: launched.update(kwargs)
+
+        monkeypatch.setattr(rd, "VECTOR_N_ELEMENTS", 1024)
+        rd._vector_call(
+            "chain", 256, 4, mb.torch.float32, "cpu", 64, _Recorder(), suite.chain_args
+        )()
+        constexprs = {p.name for p in suite.chain_kernel.params if p.is_constexpr}
+        assert set(launched) - {"num_warps"} == constexprs
 
     def test_tile_configs_split_the_chain_evenly(self):
         rd = _import_microbench_rdna()
@@ -1388,6 +1421,26 @@ class TestMicrobenchGpuBenchmarks:
         mb.REP = 1
         tflops = mb.bench_gemm(64, 64, 64, torch.float16, device=0)
         assert tflops > 0
+
+    @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+    def test_fma_chain_matches_reference(self, dtype_name):
+        torch = _require_cuda_gpu()
+        mb = _import_microbench()
+        mb.WARMUP = 1
+        mb.REP = 1
+        dtype = getattr(torch, dtype_name)
+        acc_fp32 = dtype != torch.float16
+        n, repeat = 4096, 20
+        x = torch.full((n,), 1.0, device="cuda", dtype=dtype)
+        y = torch.full((n,), 0.25, device="cuda", dtype=dtype)
+        z = torch.linspace(-1, 1, n, device="cuda").to(dtype)
+        out = torch.empty(n, device="cuda", dtype=torch.float32 if acc_fp32 else dtype)
+        mb._triton_fma_chain_ms(
+            x, y, z, out, repeat=repeat, block=2048, acc_fp32=acc_fp32
+        )
+        # x = 1 makes acc grow by y per step, so a dropped FMA shifts it by 0.25.
+        ref = z.float() + repeat * 0.25
+        torch.testing.assert_close(out.float(), ref, atol=0.05, rtol=0)
 
     def test_prepare_mxfp4_gemm_on_gpu(self):
         torch = _require_cuda_gpu()
