@@ -31,7 +31,7 @@ Derived:
 |---|---|---|
 | `<magpie_prefix>` | `ssh <node> "cd <magpie_dir> && PYTHONPATH=<magpie_dir> {CMD}"` | 0 |
 | `<container>` | `bringup_<basename of <bringup_dir>>` | 0 |
-| `<prefix>` | `ssh <node> "docker exec -i -w /tmp <container> bash -c '{CMD}'"` | 0 |
+| `<prefix>` | `ssh <node> "docker exec -i -w <tracelens_dir> <container> bash -c '{CMD}'"` | 0 |
 | `<bringup_gates>` | `python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates` | 0 |
 | `<tl_extension>`, `<gpu_devices>`, `<framework_src>`, `<gfx_arch>`, `<platform>`, `<image_path>`, `<user>`, `<uid_gid>`, `<device_gids>` | printed in Step 0 | 0 |
 | `<gpu_count>` | the number of `<gpu_devices>` | 0 |
