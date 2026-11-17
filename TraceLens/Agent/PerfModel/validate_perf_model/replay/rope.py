@@ -24,7 +24,6 @@ roofline metric is HBM read+write of the Q/K tensors.
 # (and side effects) of importing torch.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
-from ._measure import prepare_measured_call
 
 # ---------------------------------------------------------------------------
 # 1. aiter rope_cached_positions_2c_fwd_impl  (aiter pattern)
@@ -38,7 +37,6 @@ def test_rope_cached_positions_2c_fwd_impl(
     head_dim=64,
     in_dtype="bf16",
     rotate_style=0,
-    num_warmup=3,
     **_,
 ):
     """``aiter.ops.rope.rope_cached_positions_2c_fwd_impl`` — 2-channel RoPE.
@@ -97,7 +95,7 @@ def test_rope_cached_positions_2c_fwd_impl(
     reuse_freqs_front_part = True
     nope_first = False
 
-    for _ in range(num_warmup):
+    def call():
         _fn(
             output_x,
             output_y,
@@ -110,26 +108,8 @@ def test_rope_cached_positions_2c_fwd_impl(
             reuse_freqs_front_part,
             nope_first,
         )
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _fn(
-        output_x,
-        output_y,
-        input_x,
-        input_y,
-        cos_cache,
-        sin_cache,
-        positions,
-        rotate_style,
-        reuse_freqs_front_part,
-        nope_first,
-    )
-    torch.cuda.synchronize()
-    print(
-        f"test: done, output_x={output_x.shape} output_y={output_y.shape}",
-        flush=True,
-    )
+
+    return call
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +124,6 @@ def test_sgl_kernel_rotary_embedding(
     head_dim=128,
     in_dtype="bf16",
     is_neox=True,
-    num_warmup=3,
     **_,
 ):
     """``sgl_kernel.rotary_embedding`` — in-place rotate-half RoPE on Q and K.
@@ -197,11 +176,7 @@ def test_sgl_kernel_rotary_embedding(
     # cos/sin packed: shape [max_pos, rot_dim]
     cos_sin_cache = torch.randn(max_pos, rot_dim, dtype=in_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         _fn(positions, query, key, head_dim, cos_sin_cache, is_neox)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _fn(positions, query, key, head_dim, cos_sin_cache, is_neox)
-    torch.cuda.synchronize()
-    print(f"test: done, query={query.shape} key={key.shape}", flush=True)
+
+    return call

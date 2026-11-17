@@ -32,10 +32,9 @@ validate_perf_model/
 ├── validate_perf_model.py   CLI: profiles ops under rocprofv3, compares, reports
 ├── perf_model_harnesses.py  Op registry: @register(...) event builders + perf models
 └── replay/
-    ├── _runner.py           Subprocess rocprofv3 wraps; dispatches --op <key> to test_<key>
+    ├── _runner.py           Subprocess rocprofv3 wraps; dispatches --op <key> to test_<key> and measures its call
     ├── generic.py           Replay of traced shapes from --cases (OP_CALL_SPEC)
     ├── _dtypes.py           Shared dtype helpers
-    ├── _measure.py          prepare_measured_call: L2 flush and marker before the measured call
     ├── gemm.py moe.py attention.py rmsnorm.py other.py rope.py
     │                        test_<key>(**kwargs) GPU replay harnesses, one module per op family
     └── collectives.py       Collective harnesses; not wired into the runner or registry
@@ -323,14 +322,14 @@ Writing a harness for a new op:
 
 Harness conventions (see `replay/gemm.py`):
 
-- Signature `test_<key>(<dims>, <dtype kwargs>=<default>, num_warmup=3, **_)`;
-  `**_` absorbs flags meant for other ops.
-- Build inputs, run `num_warmup` calls, `torch.cuda.synchronize()`, call
-  `prepare_measured_call()` (from `replay/_measure.py`), then make one measured
-  call and synchronize again. `prepare_measured_call` flushes L2 so the
-  measured call starts cold, and launches a `bitwise_not` marker between the
-  warmup and measured dispatches. The validator reads counters from the last
-  dispatch.
+- Signature `test_<key>(<dims>, <dtype kwargs>=<default>, **_)`; `**_` absorbs
+  flags meant for other ops.
+- Build the inputs and return a zero-argument callable that makes the kernel
+  call. `measure()` in `replay/_runner.py` runs it `--num-warmup` times,
+  synchronizes, flushes L2 so the measured call starts cold, launches a
+  `bitwise_not` marker between the warmup and measured dispatches, then makes
+  one measured call and synchronizes again. The validator reads counters from
+  the last dispatch.
 - Import the kernel library inside the function, so a missing framework only
   breaks its own ops.
 - Invoke the op the way the framework does: `aiter.<fn>(...)`,

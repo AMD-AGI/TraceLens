@@ -10,7 +10,7 @@ For report rows whose op was not registered with ``csv_harness=True`` in
 ``perf_model_harnesses.py``, ``validate_perf_model.py`` forwards the raw
 ``Input Dims`` and ``Input type`` columns from the trace's
 ``unified_perf_summary.csv``. ``test_generic_simple_op`` builds random
-tensors of those shapes and dtypes and dispatches to the op's
+tensors of those shapes and dtypes and returns the call to the op's
 ``OP_CALL_SPEC`` entry here.
 """
 
@@ -18,8 +18,6 @@ import inspect
 import json
 
 import torch
-
-from ._measure import prepare_measured_call
 
 C10_TO_TORCH = {
     "c10::Float8_e4m3fnuz": torch.float8_e4m3fnuz,
@@ -555,7 +553,6 @@ def test_generic_simple_op(
     input_dims_json,
     input_types_json,
     registry_key=None,
-    num_warmup=3,
     concrete_inputs_json=None,
     **_,
 ):
@@ -604,14 +601,7 @@ def test_generic_simple_op(
     concrete = _parse_concrete(concrete_inputs_json)
     takes_concrete = len(inspect.signature(fn).parameters) >= 2
 
-    def _call():
+    def call():
         return fn(t, concrete) if takes_concrete else fn(t)
 
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _call()
-    torch.cuda.synchronize()
-    print("test: done", flush=True)
+    return call

@@ -6,9 +6,8 @@
 
 """RMSNorm-family test harnesses for ``validate_perf_model``.
 
-Each ``test_<op>`` function builds the input tensors and calls the target
-kernel with ``num_warmup`` warmup iterations followed by one measured
-iteration. Functions are parameterized over input/weight/output dtype
+Each ``test_<op>`` function builds the input tensors and returns the kernel
+call, which ``replay/_runner.py`` measures. Functions are parameterized over input/weight/output dtype
 where the kernel supports it; quant variants additionally honor
 ``out_dtype`` to select between FP8 storage flavors.
 """
@@ -18,12 +17,9 @@ where the kernel supports it; quant variants additionally honor
 # (and side effects) of importing torch.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
-from ._measure import prepare_measured_call
 
 
-def test_rms_norm(
-    M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", num_warmup=3, **_
-):
+def test_rms_norm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", **_):
     """``aiter.rms_norm`` (CK).
 
     Parameters
@@ -50,19 +46,13 @@ def test_rms_norm(
     inp = torch.randn(M, N, dtype=in_t, device=device)
     weight = torch.randn(N, dtype=w_t, device=device)
 
-    for _ in range(num_warmup):
-        out = aiter.rms_norm(inp, weight, 1e-06)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    out = aiter.rms_norm(inp, weight, 1e-06)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    def call():
+        return aiter.rms_norm(inp, weight, 1e-06)
+
+    return call
 
 
-def test_rmsnorm(
-    M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", num_warmup=3, **_
-):
+def test_rmsnorm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", **_):
     """``aiter.ops.rmsnorm.rmsnorm`` (compiled CK op, out-first API).
 
     Same dtype constraints as :func:`test_rms_norm` -- input/weight/output
@@ -87,19 +77,13 @@ def test_rmsnorm(
     weight = torch.randn(N, dtype=w_t, device=device)
     out = torch.empty_like(inp)
 
-    for _ in range(num_warmup):
+    def call():
         rmsnorm(out, inp, weight, 1e-06)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    rmsnorm(out, inp, weight, 1e-06)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
-def test_add_rmsnorm(
-    M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", num_warmup=3, **_
-):
+def test_add_rmsnorm(M, N, in_dtype="bf16", w_dtype="bf16", out_dtype="bf16", **_):
     """``aiter.fused_add_rms_norm_cu`` (residual-add + RMSNorm).
 
     Parameters mirror :func:`test_rms_norm`. The kernel updates ``inp`` and
@@ -124,14 +108,10 @@ def test_add_rmsnorm(
     residual = torch.randn(M, N, dtype=in_t, device=device)
     weight = torch.randn(N, dtype=w_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         aiter.fused_add_rms_norm_cu(inp.clone(), residual.clone(), weight, 1e-06)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    aiter.fused_add_rms_norm_cu(inp.clone(), residual.clone(), weight, 1e-06)
-    torch.cuda.synchronize()
-    print("test: done", flush=True)
+
+    return call
 
 
 def test_rmsnorm_dynamicquant(
@@ -141,7 +121,6 @@ def test_rmsnorm_dynamicquant(
     w_dtype="bf16",
     out_dtype="fp8",
     scale_dtype="fp32",
-    num_warmup=3,
     **_,
 ):
     """``aiter.ops.rmsnorm.rmsnorm2d_fwd_with_dynamicquant`` (fused RMSNorm + dynamic FP8 quant).
@@ -175,14 +154,10 @@ def test_rmsnorm_dynamicquant(
     out = torch.empty(M, N, dtype=out_t, device=device)
     yscale = torch.empty(M, 1, dtype=scl_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         rmsnorm2d_fwd_with_dynamicquant(out, inp, yscale, weight, 1e-06)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    rmsnorm2d_fwd_with_dynamicquant(out, inp, yscale, weight, 1e-06)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
 def test_vllm_rmsnorm_fp8_group_quant(
@@ -193,7 +168,6 @@ def test_vllm_rmsnorm_fp8_group_quant(
     out_dtype="fp8",
     scale_dtype="fp32",
     group_size=128,
-    num_warmup=3,
     **_,
 ):
     """``vllm::rocm_aiter_rmsnorm_fp8_group_quant`` (fused RMSNorm + FP8 group quant).
@@ -227,14 +201,10 @@ def test_vllm_rmsnorm_fp8_group_quant(
     weight = torch.randn(N, dtype=w_t, device=device)
     fn = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant
 
-    for _ in range(num_warmup):
-        x_q, x_scales = fn(x, weight, eps, group_size)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    x_q, x_scales = fn(x, weight, eps, group_size)
-    torch.cuda.synchronize()
-    print(f"test: done, x_q={x_q.shape} x_scales={x_scales.shape}", flush=True)
+    def call():
+        return fn(x, weight, eps, group_size)
+
+    return call
 
 
 def test_vllm_rmsnorm_add_fp8_group_quant(
@@ -245,7 +215,6 @@ def test_vllm_rmsnorm_add_fp8_group_quant(
     out_dtype="fp8",
     scale_dtype="fp32",
     group_size=128,
-    num_warmup=3,
     **_,
 ):
     """``vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant``."""
@@ -269,21 +238,13 @@ def test_vllm_rmsnorm_add_fp8_group_quant(
     weight = torch.randn(N, dtype=w_t, device=device)
     fn = torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant
 
-    for _ in range(num_warmup):
-        x_q, res_out, x_scales = fn(
-            x.clone(), residual.clone(), weight, eps, group_size
-        )
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    x_q, res_out, x_scales = fn(x.clone(), residual.clone(), weight, eps, group_size)
-    torch.cuda.synchronize()
-    print(f"test: done, x_q={x_q.shape} res={res_out.shape}", flush=True)
+    def call():
+        return fn(x.clone(), residual.clone(), weight, eps, group_size)
+
+    return call
 
 
-def test_fused_rms_mxfp4_quant(
-    M, N, in_dtype="bf16", w_dtype="bf16", num_warmup=3, **_
-):
+def test_fused_rms_mxfp4_quant(M, N, in_dtype="bf16", w_dtype="bf16", **_):
     """SGLang triton fused RMSNorm + MXFP4 quantization kernel.
 
     Single-path variant: normalizes ``x1 [M, N]`` with weight ``w [N]`` and
@@ -332,11 +293,4 @@ def test_fused_rms_mxfp4_quant(
                 "aiter.triton.fused_rms_mxfp4_quant is available."
             ) from exc
 
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _call()
-    torch.cuda.synchronize()
-    print("test: done", flush=True)
+    return _call

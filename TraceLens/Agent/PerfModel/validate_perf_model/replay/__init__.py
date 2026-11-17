@@ -6,10 +6,10 @@
 
 """Per-category GPU replay harnesses for validate_perf_model.
 
-Each ``test_<op>`` function initializes input tensors and invokes the target
-kernel with 3 warmup iterations + 1 measured iteration. The shared
-``_runner.py`` script dispatches to the right test function based on a
-``--op <registry_key>`` flag and passes through dimensional kwargs.
+Each ``test_<op>`` function builds the input tensors and returns the kernel
+call. The shared ``_runner.py`` script dispatches to the right function based
+on a ``--op <registry_key>`` flag, passes through dimensional kwargs, and
+measures the returned call.
 
 This package replaces the runtime Python-string codegen previously embedded in
 ``validate_perf_model.py``.

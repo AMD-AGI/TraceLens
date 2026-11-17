@@ -55,6 +55,10 @@ from TraceLens.Agent.PerfModel.validate_perf_model.replay._runner import (
     INT_FLAGS,
     STR_FLAGS,
 )
+from TraceLens.Agent.PerfModel.validate_perf_model.replay.attention import (
+    compute_varlen_annotation_stats,
+    make_varlen_seqlens,
+)
 from TraceLens.Agent.PerfModel.ratio_bands import (
     BAND_COLUMNS,
     RATIO_MATCH,
@@ -1927,13 +1931,6 @@ def _populate_varlen_attention_args(op_name, effective_args):
         return None
     if getattr(effective_args, "_varlen_c_sq", None) is not None:
         return None
-    # Imported lazily: replay.attention needs torch, which --discover and
-    # perf-model-only runs do not.
-    from TraceLens.Agent.PerfModel.validate_perf_model.replay.attention import (
-        compute_varlen_annotation_stats,
-        make_varlen_seqlens,
-    )
-
     num_seqs = getattr(effective_args, "varlen_num_seqs", None) or 4
     seed = getattr(effective_args, "varlen_seed", None) or 42
     scenario = getattr(effective_args, "varlen_scenario", None) or "random"

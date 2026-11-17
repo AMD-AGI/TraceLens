@@ -6,9 +6,9 @@
 
 """GEMM test harnesses for ``validate_perf_model``.
 
-Each ``test_<op>`` function builds the input tensors and calls the target
-kernel with ``num_warmup`` warmup iterations followed by one measured
-iteration. The shared runner (``replay/_runner.py``) dispatches into these.
+Each ``test_<op>`` function builds the input tensors and returns the kernel
+call; the shared runner (``replay/_runner.py``) dispatches into these and
+measures the call.
 
 Every test function is parameterized over the input / weight / output
 dtype the kernel actually supports.
@@ -19,7 +19,6 @@ dtype the kernel actually supports.
 # (and side effects) of importing torch.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
-from ._measure import prepare_measured_call
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -70,7 +69,6 @@ def test_gemm_a8w8_blockscale(
     out_dtype="bf16",
     scale_dtype="fp32",
     block_k=128,
-    num_warmup=3,
     **_,
 ):
     """``aiter.gemm_a8w8_blockscale`` (FP8 / INT8 block-scaled GEMM).
@@ -113,14 +111,10 @@ def test_gemm_a8w8_blockscale(
     if out_t not in (torch.bfloat16, torch.float16):
         raise ValueError(f"gemm_a8w8_blockscale unsupported out_dtype={out_dtype}")
 
-    for _ in range(num_warmup):
-        out = aiter.gemm_a8w8_blockscale(x_q, w_q, x_scale, w_scale)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    out = aiter.gemm_a8w8_blockscale(x_q, w_q, x_scale, w_scale)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    def call():
+        return aiter.gemm_a8w8_blockscale(x_q, w_q, x_scale, w_scale)
+
+    return call
 
 
 # vllm_triton_gemm_a8w8_blockscale has no dedicated test; it reuses the aiter
@@ -140,7 +134,6 @@ def test_gemm_a16w16_atomic_(
     in_dtype="bf16",
     w_dtype="bf16",
     out_dtype="bf16",
-    num_warmup=3,
     **_,
 ):
     """``aiter.ops.gemm_op_a16w16.gemm_a16w16_asm`` (BF16 / FP16 GEMM, atomic accumulate).
@@ -184,14 +177,10 @@ def test_gemm_a16w16_atomic_(
     B = torch.randn(N, K, dtype=w_t, device=device)
     out = torch.empty(M, N, dtype=out_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         gemm_a16w16_asm(A, B, out)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    gemm_a16w16_asm(A, B, out)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +195,6 @@ def test_vllm_unquantized_gemm(
     in_dtype="bf16",
     w_dtype="bf16",
     out_dtype="bf16",
-    num_warmup=3,
     **_,
 ):
     """``vllm::rocm_unquantized_gemm`` -- in production this dispatches to
@@ -241,14 +229,10 @@ def test_vllm_unquantized_gemm(
     B = torch.randn(N, K, dtype=w_t, device=device)
     out = torch.empty(M, N, dtype=out_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         gemm_a16w16_asm(A, B, out)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    gemm_a16w16_asm(A, B, out)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +248,6 @@ def test_vllm_gemm_with_dynamic_quant(
     w_dtype="fp4x2",
     out_dtype="bf16",
     scale_dtype="u8",
-    num_warmup=3,
     **_,
 ):
     """``vllm::gemm_with_dynamic_quant`` (Quark OCP MX FP4 GEMM).
@@ -311,14 +294,10 @@ def test_vllm_gemm_with_dynamic_quant(
     weight_scale = torch.randint(0, 255, (N, K // 32), dtype=torch.uint8, device=device)
     fn = torch.ops.vllm.gemm_with_dynamic_quant
 
-    for _ in range(num_warmup):
-        out = fn(x, weight, weight_scale, False, out_t)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    out = fn(x, weight, weight_scale, False, out_t)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    def call():
+        return fn(x, weight, weight_scale, False, out_t)
+
+    return call
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +311,6 @@ def test_gemm_afp4wfp4(
     K,
     group_size=128,
     out_dtype="bf16",
-    num_warmup=3,
     **_,
 ):
     """``aiter.gemm_afp4wfp4_`` — AITER MXFP4 (4-bit floating point) GEMM.
@@ -387,11 +365,7 @@ def test_gemm_afp4wfp4(
     b_scale = torch.randn(N, num_k_groups, dtype=torch.float32, device=device)
     out = torch.empty(M, N, dtype=out_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         _fn(a, b, a_scale, b_scale, out)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _fn(a, b, a_scale, b_scale, out)
-    torch.cuda.synchronize()
-    print(f"test: done, out={out.shape}", flush=True)
+
+    return call
