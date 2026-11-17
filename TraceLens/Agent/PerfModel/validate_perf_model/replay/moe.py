@@ -7,14 +7,13 @@
 """Mixture-of-Experts test harnesses for ``validate_perf_model``.
 
 Each ``test_<op>`` function builds the input tensors for a single MoE kernel
-in ``aiter``, runs a few warm-up iterations and then a measured iteration, and
-synchronizes the GPU. The functions are imported by ``tests/_runner.py``,
-which is what ``rocprofv3`` actually wraps.
+in ``aiter`` and returns the kernel call. The functions are imported by
+``replay/_runner.py``, which is what ``rocprofv3`` actually wraps, and which
+measures the call.
 
 Every test function is parameterized over input/weight/output dtype and the
 relevant ``aiter`` ``QuantType`` so that perf-model validation can target any
-of the production kernel variants. See ``tests/moe.md`` for the per-op
-mapping of dtypes onto the upstream ``aiter`` implementation.
+of the production kernel variants.
 
 Shared helpers
 --------------
@@ -37,7 +36,7 @@ Shared helpers
 # Dtype string resolution
 # ---------------------------------------------------------------------------
 #
-# The actual resolvers live in ``tests/_dtypes.py`` so the gemm/attention/
+# The actual resolvers live in ``replay/_dtypes.py`` so the gemm/attention/
 # rmsnorm/other harnesses can reuse them. Re-exported here under the
 # legacy ``_<name>`` aliases so existing references inside this file continue
 # to work without touching every callsite.
@@ -47,7 +46,6 @@ from ._dtypes import (
     resolve_dtype as _resolve_dtype,
     resolve_quant_type as _resolve_quant_type,
 )
-from ._measure import prepare_measured_call
 
 # ---------------------------------------------------------------------------
 # Shared MoE input builders
@@ -153,7 +151,6 @@ def test_fmoe_fp8_blockscale_g1u1(
     activation="silu",
     block_n=128,
     block_k=128,
-    num_warmup=3,
     **_,
 ):
     """``aiter.fmoe_fp8_blockscale_g1u1`` (fused FP8 block-scaled MoE, SwiGLU).
@@ -243,14 +240,7 @@ def test_fmoe_fp8_blockscale_g1u1(
             activation=act.value,
         )
 
-    for _ in range(num_warmup):
-        _run()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _run()
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    return _run
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +321,6 @@ def test_moe_cktile2stages_gemm1_ck(
     activation="silu",
     block_m=32,
     split_k=1,
-    num_warmup=3,
     **_,
 ):
     """``aiter.moe_cktile2stages_gemm1_ck`` (CK-Tile MoE up-projection).
@@ -407,14 +396,7 @@ def test_moe_cktile2stages_gemm1_ck(
             "",
         )
 
-    for _ in range(num_warmup):
-        _run()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _run()
-    torch.cuda.synchronize()
-    print(f"test: done, shape={Y.shape}", flush=True)
+    return _run
 
 
 def test_moe_cktile2stages_gemm2_ck(
@@ -430,7 +412,6 @@ def test_moe_cktile2stages_gemm2_ck(
     activation="silu",
     block_m=32,
     split_k=1,
-    num_warmup=3,
     **_,
 ):
     """``aiter.moe_cktile2stages_gemm2_ck`` (CK-Tile MoE down-projection)."""
@@ -507,14 +488,7 @@ def test_moe_cktile2stages_gemm2_ck(
             "",
         )
 
-    for _ in range(num_warmup):
-        _run()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _run()
-    torch.cuda.synchronize()
-    print(f"test: done, shape={Y.shape}", flush=True)
+    return _run
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +550,6 @@ def test_ck_moe_stage1(
     activation="silu",
     block_m=32,
     split_k=1,
-    num_warmup=3,
     **_,
 ):
     """``aiter.ck_moe_stage1_fwd`` (CK MoE up-projection, fused activation)."""
@@ -629,14 +602,7 @@ def test_ck_moe_stage1(
             out_t,
         )
 
-    for _ in range(num_warmup):
-        _run()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _run()
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    return _run
 
 
 def test_ck_moe_stage2(
@@ -651,7 +617,6 @@ def test_ck_moe_stage2(
     quant_type="no",
     activation="silu",
     block_m=32,
-    num_warmup=3,
     **_,
 ):
     """``aiter.ck_moe_stage2_fwd`` (CK MoE down-projection)."""
@@ -709,14 +674,7 @@ def test_ck_moe_stage2(
             False,
         )
 
-    for _ in range(num_warmup):
-        _run()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _run()
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    return _run
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +691,6 @@ def test_sglang_fused_moe_triton_invoke(
     in_dtype="bf16",
     w_dtype="fp8",
     out_dtype="bf16",
-    num_warmup=3,
     **_,
 ):
     """A single SGLang Triton ``invoke_fused_moe_kernel`` (gate/up grouped GEMM).
@@ -853,14 +810,7 @@ def test_sglang_fused_moe_triton_invoke(
             block_shape=None,
         )
 
-    for _ in range(num_warmup):
-        _run()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _run()
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    return _run
 
 
 def tl_dtype_for(torch_dtype):
@@ -972,9 +922,7 @@ def _gen_flydsl_a4w4_data(token, model_dim, inter_dim, E, topk, block_m, dtype=N
     )
 
 
-def test_dsv3_moe_flydsl_stage1(
-    M=64, K=7168, N=256, E=257, topk=9, block_m=32, num_warmup=3, **_
-):
+def test_dsv3_moe_flydsl_stage1(M=64, K=7168, N=256, E=257, topk=9, block_m=32, **_):
     """FlyDSL MoE stage-1 GEMM (a4w4 gate+up) -- ``pseudo_op::moe_flydsl_stage1``.
 
     Launches the ``moe_gemm1_0`` FlyDSL kernel via ``flydsl_moe_stage1`` with
@@ -1034,18 +982,11 @@ def test_dsv3_moe_flydsl_stage1(
             sorted_weights=data["sorted_weights_s1"],
         )
 
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _call()
-    torch.cuda.synchronize()
-    print("test: done dsv3_moe_flydsl_stage1", flush=True)
+    return _call
 
 
 def test_dsv3_moe_flydsl_stage2(
-    M=64, K=7168, N=256, E=257, topk=9, block_m=32, mode="atomic", num_warmup=3, **_
+    M=64, K=7168, N=256, E=257, topk=9, block_m=32, mode="atomic", **_
 ):
     """FlyDSL MoE stage-2 GEMM (a4w4 down-proj) -- ``pseudo_op::moe_flydsl_stage2``.
 
@@ -1099,11 +1040,4 @@ def test_dsv3_moe_flydsl_stage2(
             sorted_weights=data["sorted_weights_s2"],
         )
 
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _call()
-    torch.cuda.synchronize()
-    print("test: done dsv3_moe_flydsl_stage2", flush=True)
+    return _call

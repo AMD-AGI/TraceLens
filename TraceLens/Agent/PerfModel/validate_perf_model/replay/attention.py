@@ -15,8 +15,7 @@ installed; ``torch`` is only imported inside each ``test_*`` function
 body.
 
 Every test function is parameterized over the dtype kwargs the kernel
-actually consumes. See ``tests/attention.md`` for per-op coverage and
-``tests/attention.csv`` for the canonical parameter combinations.
+actually consumes.
 """
 
 import random
@@ -24,7 +23,6 @@ import random
 from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
 
 from ._dtypes import resolve_dtype as _resolve_dtype
-from ._measure import prepare_measured_call
 
 VARLEN_SCENARIOS = ("random", "mixed_prefill_decode")
 
@@ -110,7 +108,6 @@ def test__flash_attn_forward(
     head_dim=128,
     in_dtype="bf16",
     out_dtype="bf16",
-    num_warmup=3,
     **_,
 ):
     """``aiter._flash_attn_forward`` via ``aiter.flash_attn_func`` (CK).
@@ -144,14 +141,11 @@ def test__flash_attn_forward(
     q = torch.randn(B, S, H_Q, d, dtype=in_t, device=device)
     k = torch.randn(B, S, H_KV, d, dtype=in_t, device=device)
     v = torch.randn(B, S, H_KV, d, dtype=in_t, device=device)
-    for _ in range(num_warmup):
-        out = aiter.flash_attn_func(q, k, v, causal=True)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    out = aiter.flash_attn_func(q, k, v, causal=True)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    def call():
+        return aiter.flash_attn_func(q, k, v, causal=True)
+
+    return call
 
 
 def test_wrapper_fmha_v3_fwd(
@@ -161,7 +155,6 @@ def test_wrapper_fmha_v3_fwd(
     head_dim=128,
     in_dtype="bf16",
     out_dtype="bf16",
-    num_warmup=3,
     **_,
 ):
     """``aiter::wrapper_fmha_v3_fwd`` via ``aiter.ops.mha.fmha_v3_fwd``.
@@ -184,18 +177,11 @@ def test_wrapper_fmha_v3_fwd(
     q = torch.randn(B, S, H_Q, d, device=device).to(in_t)
     k = torch.randn(B, S, H_KV, d, device=device).to(in_t)
     v = torch.randn(B, S, H_KV, d, device=device).to(in_t)
-    for _ in range(num_warmup):
-        out, lse, S_dmask, _ = fmha_v3_fwd(
-            q, k, v, 0, softmax_scale, True, -1, -1, True, False, 1
-        )
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    out, lse, S_dmask, _ = fmha_v3_fwd(
-        q, k, v, 0, softmax_scale, True, -1, -1, True, False, 1
-    )
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    def call():
+        return fmha_v3_fwd(q, k, v, 0, softmax_scale, True, -1, -1, True, False, 1)
+
+    return call
 
 
 def test_mha_varlen_fwd(
@@ -205,7 +191,6 @@ def test_mha_varlen_fwd(
     head_dim=128,
     in_dtype="bf16",
     out_dtype="bf16",
-    num_warmup=3,
     varlen_seed=42,
     varlen_num_seqs=4,
     varlen_scenario="random",
@@ -255,8 +240,9 @@ def test_mha_varlen_fwd(
     v = torch.randn(total_kv, H_KV, d, device=device).to(in_t)
     cu_q = torch.tensor(cu_q_list, dtype=torch.int32, device=device)
     cu_k = torch.tensor(cu_k_list, dtype=torch.int32, device=device)
-    for _ in range(num_warmup):
-        out, lse, S_dmask, _ = mha_varlen_fwd(
+
+    def call():
+        return mha_varlen_fwd(
             q,
             k,
             v,
@@ -276,31 +262,8 @@ def test_mha_varlen_fwd(
             True,
             False,
         )
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    out, lse, S_dmask, _ = mha_varlen_fwd(
-        q,
-        k,
-        v,
-        cu_q,
-        cu_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        min_seqlen_q,
-        0,
-        softmax_scale,
-        0,
-        False,
-        True,
-        -1,
-        -1,
-        0,
-        True,
-        False,
-    )
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
 def test_fmha_v3_varlen_fwd(
@@ -310,7 +273,6 @@ def test_fmha_v3_varlen_fwd(
     head_dim=128,
     in_dtype="bf16",
     out_dtype="bf16",
-    num_warmup=3,
     varlen_seed=42,
     varlen_num_seqs=4,
     varlen_scenario="random",
@@ -348,8 +310,9 @@ def test_fmha_v3_varlen_fwd(
     v = torch.randn(total_kv, H_KV, d, device=device).to(in_t)
     cu_q = torch.tensor(cu_q_list, dtype=torch.int32, device=device)
     cu_k = torch.tensor(cu_k_list, dtype=torch.int32, device=device)
-    for _ in range(num_warmup):
-        out, lse, S_dmask, _ = fmha_v3_varlen_fwd(
+
+    def call():
+        return fmha_v3_varlen_fwd(
             q,
             k,
             v,
@@ -369,31 +332,8 @@ def test_fmha_v3_varlen_fwd(
             False,
             1,
         )
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    out, lse, S_dmask, _ = fmha_v3_varlen_fwd(
-        q,
-        k,
-        v,
-        cu_q,
-        cu_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        min_seqlen_q,
-        0,
-        softmax_scale,
-        0,
-        False,
-        True,
-        -1,
-        -1,
-        True,
-        False,
-        1,
-    )
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
 def test_vllm_unified_attention(
@@ -404,7 +344,6 @@ def test_vllm_unified_attention(
     in_dtype="bf16",
     kv_dtype="fp8",
     out_dtype="bf16",
-    num_warmup=3,
     annotation=None,
     num_decode_seqs=None,
     ctx_len=None,
@@ -551,14 +490,7 @@ def test_vllm_unified_attention(
             v_descale=v_descale,
         )
 
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _call()
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+    return _call
 
 
 def test_unified_attention(
@@ -569,7 +501,6 @@ def test_unified_attention(
     in_dtype="bf16",
     kv_dtype="fp8",
     out_dtype="bf16",
-    num_warmup=3,
     annotation=None,
     **kwargs,
 ):
@@ -599,7 +530,6 @@ def test_unified_attention(
         in_dtype=in_dtype,
         kv_dtype=kv_dtype,
         out_dtype=out_dtype,
-        num_warmup=num_warmup,
         annotation=annotation,
         num_decode_seqs=num_decode_seqs,
         ctx_len=ctx_len,
@@ -622,7 +552,6 @@ def test_dsv3_mla_decode_fwd(
     kv_dtype="fp8",
     n_ctx=0,
     ctx_qlen=0,
-    num_warmup=3,
     **_,
 ):
     """``aiter.mla.mla_decode_fwd`` (paged MLA attention through the MQA path).
@@ -789,14 +718,4 @@ def test_dsv3_mla_decode_fwd(
             reduce_partial_map=red_partial,
         )
 
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _call()
-    torch.cuda.synchronize()
-    print(
-        f"test: done, output={out.shape} qk_pairs={total_kv} kv_pages={region_base}",
-        flush=True,
-    )
+    return _call

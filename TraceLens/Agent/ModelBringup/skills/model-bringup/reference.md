@@ -120,7 +120,7 @@ Then launch one sub-agent:
     **Execution Context:**
     - Mode: unattended
     - Workload: <workload>; benchmark YAML: <benchmark_yaml> (or model <model_id>, framework <framework>, image <serving_image>, HF cache <hf_home>), copy to <profile_dir>/benchmark.yaml
-    - Node: <node>; Magpie command: <magpie_prefix> python3 -m Magpie ...
+    - Node: <node>; Magpie command: <magpie_prefix> python3 -m Magpie benchmark ... --output-dir <profile_dir>
     - Container: <container>; command prefix: Read <bringup_dir>/cache/cmd_prefix.txt and substitute {CMD}
     - TraceLens repo: <tracelens_dir>
     - Output directory: <profile_dir>

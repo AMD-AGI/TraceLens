@@ -9,10 +9,6 @@
 The "other" category bucket covers gated activations (silu/gelu *and_mul*),
 the aiter dynamic per-token FP8 quant, and the vLLM Triton group-quant
 variant that don't naturally fit gemm/moe/attention/rmsnorm.
-
-See ``tests/other.md`` for the per-op mapping of dtypes onto the upstream
-``aiter`` / ``vllm`` implementation and ``tests/other.csv`` for the
-canonical parameter combinations.
 """
 
 # NOTE: torch is imported lazily inside each function so that this module can
@@ -20,7 +16,6 @@ canonical parameter combinations.
 # (and side effects) of importing torch.
 
 from ._dtypes import resolve_dtype as _resolve_dtype
-from ._measure import prepare_measured_call
 
 # ---------------------------------------------------------------------------
 # Activation _and_mul kernels (SwiGLU-style: input [M, 2N] -> out [M, N])
@@ -33,7 +28,6 @@ def _activation_and_mul(
     N,
     in_dtype="bf16",
     out_dtype="bf16",
-    num_warmup=3,
 ):
     """Generic ``aiter.<fn_name>(out, inp)`` driver for SwiGLU-style activations.
 
@@ -57,53 +51,46 @@ def _activation_and_mul(
     inp = torch.randn(M, 2 * N, dtype=in_t, device=device)
     out = torch.empty(M, N, dtype=out_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         fn(out, inp)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    fn(out, inp)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
-def test_silu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_):
+def test_silu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", **_):
     """``aiter.silu_and_mul`` (SwiGLU gate*up).
 
     Kernel supports BF16 / FP16 input and BF16 / FP16 / FP32 output (with
     upcast accumulation). Production deployments use BF16 in / BF16 out.
     """
-    _activation_and_mul(
+    return _activation_and_mul(
         "silu_and_mul",
         M,
         N,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
-        num_warmup=num_warmup,
     )
 
 
-def test_gelu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_):
+def test_gelu_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", **_):
     """``aiter.gelu_and_mul`` (GeGLU)."""
-    _activation_and_mul(
+    return _activation_and_mul(
         "gelu_and_mul",
         M,
         N,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
-        num_warmup=num_warmup,
     )
 
 
-def test_gelu_tanh_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", num_warmup=3, **_):
+def test_gelu_tanh_and_mul(M, N, in_dtype="bf16", out_dtype="bf16", **_):
     """``aiter.gelu_tanh_and_mul`` (tanh-approximated GeGLU)."""
-    _activation_and_mul(
+    return _activation_and_mul(
         "gelu_tanh_and_mul",
         M,
         N,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
-        num_warmup=num_warmup,
     )
 
 
@@ -118,7 +105,6 @@ def test_dynamic_per_token_scaled_quant(
     in_dtype="bf16",
     out_dtype="fp8",
     scale_dtype="fp32",
-    num_warmup=3,
     **_,
 ):
     """``aiter.dynamic_per_token_scaled_quant`` (per-token FP8 quantization).
@@ -150,14 +136,10 @@ def test_dynamic_per_token_scaled_quant(
     out = torch.empty(M, N, dtype=out_t, device=device)
     scales = torch.empty(M, 1, dtype=scl_t, device=device)
 
-    for _ in range(num_warmup):
+    def call():
         aiter.dynamic_per_token_scaled_quant(out, inp, scales)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    aiter.dynamic_per_token_scaled_quant(out, inp, scales)
-    torch.cuda.synchronize()
-    print(f"test: done, shape={out.shape}", flush=True)
+
+    return call
 
 
 def test_vllm_triton_group_quant_fp8(
@@ -167,7 +149,6 @@ def test_vllm_triton_group_quant_fp8(
     out_dtype="fp8",
     scale_dtype="fp32",
     group_size=128,
-    num_warmup=3,
     **_,
 ):
     """``vllm::triton_per_token_group_quant_fp8`` (Triton FP8 group quant).
@@ -197,14 +178,10 @@ def test_vllm_triton_group_quant_fp8(
     x = torch.randn(M, N, dtype=in_t, device=device)
     fn = torch.ops.vllm.triton_per_token_group_quant_fp8
 
-    for _ in range(num_warmup):
-        x_q, scales = fn(x, group_size)
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    x_q, scales = fn(x, group_size)
-    torch.cuda.synchronize()
-    print(f"test: done, x_q={x_q.shape} scales={scales.shape}", flush=True)
+    def call():
+        return fn(x, group_size)
+
+    return call
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +194,6 @@ def test_fused_flatten_mxfp4_quant(
     N,
     in_dtype="bf16",
     group_size=128,
-    num_warmup=3,
     **_,
 ):
     """SGLang triton fused flatten + MXFP4 quantization kernel.
@@ -275,11 +251,4 @@ def test_fused_flatten_mxfp4_quant(
                 "aiter.triton.fused_flatten_mxfp4_quant is available."
             ) from exc
 
-    for _ in range(num_warmup):
-        _call()
-    torch.cuda.synchronize()
-    print("test: measured iteration...", flush=True)
-    prepare_measured_call()
-    _call()
-    torch.cuda.synchronize()
-    print("test: done", flush=True)
+    return _call

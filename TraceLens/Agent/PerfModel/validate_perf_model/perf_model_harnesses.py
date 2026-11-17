@@ -18,10 +18,10 @@ Adding an op
    (``PERF_MODEL_EXT``, ``ATTN_EXT``, ``CORE_OP_MAP``, ...); ``name`` is the
    class name or its trace op name. ``trace_names`` lists the trace op names
    that map to the op in ``--cases`` mode.
-2. Add ``test_<key>(**kwargs)`` to the matching ``tests/<module>.py``. The
+2. Add ``test_<key>(**kwargs)`` to the matching ``replay/<module>.py``. The
    runner finds it by name and rocprofv3 profiles it.
 3. Ops validated only from ``--cases`` have no builder: add them to
-   the ``_CSV_ONLY_OPS`` table and to ``tests/_generic.OP_CALL_SPEC``.
+   the ``_CSV_ONLY_OPS`` table and to ``replay/generic.OP_CALL_SPEC``.
 """
 
 import functools
@@ -92,7 +92,7 @@ _ACTIVATION_OPS = (
 )
 # (key, category, description, trace_name) for ops with no CLI builder. In
 # --cases mode the prediction comes from the traced event and
-# tests/_generic.OP_CALL_SPEC replays the traced call.
+# replay/generic.OP_CALL_SPEC replays the traced call.
 _CSV_ONLY_OPS = (
     (
         "batched_gemm_a16wfp4_",
@@ -594,7 +594,7 @@ def _gemm_a8w8_blockscale_event(args):
     """Event for ``aiter::gemm_a8w8_blockscale_ck`` (FP8 / INT8 block-scaled GEMM).
 
     Dtype kwargs read from ``args`` (defaults match
-    :func:`tests.gemm.test_gemm_a8w8_blockscale`):
+    :func:`replay.gemm.test_gemm_a8w8_blockscale`):
 
     * ``in_dtype`` -- activation storage (``"i8"``, ``"u8"``, ``"fp8"`` -- all 1 BPE).
     * ``w_dtype``  -- weight storage (``"i8"``, ``"u8"``, ``"fp8"`` -- all 1 BPE).
@@ -653,7 +653,7 @@ def _fmoe_fp8_blockscale_g1u1_event(args):
     """Event for ``aiter::fmoe_fp8_blockscale_g1u1``.
 
     Dtype kwargs read from ``args`` (all optional; defaults match
-    :func:`tests.moe.test_fmoe_fp8_blockscale_g1u1`):
+    :func:`replay.moe.test_fmoe_fp8_blockscale_g1u1`):
 
     * ``in_dtype``    -- activation dtype. ``"bf16"`` exercises the in-kernel
       quant path; ``"fp8"`` does caller-side ``pertoken_quant``. Default ``"bf16"``.
@@ -936,7 +936,7 @@ def _rms_norm_event(args):
 
     Reads ``in_dtype`` (slot ``[0]``), ``w_dtype`` (slot ``[1]``). Output
     traffic is computed using ``in_dtype`` (kernel out matches input).
-    Defaults match :func:`tests.rmsnorm.test_rms_norm`.
+    Defaults match :func:`replay.rmsnorm.test_rms_norm`.
     """
     N = args.N
     M = args.M
@@ -1247,7 +1247,7 @@ def _fmha_v3_varlen_fwd_event(args):
 def _vllm_unquantized_gemm_event(args):
     """Event for ``vllm::rocm_unquantized_gemm`` (BF16 / FP16 GEMM).
 
-    Dtype kwargs (defaults match :func:`tests.gemm.test_vllm_unquantized_gemm`):
+    Dtype kwargs (defaults match :func:`replay.gemm.test_vllm_unquantized_gemm`):
 
     * ``in_dtype`` / ``w_dtype`` -- activation / weight (default ``"bf16"``).
     * ``bias_dtype`` -- bias dtype if a bias is supplied (default unset =
@@ -1787,7 +1787,7 @@ def _fused_rms_mxfp4_quant_event(args):
 
 
 # ---------------------------------------------------------------------------
-# ATOM FlyDSL ops (tests/ has no test_<key> for these yet, so only the perf
+# ATOM FlyDSL ops (replay/ has no test_<key> for these yet, so only the perf
 # model is exercised)
 # ---------------------------------------------------------------------------
 @register(

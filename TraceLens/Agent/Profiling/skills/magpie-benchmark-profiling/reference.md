@@ -67,6 +67,7 @@ When the caller (for example the model-bringup skill) asks for unattended mode:
 - Edit only the copy of the YAML the caller names.
 - Keep the cleanup's script restores but skip the YAML restore.
 - Run Magpie and the AgentX check through the caller's Magpie command instead of `<magpie_activate>` in Steps 0 and 3 (no Magpie environment is needed), under `set -o pipefail` piped through `tee <output_dir>/magpie.log | tail -n 40`.
+- Pass `--output-dir <output_dir>` to `python3 -m Magpie benchmark`, so the bench directory is `<output_dir>/benchmark_<framework>_<timestamp>/`.
 - Skip Step 5.
 - Stop after the Step 6 split, which runs through the caller's container command prefix.
 - Do not print the TraceLens command.
