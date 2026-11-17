@@ -21,6 +21,9 @@ from TraceLens.PerfModel.benchmarking.microbench_utils import (
     gfx_target,
     mx_peak_without_native_support,
     resolve_physical_device,
+    VECTOR_FMA_BLOCK,
+    VECTOR_FMA_BLOCK_DEFAULT,
+    vector_fma_block,
 )
 
 # These modules import torch; without it they stay None and the tests that use them skip in _require_torch.
@@ -156,6 +159,16 @@ class TestMxPeakWithoutNativeSupport:
         assert mx_peak_without_native_support(gfx, self.MATRIX) is None
 
 
+class TestVectorFmaBlock:
+    @pytest.mark.parametrize("gfx", sorted(VECTOR_FMA_BLOCK))
+    def test_vector_fma_block_listed_target(self, gfx):
+        assert vector_fma_block(gfx) == VECTOR_FMA_BLOCK[gfx]
+
+    @pytest.mark.parametrize("gfx", ["gfx9999", ""])
+    def test_vector_fma_block_falls_back_to_default(self, gfx):
+        assert vector_fma_block(gfx) == VECTOR_FMA_BLOCK_DEFAULT
+
+
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestMicrobenchHelpers:
     def test_gemm_flops(self):
@@ -173,6 +186,19 @@ class TestMicrobenchHelpers:
             ("Generic GPU", 280.0, "MI355X"),
             ("Some Card", 64.0, "Card"),
             ("", 0.0, "GPU"),
+            # Workstation boards are named after the model that follows "PRO".
+            # Both W7900 boards are one platform; only the cooler differs.
+            ("AMD Radeon Pro W7900", 45.0, "W7900"),
+            ("AMD Radeon PRO W7900 Dual Slot", 45.0, "W7900"),
+            ("AMD Radeon PRO  W7900  Dual Slot ", 45.0, "W7900"),
+            ("AMD Radeon Pro W7800", 32.0, "W7800"),
+            ("AMD Radeon Pro W7800 48GB", 48.0, "W7800"),
+            ("AMD Radeon AI PRO R9700", 32.0, "R9700"),
+            # RX boards and a bare gfx target keep the last-word fallback.
+            ("AMD Radeon RX 7900 XTX", 24.0, "XTX"),
+            ("AMD Radeon RX 7900 XT", 20.0, "XT"),
+            ("AMD Radeon RX 7900 GRE", 16.0, "GRE"),
+            ("gfx1100", 45.0, "gfx1100"),
         ],
     )
     def test_arch_product_name(self, gpu_name, mem_gb, expected):
@@ -350,6 +376,26 @@ class TestMicrobenchGpuBenchmarks:
         mb.REP = 1
         tflops = mb.bench_gemm(64, 64, 64, torch.float16, device=0)
         assert tflops > 0
+
+    @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+    def test_fma_chain_matches_reference(self, dtype_name):
+        torch = _require_cuda_gpu()
+        mb = _import_microbench()
+        mb.WARMUP = 1
+        mb.REP = 1
+        dtype = getattr(torch, dtype_name)
+        acc_fp32 = dtype != torch.float16
+        n, repeat = 4096, 20
+        x = torch.full((n,), 1.0, device="cuda", dtype=dtype)
+        y = torch.full((n,), 0.25, device="cuda", dtype=dtype)
+        z = torch.linspace(-1, 1, n, device="cuda").to(dtype)
+        out = torch.empty(n, device="cuda", dtype=torch.float32 if acc_fp32 else dtype)
+        mb._triton_fma_chain_ms(
+            x, y, z, out, repeat=repeat, block=2048, acc_fp32=acc_fp32
+        )
+        # x = 1 makes acc grow by y per step, so a dropped FMA shifts it by 0.25.
+        ref = z.float() + repeat * 0.25
+        torch.testing.assert_close(out.float(), ref, atol=0.05, rtol=0)
 
     def test_prepare_mxfp4_gemm_on_gpu(self):
         torch = _require_cuda_gpu()

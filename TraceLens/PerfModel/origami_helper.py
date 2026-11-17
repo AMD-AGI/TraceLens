@@ -27,7 +27,47 @@ ORIGAMI_DTYPES = {
     "fp8": "Float8_fnuz",
 }
 
+# The Origami Python bindings model the MI300 and MI350 series only.
+ORIGAMI_GFX_ARCHS = frozenset({"gfx942", "gfx950"})
+
+_NAME_TO_GFX = {
+    "mi300": "gfx942",
+    "mi325": "gfx942",
+    "mi350": "gfx950",
+    "mi355": "gfx950",
+}
+
+
+class OrigamiUnavailableError(ValueError):
+    """The architecture spec names a GPU that Origami does not model."""
+
+
+def origami_gfx_arch(arch: dict) -> str:
+    """
+    The gfx target Origami should model for *arch*. The spec's ``gfx_arch``
+    wins over its ``name``. Raises :class:`OrigamiUnavailableError` when
+    Origami doesn't model that target.
+    """
+    gfx = arch.get("gfx_arch")
+    if gfx is None:
+        name = arch.get("name", None)
+        if name is None:
+            warnings.warn("No architecture name provided; Assuming MI300x")
+            name = "mi300x"
+        name = name.lower()
+        if name.endswith("x"):
+            name = name[:-1]
+        gfx = _NAME_TO_GFX.get(name, name)
+    if gfx not in ORIGAMI_GFX_ARCHS:
+        raise OrigamiUnavailableError(
+            f"Origami is unavailable on {gfx}; it models "
+            f"{', '.join(sorted(ORIGAMI_GFX_ARCHS))} only"
+        )
+    return gfx
+
+
 _import_error_printed = False
+_unavailable_printed = False
 
 
 def _load_origami():
@@ -39,15 +79,27 @@ def _load_origami():
 
 
 def gemm_time_us(arch, M, N, K, B, dtype, force_to_l1=False, num_cus=None):
-    """GEMM time in µs from Origami, or None if Origami isn't installed or
-    doesn't support ``dtype`` (a TraceLens precision name such as ``"bf16"``).
+    """GEMM time in µs from Origami, or None if Origami isn't installed, doesn't
+    model ``arch``, or doesn't support ``dtype`` (a TraceLens precision name
+    such as ``"bf16"``).
 
-    ``arch`` needs ``name`` (MI300X, MI325X, MI350X, MI355X), ``freq_mhz``,
-    ``num_cus``, and ``lds_capacity``. The report fills the last two from the
-    trace's ``deviceProperties``. The ``num_cus`` argument times this GEMM on
-    that many CUs; ``force_to_l1`` treats the operands as cache resident, as
-    in flash attention."""
-    global _import_error_printed
+    ``arch`` needs ``gfx_arch`` or ``name`` (MI300X, MI325X, MI350X, MI355X),
+    ``freq_mhz``, ``num_cus``, and ``lds_capacity``. The report fills the last
+    two from the trace's ``deviceProperties``. The ``num_cus`` argument times
+    this GEMM on that many CUs; ``force_to_l1`` treats the operands as cache
+    resident, as in flash attention."""
+    global _import_error_printed, _unavailable_printed
+    try:
+        origami_gfx_arch(arch)
+    except OrigamiUnavailableError as error:
+        if not _unavailable_printed:
+            print(
+                f"TraceLens: Origami simulation skipped: {error}. "
+                "Simulated GEMM/SDPA times are omitted.",
+                file=sys.stderr,
+            )
+            _unavailable_printed = True
+        return None
     if dtype not in ORIGAMI_DTYPES:
         warnings.warn(
             f"Unsupported dtype '{dtype}' for Origami simulation; skipping simulation.",
@@ -453,26 +505,11 @@ class OrigamiHelper:
                 "trace's deviceProperties maxSharedMemoryPerMultiProcessor."
             )
         _load_origami()
-        # find architecture name, look up
-        # need to map from GPU name ("mi300x") to internal name ("gfx42a")
-        arch_name = arch.get("name", None)
-        if arch_name is None:
-            warnings.warn("No architecture name provided; Assuming MI300x")
-            arch_name = "mi300x"
+        arch_name = origami_gfx_arch(arch)
         freq_mhz = arch.get("freq_mhz", None)
         if freq_mhz is None:
             warnings.warn("No frequency provided; Assuming 2200 MHz")
             freq_mhz = 2200
-        arch_name = arch_name.lower()
-        if arch_name.endswith("x"):
-            arch_name = arch_name[:-1]
-        name_to_arch = {
-            "mi300": "gfx942",
-            "mi325": "gfx942",
-            "mi350": "gfx950",
-            "mi355": "gfx950",
-        }
-        arch_name = name_to_arch.get(arch_name, arch_name)
 
         # The origami python bindings only support the 3xx series.
         # Compute units and LDS come from the trace. L2 is not in the trace.
@@ -487,7 +524,7 @@ class OrigamiHelper:
             },
         }
 
-        props = arch_to_props[arch_name]  # throw an error for unknown devices
+        props = arch_to_props[arch_name]
         return origami.get_hardware_for_arch(
             arch=props["arch"],
             N_CU=int(num_cus),
