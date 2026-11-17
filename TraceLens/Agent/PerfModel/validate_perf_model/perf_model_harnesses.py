@@ -26,12 +26,12 @@ Adding an op
 
 import functools
 import importlib
-import importlib.util
 import inspect
 import os
 import re
-import sys
 from pathlib import Path
+
+from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
 
 # Constants
 PERF_MODEL_EXT = "TraceLens.PerfModel.extensions.perf_model_extensions"
@@ -45,8 +45,6 @@ _PARENTS = Path(__file__).resolve().parents
 # <repo>/TraceLens/Agent/PerfModel/validate_perf_model/; staging copies of the
 # skill may sit fewer than five levels deep.
 REPO_ROOT = str(_PARENTS[4] if len(_PARENTS) > 4 else _PARENTS[-1])
-if importlib.util.find_spec("TraceLens") is None:
-    sys.path.insert(0, REPO_ROOT)
 
 _BF16 = "c10::BFloat16"
 _FP8 = "c10::Float8_e4m3fn"
@@ -385,9 +383,6 @@ def _parse_unified_attention_annotation(annotation):
     ctx_sqsq/ctx_sqsk and gen_req/gen_sq/gen_sk/gen_sqsq/gen_sqsk, or None when
     the annotation is empty or has no sq/sk sums.
     """
-    # TraceLens may only be importable after the REPO_ROOT path fix above.
-    from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
-
     if not annotation:
         return None
     try:

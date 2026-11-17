@@ -15,13 +15,26 @@ from TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops import (
     missing_perf_model_share,
     validation_cases,
 )
-from TraceLens.Agent.PerfModel.ratio_bands import match_status, ratio_band
+from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
+    match_status,
+    ratio_band,
+)
+from TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model import (
+    measured_bytes,
+)
 
 _HEADER = "name,op category,Input Dims,Input type,Kernel Time (µs)_sum,has_perf_model,kernel_details_summary,GFLOPS\n"
 _BAND_HEADER = "run_status,flops_ratio,flops_band,bytes_ratio,bytes_band,match_status\n"
 _OK_ROW = "OK,1.0000,match,1.0000,match,match\n"
-_SEPARATOR = "|---|---|---|---|---|---|---|"
-_DRAFT = f"## Operator\n\nOp a, data: None.\n\n## Validation\n\n{bringup_gates.VALIDATION_HEADER}\n{_SEPARATOR}\n"
+
+
+def _template_body(name):
+    return (bringup_gates.TEMPLATES_DIR / name).read_text().split("-->", 1)[1]
+
+
+# Cut before Ratio Deviations so text appended to the draft lands in Validation.
+_DRAFT = _template_body("perf_model_pr.md").split("## Ratio Deviations")[0]
+_ISSUE = _template_body("perf_model_issue.md")
 
 
 def _write_csv(path, rows):
@@ -77,6 +90,16 @@ def test_match_status():
     assert match_status("OK", ["deviation", "over-predicted"]) == "over-predicted"
     assert match_status("OK", ["match", "deviation"]) == "deviation-suspect"
     assert match_status("OK", ["match", "match"]) == "match"
+
+
+def test_measured_bytes():
+    counters = {
+        "TCC_EA0_RDREQ_sum": 10,
+        "TCC_EA0_RDREQ_32B_sum": 2,
+        "TCC_EA0_RDREQ_64B_sum": 3,
+        "WRITE_SIZE": 4,
+    }
+    assert measured_bytes(counters) == (2 * 32 + 3 * 64 + 5 * 128, 4 * 1024)
 
 
 def test_unified_perf_ops_share_and_cases(tmp_path):
@@ -219,7 +242,7 @@ def test_op_result_gates_outcomes(tmp_path):
     assert bringup_gates.main(args) == 1
 
     issue = op_dir / "perf_model_issue.md"
-    issue.write_text(_DRAFT)
+    issue.write_text(_ISSUE)
     path.write_text(json.dumps({**result, "outcome": "blocked"}))
     assert bringup_gates.main(args) == 1
     path.write_text(json.dumps({**result, "outcome": "blocked", "reason": "r"}))
@@ -228,7 +251,7 @@ def test_op_result_gates_outcomes(tmp_path):
     assert bringup_gates.main(args) == 1
     issue.write_text("## Operator\n")
     assert bringup_gates.main(args) == 1
-    issue.write_text(_DRAFT + "\n| Shape | Time (us) |\n|---|---|\n| s | 1 |\n")
+    issue.write_text(_ISSUE + "\n| Shape | Time (us) |\n|---|---|\n| s | 1 |\n")
     assert bringup_gates.main(args) == 1
     issue.write_text("## Operator\n")
     path.write_text(
@@ -245,10 +268,11 @@ def test_op_result_gates_outcomes(tmp_path):
 def test_op_result_needs_a_real_validation_table(tmp_path):
     op_dir, args = _modeled_op(tmp_path, _OK_ROW)
     draft = op_dir / "perf_model_pr.md"
-    header = bringup_gates.VALIDATION_HEADER
+    header = bringup_gates._template_headers()[0]
     draft.write_text(f"## Validation\n\nThe header is {header} here.\n")
     assert bringup_gates.main(args) == 1
-    draft.write_text(f"## Validation\n\n```\n{header}\n{_SEPARATOR}\n```\n")
+    table = _DRAFT[_DRAFT.index(header) :]
+    draft.write_text(f"## Validation\n\n```\n{table}```\n")
     assert bringup_gates.main(args) == 1
     (op_dir / "validation.csv").unlink()
     draft.write_text(_DRAFT)

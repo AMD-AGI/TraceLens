@@ -7,9 +7,7 @@ See LICENSE for license information.
 # Perf-model validation: reference
 
 Detail for [SKILL.md](SKILL.md). Read each section when its step needs it. The
-scripts live in `TraceLens/Agent/PerfModel/validate_perf_model/`. The commands below
-run from there; from anywhere else, replace `python validate_perf_model.py` with
-`python -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model`.
+scripts live in `TraceLens/Agent/PerfModel/validate_perf_model/`.
 
 ## Prerequisites
 
@@ -254,24 +252,24 @@ validator, so the code matches the kernel that was measured.
 
 ```bash
 # Single op
-python validate_perf_model.py --op gemm_a8w8_blockscale \
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --op gemm_a8w8_blockscale \
     --M 2048 --N 4096 --K 8192 --arch gfx942 --output-dir /tmp/perf_val
 
 # One category, or every registered op, with default dimensions
-python validate_perf_model.py --category gemm --output-dir /tmp/perf_val
-python validate_perf_model.py --all --output-dir /tmp/perf_val
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --category gemm --output-dir /tmp/perf_val
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --all --output-dir /tmp/perf_val
 
 # Every traced shape in a cases file (see above)
-python validate_perf_model.py --cases cases.json --arch gfx950 --output-dir /tmp/perf_val
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --cases cases.json --arch gfx950 --output-dir /tmp/perf_val
 # ...restricted to some registry keys or trace names
-python validate_perf_model.py --cases cases.json \
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --cases cases.json \
     --only-ops ck_moe_stage1,aiter::rms_norm --output-dir /tmp/perf_val
 
 # aiter:: / vllm:: ops with TraceLens perf models but no registry entry
-python validate_perf_model.py --discover
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --discover
 ```
 
-`python validate_perf_model.py --help` lists every op key and category.
+`python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --help` lists every op key and category.
 
 Output in `--output-dir`:
 - `validation_report_<timestamp>.csv`: one row per op with predictions,
@@ -295,7 +293,7 @@ and where to run.
 | Replay report rows through the op's own `test_<key>` | `csv_harness=True` on `register(...)` and a branch in `_extract_dims_for_existing_harness` in `validate_perf_model.py` that maps the row to CLI args |
 | Validate an op only from `--cases` (no CLI builder) | a row in `_CSV_ONLY_OPS` in `perf_model_harnesses.py` and an `OP_CALL_SPEC` entry |
 | Register an op whose kernel cannot run standalone | `perf_model_only=True` |
-| Add a test module for a new op family | the module name in `replay/_runner.MODULES` |
+| Add a replay module for a new op family | the module name in `replay/_runner.MODULES` |
 | Use a new perf-model module | a constant next to `PERF_MODEL_EXT` |
 | Add a CLI dimension or dtype flag | `main()` in `validate_perf_model.py` and `INT_FLAGS` / `STR_FLAGS` in `replay/_runner.py` |
 | Support a new GPU arch | `ARCH_COUNTER_CONFIGS` in `validate_perf_model.py` |

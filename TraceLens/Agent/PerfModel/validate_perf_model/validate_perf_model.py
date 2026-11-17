@@ -14,21 +14,23 @@ registered in ``perf_model_harnesses.py``; this script only orchestrates
 profiling and reporting.
 
 Usage (single op):
-    python validate_perf_model.py \
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
         --op gemm_a8w8_blockscale \
         --M 2048 --N 4096 --K 8192 \
         --arch gfx942 --output-dir /tmp/perf_validation
 
 Usage (batch):
-    python validate_perf_model.py --all --arch gfx942 --output-dir /tmp/perf_val
-    python validate_perf_model.py --category activation --arch gfx942 --output-dir /tmp/perf_val
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
+        --all --arch gfx942 --output-dir /tmp/perf_val
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
+        --category activation --arch gfx942 --output-dir /tmp/perf_val
 
 Usage (traced shapes; build the cases file with ModelBringup's bringup_gates cases):
-    python validate_perf_model.py --cases cases.json \
-        --arch gfx942 --output-dir /tmp/perf_val
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model \
+        --cases cases.json --arch gfx942 --output-dir /tmp/perf_val
 
 Usage (discover missing coverage):
-    python validate_perf_model.py --discover
+    python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --discover
 """
 
 import argparse
@@ -51,6 +53,12 @@ from TraceLens.Agent.PerfModel.validate_perf_model.perf_model_harnesses import (
     run_perf_model_from_event,
     tuple_to_list,
 )
+from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
+    BAND_COLUMNS,
+    RATIO_MATCH,
+    match_status,
+    ratio_band,
+)
 from TraceLens.Agent.PerfModel.validate_perf_model.replay._runner import (
     INT_FLAGS,
     STR_FLAGS,
@@ -59,18 +67,12 @@ from TraceLens.Agent.PerfModel.validate_perf_model.replay.attention import (
     compute_varlen_annotation_stats,
     make_varlen_seqlens,
 )
-from TraceLens.Agent.PerfModel.ratio_bands import (
-    BAND_COLUMNS,
-    RATIO_MATCH,
-    match_status,
-    ratio_band,
-)
 
 # Constants
 
 # Read bytes are reconstructed from the raw TCC->EA read-request counters so
 # that 32B, 64B and 128B requests are each weighted by their own size (see
-# generate_report). Write bytes come from WRITE_SIZE (KiB units).
+# measured_bytes). Write bytes come from WRITE_SIZE (KiB units).
 ARCH_COUNTER_CONFIGS = {
     "gfx942": {
         "ops_counters": ["SQ_INSTS_VALU_MFMA_MOPS_I8", "SQ_INSTS_VALU_MFMA_MOPS_F8"],
@@ -121,7 +123,7 @@ COUNTER_DISPLAY = {
 }
 
 # Raw TCC read-request counters kept by parse_counter_csv even though they are
-# not part of COUNTER_DISPLAY; generate_report reconstructs read bytes from them.
+# not part of COUNTER_DISPLAY; measured_bytes reconstructs read bytes from them.
 _MEM_READ_RAW_COUNTERS = {
     "TCC_EA0_RDREQ_sum",
     "TCC_EA0_RDREQ_32B_sum",
@@ -192,56 +194,66 @@ def _rocprof_env(out_dir):
     return {**os.environ, "PWD": out_dir}
 
 
-def run_rocprofv3(
-    rocprofv3_path, counters, runner_argv, out_name, out_dir, timeout=300
-):
-    """Wrap a replay/_runner.py invocation under rocprofv3 PMC counters.
+def _find_csv(path, search_dir, suffix):
+    """``path`` if it exists, else the first ``*suffix`` file under ``search_dir``."""
+    if os.path.exists(path):
+        return path
+    candidates = list(Path(search_dir).rglob(f"*{suffix}"))
+    return str(candidates[0]) if candidates else None
 
-    ``runner_argv`` is the full argv list to execute inside rocprofv3 (e.g.
-    ``[python, /abs/replay/_runner.py, --op, gemm_a8w8_blockscale, --M, ...]``).
+
+def run_rocprofv3(
+    rocprofv3_path, rocprof_args, csv_suffix, runner_argv, out_name, out_dir, timeout
+):
+    """Run ``runner_argv`` under rocprofv3 and return the CSV it writes.
+
+    ``rocprof_args`` select the collection mode and the CSV is the file ending
+    in ``csv_suffix``. Raises RuntimeError on a timeout or a non-zero exit, and
+    FileNotFoundError when no such CSV is written.
     """
     out_dir = os.path.abspath(out_dir)
-    counter_dir = os.path.join(out_dir, out_name)
-    os.makedirs(counter_dir, exist_ok=True)
-    cmd = [rocprofv3_path, "--pmc"]
-    cmd.extend(counters)
-    cmd.append("--output-format")
-    cmd.append("csv")
-    cmd.append("-o")
-    cmd.append(out_name)
-    cmd.append("-d")
-    cmd.append(counter_dir)
-    cmd.append("--")
-    cmd.extend(runner_argv)
+    result_dir = os.path.join(out_dir, out_name)
+    os.makedirs(result_dir, exist_ok=True)
+    cmd = [
+        rocprofv3_path,
+        *rocprof_args,
+        "--output-format",
+        "csv",
+        "-o",
+        out_name,
+        "-d",
+        result_dir,
+        "--",
+        *runner_argv,
+    ]
     stdout_log = os.path.join(out_dir, f"{out_name}_stdout.log")
     stderr_log = os.path.join(out_dir, f"{out_name}_stderr.log")
     print(f'\n{"============================================================"}')
     print(f'Running: {" ".join(cmd)}')
-    print(f"Logs:    {stdout_log}")
-    print(f"         {stderr_log}")
+    print(f"Logs:    {stdout_log}\n         {stderr_log}")
     print(f"Timeout: {timeout}s")
     print(f'{"============================================================"}')
-    with open(stdout_log, "w") as f_out, open(stderr_log, "w") as f_err:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=out_dir,
-            env=_rocprof_env(out_dir),
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=out_dir,
+        env=_rocprof_env(out_dir),
+    )
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        timed_out = True
+    Path(stdout_log).write_text(stdout or "")
+    Path(stderr_log).write_text(stderr or "")
+    if timed_out:
+        raise RuntimeError(
+            f"rocprofv3 timed out after {timeout}s. Check logs:\n  {stdout_log}\n  {stderr_log}"
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            f_out.write(stdout or "")
-            f_err.write(stderr or "")
-            raise RuntimeError(
-                f"rocprofv3 timed out after {timeout}s. Check logs:\n  {stdout_log}\n  {stderr_log}"
-            )
-        f_out.write(stdout or "")
-        f_err.write(stderr or "")
     if stdout:
         print(f"[{out_name} stdout]:\n{stdout}")
     if stderr:
@@ -250,17 +262,14 @@ def run_rocprofv3(
         raise RuntimeError(
             f"rocprofv3 failed with exit code {proc.returncode}. Check logs:\n  {stdout_log}\n  {stderr_log}"
         )
-    csv_path = os.path.join(counter_dir, f"{out_name}_counter_collection.csv")
-    if not os.path.exists(csv_path):
-        candidates = list(Path(counter_dir).rglob("*counter_collection.csv"))
-        if candidates:
-            csv_path = str(candidates[0])
-        else:
-            raise FileNotFoundError(
-                f"Counter CSV not found in {counter_dir}. Directory contents: "
-                f"{os.listdir(counter_dir)}. Check logs:\n  {stdout_log}\n  {stderr_log}"
-            )
-    print(f"Counter CSV: {csv_path}")
+    csv_path = _find_csv(
+        os.path.join(result_dir, f"{out_name}_{csv_suffix}"), result_dir, csv_suffix
+    )
+    if csv_path is None:
+        raise FileNotFoundError(
+            f"No *{csv_suffix} in {result_dir}. Directory contents: "
+            f"{os.listdir(result_dir)}. Check logs:\n  {stdout_log}\n  {stderr_log}"
+        )
     return csv_path
 
 
@@ -268,64 +277,19 @@ def discover_kernel_name(
     rocprofv3_path, runner_argv, num_warmup_iters, out_dir, timeout=120
 ):
     """Trace one execution of ``runner_argv`` to auto-discover the target kernel."""
-    out_dir = os.path.abspath(out_dir)
-    disc_dir = os.path.join(out_dir, "kernel_discovery")
-    os.makedirs(disc_dir, exist_ok=True)
-    cmd = [
-        rocprofv3_path,
-        "--kernel-trace",
-        "--output-format",
-        "csv",
-        "-o",
-        "kernel_discovery",
-        "-d",
-        disc_dir,
-        "--",
-    ]
-    cmd.extend(runner_argv)
-    stdout_log = os.path.join(out_dir, "kernel_discovery_stdout.log")
-    stderr_log = os.path.join(out_dir, "kernel_discovery_stderr.log")
-    print(f'\n{"============================================================"}')
-    print(f'Running: {" ".join(cmd)}')
-    print(f"Logs:    {stdout_log}")
-    print(f"         {stderr_log}")
-    print(f"Timeout: {timeout}s")
-    print(f'{"============================================================"}')
-    with open(stdout_log, "w") as f_out, open(stderr_log, "w") as f_err:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=out_dir,
-            env=_rocprof_env(out_dir),
+    try:
+        trace_csv = run_rocprofv3(
+            rocprofv3_path,
+            ["--kernel-trace"],
+            "kernel_trace.csv",
+            runner_argv,
+            "kernel_discovery",
+            out_dir,
+            timeout,
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            f_out.write(stdout or "")
-            f_err.write(stderr or "")
-            print(f"  WARNING: kernel-trace timed out after {timeout}s")
-            return None
-        f_out.write(stdout or "")
-        f_err.write(stderr or "")
-    if stdout:
-        print(f"[kernel_discovery stdout]:\n{stdout}")
-    if stderr:
-        print(f"[kernel_discovery stderr]:\n{stderr}")
-    if proc.returncode != 0:
-        print(f"  WARNING: kernel-trace failed (exit {proc.returncode})")
+    except (RuntimeError, FileNotFoundError) as e:
+        print(f"  WARNING: kernel-trace failed: {e}")
         return None
-    trace_csv = os.path.join(disc_dir, "kernel_discovery_kernel_trace.csv")
-    if not os.path.exists(trace_csv):
-        candidates = list(Path(disc_dir).rglob("*kernel_trace.csv"))
-        if candidates:
-            trace_csv = str(candidates[0])
-        else:
-            print(f"  WARNING: kernel_trace CSV not found in {disc_dir}")
-            return None
     kernel_info = {}
     with open(trace_csv, newline="") as f:
         reader = csv.DictReader(f)
@@ -494,6 +458,17 @@ def _arch_ops_counters(arch):
     }
 
 
+def measured_bytes(mem_counters):
+    """Return ``(read_bytes, write_bytes)`` from the raw memory counters."""
+    # TCC_EA0_RDREQ_sum counts all requests; those not tagged 32B or 64B are
+    # 128B.
+    rd_total = mem_counters.get("TCC_EA0_RDREQ_sum", 0)
+    rd32 = mem_counters.get("TCC_EA0_RDREQ_32B_sum", 0)
+    rd64 = mem_counters.get("TCC_EA0_RDREQ_64B_sum", 0)
+    read_bytes = 32 * rd32 + 64 * rd64 + 128 * (rd_total - rd32 - rd64)
+    return read_bytes, mem_counters.get("WRITE_SIZE", 0) * 1024
+
+
 def generate_report(
     op_name,
     arch,
@@ -511,7 +486,7 @@ def generate_report(
 ):
     """Generate the validation report.
 
-    Returns a dict with flops_ratio, bytes_ratio, precision_result, and all
+    Returns a dict with flops_ratio, bytes_ratio, precision, and all
     individual scaled counter values for the rich CSV/text report.
     """
     lines = []
@@ -542,14 +517,9 @@ def generate_report(
         )
     lines.append("")
     lines.append("--- Measured Memory (rocprofv3 --pmc) ---")
-    # TCC_EA0_RDREQ_sum counts all requests; those not tagged 32B or 64B are
-    # 128B.
+    measured_read_bytes, measured_write_bytes = measured_bytes(mem_counters)
     rd_total = mem_counters.get("TCC_EA0_RDREQ_sum", 0)
-    rd32 = mem_counters.get("TCC_EA0_RDREQ_32B_sum", 0)
-    rd64 = mem_counters.get("TCC_EA0_RDREQ_64B_sum", 0)
-    measured_read_bytes = 32 * rd32 + 64 * rd64 + 128 * (rd_total - rd32 - rd64)
     write_raw = mem_counters.get("WRITE_SIZE", 0)
-    measured_write_bytes = write_raw * 1024
     lines.append(
         f'  {"HBM Read":25s}: {format_number(measured_read_bytes, "bytes"):>12s}  (raw counter: {rd_total:.0f})'
     )
@@ -770,7 +740,7 @@ def generate_report(
     return {
         "flops_ratio": flops_ratio,
         "bytes_ratio": bytes_ratio,
-        "precision_result": precision_result,
+        "precision": precision_result,
         "precision_reason": precision_reason,
         "rocprof_f4_ops": f4_ops
         * COUNTER_DISPLAY.get("SQ_INSTS_VALU_MFMA_MOPS_F6F4", (1,))[0],
@@ -790,10 +760,197 @@ def generate_report(
     }
 
 
+def _run_prediction(predict):
+    """Run the perf model through ``predict()`` and print what it returned."""
+    predicted_flops, predicted_bytes, predicted_precision = predict()
+    print(f'       Predicted FLOPs: {format_number(predicted_flops, "ops")}')
+    print(f'       Predicted Bytes: {format_number(predicted_bytes, "bytes")}')
+    print(f'       Compute precision: {predicted_precision or "unknown"}')
+    return predicted_flops, predicted_bytes, predicted_precision
+
+
+def _unmeasured_row(op_name, run_status, extra_fields, predicted=(None, None, "---")):
+    """Result row for an op that has no hardware measurement."""
+    predicted_flops, predicted_bytes, predicted_precision = predicted
+    return {
+        "op": op_name,
+        **extra_fields,
+        "predicted_flops": predicted_flops,
+        "predicted_bytes": predicted_bytes,
+        "predicted_precision": predicted_precision,
+        "rocprof_f4_ops": 0,
+        "rocprof_f8_ops": 0,
+        "rocprof_total_16": 0,
+        "rocprof_total_32": 0,
+        "rocprof_read_bytes": 0,
+        "rocprof_write_bytes": 0,
+        "kernel_name": "",
+        "flops_ratio": None,
+        "bytes_ratio": None,
+        "precision": predicted_precision,
+        "run_status": run_status,
+    }
+
+
+def _fail_row(op_name, error, extra_fields):
+    """Result row for an op whose validation raised ``error``."""
+    return _unmeasured_row(op_name, f"FAIL: {str(error)[:60]}", extra_fields)
+
+
+def _report_model_only(op_name, arch, output_dir, dims_str, predict, extra_fields):
+    """Report an op that needs model-level context from its prediction alone."""
+    print("Running TraceLens perf model (perf-model-only mode) ...")
+    predicted_flops, predicted_bytes, predicted_precision = _run_prediction(predict)
+    lines = [
+        "======================================================================",
+        "PERF MODEL VALIDATION REPORT (perf-model-only)",
+        "======================================================================",
+        f"Op:   {op_name}",
+        f"Arch: {arch}",
+        dims_str,
+        "",
+        "--- Perf Model Predictions ---",
+        f'  FLOPs:               {format_number(predicted_flops, "ops")}',
+        f'  Bytes (roofline min): {format_number(predicted_bytes, "bytes")}',
+        f'  Compute precision:   {predicted_precision or "unknown"}',
+        "",
+        "Note: This op requires model-level context (ForwardContext, KV cache)",
+        "and cannot be tested standalone with rocprofv3. Only the perf model",
+        "predictions are shown.",
+        "======================================================================",
+    ]
+    report_text = "\n".join(lines)
+    print(report_text)
+    report_path = os.path.join(output_dir, "validation_report.txt")
+    with open(report_path, "w") as f:
+        f.write(report_text)
+    print(f"\nReport saved to: {report_path}")
+    predicted = (predicted_flops, predicted_bytes, predicted_precision or "N/A")
+    return _unmeasured_row(op_name, "MODEL_ONLY", extra_fields, predicted)
+
+
+def _collect_counters(args, runner_argv, kernel_filter, output_dir):
+    """Run the rocprofv3 counter passes and return ``(ops_counters, mem_counters)``.
+
+    The MFMA ops pass must succeed. A derived-ops or memory pass that fails is
+    reported and leaves its counters out.
+    """
+
+    def collect(key):
+        csv_path = run_rocprofv3(
+            args.rocprofv3_path,
+            ["--pmc", *ARCH_COUNTER_CONFIGS[args.arch][key]],
+            "counter_collection.csv",
+            runner_argv,
+            key,
+            output_dir,
+            args.timeout,
+        )
+        return parse_counter_csv(csv_path, kernel_filter)
+
+    ops_counters = collect("ops_counters")
+    mem_counters = {}
+    passes = [("mem_read_counters", mem_counters), ("mem_write_counters", mem_counters)]
+    if not args.skip_derived:
+        passes = [
+            ("ops_derived_16", ops_counters),
+            ("ops_derived_32", ops_counters),
+            *passes,
+        ]
+    for key, counters in passes:
+        try:
+            counters.update(collect(key))
+        except (RuntimeError, FileNotFoundError) as e:
+            print(f"  WARNING: {key} collection failed: {e}")
+    return ops_counters, mem_counters
+
+
+def _resolve_kernel_filter(args, runner_argv, num_warmup_iters, output_dir):
+    """Return the manual ``--kernel-filter``, else the auto-discovered kernel name."""
+    if args.kernel_filter:
+        print(f"Using manual kernel filter: {args.kernel_filter}")
+        return args.kernel_filter
+    print("Discovering target kernel via rocprofv3 --kernel-trace ...")
+    kernel_filter = discover_kernel_name(
+        args.rocprofv3_path,
+        runner_argv,
+        num_warmup_iters,
+        output_dir,
+        timeout=args.timeout,
+    )
+    if kernel_filter:
+        print(f"       Auto-discovered kernel: {kernel_filter[:120]}...")
+    else:
+        print("       WARNING: auto-discovery failed, no kernel filter applied")
+    return kernel_filter
+
+
+def run_op_validation(
+    op_name, args, output_dir, title, dims_str, predict, build_argv, extra_fields
+):
+    """Validate one op against rocprofv3 counters; return its result row.
+
+    ``op_name`` is the OP_REGISTRY key. ``predict()`` returns the perf model's
+    ``(flops, bytes, precision)`` and ``build_argv()`` returns ``(runner_argv,
+    num_warmup_iters)``; ops registered ``perf_model_only`` skip the latter.
+    ``extra_fields`` are added to the row. A rocprofv3 failure raises.
+    """
+    print("\n" + "#" * 70)
+    print(f"# Validating: {title}")
+    print(f"# Dims: {dims_str}")
+    print("#" * 70)
+    if OP_REGISTRY[op_name].get("perf_model_only"):
+        return _report_model_only(
+            op_name, args.arch, output_dir, dims_str, predict, extra_fields
+        )
+    print("Running TraceLens perf model ...")
+    predicted_flops, predicted_bytes, predicted_precision = _run_prediction(predict)
+    print("Building replay runner command ...")
+    runner_argv, num_warmup_iters = build_argv()
+    print(f'       Runner cmd: {" ".join(runner_argv)}')
+    kernel_filter = _resolve_kernel_filter(
+        args, runner_argv, num_warmup_iters, output_dir
+    )
+    ops_counters, mem_counters = _collect_counters(
+        args, runner_argv, kernel_filter, output_dir
+    )
+    trace_csv_path = os.path.join(
+        output_dir, "kernel_discovery", "kernel_discovery_kernel_trace.csv"
+    )
+    trace_csv_path = _find_csv(trace_csv_path, output_dir, "kernel_trace.csv")
+    runtime_ns, runtime_mean_ns, runtime_dispatches = parse_kernel_runtime_ns(
+        trace_csv_path, kernel_filter
+    )
+    report_data = generate_report(
+        op_name,
+        args.arch,
+        dims_str,
+        predicted_flops,
+        predicted_bytes,
+        predicted_precision,
+        ops_counters,
+        mem_counters,
+        output_dir,
+        kernel_filter=kernel_filter,
+        kernel_runtime_ns=runtime_ns,
+        kernel_runtime_mean_ns=runtime_mean_ns,
+        kernel_runtime_dispatches=runtime_dispatches,
+    )
+    return {
+        "op": op_name,
+        **extra_fields,
+        "predicted_flops": predicted_flops,
+        "predicted_bytes": predicted_bytes,
+        "predicted_precision": predicted_precision or "N/A",
+        **report_data,
+        "kernel_name": kernel_filter or "",
+        "run_status": "OK",
+    }
+
+
 def run_single_op_validation(op_name, args, output_dir):
-    """Run full validation for a single op. Returns result dict."""
+    """Run full validation for a single registered op. Returns result dict."""
     reg = OP_REGISTRY[op_name]
-    arch_cfg = ARCH_COUNTER_CONFIGS[args.arch]
     effective = argparse.Namespace(**vars(args))
     effective.op = op_name
     for key, default_val in reg["defaults"].items():
@@ -818,226 +975,18 @@ def run_single_op_validation(op_name, args, output_dir):
     ann_val = getattr(effective, "annotation", None)
     if ann_val:
         parts.append(f'annotation={ann_val[:60]}{"..." if len(ann_val) > 60 else ""}')
-    dims_str = ", ".join(parts)
-    print(
-        f'\n{"######################################################################"}'
-    )
-    print(f'# Validating: {op_name} ({reg["description"]})')
-    print(f"# Dims: {dims_str}")
-    print(f'{"######################################################################"}')
-    if reg.get("perf_model_only"):
-        print("[1/1] Running TraceLens perf model (perf-model-only mode) ...")
-        predicted_flops, predicted_bytes, predicted_precision = reg["model_fn"](
-            effective
-        )
-        print(f'       Predicted FLOPs: {format_number(predicted_flops, "ops")}')
-        print(f'       Predicted Bytes: {format_number(predicted_bytes, "bytes")}')
-        print(f'       Compute precision: {predicted_precision or "unknown"}')
-        lines = [
-            "======================================================================",
-            "PERF MODEL VALIDATION REPORT (perf-model-only)",
-            "======================================================================",
-            f"Op:   {op_name}",
-            f"Arch: {args.arch}",
-            dims_str,
-            "",
-            "--- Perf Model Predictions ---",
-            f'  FLOPs:               {format_number(predicted_flops, "ops")}',
-            f'  Bytes (roofline min): {format_number(predicted_bytes, "bytes")}',
-            f'  Compute precision:   {predicted_precision or "unknown"}',
-            "",
-            "Note: This op requires model-level context (ForwardContext, KV cache)",
-            "and cannot be tested standalone with rocprofv3. Only the perf model",
-            "predictions are shown.",
-            "======================================================================",
-        ]
-        report_text = "\n".join(lines)
-        print(report_text)
-        report_path = os.path.join(output_dir, "validation_report.txt")
-        with open(report_path, "w") as f:
-            f.write(report_text)
-        print(f"\nReport saved to: {report_path}")
-        return {
-            "op": op_name,
-            "category": reg["category"],
-            "dims": dims_str,
-            "predicted_flops": predicted_flops,
-            "predicted_bytes": predicted_bytes,
-            "predicted_precision": predicted_precision or "N/A",
-            "rocprof_f4_ops": 0,
-            "rocprof_f8_ops": 0,
-            "rocprof_total_16": 0,
-            "rocprof_total_32": 0,
-            "rocprof_read_bytes": 0,
-            "rocprof_write_bytes": 0,
-            "kernel_name": "",
-            "flops_ratio": None,
-            "bytes_ratio": None,
-            "precision": predicted_precision or "N/A",
-            "run_status": "MODEL_ONLY",
-        }
-    step = 1
-    total_steps = 8
-    print(f"[{step}/{total_steps}] Building test runner command for {op_name} ...")
+
     _populate_varlen_attention_args(op_name, effective)
-    runner_argv, num_warmup_iters = _build_runner_argv(op_name, effective)
-    print(f'       Runner cmd: {" ".join(runner_argv)}')
-    step += 1
-    if args.kernel_filter:
-        kernel_filter = args.kernel_filter
-        print(f"[{step}/{total_steps}] Using manual kernel filter: {kernel_filter}")
-    else:
-        print(
-            f"[{step}/{total_steps}] Discovering target kernel via rocprofv3 --kernel-trace ..."
-        )
-        kernel_filter = discover_kernel_name(
-            args.rocprofv3_path,
-            runner_argv,
-            num_warmup_iters,
-            output_dir,
-            timeout=args.timeout,
-        )
-        if kernel_filter:
-            print(f"       Auto-discovered kernel: {kernel_filter[:120]}...")
-        else:
-            print("       WARNING: auto-discovery failed, no kernel filter applied")
-    step += 1
-    print(f"[{step}/{total_steps}] Running TraceLens perf model ...")
-    predicted_flops, predicted_bytes, predicted_precision = reg["model_fn"](effective)
-    print(f'       Predicted FLOPs: {format_number(predicted_flops, "ops")}')
-    print(f'       Predicted Bytes: {format_number(predicted_bytes, "bytes")}')
-    print(f'       Compute precision: {predicted_precision or "unknown"}')
-    step += 1
-    print(f"[{step}/{total_steps}] Running rocprofv3 (MFMA ops counters) ...")
-    ops_csv = run_rocprofv3(
-        args.rocprofv3_path,
-        arch_cfg["ops_counters"],
-        runner_argv,
-        "ops_counters",
-        output_dir,
-        timeout=args.timeout,
-    )
-    ops_counters = parse_counter_csv(ops_csv, kernel_filter)
-    step += 1
-    if not args.skip_derived and arch_cfg.get("ops_derived_16"):
-        print(f"[{step}/{total_steps}] Running rocprofv3 (TOTAL_16_OPS) ...")
-        try:
-            csv_16 = run_rocprofv3(
-                args.rocprofv3_path,
-                arch_cfg["ops_derived_16"],
-                runner_argv,
-                "ops_derived_16",
-                output_dir,
-                timeout=args.timeout,
-            )
-            ops_counters.update(parse_counter_csv(csv_16, kernel_filter))
-        except (RuntimeError, FileNotFoundError) as e:
-            print(f"  WARNING: TOTAL_16_OPS collection failed: {e}")
-    else:
-        print(f"[{step}/{total_steps}] Skipping TOTAL_16_OPS")
-    step += 1
-    if not args.skip_derived and arch_cfg.get("ops_derived_32"):
-        print(f"[{step}/{total_steps}] Running rocprofv3 (TOTAL_32_OPS) ...")
-        try:
-            csv_32 = run_rocprofv3(
-                args.rocprofv3_path,
-                arch_cfg["ops_derived_32"],
-                runner_argv,
-                "ops_derived_32",
-                output_dir,
-                timeout=args.timeout,
-            )
-            ops_counters.update(parse_counter_csv(csv_32, kernel_filter))
-        except (RuntimeError, FileNotFoundError) as e:
-            print(f"  WARNING: TOTAL_32_OPS collection failed: {e}")
-    else:
-        print(f"[{step}/{total_steps}] Skipping TOTAL_32_OPS")
-    step += 1
-    mem_counters = {}
-    print(f"[{step}/{total_steps}] Running rocprofv3 (TCC_EA0_RDREQ read counters) ...")
-    try:
-        read_csv = run_rocprofv3(
-            args.rocprofv3_path,
-            arch_cfg["mem_read_counters"],
-            runner_argv,
-            "mem_read_counters",
-            output_dir,
-            timeout=args.timeout,
-        )
-        mem_counters.update(parse_counter_csv(read_csv, kernel_filter))
-    except (RuntimeError, FileNotFoundError) as e:
-        print(f"  WARNING: TCC_EA0_RDREQ read-counter collection failed: {e}")
-    step += 1
-    print(f"[{step}/{total_steps}] Running rocprofv3 (WRITE_SIZE) ...")
-    try:
-        write_csv = run_rocprofv3(
-            args.rocprofv3_path,
-            arch_cfg["mem_write_counters"],
-            runner_argv,
-            "mem_write_counters",
-            output_dir,
-            timeout=args.timeout,
-        )
-        mem_counters.update(parse_counter_csv(write_csv, kernel_filter))
-    except (RuntimeError, FileNotFoundError) as e:
-        print(f"  WARNING: WRITE_SIZE collection failed: {e}")
-    kernel_runtime_ns = None
-    kernel_runtime_mean_ns = None
-    kernel_runtime_dispatches = 0
-    trace_csv_path = os.path.join(
-        output_dir, "kernel_discovery", "kernel_discovery_kernel_trace.csv"
-    )
-    if not os.path.exists(trace_csv_path):
-        candidates = list(Path(output_dir).rglob("*kernel_trace.csv"))
-        if candidates:
-            trace_csv_path = str(candidates[0])
-    if os.path.exists(trace_csv_path):
-        kernel_runtime_ns, kernel_runtime_mean_ns, kernel_runtime_dispatches = (
-            parse_kernel_runtime_ns(trace_csv_path, kernel_filter)
-        )
-    report_data = generate_report(
+    return run_op_validation(
         op_name,
-        args.arch,
-        dims_str,
-        predicted_flops,
-        predicted_bytes,
-        predicted_precision,
-        ops_counters,
-        mem_counters,
+        args,
         output_dir,
-        kernel_filter=kernel_filter,
-        kernel_runtime_ns=kernel_runtime_ns,
-        kernel_runtime_mean_ns=kernel_runtime_mean_ns,
-        kernel_runtime_dispatches=kernel_runtime_dispatches,
+        title=f'{op_name} ({reg["description"]})',
+        dims_str=", ".join(parts),
+        predict=lambda: reg["model_fn"](effective),
+        build_argv=lambda: _build_runner_argv(op_name, effective),
+        extra_fields={},
     )
-    return {
-        "op": op_name,
-        "category": reg["category"],
-        "dims": dims_str,
-        "predicted_flops": predicted_flops,
-        "predicted_bytes": predicted_bytes,
-        "predicted_precision": predicted_precision or "N/A",
-        "rocprof_f4_ops": report_data["rocprof_f4_ops"],
-        "rocprof_f8_ops": report_data["rocprof_f8_ops"],
-        "rocprof_total_16": report_data["rocprof_total_16"],
-        "rocprof_total_32": report_data["rocprof_total_32"],
-        "rocprof_read_bytes": report_data["rocprof_read_bytes"],
-        "rocprof_write_bytes": report_data["rocprof_write_bytes"],
-        "kernel_name": kernel_filter or "",
-        "kernel_runtime_us": report_data.get("kernel_runtime_us"),
-        "kernel_runtime_mean_us": report_data.get("kernel_runtime_mean_us"),
-        "kernel_runtime_dispatches": report_data.get("kernel_runtime_dispatches", 0),
-        "predicted_tflops_s": report_data.get("predicted_tflops_s"),
-        "measured_tflops_s": report_data.get("measured_tflops_s"),
-        "predicted_tb_s": report_data.get("predicted_tb_s"),
-        "measured_tb_s": report_data.get("measured_tb_s"),
-        "throughput_ops_counter": report_data.get("throughput_ops_counter"),
-        "flops_ratio": report_data["flops_ratio"],
-        "bytes_ratio": report_data["bytes_ratio"],
-        "precision": report_data["precision_result"],
-        "precision_reason": report_data["precision_reason"],
-        "run_status": "OK",
-    }
 
 
 def load_cases(cases_path):
@@ -1054,238 +1003,42 @@ def load_cases(cases_path):
     return entries
 
 
+def _case_fields(entry):
+    """Result-row fields that identify a ``--cases`` entry."""
+    return {
+        "trace_name": entry["trace_name"],
+        "csv_reported_flops": entry["csv_flops"],
+        "csv_reported_bytes": entry["csv_bytes"],
+    }
+
+
 def run_csv_op_validation(entry, args, output_dir):
     """Run validation for a single traced case from ``--cases``."""
     registry_key = entry["registry_key"]
-    trace_name = entry["trace_name"]
-    reg = OP_REGISTRY[registry_key]
-    arch_cfg = ARCH_COUNTER_CONFIGS[args.arch]
-    dims_display = entry["dims_str"][:80] if entry["dims_str"] else ""
-    print(
-        f'\n{"######################################################################"}'
-    )
-    print(f"# Validating: {trace_name} -> {registry_key}")
-    print(f"# Dims: {dims_display}")
-    print(f'{"######################################################################"}')
-    if reg.get("perf_model_only"):
-        print("[1/1] Running perf model from event dict (perf-model-only) ...")
-        try:
-            predicted_flops, predicted_bytes, predicted_precision = (
-                run_perf_model_from_event(
-                    trace_name,
-                    entry["input_dims"],
-                    entry["input_types"],
-                    entry["input_strides"],
-                    entry["concrete_inputs"],
-                    entry.get("perf_params") or entry["attn_params"],
-                )
-            )
-        except Exception as e:
-            print(f"  WARNING: perf model failed: {e}")
-            predicted_flops, predicted_bytes, predicted_precision = (0, 0, "N/A")
-        return {
-            "op": registry_key,
-            "trace_name": trace_name,
-            "category": reg["category"],
-            "dims": dims_display,
-            "predicted_flops": predicted_flops,
-            "predicted_bytes": predicted_bytes,
-            "predicted_precision": predicted_precision or "N/A",
-            "csv_reported_flops": entry["csv_flops"],
-            "csv_reported_bytes": entry["csv_bytes"],
-            "rocprof_f4_ops": 0,
-            "rocprof_f8_ops": 0,
-            "rocprof_total_16": 0,
-            "rocprof_total_32": 0,
-            "rocprof_read_bytes": 0,
-            "rocprof_write_bytes": 0,
-            "kernel_name": "",
-            "flops_ratio": None,
-            "bytes_ratio": None,
-            "precision": predicted_precision or "N/A",
-            "run_status": "MODEL_ONLY",
-        }
-    step = 1
-    total_steps = 8
-    print(f"[{step}/{total_steps}] Building test runner command ...")
-    runner_argv, num_warmup_iters = _build_runner_argv_from_csv_entry(
+    return run_op_validation(
         registry_key,
-        entry["input_dims"],
-        entry["input_types"],
-        entry["concrete_inputs"],
-        entry["attn_params"],
-        perf_params=entry.get("perf_params"),
-    )
-    print(f'       Runner cmd: {" ".join(runner_argv)}')
-    step += 1
-    if args.kernel_filter:
-        kernel_filter = args.kernel_filter
-        print(f"[{step}/{total_steps}] Using manual kernel filter: {kernel_filter}")
-    else:
-        print(f"[{step}/{total_steps}] Discovering target kernel ...")
-        kernel_filter = discover_kernel_name(
-            args.rocprofv3_path,
-            runner_argv,
-            num_warmup_iters,
-            output_dir,
-            timeout=args.timeout,
-        )
-        if kernel_filter:
-            print(f"       Auto-discovered kernel: {kernel_filter[:120]}...")
-        else:
-            print("       WARNING: auto-discovery failed")
-    step += 1
-    ops_counters = {}
-    print(f"[{step}/{total_steps}] Running rocprofv3 (MFMA ops) ...")
-    try:
-        csv_out = run_rocprofv3(
-            args.rocprofv3_path,
-            arch_cfg["ops_counters"],
-            runner_argv,
-            "ops_counters",
-            output_dir,
-            timeout=args.timeout,
-        )
-        ops_counters.update(parse_counter_csv(csv_out, kernel_filter))
-    except (RuntimeError, FileNotFoundError) as e:
-        print(f"  WARNING: MFMA ops collection failed: {e}")
-    step += 1
-    if not args.skip_derived and arch_cfg.get("ops_derived_16"):
-        print(f"[{step}/{total_steps}] Running rocprofv3 (TOTAL_16_OPS) ...")
-        try:
-            csv_16 = run_rocprofv3(
-                args.rocprofv3_path,
-                arch_cfg["ops_derived_16"],
-                runner_argv,
-                "ops_derived_16",
-                output_dir,
-                timeout=args.timeout,
-            )
-            ops_counters.update(parse_counter_csv(csv_16, kernel_filter))
-        except (RuntimeError, FileNotFoundError) as e:
-            print(f"  WARNING: TOTAL_16_OPS collection failed: {e}")
-    step += 1
-    if not args.skip_derived and arch_cfg.get("ops_derived_32"):
-        print(f"[{step}/{total_steps}] Running rocprofv3 (TOTAL_32_OPS) ...")
-        try:
-            csv_32 = run_rocprofv3(
-                args.rocprofv3_path,
-                arch_cfg["ops_derived_32"],
-                runner_argv,
-                "ops_derived_32",
-                output_dir,
-                timeout=args.timeout,
-            )
-            ops_counters.update(parse_counter_csv(csv_32, kernel_filter))
-        except (RuntimeError, FileNotFoundError) as e:
-            print(f"  WARNING: TOTAL_32_OPS collection failed: {e}")
-    step += 1
-    mem_counters = {}
-    print(f"[{step}/{total_steps}] Running rocprofv3 (TCC_EA0_RDREQ read counters) ...")
-    try:
-        read_csv = run_rocprofv3(
-            args.rocprofv3_path,
-            arch_cfg["mem_read_counters"],
-            runner_argv,
-            "mem_read_counters",
-            output_dir,
-            timeout=args.timeout,
-        )
-        mem_counters.update(parse_counter_csv(read_csv, kernel_filter))
-    except (RuntimeError, FileNotFoundError) as e:
-        print(f"  WARNING: TCC_EA0_RDREQ read-counter collection failed: {e}")
-    step += 1
-    print(f"[{step}/{total_steps}] Running rocprofv3 (WRITE_SIZE) ...")
-    try:
-        write_csv = run_rocprofv3(
-            args.rocprofv3_path,
-            arch_cfg["mem_write_counters"],
-            runner_argv,
-            "mem_write_counters",
-            output_dir,
-            timeout=args.timeout,
-        )
-        mem_counters.update(parse_counter_csv(write_csv, kernel_filter))
-    except (RuntimeError, FileNotFoundError) as e:
-        print(f"  WARNING: WRITE_SIZE collection failed: {e}")
-    step += 1
-    print(f"[{step}/{total_steps}] Running perf model from event dict ...")
-    try:
-        predicted_flops, predicted_bytes, predicted_precision = (
-            run_perf_model_from_event(
-                trace_name,
-                entry["input_dims"],
-                entry["input_types"],
-                entry["input_strides"],
-                entry["concrete_inputs"],
-                entry.get("perf_params") or entry["attn_params"],
-            )
-        )
-    except Exception as e:
-        print(f"  WARNING: perf model from event failed: {e}")
-        predicted_flops, predicted_bytes, predicted_precision = (0, 0, "N/A")
-    print(f'       Predicted FLOPs: {format_number(predicted_flops, "ops")}')
-    print(f'       Predicted Bytes: {format_number(predicted_bytes, "bytes")}')
-    kernel_runtime_ns = None
-    kernel_runtime_mean_ns = None
-    kernel_runtime_dispatches = 0
-    trace_csv_path = os.path.join(
-        output_dir, "kernel_discovery", "kernel_discovery_kernel_trace.csv"
-    )
-    if not os.path.exists(trace_csv_path):
-        candidates = list(Path(output_dir).rglob("*kernel_trace.csv"))
-        if candidates:
-            trace_csv_path = str(candidates[0])
-    if os.path.exists(trace_csv_path):
-        kernel_runtime_ns, kernel_runtime_mean_ns, kernel_runtime_dispatches = (
-            parse_kernel_runtime_ns(trace_csv_path, kernel_filter)
-        )
-    report_data = generate_report(
-        registry_key,
-        args.arch,
-        dims_display,
-        predicted_flops,
-        predicted_bytes,
-        predicted_precision,
-        ops_counters,
-        mem_counters,
+        args,
         output_dir,
-        kernel_filter=kernel_filter,
-        kernel_runtime_ns=kernel_runtime_ns,
-        kernel_runtime_mean_ns=kernel_runtime_mean_ns,
-        kernel_runtime_dispatches=kernel_runtime_dispatches,
+        title=f'{entry["trace_name"]} -> {registry_key}',
+        dims_str=entry["dims_str"][:80] if entry["dims_str"] else "",
+        predict=lambda: run_perf_model_from_event(
+            entry["trace_name"],
+            entry["input_dims"],
+            entry["input_types"],
+            entry["input_strides"],
+            entry["concrete_inputs"],
+            entry.get("perf_params") or entry["attn_params"],
+        ),
+        build_argv=lambda: _build_runner_argv_from_csv_entry(
+            registry_key,
+            entry["input_dims"],
+            entry["input_types"],
+            entry["concrete_inputs"],
+            entry["attn_params"],
+            perf_params=entry.get("perf_params"),
+        ),
+        extra_fields=_case_fields(entry),
     )
-    return {
-        "op": registry_key,
-        "trace_name": trace_name,
-        "category": reg["category"],
-        "dims": dims_display,
-        "predicted_flops": predicted_flops,
-        "predicted_bytes": predicted_bytes,
-        "predicted_precision": predicted_precision or "N/A",
-        "csv_reported_flops": entry["csv_flops"],
-        "csv_reported_bytes": entry["csv_bytes"],
-        "rocprof_f4_ops": report_data["rocprof_f4_ops"],
-        "rocprof_f8_ops": report_data["rocprof_f8_ops"],
-        "rocprof_total_16": report_data["rocprof_total_16"],
-        "rocprof_total_32": report_data["rocprof_total_32"],
-        "rocprof_read_bytes": report_data["rocprof_read_bytes"],
-        "rocprof_write_bytes": report_data["rocprof_write_bytes"],
-        "kernel_name": kernel_filter or "",
-        "kernel_runtime_us": report_data.get("kernel_runtime_us"),
-        "kernel_runtime_mean_us": report_data.get("kernel_runtime_mean_us"),
-        "kernel_runtime_dispatches": report_data.get("kernel_runtime_dispatches", 0),
-        "predicted_tflops_s": report_data.get("predicted_tflops_s"),
-        "measured_tflops_s": report_data.get("measured_tflops_s"),
-        "predicted_tb_s": report_data.get("predicted_tb_s"),
-        "measured_tb_s": report_data.get("measured_tb_s"),
-        "throughput_ops_counter": report_data.get("throughput_ops_counter"),
-        "flops_ratio": report_data["flops_ratio"],
-        "bytes_ratio": report_data["bytes_ratio"],
-        "precision": report_data["precision_result"],
-        "precision_reason": report_data["precision_reason"],
-        "run_status": "OK",
-    }
 
 
 def write_results_csv(results, output_path):
@@ -1747,30 +1500,7 @@ def main():
                 results.append(result)
             except Exception as e:
                 print(f'\n  FAILED: {entry["trace_name"]}: {e}')
-                results.append(
-                    {
-                        "op": entry["registry_key"],
-                        "trace_name": entry["trace_name"],
-                        "category": OP_REGISTRY[entry["registry_key"]]["category"],
-                        "dims": entry.get("dims_str", "")[:80],
-                        "predicted_flops": None,
-                        "predicted_bytes": None,
-                        "predicted_precision": "---",
-                        "csv_reported_flops": entry.get("csv_flops", 0),
-                        "csv_reported_bytes": entry.get("csv_bytes", 0),
-                        "rocprof_f4_ops": 0,
-                        "rocprof_f8_ops": 0,
-                        "rocprof_total_16": 0,
-                        "rocprof_total_32": 0,
-                        "rocprof_read_bytes": 0,
-                        "rocprof_write_bytes": 0,
-                        "kernel_name": "",
-                        "flops_ratio": None,
-                        "bytes_ratio": None,
-                        "precision": "---",
-                        "run_status": f"FAIL: {str(e)[:60]}",
-                    }
-                )
+                results.append(_fail_row(entry["registry_key"], e, _case_fields(entry)))
         _enrich_results(results)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_filename = f"validation_report_{timestamp}.csv"
@@ -1811,27 +1541,7 @@ def main():
             results.append(result)
         except Exception as e:
             print(f"\n  FAILED: {op_name}: {e}")
-            results.append(
-                {
-                    "op": op_name,
-                    "category": OP_REGISTRY[op_name]["category"],
-                    "dims": "",
-                    "predicted_flops": None,
-                    "predicted_bytes": None,
-                    "predicted_precision": "---",
-                    "rocprof_f4_ops": 0,
-                    "rocprof_f8_ops": 0,
-                    "rocprof_total_16": 0,
-                    "rocprof_total_32": 0,
-                    "rocprof_read_bytes": 0,
-                    "rocprof_write_bytes": 0,
-                    "kernel_name": "",
-                    "flops_ratio": None,
-                    "bytes_ratio": None,
-                    "precision": "---",
-                    "run_status": f"FAIL: {str(e)[:60]}",
-                }
-            )
+            results.append(_fail_row(op_name, e, {}))
     _enrich_results(results)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_filename = f"validation_report_{timestamp}.csv"

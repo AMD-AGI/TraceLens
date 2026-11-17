@@ -16,6 +16,7 @@ BAND_COLUMNS = {"flops_ratio": "flops_band", "bytes_ratio": "bytes_band"}
 RATIO_EPS = 1e-6
 MATCH = "match"
 OVER_PREDICTED = "over-predicted"
+DEVIATION = "deviation"
 DEVIATION_SUSPECT = "deviation-suspect"
 DEVIATION_EXPLAINED = "deviation-explained"
 NO_PREDICTION = "no prediction"
@@ -31,8 +32,8 @@ def ratio_band(column, ratio):
         return ""
     low, high = RATIO_MATCH[column]
     if ratio < low - RATIO_EPS:
-        return "over-predicted"
-    return "match" if ratio <= high else "deviation"
+        return OVER_PREDICTED
+    return MATCH if ratio <= high else DEVIATION
 
 
 def match_status(run_status, bands):
@@ -48,8 +49,8 @@ def match_status(run_status, bands):
         return ""
     if "" in bands:
         return NO_PREDICTION
-    if "over-predicted" in bands:
+    if OVER_PREDICTED in bands:
         return OVER_PREDICTED
-    if "deviation" in bands:
+    if DEVIATION in bands:
         return DEVIATION_SUSPECT
     return MATCH
