@@ -300,5 +300,4 @@ def get_pseudo_op_category_only_mappings():
         # DeepSeek-V4 fused all-gather (custom collective); one entry per world size/dtype template arg, add new variants as needed.
         "aiter::allgather_lastdim<std::bfloat16_t, 2>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
         "aiter::allgather_lastdim<std::bfloat16_t, 4>(aiter::RankData*, aiter::RankSignals, aiter::Signal*, std::bfloat16_t*, int, int, int) (Synthetic Op)": "CustomCollective",
-        # Primus Flux fused QKV + RMSNorm + RoPE (multi-kernel fused ops, classify only).
     }
