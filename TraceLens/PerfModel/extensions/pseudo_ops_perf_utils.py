@@ -83,6 +83,8 @@ def _get_attention_mappings():
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
         "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
         "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,
+        # DeepSeek-V4 MXFP4 indexer logits
+        "aiter::_fwd_sched_raw": attention_perf_model_extensions.pa_mqa_logits_mxfp4,
         "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
         "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
         "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
@@ -220,6 +222,7 @@ def _get_misc_mappings():
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
         "aiter::dynamic_per_group_scaled_quant_fp4": perf_model_extensions.aiter_dynamic_per_group_scaled_quant_fp4,
         "aiter::mhc_post": perf_model_extensions.mhc_post,
+        "sglang_profiler::hc_combine_hc_combine_split": perf_model_extensions.sglang_hc_combine_split,
         "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
         "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
         "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,

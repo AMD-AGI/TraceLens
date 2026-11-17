@@ -70,6 +70,7 @@ from TraceLens.PerfModel.extensions.perf_model_extensions import (
     gemm_afp4wfp4,
     mhc_fused_post_pre_gemm_sqrsum,
     mhc_post,
+    sglang_hc_combine_split,
     mhc_pre_big_fuse_rmsnorm,
     mhc_pre_gemm_sqrsum,
     mixed_sample_outer_exponential,
@@ -984,6 +985,83 @@ class TestPerfModelExtensions:
         assert model.param_details["_no_perf"] is True
         assert model.flops() is None
         assert model.bytes() is None
+
+    @staticmethod
+    def _mqa_logits_event(annotation, rows=4, q_per_block=1):
+        # Traced aiter::_fwd_sched_raw layout; the cache and logits are capacities.
+        return {
+            "args": {
+                "Input Dims": [
+                    [1],
+                    [rows, 64, 64],
+                    [rows, 64, 4],
+                    [84664, 64, 64],
+                    [84664, 64, 4],
+                    [rows, 4096],
+                    [rows, 64],
+                    [0],
+                    [rows],
+                    [3168, 8],
+                    [rows, 262144],
+                ]
+                + [[]] * 7,
+                "Input type": [
+                    "c10::BFloat16",
+                    "unsigned char",
+                    "unsigned char",
+                    "unsigned char",
+                    "unsigned char",
+                    "int",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                ]
+                + ["Scalar"] * 7,
+                "Concrete Inputs": [""] * 11
+                + [str(rows), "3072", "0.011", "64", "262144", str(q_per_block), "64"],
+            },
+            "annotation": annotation,
+        }
+
+    def test_mqa_logits_mxfp4_decode_keys_from_annotation(self):
+        model = aext.pa_mqa_logits_mxfp4(
+            self._mqa_logits_event(self._decode_annotation(3, 32768))
+        )
+        keys = 3 * 32768 // 4
+        assert model.param_details["keys"] == keys
+        assert model.flops() == keys * 64 * (2 * 128 + 2)
+        assert model.bytes() == 3 * 64 * (64 + 4 + 2) + keys * (64 + 4 + 4 + 4 / 64)
+        assert model.get_compute_precision() == "fp4"
+        assert model.get_maf_type() == "matrix"
+
+    def test_mqa_logits_mxfp4_prefill_scores_causal_pairs(self):
+        annotation = (
+            "execute_1_context_1(sq8sk8sqsq64sqsk64)_generation_0(sq0sk0sqsq0sqsk0)"
+        )
+        model = aext.pa_mqa_logits_mxfp4(
+            self._mqa_logits_event(annotation, rows=16, q_per_block=4)
+        )
+        assert model.param_details["rows"] == 8
+        keys = (64 - (64 - 8) // 2) // 4
+        assert model.param_details["keys"] == keys
+        # Four rows per CTA share each KV tile; every row stores its own logits.
+        assert model.bytes() == 8 * 64 * (64 + 4 + 2) + keys * (
+            (64 + 4 + 4 / 64) / 4 + 4
+        )
+
+    def test_mqa_logits_mxfp4_unknown_dtype_bytes(self):
+        logits = self._mqa_logits_event(self._decode_annotation(3, 1000))
+        logits["args"]["Input type"][6] = "c10::Unknown"
+        assert aext.pa_mqa_logits_mxfp4(logits).bytes() is None
+
+    def test_mqa_logits_mxfp4_no_perf_without_annotation(self):
+        model = aext.pa_mqa_logits_mxfp4(self._mqa_logits_event("NA"))
+        assert model.flops() is None
+        assert model.bytes() is None
+        assert model.get_compute_precision() is None
+        assert model.get_maf_type() is None
 
     def test_mla_bytes_reject_broadcast_stride(self):
         event = {
@@ -3119,6 +3197,42 @@ class TestPerfModelExtensionsCoverage:
             }
         )
         assert topk.flops() > 0
+
+    def test_sglang_hc_combine_split(self):
+        # Decode shape from the Qwen3.8 trace: M=32, C=2560, n=4.
+        event = {
+            "args": {
+                "Input Dims": [(32, 2560), (32, 10240), (32, 10240), (4, 10240), ()],
+                "Input type": ["c10::BFloat16"] * 4 + ["Scalar"],
+                "Input Strides": [(2560, 1), (10240, 1), (10240, 1), (10240, 1), ()],
+            }
+        }
+        model = sglang_hc_combine_split(event)
+        assert model.flops() == 2 * 32 * 4 * 2560 * 5
+        assert model.bytes() == (
+            32 * 2560 * 2 + 3 * 32 * 10240 * 2 + 4 * 10240 * 2 + 2 * 32 * 8 * 4 * 4
+        )
+        assert model.get_compute_precision() == "bf16"
+        assert model.get_maf_type() == "vector"
+        assert model.category == "mHC"
+
+        gapped = {
+            "args": {
+                "Input Dims": event["args"]["Input Dims"],
+                "Input type": event["args"]["Input type"],
+                "Input Strides": [(2560, 1), (20480, 1), (10240, 1), (10240, 1), ()],
+            }
+        }
+        assert sglang_hc_combine_split(gapped).flops() == model.flops()
+        assert sglang_hc_combine_split(gapped).bytes() is None
+        assert (
+            sglang_hc_combine_split({"args": {"Input Dims": [(32, 2560)]}}).flops()
+            is None
+        )
+        assert (
+            get_pseudo_op_mappings()["sglang_profiler::hc_combine_hc_combine_split"]
+            is sglang_hc_combine_split
+        )
 
     def test_misc_extension_ops(self):
         rope = aiter_rope_cached_positions_2c_fwd_impl(
