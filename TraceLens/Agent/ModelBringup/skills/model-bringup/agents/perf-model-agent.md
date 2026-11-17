@@ -81,7 +81,7 @@ Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
 ### Step 2: Decide
 
 ```bash
-<prefix> python3 -m TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops <analysis_dir>/perf_report_csvs/unified_perf_summary.csv --mode top-ops --threshold 0 --include-covered --check-mapping
+<prefix> python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops <analysis_dir>/perf_report_csvs/unified_perf_summary.csv --mode top-ops --threshold 0 --include-covered --check-mapping
 ```
 
 This shows whether a built-in perf model already fits. Then use the depth and output mode defaults from the authoring skill's Inputs. A categorize-only op is categorized, not modeled.
@@ -92,13 +92,13 @@ Follow the authoring skill's workflow index, Steps 1-5, in `<op_worktree>`. Its 
 
 ### Step 4: Validate
 
-Register the op as the validation skill's "Adding an op" describes. The validator, `validate_perf_model.py`, reads only rows that have a perf model, so regenerate the report from the op worktree first:
+Register the op as the validation skill's "Adding an op" describes. The validator reads only rows that have a perf model, so regenerate the report from the op worktree first:
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils build --scope standalone --analysis_mode inference --output_dir <op_dir>/report --job <job>
 <prefix> set -o pipefail; cd <op_worktree> && PYTHONPATH=<op_worktree> python3 -m TraceLens.Reporting.generate_perf_report_from_config --config <op_dir>/report/cache/run_config.yaml 2>&1 | tee <op_dir>/report/perf_report.log | tail -n 40
 <prefix> <bringup_gates> cases --report-dir <op_dir>/report/perf_report_csvs --out <op_dir>/cases.json
-<prefix> set -o pipefail; cd <op_worktree> && HIP_VISIBLE_DEVICES=<gpu_index> PYTHONPATH=<op_worktree> python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --cases <op_dir>/cases.json --only-ops <op> --arch <gfx_arch> --output-dir <op_dir>/validation 2>&1 | tee <op_dir>/validation.log | tail -n 40
+<prefix> set -o pipefail; cd <op_worktree> && HIP_VISIBLE_DEVICES=<gpu_index> PYTHONPATH=<op_worktree> python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --cases <op_dir>/cases.json --only-ops <op> --arch <gfx_arch> --output-dir <op_dir>/validation 2>&1 | tee <op_dir>/validation.log | tail -n 40
 ```
 
 If `rocprofv3` aborts torch processes (some ROCm SDK images load two LLVM copies), pass `--rocprofv3-path` pointing at the SDK's `_rocm_sdk_core/bin/rocprofv3`.

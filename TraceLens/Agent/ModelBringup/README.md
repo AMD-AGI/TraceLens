@@ -26,6 +26,6 @@ from config `<path>/bringup_config.yaml`".
 Code layout:
 - `utils/bringup_gates.py` holds the step gates.
 - Perf-model authoring and validation live in [`../PerfModel/`](../PerfModel/), including
-  `perf_model_generate/unified_perf_ops.py`, which reads `unified_perf_summary.csv`: it
+  `utils/unified_perf_ops.py`, which reads `unified_perf_summary.csv`: it
   ranks ops worth a perf model, measures the share of kernel time without one, and builds
   validator cases.

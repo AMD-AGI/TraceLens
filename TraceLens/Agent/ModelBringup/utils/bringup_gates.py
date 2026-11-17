@@ -28,7 +28,7 @@ from TraceLens.Agent.Analysis.triage.checks import (
     rank_of,
 )
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
-from TraceLens.Agent.PerfModel.perf_model_generate.unified_perf_ops import (
+from TraceLens.Agent.PerfModel.utils.unified_perf_ops import (
     DEFAULT_THRESHOLD,
     categorized_names,
     compute_top_ops,

@@ -10,7 +10,4 @@ Each ``test_<op>`` function builds the input tensors and returns the kernel
 call. The shared ``_runner.py`` script dispatches to the right function based
 on a ``--op <registry_key>`` flag, passes through dimensional kwargs, and
 measures the returned call.
-
-This package replaces the runtime Python-string codegen previously embedded in
-``validate_perf_model.py``.
 """

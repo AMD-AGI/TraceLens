@@ -27,8 +27,8 @@ scripts live in `TraceLens/Agent/PerfModel/validate_perf_model/`.
 
 ```
 validate_perf_model/
-├── validate_perf_model.py   CLI: profiles ops under rocprofv3, compares, reports
-├── perf_model_harnesses.py  Op registry: @register(...) event builders + perf models
+├── validator.py             CLI: profiles ops under rocprofv3, compares, reports
+├── harnesses.py             Op registry: @register(...) event builders + perf models
 └── replay/
     ├── _runner.py           Subprocess rocprofv3 wraps; dispatches --op <key> to test_<key> and measures its call
     ├── generic.py           Replay of traced shapes from --cases (OP_CALL_SPEC)
@@ -38,7 +38,7 @@ validate_perf_model/
     └── collectives.py       Collective harnesses; not wired into the runner or registry
 ```
 
-Each op is declared once, in `perf_model_harnesses.py`:
+Each op is declared once, in `harnesses.py`:
 
 ```python
 @register(
@@ -62,7 +62,7 @@ precision)`. `model` sources are the module constants `PERF_MODEL_EXT`,
 
 ## How a run works
 
-For each op, `validate_perf_model.py`:
+For each op, `validator.py`:
 
 1. Fills unset CLI dimensions from the op's `defaults` and builds the runner
    command `python replay/_runner.py --op <key> --M ... --num-warmup 3`.
@@ -252,24 +252,24 @@ validator, so the code matches the kernel that was measured.
 
 ```bash
 # Single op
-python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --op gemm_a8w8_blockscale \
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --op gemm_a8w8_blockscale \
     --M 2048 --N 4096 --K 8192 --arch gfx942 --output-dir /tmp/perf_val
 
 # One category, or every registered op, with default dimensions
-python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --category gemm --output-dir /tmp/perf_val
-python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --all --output-dir /tmp/perf_val
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --category gemm --output-dir /tmp/perf_val
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --all --output-dir /tmp/perf_val
 
 # Every traced shape in a cases file (see above)
-python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --cases cases.json --arch gfx950 --output-dir /tmp/perf_val
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --cases cases.json --arch gfx950 --output-dir /tmp/perf_val
 # ...restricted to some registry keys or trace names
-python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --cases cases.json \
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --cases cases.json \
     --only-ops ck_moe_stage1,aiter::rms_norm --output-dir /tmp/perf_val
 
 # aiter:: / vllm:: ops with TraceLens perf models but no registry entry
-python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --discover
+python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --discover
 ```
 
-`python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validate_perf_model --help` lists every op key and category.
+`python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --help` lists every op key and category.
 
 Output in `--output-dir`:
 - `validation_report_<timestamp>.csv`: one row per op with predictions,
@@ -287,16 +287,16 @@ and where to run.
 
 | To... | Edit |
 |---|---|
-| Validate a new op from CLI dimensions | `@register(...)` builder in `perf_model_harnesses.py`, in its op-family section, **and** `test_<key>(**kwargs)` in the matching `replay/<family>.py` |
+| Validate a new op from CLI dimensions | `@register(...)` builder in `harnesses.py`, in its op-family section, **and** `test_<key>(**kwargs)` in the matching `replay/<family>.py` |
 | Map more trace names to an existing op | `trace_names=` on its `register(...)` |
 | Replay report rows through the generic runner | an `OP_CALL_SPEC` entry keyed by the op key in `replay/generic.py` |
-| Replay report rows through the op's own `test_<key>` | `csv_harness=True` on `register(...)` and a branch in `_extract_dims_for_existing_harness` in `validate_perf_model.py` that maps the row to CLI args |
-| Validate an op only from `--cases` (no CLI builder) | a row in `_CSV_ONLY_OPS` in `perf_model_harnesses.py` and an `OP_CALL_SPEC` entry |
+| Replay report rows through the op's own `test_<key>` | `csv_harness=True` on `register(...)` and a branch in `_extract_dims_for_existing_harness` in `validator.py` that maps the row to CLI args |
+| Validate an op only from `--cases` (no CLI builder) | a row in `_CSV_ONLY_OPS` in `harnesses.py` and an `OP_CALL_SPEC` entry |
 | Register an op whose kernel cannot run standalone | `perf_model_only=True` |
 | Add a replay module for a new op family | the module name in `replay/_runner.MODULES` |
 | Use a new perf-model module | a constant next to `PERF_MODEL_EXT` |
-| Add a CLI dimension or dtype flag | `main()` in `validate_perf_model.py` and `INT_FLAGS` / `STR_FLAGS` in `replay/_runner.py` |
-| Support a new GPU arch | `ARCH_COUNTER_CONFIGS` in `validate_perf_model.py` |
+| Add a CLI dimension or dtype flag | `main()` in `validator.py` and `INT_FLAGS` / `STR_FLAGS` in `replay/_runner.py` |
+| Support a new GPU arch | `ARCH_COUNTER_CONFIGS` in `validator.py` |
 
 Writing a harness for a new op:
 

@@ -7,7 +7,7 @@
 """Attention test harnesses for ``validate_perf_model``.
 
 Includes ``make_varlen_seqlens`` / ``compute_varlen_annotation_stats``
-which the parent ``validate_perf_model.py`` also imports so the
+which the parent ``validator.py`` also imports so the
 perf-model runner sees the same ``c_sq`` / ``c_sqsq`` aggregates as the
 test harness. These helpers are pure-Python and do NOT import torch at
 module load time so the parent can use them on machines without torch
