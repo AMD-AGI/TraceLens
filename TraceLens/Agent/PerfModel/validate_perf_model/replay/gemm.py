@@ -8,13 +8,10 @@
 
 Each ``test_<op>`` function builds the input tensors and calls the target
 kernel with ``num_warmup`` warmup iterations followed by one measured
-iteration. The shared runner (``tests/_runner.py``) dispatches into these.
+iteration. The shared runner (``replay/_runner.py``) dispatches into these.
 
 Every test function is parameterized over the input / weight / output
-dtype the kernel actually supports. See ``tests/gemm.md`` for the per-op
-mapping of dtypes onto the upstream ``aiter`` / ``vllm`` implementation
-and ``tests/gemm.csv`` for the canonical parameter combinations exercised
-by the validation harness.
+dtype the kernel actually supports.
 """
 
 # NOTE: torch is imported lazily inside each function so that this module can

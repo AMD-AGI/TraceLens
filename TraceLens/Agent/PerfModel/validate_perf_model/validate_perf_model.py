@@ -7,7 +7,7 @@
 """
 Perf-model validation script.
 
-Runs the ``tests/_runner.py`` GPU test for a registered op under rocprofv3
+Runs the ``replay/_runner.py`` GPU harness for a registered op under rocprofv3
 with hardware counters, then compares measured ops/bytes against the perf
 model's predictions. Ops, their perf models and their trace names are
 registered in ``perf_model_harnesses.py``; this script only orchestrates
@@ -51,7 +51,7 @@ from TraceLens.Agent.PerfModel.validate_perf_model.perf_model_harnesses import (
     run_perf_model_from_event,
     tuple_to_list,
 )
-from TraceLens.Agent.PerfModel.validate_perf_model.tests._runner import (
+from TraceLens.Agent.PerfModel.validate_perf_model.replay._runner import (
     INT_FLAGS,
     STR_FLAGS,
 )
@@ -127,7 +127,7 @@ _MEM_READ_RAW_COUNTERS = {
 
 CATEGORIES = sorted({entry["category"] for entry in OP_REGISTRY.values()})
 
-TESTS_RUNNER = Path(__file__).resolve().parent / "tests" / "_runner.py"
+REPLAY_RUNNER = Path(__file__).resolve().parent / "replay" / "_runner.py"
 
 _INFRA_KERNEL_PATTERNS = [
     "at::native::",
@@ -191,10 +191,10 @@ def _rocprof_env(out_dir):
 def run_rocprofv3(
     rocprofv3_path, counters, runner_argv, out_name, out_dir, timeout=300
 ):
-    """Wrap a tests/_runner.py invocation under rocprofv3 PMC counters.
+    """Wrap a replay/_runner.py invocation under rocprofv3 PMC counters.
 
     ``runner_argv`` is the full argv list to execute inside rocprofv3 (e.g.
-    ``[python, /abs/tests/_runner.py, --op, gemm_a8w8_blockscale, --M, ...]``).
+    ``[python, /abs/replay/_runner.py, --op, gemm_a8w8_blockscale, --M, ...]``).
     """
     out_dir = os.path.abspath(out_dir)
     counter_dir = os.path.join(out_dir, out_name)
@@ -1846,7 +1846,7 @@ def _build_runner_argv(op_name, effective_args, num_warmup=3):
     """
     cmd = [
         sys.executable,
-        str(TESTS_RUNNER),
+        str(REPLAY_RUNNER),
         "--op",
         op_name,
         "--num-warmup",
@@ -1893,7 +1893,7 @@ def _build_csv_runner_argv(
     """
     cmd = [
         sys.executable,
-        str(TESTS_RUNNER),
+        str(REPLAY_RUNNER),
         "--op",
         "__generic__",
         "--registry-key",
@@ -1918,7 +1918,7 @@ def _populate_varlen_attention_args(op_name, effective_args):
 
     The test runs in a rocprofv3 subprocess, so the parent recomputes the
     per-batch aggregates the perf model needs from the same deterministic
-    seed + scenario used by ``tests/attention.make_varlen_seqlens``. Also
+    seed + scenario used by ``replay/attention.make_varlen_seqlens``. Also
     pre-computes total Q / KV token counts so the event builders can size
     Input Dims correctly for non-self-attention scenarios (mixed
     prefill+decode).
@@ -1927,9 +1927,9 @@ def _populate_varlen_attention_args(op_name, effective_args):
         return None
     if getattr(effective_args, "_varlen_c_sq", None) is not None:
         return None
-    # Imported lazily: tests.attention needs torch, which --discover and
+    # Imported lazily: replay.attention needs torch, which --discover and
     # perf-model-only runs do not.
-    from TraceLens.Agent.PerfModel.validate_perf_model.tests.attention import (
+    from TraceLens.Agent.PerfModel.validate_perf_model.replay.attention import (
         compute_varlen_annotation_stats,
         make_varlen_seqlens,
     )

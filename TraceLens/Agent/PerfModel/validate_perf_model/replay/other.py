@@ -9,10 +9,6 @@
 The "other" category bucket covers gated activations (silu/gelu *and_mul*),
 the aiter dynamic per-token FP8 quant, and the vLLM Triton group-quant
 variant that don't naturally fit gemm/moe/attention/rmsnorm.
-
-See ``tests/other.md`` for the per-op mapping of dtypes onto the upstream
-``aiter`` / ``vllm`` implementation and ``tests/other.csv`` for the
-canonical parameter combinations.
 """
 
 # NOTE: torch is imported lazily inside each function so that this module can

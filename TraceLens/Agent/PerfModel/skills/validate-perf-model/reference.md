@@ -31,14 +31,14 @@ run from there; from anywhere else, replace `python validate_perf_model.py` with
 validate_perf_model/
 ├── validate_perf_model.py   CLI: profiles ops under rocprofv3, compares, reports
 ├── perf_model_harnesses.py  Op registry: @register(...) event builders + perf models
-└── tests/
+└── replay/
     ├── _runner.py           Subprocess rocprofv3 wraps; dispatches --op <key> to test_<key>
-    ├── _generic.py          Replay of traced shapes from --cases (OP_CALL_SPEC)
+    ├── generic.py           Replay of traced shapes from --cases (OP_CALL_SPEC)
     ├── _dtypes.py           Shared dtype helpers
     ├── _measure.py          prepare_measured_call: L2 flush and marker before the measured call
     ├── gemm.py moe.py attention.py rmsnorm.py other.py rope.py
-    │                        test_<key>(**kwargs) GPU tests, one module per op family
-    └── collectives.py       Collective tests; not wired into the runner or registry
+    │                        test_<key>(**kwargs) GPU replay harnesses, one module per op family
+    └── collectives.py       Collective harnesses; not wired into the runner or registry
 ```
 
 Each op is declared once, in `perf_model_harnesses.py`:
@@ -68,7 +68,7 @@ precision)`. `model` sources are the module constants `PERF_MODEL_EXT`,
 For each op, `validate_perf_model.py`:
 
 1. Fills unset CLI dimensions from the op's `defaults` and builds the runner
-   command `python tests/_runner.py --op <key> --M ... --num-warmup 3`.
+   command `python replay/_runner.py --op <key> --M ... --num-warmup 3`.
 2. Runs it once under `rocprofv3 --kernel-trace` to pick the target kernel
    (non-infrastructure kernel with `warmups + 1` dispatches, longest total
    time) and its runtime. `--kernel-filter` overrides this.
@@ -85,7 +85,7 @@ In `--cases` mode the op list comes from a cases JSON that
 `name` is in no op's `trace_names` are skipped. The prediction
 comes from the traced event (`run_perf_model_from_event`) and the kernel is
 replayed either through the op's own `test_<key>` (`csv_harness=True`) or
-through `tests/_generic.py` with the traced shapes.
+through `replay/generic.py` with the traced shapes.
 
 Each case's `perf_params` (the values the perf model parsed in the report)
 drive both sides, ahead of the attention CSV parameters:
@@ -208,7 +208,7 @@ validator, so the code matches the kernel that was measured.
 
 1. **Follow the call chain to the kernel that ran.** One file is rarely
    enough:
-   - the harness, `test_<key>` in `tests/<module>.py`, shows which framework
+   - the harness, `test_<key>` in `replay/<module>.py`, shows which framework
      function was called;
    - the Python wrapper (aiter, vLLM, SGLang) may choose a path by shape, dtype
      or architecture;
@@ -290,15 +290,15 @@ and where to run.
 
 | To... | Edit |
 |---|---|
-| Validate a new op from CLI dimensions | `@register(...)` builder in `perf_model_harnesses.py`, in its op-family section, **and** `test_<key>(**kwargs)` in the matching `tests/<family>.py` |
+| Validate a new op from CLI dimensions | `@register(...)` builder in `perf_model_harnesses.py`, in its op-family section, **and** `test_<key>(**kwargs)` in the matching `replay/<family>.py` |
 | Map more trace names to an existing op | `trace_names=` on its `register(...)` |
-| Replay report rows through the generic runner | an `OP_CALL_SPEC` entry keyed by the op key in `tests/_generic.py` |
+| Replay report rows through the generic runner | an `OP_CALL_SPEC` entry keyed by the op key in `replay/generic.py` |
 | Replay report rows through the op's own `test_<key>` | `csv_harness=True` on `register(...)` and a branch in `_extract_dims_for_existing_harness` in `validate_perf_model.py` that maps the row to CLI args |
 | Validate an op only from `--cases` (no CLI builder) | a row in `_CSV_ONLY_OPS` in `perf_model_harnesses.py` and an `OP_CALL_SPEC` entry |
 | Register an op whose kernel cannot run standalone | `perf_model_only=True` |
-| Add a test module for a new op family | the module name in `tests/_runner.MODULES` |
+| Add a test module for a new op family | the module name in `replay/_runner.MODULES` |
 | Use a new perf-model module | a constant next to `PERF_MODEL_EXT` |
-| Add a CLI dimension or dtype flag | `main()` in `validate_perf_model.py` and `INT_FLAGS` / `STR_FLAGS` in `tests/_runner.py` |
+| Add a CLI dimension or dtype flag | `main()` in `validate_perf_model.py` and `INT_FLAGS` / `STR_FLAGS` in `replay/_runner.py` |
 | Support a new GPU arch | `ARCH_COUNTER_CONFIGS` in `validate_perf_model.py` |
 
 Writing a harness for a new op:
@@ -321,12 +321,12 @@ Writing a harness for a new op:
    differ, the harness took another branch and the run measures the wrong
    kernel; fix the inputs before trusting any ratio.
 
-Test function conventions (see `tests/gemm.py`):
+Harness conventions (see `replay/gemm.py`):
 
 - Signature `test_<key>(<dims>, <dtype kwargs>=<default>, num_warmup=3, **_)`;
   `**_` absorbs flags meant for other ops.
 - Build inputs, run `num_warmup` calls, `torch.cuda.synchronize()`, call
-  `prepare_measured_call()` (from `tests/_measure.py`), then make one measured
+  `prepare_measured_call()` (from `replay/_measure.py`), then make one measured
   call and synchronize again. `prepare_measured_call` flushes L2 so the
   measured call starts cold, and launches a `bitwise_not` marker between the
   warmup and measured dispatches. The validator reads counters from the last

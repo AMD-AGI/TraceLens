@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Per-category GPU test functions for validate_perf_model.
+"""Per-category GPU replay harnesses for validate_perf_model.
 
 Each ``test_<op>`` function initializes input tensors and invokes the target
 kernel with 3 warmup iterations + 1 measured iteration. The shared

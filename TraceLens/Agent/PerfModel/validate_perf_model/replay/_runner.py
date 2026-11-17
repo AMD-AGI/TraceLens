@@ -8,12 +8,12 @@
 
 Usage:
 
-    python tests/_runner.py --op gemm_a8w8_blockscale --M 2048 --N 4096 --K 8192
+    python replay/_runner.py --op gemm_a8w8_blockscale --M 2048 --N 4096 --K 8192
 
 Finds ``test_<op>`` in the first of :data:`MODULES` that defines it and calls
 it with the supplied dimensional kwargs. Every test function tolerates extra
 kwargs via ``**_`` so unrelated CLI flags are silently ignored.
-``--op __generic__`` dispatches to ``_generic.test_generic_simple_op``.
+``--op __generic__`` dispatches to ``generic.test_generic_simple_op``.
 """
 
 import argparse
@@ -23,7 +23,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    _PKG = "tests"
+    _PKG = "replay"
 else:
     _PKG = __package__
 
@@ -76,7 +76,7 @@ def find_test_fn(op):
     libraries for some op families may be absent in a given environment.
     """
     if op == "__generic__":
-        return importlib.import_module(f"{_PKG}._generic").test_generic_simple_op
+        return importlib.import_module(f"{_PKG}.generic").test_generic_simple_op
     for modname in MODULES:
         try:
             mod = importlib.import_module(f"{_PKG}.{modname}")
@@ -154,7 +154,7 @@ def main():
     fn = find_test_fn(args.op)
     if fn is None:
         raise SystemExit(
-            f"_runner: no test_{args.op} in tests/{{{','.join(MODULES)}}}.py"
+            f"_runner: no test_{args.op} in replay/{{{','.join(MODULES)}}}.py"
         )
 
     kwargs = {k: v for k, v in vars(args).items() if v is not None and k != "op"}

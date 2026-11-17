@@ -11,10 +11,6 @@ kernel with ``num_warmup`` warmup iterations followed by one measured
 iteration. Functions are parameterized over input/weight/output dtype
 where the kernel supports it; quant variants additionally honor
 ``out_dtype`` to select between FP8 storage flavors.
-
-See ``tests/rmsnorm.md`` for the per-op mapping of dtypes onto the
-upstream ``aiter`` / ``vllm`` implementation and ``tests/rmsnorm.csv``
-for the canonical parameter combinations.
 """
 
 # NOTE: torch is imported lazily inside each function so that this module can

@@ -8,13 +8,12 @@
 
 Each ``test_<op>`` function builds the input tensors for a single MoE kernel
 in ``aiter``, runs a few warm-up iterations and then a measured iteration, and
-synchronizes the GPU. The functions are imported by ``tests/_runner.py``,
+synchronizes the GPU. The functions are imported by ``replay/_runner.py``,
 which is what ``rocprofv3`` actually wraps.
 
 Every test function is parameterized over input/weight/output dtype and the
 relevant ``aiter`` ``QuantType`` so that perf-model validation can target any
-of the production kernel variants. See ``tests/moe.md`` for the per-op
-mapping of dtypes onto the upstream ``aiter`` implementation.
+of the production kernel variants.
 
 Shared helpers
 --------------
@@ -37,7 +36,7 @@ Shared helpers
 # Dtype string resolution
 # ---------------------------------------------------------------------------
 #
-# The actual resolvers live in ``tests/_dtypes.py`` so the gemm/attention/
+# The actual resolvers live in ``replay/_dtypes.py`` so the gemm/attention/
 # rmsnorm/other harnesses can reuse them. Re-exported here under the
 # legacy ``_<name>`` aliases so existing references inside this file continue
 # to work without touching every callsite.

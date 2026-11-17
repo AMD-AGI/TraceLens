@@ -6,13 +6,13 @@
 
 """Shared dtype / activation / quant-type resolvers for the test harnesses.
 
-The ``tests/<category>.py`` modules accept user-friendly dtype strings
+The ``replay/<category>.py`` modules accept user-friendly dtype strings
 (``"bf16"``, ``"fp8"``, ``"fp4x2"``, ...) and need to resolve them to
 ``torch.dtype`` values before allocating tensors. Centralizing the resolvers
 avoids divergence between categories.
 
 All helpers defer the ``torch`` import so that the parent process (which
-imports the ``tests`` package only to discover function objects and to compute
+imports the ``replay`` package only to discover function objects and to compute
 varlen-attention statistics) does not need ``torch`` installed.
 """
 

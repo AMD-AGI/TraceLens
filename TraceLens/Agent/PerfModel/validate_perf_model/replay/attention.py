@@ -15,8 +15,7 @@ installed; ``torch`` is only imported inside each ``test_*`` function
 body.
 
 Every test function is parameterized over the dtype kwargs the kernel
-actually consumes. See ``tests/attention.md`` for per-op coverage and
-``tests/attention.csv`` for the canonical parameter combinations.
+actually consumes.
 """
 
 import random

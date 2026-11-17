@@ -17,9 +17,6 @@ Covers two RoPE implementations:
 
 Both ops are memory-bandwidth-bound elementwise transforms, so the dominant
 roofline metric is HBM read+write of the Q/K tensors.
-
-See ``tests/rope.md`` (to be generated) for the per-op dtype/shape matrix and
-``test_cases/rope.csv`` for the canonical parameter combinations.
 """
 
 # NOTE: torch is imported lazily inside each function so that this module can
