@@ -67,10 +67,12 @@ The inference report recovers them in two ways:
 - **Capture merge.** Pass the folder of graph-capture traces. TraceLens copies
   the captured CPU op, including its shapes, dtypes, and strides, onto the
   matching replay kernel.
-- **Model config.** Pass the Hugging Face `config.json` and the tensor-parallel
-  size of the traced rank. The DeepSeek-V4 schedule pairs each graph kernel with
-  the launch at that position and writes that launch's shapes. A kernel the
-  schedule does not recognize stays without shapes.
+- **Model source.** Pass the served model (a Hugging Face id or its
+  `config.json`). TraceLens reads the model's, the serving engine's, and the
+  kernel libraries' source, pairs each graph kernel with the launch that source
+  issues at that position, and writes that launch's shapes. The trace supplies
+  the sharding and the device. A kernel no launch pairs with stays without
+  shapes.
 
 See [Shapes from the model config](../how-to/generate-perf-report-pytorch-inference.md#shapes-from-the-model-config)
 and [Merge capture traces](../how-to/generate-perf-report-pytorch-inference.md#merge-capture-traces).

@@ -299,9 +299,9 @@ older command lines to the boolean form. The flag is only available when
 The capture trace is written once at server startup during HIP/CUDA-graph
 construction; the steady-state replay trace is written to `torch_profiler_dir`
 during the benchmark. Pass both paths to the report generator using
-`--capture_folder` and `--profile_json_path` respectively. A DeepSeek-V4
-replay can skip the capture folder and take shapes from the model config
-instead. See [Shapes from the model config](#shapes-from-the-model-config).
+`--capture_folder` and `--profile_json_path` respectively. A replay can also
+skip the capture folder and take shapes from the served model's source instead.
+See [Shapes from the model config](#shapes-from-the-model-config).
 ```
 
 **SGLang.** In the profile request for the execution step:
@@ -515,49 +515,59 @@ from the adjacent target root.
 A graph replay records the device kernels and not the CPU ops that were captured
 into the graph, so those kernels have no `Input Dims`, dtypes, or strides. The
 capture merge above restores that metadata from a capture profile. Without a
-capture profile, the inference report can derive it from the model.
+capture profile, the inference report can derive it from the served model's
+source code.
 
-Pass the Hugging Face `config.json` of the served model. The tensor-parallel
-degree is the trace's `tp` process group (`distributedInfo.pg_config`, the
-group named `tp:device`):
+Pass the served model as a Hugging Face model id, a checkpoint directory, or its
+`config.json`:
 
 ```bash
 TraceLens_generate_perf_report_pytorch_inference \
-    --profile_json_path /data/dsv4/rank0.json.gz \
-    --graph_model_config /data/dsv4/config.json
+    --profile_json_path /data/run/rank0.json.gz \
+    --graph_model_config Qwen/Qwen3-14B-FP8
 ```
 
 The same setting is the top-level `graph_model_config_path` of an inference
 run config. See
 [Generate performance reports from a YAML config](./generate-perf-report-from-config.md#inference-with-a-model-config).
 
-Each `hipGraphLaunch` or `cudaGraphLaunch` is matched to the `step[...]`
-annotation that contains it. That annotation supplies the batch size, the
-sequence length, and the cached length. The config and the trace's
-tensor-parallel group build the per-rank model, and the DeepSeek-V4 schedule
-walks the forward in launch order: one attention block and one MoE block per
-layer, using
-`compress_ratios` and `num_hash_layers` from the checkpoint. Kernels are paired
-with that list in order. A matched kernel is reported as the op the schedule
-names, with that op's input shapes, dtypes, strides, and concrete scalars, which
-is what the roofline reads.
+The trace supplies everything else about the run:
 
-The config has to be a DeepSeek-V4 checkpoint config. The schedule reads
-`hidden_size`, the LoRA ranks, the attention and indexer head sizes,
-`moe_intermediate_size`, the expert counts, `vocab_size`, and the optional
-compression, hash-layer, hyper-connection, and quantization fields. When the
-pinned engine checkout exports a kernel together with the tensors it is called
-with, those exported shapes replace the built-in schedule for that launch.
+- The parallel degrees come from its process groups (`distributedInfo.pg_config`:
+  `tp`, `moe_ep`, `moe_dp`, `attn_cp`, `pp`, and any other group).
+- The compute-unit count and the GPU target come from `deviceProperties`.
+- The serving engine (SGLang or vLLM) comes from the engine's own frames and op
+  names, and its release from the python frames the profile recorded. Set
+  `--graph_engine_version` when the trace does not say; without either, the
+  newest release is read.
+- Each `hipGraphLaunch` or `cudaGraphLaunch` takes its batch size, sequence
+  length, and cached length from the `step[...]` annotation that contains it.
+  A graph the engine annotates without a batch (a speculative draft step) uses
+  the latest step annotation before it.
 
-A kernel the schedule does not recognize stays a synthetic
-`hipGraphLaunch-><kernel>` row and has no input shapes. The report still warns
-that no capture folder was provided. The schedule fills shapes for the launches
-it matches anyway.
+The report reads the checkpoint, the engine at that release, and the kernel
+libraries at the commits the engine's own build pins. It follows one forward
+from the model down to each kernel launch, in launch order, with the tensors
+each launch is called with. Kernels are paired with that list in order: a
+launch whose source names its device kernel (a Triton function, a `__global__`
+function) pairs only with that kernel, and the rest are placed between them in
+order. A matched kernel is reported as the op that launched it, with that op's
+input shapes, dtypes, strides, and concrete scalars, which is what the roofline
+reads. No model is described by hand anywhere in this path.
 
-You can set a capture folder and a model config on the same run. Kernels the
-capture merge attaches keep the captured CPU op, including its arguments. Kernels
-the merge leaves on `hipGraphLaunch`, such as a prefill graph that has no
-capture profile, take the schedule's name and shapes.
+Environment variables and server arguments decide which kernels the forward
+launches, and a trace does not record them. Pass the ones you know with
+`--graph_setting NAME=VALUE` (repeatable). Each one left out keeps every arm it
+selects, and the replayed kernels decide between them.
+
+A kernel no launch pairs with stays a synthetic `hipGraphLaunch-><kernel>` row
+and has no input shapes. The report still warns that no capture folder was
+provided.
+
+You can set a capture folder and a model on the same run. Kernels the capture
+merge attaches keep the captured CPU op, including its arguments. Kernels the
+merge leaves on `hipGraphLaunch`, such as a prefill graph that has no capture
+profile, take the shapes read from the model's source.
 
 ## Inference-oriented options
 
@@ -569,7 +579,9 @@ relevant to serving traces:
 | ---------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--profile_json_path`      | required  | Path to the graph-replay `torch.profiler` trace (`.json` or `.json.gz`).                                                                       |
 | `--capture_folder PATH`    | `None`  | Folder of graph-capture traces to merge into the replay trace (recovers shapes and call stacks). |
-| `--graph_model_config PATH` | `None` | Hugging Face `config.json`. The trace's `tp` process group supplies the tensor-parallel degree. Schedules each graph kernel onto its model launch and fills input shapes. See [Shapes from the model config](#shapes-from-the-model-config). |
+| `--graph_model_config MODEL` | `None` | The served model: a Hugging Face id, a checkpoint directory, or its `config.json`. Fills graph-kernel shapes from the model's and the engine's source. See [Shapes from the model config](#shapes-from-the-model-config). |
+| `--graph_engine_version VERSION` | from the trace | Release of the serving engine that ran the trace, when the trace does not say. |
+| `--graph_setting NAME=VALUE` | none | An environment variable or server argument the run set (repeatable). |
 | `--group_by_parent_module` | `False` | Group kernel-launcher summaries by parent `nn.Module` in addition to operation name.                                                               |
 | `--group_by_num_kernels`   | `False` | Group summary rows by the number of kernels.                                                                                                        |
 | `--include_call_stack`     | `False` | Add the CPU call stack to the report.                                                                                                               |

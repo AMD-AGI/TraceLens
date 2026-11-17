@@ -59,7 +59,7 @@ jobs:
 | `jobs` | yes | List of jobs. See the job keys below. |
 | `aggregation` | no | `{policy: combine_by_node}`. Combines the jobs' reports. See [Combine reports](#combine-reports). |
 | any report option | no | Any parameter of the selected report function, by its Python name (for example `kernel_summary: true`, `topk_ops: 50`). Applies to every job. |
-| `graph_model_config_path` | no | Hugging Face `config.json`. `inference` only. The trace's `tp` process group supplies the tensor-parallel degree. Fills graph-kernel shapes from the model schedule. See [Shapes from the model config](./generate-perf-report-pytorch-inference.md#shapes-from-the-model-config). |
+| `graph_model_config_path` | no | The served model: a Hugging Face id, a checkpoint directory, or its `config.json`. `inference` only. Fills graph-kernel shapes from the model's and the engine's source; the trace supplies the sharding and the device. `graph_engine_version` and `graph_settings` (a mapping of environment variables and server arguments) narrow the run when the trace does not say. See [Shapes from the model config](./generate-perf-report-pytorch-inference.md#shapes-from-the-model-config). |
 
 ### Job keys
 
@@ -151,24 +151,25 @@ in the same capture folder.
 
 ### Inference with a model config
 
-A DeepSeek-V4 graph replay can take shapes from the checkpoint instead of a
+A graph replay can take shapes from the served model's source instead of a
 capture folder. `graph_model_config_path` is top-level, and it applies to
-every job. The tensor-parallel degree is read from each trace:
+every job. The sharding and the device are read from each trace:
 
 ```yaml
 analysis_mode: inference
-output_dir: /data/dsv4/analysis_output
-graph_model_config_path: /data/dsv4/config.json
+output_dir: /data/run/analysis_output
+graph_model_config_path: Qwen/Qwen3-14B-FP8
+graph_settings:
+  SGLANG_USE_AITER: "1"
 jobs:
-  - trace_path: /data/dsv4/rank0.json.gz
+  - trace_path: /data/run/rank0.json.gz
     platform: MI300X
 ```
 
-The schedule reads the DeepSeek-V4 fields in `config.json` and pairs each
-graph kernel with the launch at that position. A kernel it does not recognize
-is left without
-shapes. Setting `capture_folder` on the job as well keeps the captured CPU ops
-for the graphs that were captured. See
+Each graph kernel is paired with the launch the model's source issues at that
+position. A kernel no launch pairs with is left without shapes. Setting
+`capture_folder` on the job as well keeps the captured CPU ops for the graphs
+that were captured. See
 [Shapes from the model config](./generate-perf-report-pytorch-inference.md#shapes-from-the-model-config).
 
 ### Prefill and decode

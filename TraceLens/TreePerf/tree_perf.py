@@ -16,7 +16,6 @@ import pprint
 # TODO: warning should show the stack as well
 import warnings
 from collections import defaultdict
-from dataclasses import replace
 from functools import partial
 from typing import Any, Callable, Dict
 
@@ -28,13 +27,10 @@ logger = logging.getLogger(__name__)
 from ..PerfModel.jax_op_mapping import jax_op_to_perf_model_class_map
 from .graph_schedule import (
     align_kernels,
-    covering_annotation,
+    covering_annotations,
     group_stopped_ops,
     invocation_from_annotation,
     launch_arguments,
-    launches_from_architecture,
-    num_cus_from_trace,
-    schedule_deepseek_v4,
 )
 from ..PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
@@ -355,15 +351,7 @@ class TreePerfAnalyzer:
         self.enable_origami_sdpa_tile = enable_origami_sdpa_tile
         # When set, each replayed graph is one run of this model. Its kernels
         # are paired, in order, with that run's launches and take their shapes.
-        # The trace's device block records the compute-unit count. The
-        # architecture table is only the fallback when that field is absent.
-        recorded_cus = num_cus_from_trace(self.trace_metadata)
-        if graph_model is not None and recorded_cus:
-            graph_model = replace(graph_model, num_cus=recorded_cus)
         self.graph_model = graph_model
-        # Engine modeling specs, keyed by "decode" / "prefill". The exporter
-        # fills this from the pinned checkout. Empty leaves the config schedule.
-        self.architectures = {}
         self.op_projections = default_op_projections(
             enable_origami_gemm, enable_origami_sdpa_tile
         )
@@ -1843,23 +1831,48 @@ class TreePerfAnalyzer:
                 return True
         return False
 
-    def _annotation_for(self, event):
-        """The step annotation whose span contains ``event``."""
-        steps = getattr(self, "_step_events", None)
-        if steps is None:
-            steps = [
-                candidate
-                for candidate in self.tree.events
-                if "step[" in (candidate.get("name") or "")
-            ]
-            self._step_events = steps
-        return covering_annotation(steps, event)
+    def _annotations_over(self, event):
+        """The annotations whose span contains ``event``, outermost first."""
+        annotations = getattr(self, "_user_annotations", None)
+        if annotations is None:
+            annotations = sorted(
+                (
+                    candidate
+                    for candidate in self.tree.events
+                    if candidate.get("cat") == "user_annotation"
+                ),
+                key=lambda candidate: candidate.get("ts") or 0,
+            )
+            self._user_annotations = annotations
+        return covering_annotations(annotations, event)
 
-    def _launches_for(self, event):
+    def _annotation_for(self, event):
+        """The step annotation that sizes the run replaying ``event``.
+
+        The innermost covering annotation that states a batch wins. A graph
+        the engine annotates without one (a speculative draft step) runs for
+        the batch of the latest step annotation before it.
+        """
+        for annotation in reversed(self._annotations_over(event)):
+            if invocation_from_annotation(annotation["name"]) is not None:
+                return annotation["name"]
+        start = event.get("ts") or 0
+        latest = None
+        for annotation in getattr(self, "_user_annotations", ()):
+            if (annotation.get("ts") or 0) > start:
+                break
+            if invocation_from_annotation(annotation["name"]) is not None:
+                latest = annotation["name"]
+        return latest
+
+    def _launches_for(self, event, kernel_names):
         """The model's launch list for the invocation that replays ``event``.
 
-        Only a graph launch has that list. The step annotation that contains
-        the launch supplies the batch and the sequence length.
+        Only a graph launch has that list. The step annotation supplies the
+        batch and the sequence length; every annotation over the launch is
+        the scope the engine's source places the graph in. ``kernel_names``
+        are the replayed kernels, which decide any arm the run's settings
+        leave open.
         """
         if self.graph_model is None:
             return None
@@ -1868,33 +1881,20 @@ class TreePerfAnalyzer:
         name = self._annotation_for(event)
         if name is None:
             return None
-        invocation = invocation_from_annotation(name)
+        scope = tuple(item["name"] for item in self._annotations_over(event))
+        invocation = invocation_from_annotation(name, scope)
         if invocation is None:
             return None
         cache = getattr(self, "_launch_cache", None)
         if cache is None:
             cache = {}
             self._launch_cache = cache
-        key = (
-            invocation.batch_size,
-            invocation.seq_len,
-            invocation.past_len,
-            invocation.tokens,
-        )
-        schedule = cache.get(key)
-        if schedule is None:
-            phase = "prefill" if invocation.prefill else "decode"
-            spec = getattr(self, "architectures", {}).get(phase)
-            introspected = (
-                launches_from_architecture(spec, self.graph_model, invocation)
-                if spec is not None
-                else None
-            )
-            schedule = introspected or schedule_deepseek_v4(
-                self.graph_model, invocation
-            )
-            cache[key] = schedule
-        return schedule
+        key = (invocation, tuple(kernel_names))
+        if key not in cache:
+            from TraceLens.ModelUtils.graph_launches import graph_launches
+
+            cache[key] = graph_launches(self.graph_model, invocation, kernel_names)
+        return cache[key]
 
     def collect_unified_perf_events(self, include_nccl=False):
         """
@@ -1930,13 +1930,14 @@ class TreePerfAnalyzer:
             one stopped op onto that op's row.
             """
             ordered = sorted(kernels, key=_by_time_then_uid)
+            names = [kernel.get("name", "") for kernel in ordered]
             launches = (
-                self._launches_for(cpu_op) if self.graph_model is not None else None
+                self._launches_for(cpu_op, names)
+                if self.graph_model is not None
+                else None
             )
             assigned = (
-                align_kernels([kernel.get("name", "") for kernel in ordered], launches)
-                if launches
-                else [None] * len(ordered)
+                align_kernels(names, launches) if launches else [None] * len(ordered)
             )
             for owner_index, members in group_stopped_ops(assigned):
                 owned = [ordered[index] for index in members]

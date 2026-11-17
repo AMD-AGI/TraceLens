@@ -1063,6 +1063,23 @@ class TraceEventUtils:
         return value if value > 0 else None
 
     @staticmethod
+    def _agreed_device_int_or_zero(metadata: dict | None, field: str) -> int | None:
+        """Like :meth:`_agreed_device_int`, keeping an agreed value of zero."""
+        devices = (metadata or {}).get("deviceProperties")
+        if not isinstance(devices, list) or not devices:
+            return None
+        values = {
+            int(device[field])
+            for device in devices
+            if isinstance(device, dict) and field in device
+        }
+        if len(values) != 1 or any(
+            not isinstance(device, dict) or field not in device for device in devices
+        ):
+            return None
+        return values.pop()
+
+    @staticmethod
     def num_cus_from_trace(metadata: dict | None) -> int | None:
         """Compute units from ``deviceProperties``.
 
@@ -1079,6 +1096,28 @@ class TraceEventUtils:
         return TraceEventUtils._agreed_device_int(
             metadata, "maxSharedMemoryPerMultiProcessor"
         )
+
+    @staticmethod
+    def gpu_target_prefix_from_trace(metadata: dict | None) -> str | None:
+        """The GPU target the trace's devices report, as far as it says.
+
+        ``deviceProperties`` records the compute capability, ``computeMajor``
+        and ``computeMinor``. An AMD device is the ``gfx<major><minor>``
+        family; the stepping digit (the ``2`` of ``gfx942``) is not recorded,
+        so this is the prefix of the full target. Any other device is ``sm_<major><minor>``.
+        """
+        major = TraceEventUtils._agreed_device_int(metadata, "computeMajor")
+        minor = TraceEventUtils._agreed_device_int_or_zero(metadata, "computeMinor")
+        if major is None or minor is None:
+            return None
+        names = {
+            str(device.get("name", ""))
+            for device in metadata.get("deviceProperties") or ()
+            if isinstance(device, dict)
+        }
+        if names and all(name.startswith("AMD") for name in names):
+            return f"gfx{major}{minor}"
+        return f"sm_{major}{minor}"
 
     @staticmethod
     def get_metadata(events: List[dict]) -> Dict[str, Dict[str, str]]:
@@ -1293,8 +1332,8 @@ GPU_KERNEL_CATEGORIES = tuple(TraceEventUtils.GpuEventCategories)
 GPU_USER_ANNOTATION = TraceEventUtils.GpuUserAnnotation.GpuUserAnnotation
 GPU_EVENT_CATEGORIES = (*GPU_KERNEL_CATEGORIES, GPU_USER_ANNOTATION)
 
-# Product name, without a trailing X, to the gfx arch. Origami and the
-# inference report both start from a product name such as MI355X.
+# Product name, without a trailing X, to the gfx arch. Origami starts from a
+# product name such as MI355X.
 PRODUCT_GFX = {
     "mi300": "gfx942",
     "mi325": "gfx942",

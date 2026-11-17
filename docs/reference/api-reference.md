@@ -60,7 +60,9 @@ Inference-oriented variant of the PyTorch report.
 | `--profile_json_path` | required | Path to the trace. |
 | `--group_by_parent_module` | off | Group kernel-launcher summaries by parent `nn.Module`. |
 | `--capture_folder` | None | Path to the capture-trace folder. |
-| `--graph_model_config` | None | Hugging Face `config.json`. The trace's `tp` process group supplies the tensor-parallel degree. Schedules graph kernels onto model launches and fills their input shapes. |
+| `--graph_model_config` | None | The served model: a Hugging Face id, a checkpoint directory, or its `config.json`. Pairs graph kernels with the launches the model's and engine's source issue and fills their input shapes. |
+| `--graph_engine_version` | from the trace | Serving-engine release, when the trace does not say. |
+| `--graph_setting NAME=VALUE` | none | An environment variable or server argument the run set (repeatable). |
 | `--include_overlap_info` | off | Add `*_kl_overlap` sheets when data exists. |
 
 Shares most options with `TraceLens_generate_perf_report_pytorch` (output

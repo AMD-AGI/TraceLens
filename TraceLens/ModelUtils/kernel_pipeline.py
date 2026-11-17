@@ -28,16 +28,9 @@ _KERNEL_SOURCE_CACHE = Path.home() / ".cache" / "tracelens" / "kernel_sources"
 _KERNEL_SEARCH_ROOTS: list[Path] = []
 
 # Top-level import roots -> (github org/repo, branch) for source fetch when the package is not installed.
-_PACKAGE_SOURCE_REPOS: dict[str, tuple[str, str | None]] = {
+_PACKAGE_SOURCE_REPOS: dict[str, tuple[str, str]] = {
     "fla": ("fla-org/flash-linear-attention", "main"),
-    # A modeling file imports these; they are not an installed package. The
-    # engine's container build says which commit its kernels were built from,
-    # so the ref is resolved from that pin (``None`` here), not stated here.
-    "aiter": ("ROCm/aiter", None),
 }
-
-# Package -> (engine, Dockerfile variable) naming the engine pin for its ref.
-_PACKAGE_ENGINE_PINS = {"aiter": ("sglang", "AITER_COMMIT_DEFAULT")}
 
 _BUILTIN_SKIP_CALLS = frozenset(
     {
@@ -357,13 +350,6 @@ def package_source_file(module: str) -> Path | None:
     if repo is None:
         return None
     org_repo, branch = repo
-    if branch is None:
-        from TraceLens.ModelUtils.engine_facts import kernel_library_commit
-
-        engine, variable = _PACKAGE_ENGINE_PINS[parts[0]]
-        branch = kernel_library_commit(engine, variable)
-        if branch is None:
-            return None
     owner, repo_name = org_repo.split("/", 1)
     from TraceLens.ModelUtils.github import GitHubRef, fetch_github_file
 
