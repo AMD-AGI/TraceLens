@@ -57,7 +57,7 @@ def _enable_tracer() -> None:
     try:
         if _shape_discovery_on():
             _get_tracer().enable()
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -66,7 +66,7 @@ def _disable_tracer() -> None:
         tracer = _get_tracer()
         if tracer.is_enabled():
             tracer.disable()
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -83,7 +83,7 @@ def _install_jit_hooks() -> bool:
         return False
     try:
         return bool(_get_tracer().install_hooks())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -95,7 +95,7 @@ def _installer(fn_name: str):
             return False
         try:
             return bool(getattr(_get_tracer(), fn_name)())
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     return install
@@ -107,7 +107,7 @@ def _installer(fn_name: str):
 def _patch_torch_profiler_profile() -> bool:
     try:
         import torch.profiler as tp
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
     cls = getattr(tp, "profile", None)
@@ -148,7 +148,7 @@ def _patch_torch_profiler_profile() -> bool:
 def _patch_kineto_record_shapes() -> bool:
     try:
         from torch.profiler.profiler import _KinetoProfile
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
     if getattr(_KinetoProfile, "_tracelens_record_shapes_patched", False):
@@ -183,7 +183,7 @@ def _patch_torch_profiler_both() -> bool:
 def _patch_torch_cuda_profiler() -> bool:
     try:
         import torch.cuda.profiler as tcp
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     if getattr(tcp, "_tracelens_shape_patched", False):
         return True
@@ -237,21 +237,27 @@ _PENDING_PATCHES = {
 _tls = threading.local()
 
 
+def _apply_pending(mod_name: str) -> None:
+    """Run one pending patch; drop it once it lands, or if it raises."""
+    fn = _PENDING_PATCHES.get(mod_name)
+    if fn is None:
+        return
+    try:
+        done = fn()
+    except Exception:  # noqa: BLE001
+        done = True
+    if done:
+        _PENDING_PATCHES.pop(mod_name, None)
+
+
 def _try_pending() -> None:
     if getattr(_tls, "in_hook", False):
         return
     _tls.in_hook = True
     try:
-        for mod_name in list(_PENDING_PATCHES.keys()):
+        for mod_name in list(_PENDING_PATCHES):
             if mod_name in sys.modules:
-                fn = _PENDING_PATCHES.get(mod_name)
-                if fn is None:
-                    continue
-                try:
-                    if fn():
-                        _PENDING_PATCHES.pop(mod_name, None)
-                except Exception:
-                    _PENDING_PATCHES.pop(mod_name, None)
+                _apply_pending(mod_name)
     finally:
         _tls.in_hook = False
     if not _PENDING_PATCHES:

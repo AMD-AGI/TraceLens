@@ -219,7 +219,7 @@ def _op_for(namespace: str, name: str, arity: int):
             impl = _launcher_impl if namespace == LAUNCHER_NAMESPACE else _noop
             lib.impl(op_name, impl, "CompositeExplicitAutograd")
             op = getattr(getattr(torch.ops, namespace), op_name)
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
             logger.debug("could not define %s::%s: %s", namespace, name, exc)
             op = _BROKEN
 
@@ -236,7 +236,7 @@ def _emit(namespace: str, name: str, tensors: Sequence[torch.Tensor]) -> bool:
     try:
         op(*tensors)
         return True
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
         logger.debug("%s::%s failed, disabling it: %s", namespace, name, exc)
         _ops[key] = _BROKEN
         return False
@@ -269,22 +269,21 @@ def _record_launch(
 def _collect_tensors(args: Sequence[Any], kwargs: Dict[str, Any]) -> List[torch.Tensor]:
     """Tensors in the arguments, up to two list/tuple levels deep, in call order.
 
-    Flat loops: under ``with_stack`` every Python call here is a trace event.
+    One loop over an explicit stack: under ``with_stack`` every Python call
+    here is a trace event, so no helpers or comprehensions.
     """
     found: List[torch.Tensor] = []
     seq = (list, tuple)
-    for values in (args, kwargs.values()):
-        for value in values:
-            if isinstance(value, torch.Tensor):
-                found.append(value)
-            elif isinstance(value, seq):
-                for item in value:
-                    if isinstance(item, torch.Tensor):
-                        found.append(item)
-                    elif isinstance(item, seq):
-                        for inner in item:
-                            if isinstance(inner, torch.Tensor):
-                                found.append(inner)
+    stack = []
+    for value in reversed((*args, *kwargs.values())):
+        stack.append((value, 0))
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, torch.Tensor):
+            found.append(value)
+        elif depth < 2 and isinstance(value, seq):
+            for item in reversed(value):
+                stack.append((item, depth + 1))
     return found[:_MAX_TENSORS]
 
 
@@ -354,7 +353,7 @@ def _is_compiling() -> bool:
     check = getattr(compiler, "is_compiling", None)
     try:
         return bool(check()) if check is not None else False
-    except Exception:  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive  # noqa: BLE001
         return False
 
 
@@ -465,14 +464,14 @@ def _maybe_promote(frame, name: str) -> bool:
         ):
             try:
                 func = _function_for(frame)
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # pragma: no cover - defensive  # noqa: BLE001
                 func = None
         if func is None or func.__closure__:
             _unpromotable.add(code)
             return False
         try:
             entry = _Promoted(func, name, len(_promoted_by_key))
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
             logger.debug("could not promote %s: %s", name, exc)
             _unpromotable.add(code)
             return False
@@ -503,7 +502,7 @@ def _call_launcher(key: int, args: tuple, kwargs: dict) -> Any:
             if tensors
             else _BROKEN
         )
-    except Exception:  # pragma: no cover - never break the workload
+    except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
         op = _BROKEN
     if op is _BROKEN:
         return orig(*args, **kwargs)
@@ -514,7 +513,7 @@ def _call_launcher(key: int, args: tuple, kwargs: dict) -> Any:
         box["ran"] = True
         try:
             box["result"] = orig(*args, **kwargs)
-        except BaseException as exc:  # re-raised below, outside the dispatcher
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
             box["exc"] = exc
 
     stack = _launcher_stack()
@@ -609,7 +608,7 @@ def _wrap_launch(
             if not tensors:
                 return original(self, *args, **kwargs)
             name = name_of(self) or fallback_name
-        except Exception:  # pragma: no cover - never break the workload
+        except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
             return original(self, *args, **kwargs)
         return _trace_launch(
             hook_id, name, tensors, lambda: original(self, *args, **kwargs)
@@ -640,7 +639,7 @@ def _break_rank_matches() -> bool:
         dist = torch.distributed
         if dist.is_available() and dist.is_initialized():
             return str(dist.get_rank()) == _BREAK_RANK
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) == _BREAK_RANK
 
@@ -700,7 +699,7 @@ class _TracedForeignCall:
             return func(*args, **kwargs)
         try:
             tensors = None if self._pointer_args else _collect_tensors(args, kwargs)
-        except Exception:  # pragma: no cover - never break the workload
+        except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
             return func(*args, **kwargs)
         if tensors is not None and not tensors:
             return func(*args, **kwargs)
@@ -741,7 +740,7 @@ def install_tvm_ffi_hooks() -> bool:
         traced = _TracedForeignCall(func, name, "tvm_ffi", pointer_args=False)
         try:
             self.__dict__[name] = traced
-        except Exception:  # pragma: no cover - read-only instance dict
+        except Exception:  # pragma: no cover - read-only instance dict  # noqa: BLE001
             pass
         return traced
 
@@ -795,7 +794,7 @@ def install_aiter_cpp_itfs_hooks() -> bool:
                 return run_hsaco(func_name, *args, **kwargs)
             try:
                 tensors = _collect_tensors(args, {})
-            except Exception:  # pragma: no cover - never break the workload
+            except Exception:  # noqa: BLE001  # pragma: no cover
                 tensors = []
             if not tensors:
                 return run_hsaco(func_name, *args, **kwargs)
@@ -825,7 +824,7 @@ def _traced_tensor_call(func: Callable, name: str, hook_id: str) -> Callable:
             return func(*args, **kwargs)
         try:
             tensors = _collect_tensors(args, kwargs)
-        except Exception:  # pragma: no cover - never break the workload
+        except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
             return func(*args, **kwargs)
         if not tensors:
             return func(*args, **kwargs)
@@ -970,7 +969,7 @@ def _tilelang_name(kernel: Any) -> Optional[str]:
     func = getattr(kernel, "prim_func", None)
     try:
         return str(func.attrs["global_symbol"])
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -1005,7 +1004,7 @@ def install_tilelang_jit_hooks() -> bool:
             name = _name_of(self.func, getattr(self.func, "func", None))
             if name and kernel is not None:
                 kernel._jit_shape_name = name
-        except Exception:  # pragma: no cover - never break the workload
+        except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
             pass
         return kernel
 
