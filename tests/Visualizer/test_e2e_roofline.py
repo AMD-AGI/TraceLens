@@ -25,7 +25,6 @@ from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     flag_points_above_roof,
     load_profile_kernels,
     points_from_model,
-    points_from_report,
     main,
     model_coverage,
     model_coverage_note,
@@ -516,54 +515,6 @@ def test_whole_model_include_adds_unscoped_kernels_without_dropping_tagged():
     assert whole["prefill"] == 80.0
 
 
-def test_points_from_report_use_the_stamped_graph_launch_costs(tmp_path):
-    (tmp_path / "inferenceattention_ops.csv").write_text(
-        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
-        'aiter::mla_decode_v4_asm,10,100,2.0,4.0,"((4, 16, 512),)"\n'
-        'aiter::mla_decode_v4_asm,1,1,0.001,4.0,"((1, 16, 512),)"\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "gemm_ops.csv").write_text(
-        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
-        'aiter::gemm_a8w8,10,200,8.0,16.0,"((4, 7168), (2048, 7168))"\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "rmsnorm_ops.csv").write_text(
-        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
-        'vllm::rmsnorm,4,40,1.0,2.0,"((4, 5120),)"\n',
-        encoding="utf-8",
-    )
-    # The unclassified bucket is not a series, even when the row has a cost.
-    (tmp_path / "unknown_ops.csv").write_text(
-        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
-        'hipGraphLaunch->mystery,4,40,1.0,2.0,"((4, 5120),)"\n',
-        encoding="utf-8",
-    )
-    # A launch the fill did not cover contributes nothing.
-    (tmp_path / "other_ops.csv").write_text(
-        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,Input Dims\n"
-        "hipGraphLaunch->mfma_moe1,61,1000,,,\n",
-        encoding="utf-8",
-    )
-    points = {
-        (item.series, item.concurrency): item for item in points_from_report(tmp_path)
-    }
-    assert ("Decode attention", 1) not in points
-    assert ("unknown", 4) not in points
-    assert ("Unknown", 4) not in points
-    norm = points[("RMSNorm", 4)]
-    assert norm.flops == pytest.approx(4.0e9)
-    attention = points[("Decode attention", 4)]
-    assert attention.cost_source == "profile"
-    assert attention.flops == pytest.approx(2.0e10)
-    assert attention.arithmetic_intensity == pytest.approx(4.0)
-    whole = points[("Whole model", 4)]
-    # Attention, GEMM, RMSNorm, and the unclassified row. Unknown is not its
-    # own series, and its cost still belongs to the whole forward.
-    assert whole.flops == pytest.approx(1.08e11)
-    assert whole.time_us == pytest.approx(380.0)
-
-
 def test_profile_csv_reads_flops_and_bytes(tmp_path):
     # 2 GFLOP/launch * 3 launches, at 4 FLOP/byte.
     csv_path = tmp_path / "gemm_ops.csv"
@@ -856,3 +807,73 @@ def test_cli_model_only_reads_no_profile(tmp_path, capsys):
     )
     assert refused == 1
     assert "does not read a profile" in capsys.readouterr().err
+
+
+def test_replay_trace_calls_the_report_and_plots_its_csvs(
+    tmp_path, monkeypatch, capsys
+):
+    """A replay with no capture goes through the inference report, then the profile reader."""
+    from pathlib import Path
+
+    from TraceLens.Visualizer.model_explorer_export import e2e_roofline
+
+    calls = {}
+
+    def fake_report(**kwargs):
+        calls.update(kwargs)
+        dest = Path(kwargs["output_csvs_dir"])
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "gemm_ops.csv").write_text(
+            "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte\n"
+            "aten::mm,40,1000,2.0,4.0\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        "TraceLens.Reporting.generate_perf_report_pytorch_inference.generate_perf_report_pytorch",
+        fake_report,
+    )
+    projection = {
+        "ops": [
+            {
+                "category": "GEMM",
+                "total_flops": 8.0e10,
+                "total_bytes": 2.0e10,
+                "compute_spec": "matrix_bf16",
+                "instances": 40,
+                "total_roofline_time_us": 100.0,
+            }
+        ]
+    }
+    projection_path = tmp_path / "decode.json"
+    projection_path.write_text(json.dumps(projection), encoding="utf-8")
+    replay = tmp_path / "replay.json"
+    replay.write_text("{}", encoding="utf-8")
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    arch_path = tmp_path / "arch.json"
+    arch_path.write_text(json.dumps(_ARCH), encoding="utf-8")
+    output = tmp_path / "roofline.png"
+    exit_code = e2e_roofline.main(
+        [
+            "--title",
+            "replay",
+            "--output",
+            str(output),
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--projection",
+            f"decode:4:{projection_path}",
+            "--replay-trace",
+            str(replay),
+            "--graph-model-config",
+            str(config),
+        ]
+    )
+    assert exit_code == 0
+    assert output.is_file()
+    assert calls["profile_json_path"] == str(replay)
+    assert calls["graph_model_config_path"] == str(config)
+    assert calls["gpu_arch"]["name"] == "TestGPU"
+    assert "graph_model" not in calls
+    assert "source=profile" in capsys.readouterr().out

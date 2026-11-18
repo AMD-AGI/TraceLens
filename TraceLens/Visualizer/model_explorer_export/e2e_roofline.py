@@ -7,21 +7,21 @@
 """End-to-end roofline plot from a profile and, where the profile has no cost, a projection.
 
 FLOPs and bytes come from the profile when its ``GFLOPS`` and ``FLOPS/Byte``
-columns are filled. A kernel the trace could not model (a GPU-graph launch with
-no ``Input Dims``) falls back to the roofline projection. The profile supplies
-the time, unless ``--model-only`` is set: then the projection's own roofline
-time is the denominator and no profile is read. Hardware roofs come from the
-GPU arch spec (``load_arch``, including ``$TL_EXTENSION``).
+columns are filled, and from the roofline projection otherwise. A capture-merged
+profile already has those columns for the ops the trace recorded. The profile
+supplies the time, unless ``--model-only`` is set: then the projection's own
+roofline time is the denominator and no profile is read. Hardware roofs come
+from the GPU arch spec (``load_arch``, including ``$TL_EXTENSION``).
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import csv
 import json
 import re
 import sys
+import tempfile
 import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,7 +32,6 @@ from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_PATTERNS,
     OP_CATEGORY_REGISTRY,
     categorize_torch_op,
-    synthetic_kernel_name,
 )
 from TraceLens.Visualizer.model_explorer_export.roofline_augment import classify_kernel
 
@@ -174,23 +173,6 @@ DEFAULT_SERIES: tuple[Series, ...] = (
     Series("Whole model", "P", None, None, False),
     Series("End to end", "D", None, None, False),
 )
-
-# Perf-report categories written after graph launches have been given Input
-# Dims, either from a capture profile or from the model schedule. The plot
-# reads the FLOPs and bytes the perf model computed from those dims.
-PROFILE_SERIES: tuple[Series, ...] = (
-    Series("Decode attention", "o", "decode", ("Attention",), False),
-    Series("Routed MoE", "s", None, ("MoE",), False),
-    *_category_series(report_categories()),
-    Series("Whole model", "P", None, None, False),
-)
-_REPORT_CATEGORIES = {
-    "inferenceattention": "Decode attention",
-    "moe_unfused": "Routed MoE",
-    "gemm": "GEMM",
-}
-# A leading dimension above this is a sequence or a weight, not a batch bucket.
-_MAX_BATCH = 16
 
 
 @dataclass(frozen=True)
@@ -502,17 +484,22 @@ _COMPUTATION_CATEGORY = (
 )
 
 
+_SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
+
+
 def _kernel_computation(name: str) -> str:
     """The device kernel. Text before ``->`` is a launcher or a display name."""
-    kernel = synthetic_kernel_name(name)
-    if kernel:
-        return kernel
-    arrow = name.rfind("->")
+    body = (
+        name[: -len(_SYNTHETIC_OP_SUFFIX)]
+        if name.endswith(_SYNTHETIC_OP_SUFFIX)
+        else name
+    )
+    arrow = body.rfind("->")
     if arrow >= 0:
-        tail = name[arrow + 2 :].strip()
+        tail = body[arrow + 2 :].strip()
         if tail:
             return tail
-    return name
+    return body
 
 
 def report_kernel_category(name: str) -> str | None:
@@ -1004,24 +991,6 @@ def _fmt_number(value: float) -> str:
     return f"{value:,.1f}"
 
 
-def _batch_dim(raw: str) -> int | None:
-    """The batch a stamped ``Input Dims`` record belongs to.
-
-    Graph-launch rows take the batch from the first tensor. A leading
-    dimension past the capture buckets is a sequence or a weight, not a batch.
-    """
-    try:
-        dims = ast.literal_eval(raw) if raw else ()
-    except (SyntaxError, ValueError):
-        return None
-    if not dims or not isinstance(dims[0], (list, tuple)) or not dims[0]:
-        return None
-    first = dims[0][0]
-    if isinstance(first, int) and 0 < first <= _MAX_BATCH:
-        return first
-    return None
-
-
 def _model_forward_time_us(ops: list[dict[str, Any]]) -> float | None:
     """Roofline time of one forward. None when a costed op has no time."""
     time_us = 0.0
@@ -1077,78 +1046,6 @@ def points_from_model(
                 )
             )
     return _drop_whole_model_matching_end_to_end(points, warnings), warnings
-
-
-def points_from_report(directory: Path) -> list[RooflinePoint]:
-    """Points from a perf report whose graph launches carry Input Dims.
-
-    The report generator fills those dims from a capture profile or from the
-    model schedule (the exporter's kernel shapes, or the config schedule when
-    the exporter does not state them). The perf model then writes ``GFLOPS``
-    and ``FLOPS/Byte``. This reads those columns. A row without them is a
-    launch the fill did not cover, and it is left out.
-    """
-    totals: dict[tuple[str, int], list[float]] = {}
-
-    def add(key: tuple[str, int], flops: float, nbytes: float, time_us: float) -> None:
-        slot = totals.setdefault(key, [0.0, 0.0, 0.0])
-        slot[0] += flops
-        slot[1] += nbytes
-        slot[2] += time_us
-
-    by_lower = {name.lower(): name for name in report_categories()}
-    for path in sorted(directory.glob("*_ops.csv")):
-        stem = path.name.removesuffix("_ops.csv")
-        # ``unknown`` is the unclassified bucket and is not drawn. A stem the
-        # report named explicitly keeps that name; the three historical files
-        # keep the labels the plot already used.
-        if stem.lower() in _UNCLASSIFIED:
-            label = None
-        else:
-            label = _REPORT_CATEGORIES.get(stem) or by_lower.get(stem.lower(), stem)
-        with path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            column = _time_column(reader.fieldnames)
-            if column is None:
-                continue
-            for row in reader:
-                count_raw = row.get("operation_count") or ""
-                count = int(float(count_raw)) if count_raw else 0
-                cost = _profile_cost(row.get("GFLOPS"), row.get("FLOPS/Byte"), count)
-                time_raw = row.get(column) or ""
-                if cost is None or not time_raw:
-                    continue
-                batch = _batch_dim(row.get("Input Dims") or "")
-                if batch is None:
-                    continue
-                flops, nbytes = cost
-                time_us = float(time_raw)
-                if label is not None:
-                    add((label, batch), flops, nbytes, time_us)
-                add(("Whole model", batch), flops, nbytes, time_us)
-    peak: dict[str, float] = {}
-    for (label, _batch), (flops, _nbytes, _time_us) in totals.items():
-        peak[label] = max(peak.get(label, 0.0), flops)
-    points = []
-    for (label, batch), (flops, nbytes, time_us) in sorted(totals.items()):
-        # A bucket under 1% of its series is a capture size the replay barely
-        # ran. It is not a point on the diagram.
-        if flops < 0.01 * peak[label] or nbytes <= 0 or time_us <= 0:
-            continue
-        points.append(
-            RooflinePoint(
-                series=label,
-                phase="decode",
-                concurrency=batch,
-                arithmetic_intensity=flops / nbytes,
-                achieved_tflops=flops / (time_us * 1e-6) / 1e12,
-                flops=flops,
-                bytes=nbytes,
-                time_us=time_us,
-                cost_source="profile",
-            )
-        )
-    return points
 
 
 @dataclass(frozen=True)
@@ -1553,6 +1450,31 @@ def _parse_keyed_flag(entries: list[str], value_is_float: bool):
     return {key: tuple(values) for key, values in parsed.items()}
 
 
+def profile_dir_from_model_config(
+    replay: Path,
+    config: Path,
+    dest: Path,
+    *,
+    arch: dict[str, Any] | None = None,
+) -> Path:
+    """Write a perf report whose graph launches were shaped from the model config.
+
+    The inference report owns that shape fill. This plot reads the ``*_ops.csv``
+    files it writes, the same columns a capture-merged profile uses.
+    """
+    from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+        generate_perf_report_pytorch,
+    )
+
+    generate_perf_report_pytorch(
+        profile_json_path=str(replay),
+        output_csvs_dir=str(dest),
+        graph_model_config_path=str(config),
+        gpu_arch=arch,
+    )
+    return dest
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="TraceLens_e2e_roofline_plot",
@@ -1613,19 +1535,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--profile-costs",
-        action="store_true",
-        help=(
-            "Read FLOPs and bytes from the perf report. Use this after the "
-            "report generator has filled graph-launch Input Dims from a "
-            "capture profile or from the model schedule. No projection is "
-            "read."
-        ),
-    )
-    parser.add_argument(
         "--profile-json",
         type=Path,
         help="JSON list of {name, time_us, count} kernel records",
+    )
+    parser.add_argument(
+        "--replay-trace",
+        type=Path,
+        help=(
+            "Graph replay with no capture profile. Used with "
+            "--graph-model-config. The inference report fills shapes from "
+            "that config, and the plot reads the report it writes."
+        ),
+    )
+    parser.add_argument(
+        "--graph-model-config",
+        type=Path,
+        help=(
+            "Hugging Face config.json for --replay-trace. Passed to the "
+            "inference report as graph_model_config_path."
+        ),
     )
     parser.add_argument(
         "--kernels",
@@ -1680,39 +1609,50 @@ def main(argv: list[str] | None = None) -> int:
         kernels = None
         ylabel = "TFLOP/s per GPU while the operation runs"
         if args.model_only and (
-            args.profile_costs
-            or args.profile_dir is not None
+            args.profile_dir is not None
             or args.profile_json is not None
+            or args.replay_trace is not None
+            or args.graph_model_config is not None
         ):
             raise ValueError("--model-only does not read a profile")
-        if args.profile_costs:
-            if args.profile_dir is None:
-                raise ValueError("--profile-costs needs --profile-dir")
-            points = points_from_report(args.profile_dir)
-            warnings = []
-            series = PROFILE_SERIES
-        else:
-            if args.augmentation is not None:
-                payload = json.loads(args.augmentation.read_text(encoding="utf-8"))
-                regimes.extend(regimes_from_augmentation(payload))
-            regimes.extend(_projection_regime(entry) for entry in args.projection)
-            if not regimes:
-                raise ValueError("pass --augmentation or at least one --projection")
-            if args.model_only:
-                points, warnings = points_from_model(regimes, series=series)
-                ylabel = "TFLOP/s per GPU at the roofline"
-            else:
-                if args.profile_json is not None:
-                    kernels = load_profile_json(args.profile_json)
-                elif args.profile_dir is not None:
-                    kernels = load_profile_kernels(args.profile_dir)
-                else:
-                    raise ValueError("pass --profile-dir or --profile-json")
-                includes = _parse_keyed_flag(args.kernels, value_is_float=False)
-                overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
-                points, warnings = build_points(
-                    regimes, kernels, includes=includes, time_overrides_us=overrides
+        if (args.replay_trace is None) != (args.graph_model_config is None):
+            raise ValueError(
+                "--replay-trace and --graph-model-config are used together"
+            )
+        if args.replay_trace is not None:
+            if args.profile_dir is not None or args.profile_json is not None:
+                raise ValueError(
+                    "--replay-trace writes the profile; do not also pass "
+                    "--profile-dir or --profile-json"
                 )
+            dest = Path(tempfile.mkdtemp(prefix="e2e-roofline-"))
+            args.profile_dir = profile_dir_from_model_config(
+                args.replay_trace,
+                args.graph_model_config,
+                dest,
+                arch=arch,
+            )
+        if args.augmentation is not None:
+            payload = json.loads(args.augmentation.read_text(encoding="utf-8"))
+            regimes.extend(regimes_from_augmentation(payload))
+        regimes.extend(_projection_regime(entry) for entry in args.projection)
+        if not regimes:
+            raise ValueError("pass --augmentation or at least one --projection")
+        if args.model_only:
+            points, warnings = points_from_model(regimes, series=series)
+            ylabel = "TFLOP/s per GPU at the roofline"
+        else:
+            if args.profile_json is not None:
+                kernels = load_profile_json(args.profile_json)
+            elif args.profile_dir is not None:
+                kernels = load_profile_kernels(args.profile_dir)
+            else:
+                raise ValueError("pass --profile-dir or --profile-json")
+            includes = _parse_keyed_flag(args.kernels, value_is_float=False)
+            overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
+            points, warnings = build_points(
+                regimes, kernels, includes=includes, time_overrides_us=overrides
+            )
         points, roof_warnings = flag_points_above_roof(points, arch)
         warnings.extend(roof_warnings)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:

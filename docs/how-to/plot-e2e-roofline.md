@@ -32,10 +32,10 @@ the whole forward) at one concurrency.
 
 `--model-only` draws the projection with no profile. Y is then the projection's
 FLOPs divided by its roofline time, so each point sits on the roof its shapes
-imply. A profile of a GPU-graph replay has kernel time and no `Input Dims`, so
-those kernels have no `GFLOPS`. The plot uses the projection for them and the
-profile for every kernel the trace did model. Whole model is the sum of those
-categories at one concurrency.
+imply. A profile whose graph capture restored the CPU ops has `GFLOPS` for
+those ops. The plot uses the profile for every kernel that has it and the
+projection for the rest. Whole model is the sum of those categories at one
+concurrency.
 
 ## Run the tool
 
@@ -98,31 +98,23 @@ TraceLens_e2e_roofline_plot \
     --output roofline.png
 ```
 
-## From a report with graph-launch shapes
+## Without a graph capture
 
-A graph replay records device kernels and not the CPU ops that were captured
-into the graph, so those kernels have no `Input Dims`. The inference report
-fills them before it costs the kernel. A capture folder supplies the recorded
-call. Without one, `--graph_model_config` builds the per-rank model and the
-schedule walks the forward. When the pinned engine checkout exports a kernel
-together with the tensors it is called with, those shapes replace the schedule
-for that launch. The perf model then writes `GFLOPS` and `FLOPS/Byte`.
-
-Plot that report directly. No projection is read:
+A graph replay that has no capture profile has kernel time and no `Input Dims`.
+Pass the replay and the Hugging Face `config.json`. The plot calls
+`generate_perf_report_pytorch` with `graph_model_config_path` and reads the
+report that call writes, the same `*_ops.csv` columns as a capture-merged
+profile. A projection is still required for any series the report did not cost.
 
 ```bash
 TraceLens_e2e_roofline_plot \
-    --profile-costs \
     --gpu-arch-name MI355X \
-    --profile-dir <report>/category_data \
+    --replay-trace replay.json.gz \
+    --graph-model-config config.json \
+    --projection decode:48:decode.json \
     --title "decode" \
     --output roofline.png
 ```
-
-Attention, routed MoE, and GEMM are the report categories `inferenceattention`,
-`moe_unfused`, and `gemm`. Whole model is every costed row in the same batch
-bucket. The batch is the leading dimension of the stamped `Input Dims`. A row
-the fill did not cover has empty `GFLOPS` and is left out.
 
 ## What the profile contributes
 
