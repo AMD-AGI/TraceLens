@@ -228,13 +228,17 @@ Pass `--threshold` only when `min_share` is set. Do not edit `gaps.json`. An emp
        Execute every step in the sub-agent file. Return "DONE" when complete.
 
 **Gate:** `<prefix> <bringup_gates> op-result --bringup-dir <bringup_dir> --result <op_dir>/result.json` exits 0 for each
-op. Otherwise relaunch that sub-agent once; if it fails again, the op is excluded.
+op. Otherwise relaunch that sub-agent once; if it fails again, the op is excluded. The gate
+records each op's verdict in `gates/op_result_<op_slug>.json`, so an excluded op is never
+merged or published. An op from `gaps.json` you do not launch needs no file; Step 8 lists
+it as skipped.
 
 ## Step 7: Coverage
 
-Skip when no op has outcome `modeled` or `categorized`.
+An op is accepted when its `gates/op_result_<op_slug>.json` has `status` `pass`. Skip this
+step when no accepted op has outcome `modeled` or `categorized`.
 
-1. In your own shell, merge each `modeled` or `categorized` op's `<op_branch>` in `gaps.json` order:
+1. In your own shell, merge each accepted `modeled` or `categorized` op's `<op_branch>` in `gaps.json` order:
 
        git -C <tracelens_dir> worktree add --detach <bringup_dir>/worktrees/pm_integration <base_branch>
        git -C <bringup_dir>/worktrees/pm_integration merge --no-edit <op_branch>
@@ -263,7 +267,7 @@ and the Publish prompt it lists.
 
 Runs only on a prompt that says publish, names `<bringup_dir>`, and lists op slugs. Run
 everything in your own shell. For each named op, read `<op_dir>/result.json`; skip it if
-`<op_dir>/published_url.txt` exists.
+`<op_dir>/published_url.txt` exists or its `gates/op_result_<op_slug>.json` is not `pass`.
 
 - `modeled` or `categorized`:
 

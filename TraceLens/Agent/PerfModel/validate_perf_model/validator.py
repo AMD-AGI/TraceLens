@@ -134,6 +134,8 @@ _MEM_READ_RAW_COUNTERS = {
 CATEGORIES = sorted({entry["category"] for entry in OP_REGISTRY.values()})
 
 REPLAY_RUNNER = Path(__file__).resolve().parent / "replay" / "_runner.py"
+# Kernel replay/_runner.measure() launches right before the measured call.
+MARKER_KERNEL = "bitwise_not"
 
 _INFRA_KERNEL_PATTERNS = [
     "at::native::",
@@ -273,155 +275,89 @@ def run_rocprofv3(
     return csv_path
 
 
-def discover_kernel_name(
-    rocprofv3_path, runner_argv, num_warmup_iters, out_dir, timeout=120
-):
-    """Trace one execution of ``runner_argv`` to auto-discover the target kernel."""
-    try:
-        trace_csv = run_rocprofv3(
-            rocprofv3_path,
-            ["--kernel-trace"],
-            "kernel_trace.csv",
-            runner_argv,
-            "kernel_discovery",
-            out_dir,
-            timeout,
-        )
-    except (RuntimeError, FileNotFoundError) as e:
-        print(f"  WARNING: kernel-trace failed: {e}")
-        return None
-    kernel_info = {}
-    with open(trace_csv, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            kn = row.get("Kernel_Name", "")
-            start = int(row.get("Start_Timestamp", 0))
-            end = int(row.get("End_Timestamp", 0))
-            if kn not in kernel_info:
-                kernel_info[kn] = {"count": 0, "total_ns": 0}
-            kernel_info[kn]["count"] += 1
-            kernel_info[kn]["total_ns"] += end - start
-    print(f"  Discovered {len(kernel_info)} unique kernels:")
-    for kn, info in sorted(kernel_info.items(), key=lambda x: -x[1]["total_ns"]):
-        dur_ms = info["total_ns"] / 1e6
-        print(f'    {info["count"]}x ({dur_ms:.2f} ms total)  {kn[:120]}...')
-    expected_count = num_warmup_iters + 1
-
-    def is_infra(name):
-        return any(pat in name for pat in _INFRA_KERNEL_PATTERNS)
-
-    candidates = {kn: info for kn, info in kernel_info.items() if not is_infra(kn)}
-    if not candidates:
-        print("  WARNING: all kernels matched infrastructure patterns")
-        return None
-    exact_match = {
-        kn: info for kn, info in candidates.items() if info["count"] == expected_count
-    }
-    pool = exact_match if exact_match else candidates
-    best_kernel = max(pool, key=lambda kn: pool[kn]["total_ns"])
-    best_info = pool[best_kernel]
-    print(
-        f'\n  Selected kernel ({best_info["count"]} dispatches, {best_info["total_ns"] / 1e6:.2f} ms):'
-    )
-    print(f"    {best_kernel[:200]}")
-    return best_kernel
+def _is_infra(name):
+    return any(pat in name for pat in _INFRA_KERNEL_PATTERNS)
 
 
-def parse_kernel_runtime_ns(trace_csv, kernel_name_filter=None):
-    """Return ``(last_dispatch_ns, mean_dispatch_ns, num_dispatches)`` for matching kernels.
+def _measured_dispatches(rows, kernel_filter=None):
+    """Rows of the measured call: the dispatches after the last marker kernel.
 
-    Reads a rocprofv3 ``--kernel-trace`` CSV (columns include ``Kernel_Name``,
-    ``Start_Timestamp``, ``End_Timestamp``) and computes per-dispatch durations
-    in nanoseconds. The "last" dispatch corresponds to the measured iteration
-    used for counter readings (warmups precede it). Returns ``(None, None, 0)``
-    if no matching dispatches are found or the file is unreadable.
+    ``rows`` are rocprofv3 CSV rows (kernel trace or counter collection).
+    Infrastructure kernels are left out, and ``kernel_filter`` (a substring of
+    the kernel name) narrows the rest. Raises RuntimeError when the trace has no
+    marker.
     """
-    if not trace_csv or not os.path.exists(trace_csv):
-        return (None, None, 0)
-    durations_by_dispatch = {}
-    try:
-        with open(trace_csv, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                kn = row.get("Kernel_Name", "")
-                if (
-                    kernel_name_filter
-                    and kernel_name_filter != kn
-                    and kernel_name_filter not in kn
-                ):
-                    continue
-                try:
-                    start = int(row.get("Start_Timestamp", 0))
-                    end = int(row.get("End_Timestamp", 0))
-                    disp_id = int(row.get("Dispatch_Id", 0))
-                except (TypeError, ValueError):
-                    continue
-                durations_by_dispatch[disp_id] = end - start
-    except (OSError, csv.Error):
-        return (None, None, 0)
-    if not durations_by_dispatch:
-        return (None, None, 0)
-    n = len(durations_by_dispatch)
-    last_id = max(durations_by_dispatch.keys())
-    last_ns = durations_by_dispatch[last_id]
-    mean_ns = sum(durations_by_dispatch.values()) / n
-    return (last_ns, mean_ns, n)
+    markers = [int(r["Dispatch_Id"]) for r in rows if MARKER_KERNEL in r["Kernel_Name"]]
+    if not markers:
+        raise RuntimeError(f"no {MARKER_KERNEL} marker in trace")
+    return [
+        r
+        for r in rows
+        if int(r["Dispatch_Id"]) > max(markers)
+        and not _is_infra(r["Kernel_Name"])
+        and (not kernel_filter or kernel_filter in r["Kernel_Name"])
+    ]
 
 
-def parse_counter_csv(csv_path, kernel_name_filter=None):
-    dispatch_counters = {}
-    matched_rows = 0
-    total_rows = 0
+def _read_csv_rows(csv_path):
     with open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            total_rows += 1
-            kernel_col = None
-            for col in ("Kernel_Name", "kernel_name", "KernelName"):
-                if col in row:
-                    kernel_col = col
-                    break
-            if kernel_name_filter and kernel_col:
-                kn = row[kernel_col]
-                if kernel_name_filter != kn and kernel_name_filter not in kn:
-                    continue
-            matched_rows += 1
-            dispatch_id = row.get("Dispatch_Id", row.get("dispatch_id", "0"))
-            counter_name_col = None
-            counter_value_col = None
-            for col in ("Counter_Name", "counter_name"):
-                if col in row:
-                    counter_name_col = col
-                    break
-            for col in ("Counter_Value", "counter_value"):
-                if col in row:
-                    counter_value_col = col
-                    break
-            if counter_name_col and counter_value_col:
-                cname = row[counter_name_col]
-                # Keep counters with a known display mapping, plus the raw TCC
-                # read-request counters used for the corrected read-byte formula.
-                if cname in COUNTER_DISPLAY or cname in _MEM_READ_RAW_COUNTERS:
-                    if dispatch_id not in dispatch_counters:
-                        dispatch_counters[dispatch_id] = {}
-                    try:
-                        dispatch_counters[dispatch_id][cname] = float(
-                            row[counter_value_col]
-                        )
-                    except (ValueError, TypeError):
-                        continue
-    if dispatch_counters:
-        last_dispatch_id = max(dispatch_counters.keys(), key=int)
-        counters = dispatch_counters[last_dispatch_id]
-    else:
-        counters = {}
-    print(
-        f"  Parsed {csv_path}: {total_rows} rows, {matched_rows} matched filter '{kernel_name_filter}'"
+        return list(csv.DictReader(f))
+
+
+def discover_measured_kernels(
+    rocprofv3_path, runner_argv, out_dir, timeout=120, kernel_filter=None
+):
+    """Trace one run of ``runner_argv``; return ``(trace_csv, kernel_names)``.
+
+    ``kernel_names`` are the distinct kernels of the measured call, in launch
+    order.
+    """
+    trace_csv = run_rocprofv3(
+        rocprofv3_path,
+        ["--kernel-trace"],
+        "kernel_trace.csv",
+        runner_argv,
+        "kernel_discovery",
+        out_dir,
+        timeout,
     )
-    print(
-        f"  Found {len(dispatch_counters)} matching dispatches, using last (dispatch "
-        f'{last_dispatch_id if dispatch_counters else "N/A"})'
-    )
+    window = _measured_dispatches(_read_csv_rows(trace_csv), kernel_filter)
+    names = list(dict.fromkeys(r["Kernel_Name"] for r in window))
+    if not names:
+        raise RuntimeError("no kernel after the marker in trace")
+    print(f"  Measured call: {len(window)} dispatches of {len(names)} kernels:")
+    for name in names:
+        print(f"    {name[:200]}")
+    return trace_csv, names
+
+
+def parse_kernel_runtime_ns(trace_csv, kernel_filter=None):
+    """Return ``(total_ns, mean_ns, num_dispatches)`` for the measured call.
+
+    Reads a rocprofv3 ``--kernel-trace`` CSV and sums the durations of the
+    dispatches after the marker.
+    """
+    durations = [
+        int(r["End_Timestamp"]) - int(r["Start_Timestamp"])
+        for r in _measured_dispatches(_read_csv_rows(trace_csv), kernel_filter)
+    ]
+    if not durations:
+        return (None, None, 0)
+    return (sum(durations), sum(durations) / len(durations), len(durations))
+
+
+def parse_counter_csv(csv_path, kernel_filter=None):
+    """Sum each counter over the measured call's dispatches in a ``--pmc`` CSV."""
+    window = _measured_dispatches(_read_csv_rows(csv_path), kernel_filter)
+    counters = {}
+    for row in window:
+        name = row["Counter_Name"]
+        # Keep counters with a known display mapping, plus the raw TCC
+        # read-request counters used for the corrected read-byte formula.
+        if name in COUNTER_DISPLAY or name in _MEM_READ_RAW_COUNTERS:
+            counters[name] = counters.get(name, 0.0) + float(row["Counter_Value"])
+    dispatches = len({r["Dispatch_Id"] for r in window})
+    print(f"  Parsed {csv_path}: {dispatches} measured dispatches")
     print(f"  Counters: {counters}")
     return counters
 
@@ -670,9 +606,9 @@ def generate_report(
             meas_tb_s = measured_total_bytes / 1e12 / runtime_s
         lines.append("")
         lines.append(
-            "--- Achieved Throughput (last-dispatch runtime from kernel-trace) ---"
+            "--- Achieved Throughput (measured-call runtime from kernel-trace) ---"
         )
-        runtime_line = f"  Kernel runtime (last dispatch): {runtime_us:9.3f} us"
+        runtime_line = f"  Kernel runtime (measured call): {runtime_us:9.3f} us"
         if runtime_mean_us is not None and kernel_runtime_dispatches > 1:
             runtime_line += f"   (mean over {kernel_runtime_dispatches} dispatches: {runtime_mean_us:.3f} us)"
         lines.append(runtime_line)
@@ -865,34 +801,14 @@ def _collect_counters(args, runner_argv, kernel_filter, output_dir):
     return ops_counters, mem_counters
 
 
-def _resolve_kernel_filter(args, runner_argv, num_warmup_iters, output_dir):
-    """Return the manual ``--kernel-filter``, else the auto-discovered kernel name."""
-    if args.kernel_filter:
-        print(f"Using manual kernel filter: {args.kernel_filter}")
-        return args.kernel_filter
-    print("Discovering target kernel via rocprofv3 --kernel-trace ...")
-    kernel_filter = discover_kernel_name(
-        args.rocprofv3_path,
-        runner_argv,
-        num_warmup_iters,
-        output_dir,
-        timeout=args.timeout,
-    )
-    if kernel_filter:
-        print(f"       Auto-discovered kernel: {kernel_filter[:120]}...")
-    else:
-        print("       WARNING: auto-discovery failed, no kernel filter applied")
-    return kernel_filter
-
-
 def run_op_validation(
     op_name, args, output_dir, title, dims_str, predict, build_argv, extra_fields
 ):
     """Validate one op against rocprofv3 counters; return its result row.
 
     ``op_name`` is the OP_REGISTRY key. ``predict()`` returns the perf model's
-    ``(flops, bytes, precision)`` and ``build_argv()`` returns ``(runner_argv,
-    num_warmup_iters)``; ops registered ``perf_model_only`` skip the latter.
+    ``(flops, bytes, precision)`` and ``build_argv()`` returns the runner argv;
+    ops registered ``perf_model_only`` skip the latter.
     ``extra_fields`` are added to the row. A rocprofv3 failure raises.
     """
     print("\n" + "#" * 70)
@@ -906,18 +822,23 @@ def run_op_validation(
     print("Running TraceLens perf model ...")
     predicted_flops, predicted_bytes, predicted_precision = _run_prediction(predict)
     print("Building replay runner command ...")
-    runner_argv, num_warmup_iters = build_argv()
+    runner_argv = build_argv()
     print(f'       Runner cmd: {" ".join(runner_argv)}')
-    kernel_filter = _resolve_kernel_filter(
-        args, runner_argv, num_warmup_iters, output_dir
+    kernel_filter = args.kernel_filter
+    if kernel_filter:
+        print(f"Using manual kernel filter: {kernel_filter}")
+    print("Tracing the measured call via rocprofv3 --kernel-trace ...")
+    trace_csv_path, kernel_names = discover_measured_kernels(
+        args.rocprofv3_path,
+        runner_argv,
+        output_dir,
+        timeout=args.timeout,
+        kernel_filter=kernel_filter,
     )
+    kernel_label = "; ".join(kernel_names)
     ops_counters, mem_counters = _collect_counters(
         args, runner_argv, kernel_filter, output_dir
     )
-    trace_csv_path = os.path.join(
-        output_dir, "kernel_discovery", "kernel_discovery_kernel_trace.csv"
-    )
-    trace_csv_path = _find_csv(trace_csv_path, output_dir, "kernel_trace.csv")
     runtime_ns, runtime_mean_ns, runtime_dispatches = parse_kernel_runtime_ns(
         trace_csv_path, kernel_filter
     )
@@ -931,7 +852,7 @@ def run_op_validation(
         ops_counters,
         mem_counters,
         output_dir,
-        kernel_filter=kernel_filter,
+        kernel_filter=kernel_label,
         kernel_runtime_ns=runtime_ns,
         kernel_runtime_mean_ns=runtime_mean_ns,
         kernel_runtime_dispatches=runtime_dispatches,
@@ -943,7 +864,7 @@ def run_op_validation(
         "predicted_bytes": predicted_bytes,
         "predicted_precision": predicted_precision or "N/A",
         **report_data,
-        "kernel_name": kernel_filter or "",
+        "kernel_name": kernel_label,
         "run_status": "OK",
     }
 
@@ -1552,12 +1473,7 @@ def main():
 
 
 def _build_runner_argv(op_name, effective_args, num_warmup=3):
-    """Build the argv list that rocprofv3 wraps for op ``op_name``.
-
-    Returns ``(argv, num_warmup_iters)`` -- num_warmup_iters is also forwarded
-    on the command line and is returned separately so ``discover_kernel_name``
-    can compute the expected dispatch count.
-    """
+    """Build the argv list that rocprofv3 wraps for op ``op_name``."""
     cmd = [
         sys.executable,
         str(REPLAY_RUNNER),
@@ -1586,7 +1502,7 @@ def _build_runner_argv(op_name, effective_args, num_warmup=3):
     ann = getattr(effective_args, "annotation", None)
     if ann:
         cmd += ["--annotation", ann]
-    return (cmd, num_warmup)
+    return cmd
 
 
 def _build_csv_runner_argv(
@@ -1624,7 +1540,7 @@ def _build_csv_runner_argv(
         ]
     if concrete_inputs is not None:
         cmd += ["--concrete-inputs-json", json.dumps([str(c) for c in concrete_inputs])]
-    return (cmd, num_warmup)
+    return cmd
 
 
 def _populate_varlen_attention_args(op_name, effective_args):
@@ -1829,8 +1745,6 @@ def _build_runner_argv_from_csv_entry(
     perf_params=None,
 ):
     """Decide which runner invocation to use for a CSV-driven validation entry.
-
-    Returns ``(argv, num_warmup_iters)``.
 
     If the op was registered with ``csv_harness=True``, dimensions
     are extracted from ``input_dims`` / ``input_types`` (and the optional
