@@ -66,12 +66,16 @@ For each op, `validator.py`:
 
 1. Fills unset CLI dimensions from the op's `defaults` and builds the runner
    command `python replay/_runner.py --op <key> --M ... --num-warmup 3`.
-2. Runs it once under `rocprofv3 --kernel-trace` to pick the target kernel
-   (non-infrastructure kernel with `warmups + 1` dispatches, longest total
-   time) and its runtime. `--kernel-filter` overrides this.
+2. Runs it once under `rocprofv3 --kernel-trace` to find the measured call:
+   every non-infrastructure dispatch after the last `bitwise_not` marker that
+   `measure()` in `replay/_runner.py` launches before it. These kernels, in
+   launch order, fill `kernel_name`, and their summed durations the runtime.
+   `--kernel-filter` keeps only the window's kernels whose name contains it. A
+   trace without the marker fails the op.
 3. Evaluates the perf model.
 4. Re-runs the test under `rocprofv3 --pmc` once per counter group (below),
-   keeping the last dispatch of the target kernel (the measured iteration).
+   summing each counter over the same window, so an op that launches several
+   kernels is measured as a whole.
 5. Writes `validation_report.txt` and adds a row to the summary CSV with its
    `run_status` and `match_status` (see Outputs in SKILL.md).
 
@@ -248,6 +252,33 @@ validator, so the code matches the kernel that was measured.
    change ratios, bands or other rows, and never mark `over-predicted` or
    `no prediction` rows as explained.
 
+### Worked example: CK MoE `block_m` padding
+
+`ck_moe_stage2` at its default shape (M 512, N 2048, K 7168, E 8, topk 2, BF16)
+reports a FLOPs ratio of 1.0938 or 1.1250, depending on the run, and
+`deviation-suspect`.
+
+1. **Call chain:** `test_ck_moe_stage2` in `replay/moe.py` calls
+   `aiter.ops.moe_op.ck_moe_stage2_fwd`, which runs the CK `kernel_moe_gemm`
+   named in `kernel_name`. Its routing buffers come from
+   `aiter.fused_moe.moe_sorting`.
+2. **Mechanism:** `moe_sorting` groups the routed rows by expert and pads each
+   expert's rows to a multiple of `block_size`, by default `BLOCK_SIZE_M = 32`
+   (`aiter/fused_moe.py:68`, buffer sizing at `:451-453`). The kernel runs every
+   padded row through the GEMM, while the model counts `2 * M * topk * N * K`.
+3. **Quantify:** the M x topk = 1024 routed rows spread over 8 experts, for
+   example 117, 132, 128, 121, 124, 133, 138 and 131 rows. Padded to multiples
+   of 32 that is 128 + 160 + 128 + 128 + 128 + 160 + 160 + 160 = 1152 rows
+   (`num_valid_ids`), and 1152 / 1024 = 1.1250. A routing that needs one tile
+   fewer gives 1120 / 1024 = 1.0938. A ratio that moves between runs at the
+   same shape points to routing, not cache capacity.
+4. **Rerun:** not needed; step 3 reproduces both ratios exactly.
+5. **Record:** `match_status` becomes `deviation-explained`, with the comment
+   `FLOPs 1.1250: moe_sorting pads each expert's rows to block_size 32
+   (aiter/fused_moe.py:68, :451-453); 1152 padded rows / 1024 routed rows`.
+   The bytes ratio of the same row has other causes and needs its own
+   investigation.
+
 ## Running
 
 ```bash
@@ -326,8 +357,8 @@ Harness conventions (see `replay/gemm.py`):
   call. `measure()` in `replay/_runner.py` runs it `--num-warmup` times,
   synchronizes, flushes L2 so the measured call starts cold, launches a
   `bitwise_not` marker between the warmup and measured dispatches, then makes
-  one measured call and synchronizes again. The validator reads counters from
-  the last dispatch.
+  one measured call and synchronizes again. The validator sums counters over
+  every dispatch after the marker.
 - Import the kernel library inside the function, so a missing framework only
   breaks its own ops.
 - Invoke the op the way the framework does: `aiter.<fn>(...)`,
