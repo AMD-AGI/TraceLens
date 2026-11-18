@@ -1208,8 +1208,8 @@ class TestPerfModelExtensions:
         assert model.param_details["logical_batch_size"] == 5
         assert model.get_compute_precision() == "fp32"
         assert model.get_maf_type() == "vector"
-        # sqrtsoftplus + bias + 12-comparator network + warp max + renorm.
-        assert model.flops() == 8 * (7 * 384 + 64 * 12 + 6 * 6 + 13)
+        # sqrtsoftplus (23) + bias + 12-comparator network + warp max + renorm.
+        assert model.flops() == 8 * (24 * 384 + 64 * 12 + 6 * 6 + 13)
         assert model.bytes() == (8 * 384 * 2 + 384 * 2 + 8 * 6 * 4 + 8 * 6 * 4)
 
     def test_deepseek_v4_moe_small_sort_selects_float_precision(self):
@@ -1396,7 +1396,7 @@ class TestPerfModelExtensions:
             }
         )
         assert sigmoid.param_details["score_func"] == "sigmoid"
-        assert sigmoid.flops() == 8 * (6 * 384 + 64 * 12 + 6 * 6 + 13)
+        assert sigmoid.flops() == 8 * (15 * 384 + 64 * 12 + 6 * 6 + 13)
         softmax = pext.topk_gating_fwd(
             {
                 "args": {
@@ -1407,7 +1407,7 @@ class TestPerfModelExtensions:
             }
         )
         assert softmax.param_details["need_renorm"] is False
-        assert softmax.flops() == 8 * (384 + 64 * 12 + 6 * 6 + 6)
+        assert softmax.flops() == 8 * (13 * 384 + 64 * 12 + 6 * 6 + 6)
 
     def test_moe_sort_distributed_path(self):
         event = {
@@ -1645,7 +1645,7 @@ class TestPerfModelExtensions:
             }
         }
         routed = pext.topk_softplus_sqrt(router)
-        assert routed.flops() == 3505
+        assert routed.flops() == 10033
         assert routed.bytes() == 3145
         assert routed.get_compute_precision() == "fp32"
         assert routed.get_maf_type() == "vector"
@@ -1669,7 +1669,7 @@ class TestPerfModelExtensions:
         }
         hash_model = pext.topk_softplus_sqrt(hashed)
         assert hash_model.param_details["use_hash"] is True
-        assert hash_model.flops() == 2317
+        assert hash_model.flops() == 8845
         assert hash_model.bytes() == 1637
         assert pext.topk_softplus_sqrt({"args": {"Input Dims": []}}).flops() is None
 
@@ -3074,7 +3074,7 @@ class TestMiscPerfModelCoverage:
             }
         }
         model = perf_model.cross_entropy_fwd(event)
-        assert model.flops() == 5 * 4 * 32000
+        assert model.flops() == 18 * 4 * 32000
 
     def test_jax_gemm_and_conv(self):
         jax_gemm_event = {
@@ -3600,7 +3600,9 @@ class TestRmsNormExtensionsCoverage:
         )
         assert model.flops() == q_only.flops() + k_only.flops()
         assert model.bytes() == q_only.bytes() + k_only.bytes()
-        assert model.flops() == 122928
+        assert model.flops() == perf_model.RMSNorm.flops_func(
+            12 * 2048, 2048, True
+        ) + perf_model.RMSNorm.flops_func(12 * 512, 512, True)
         assert model.bytes() == 128000
         assert (
             get_pseudo_op_mappings()["aiter::_fused_qk_rmsnorm_kernel"]
@@ -4340,7 +4342,9 @@ class TestCustomCollectivesPerfModels:
         sglang_model = aiter_fused_allreduce_rmsnorm_(sglang)
         vllm_model = aiter_fused_allreduce_rmsnorm_(vllm)
         assert sglang_model.num_elems == 12 * 6144
-        assert sglang_model.flops() == 368664
+        assert sglang_model.flops() == 12 * 6144 + perf_model.RMSNorm.flops_func(
+            12 * 6144, 6144, True
+        )
         assert vllm_model.num_elems == 4 * 6144
         mappings = get_pseudo_op_mappings()
         assert (

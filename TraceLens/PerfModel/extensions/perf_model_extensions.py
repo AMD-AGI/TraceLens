@@ -2447,7 +2447,7 @@ class topk_softplus(_MHCBase):
         }
 
     def flops(self):
-        return 6 * self.M * self.param_details["E"]
+        return _SQRTSOFTPLUS_FLOPS * self.M * self.param_details["E"]
 
     def bytes(self):
         if self.bpe_in is None:
@@ -2461,12 +2461,20 @@ class topk_softplus(_MHCBase):
         return read_gating + read_bias + write_w + write_idx
 
 
-_SQRTSOFTPLUS_FLOPS = 6  # mul, exp2, add, log2, mul, sqrt
-_SIGMOID_FLOPS = 5  # mul, neg, exp2, add, rcp
+# Fast score formulas, each term priced from OP_FLOPS_PER_ELEM.
+# sqrt(softplus): scale, exp2, add, log2, scale, sqrt.
+_SQRTSOFTPLUS_FLOPS = (
+    op_flops_per_elem("mul")
+    + op_flops_per_elem("exp")
+    + op_flops_per_elem("add")
+    + op_flops_per_elem("log")
+    + op_flops_per_elem("mul")
+    + op_flops_per_elem("sqrt")
+)
 _SCORE_FLOPS = {
     "sqrtsoftplus": _SQRTSOFTPLUS_FLOPS,
-    "sigmoid": _SIGMOID_FLOPS,
-    "softmax": 0,
+    "sigmoid": op_flops_per_elem("sigmoid"),
+    "softmax": op_flops_per_elem("softmax"),
 }
 # Comparator counts in topk_gating_kernels.cu sort_network_desc.
 _SORT_NETWORK_COMPARATORS = {1: 0, 2: 1, 3: 3, 4: 5, 6: 12, 8: 19}

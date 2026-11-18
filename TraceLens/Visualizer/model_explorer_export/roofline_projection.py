@@ -113,6 +113,7 @@ from TraceLens.PerfModel.perf_model import (
     IndexedCopy,
     Normalization,
     Reduce,
+    RMSNorm,
     Softmax,
     UnaryElementwise,
 )
@@ -185,8 +186,7 @@ _ENGINE_MOE_CLASS_MARKERS = ("FusedMoE",)
 # norm layers (LlamaRMSNorm, Qwen2RMSNorm, CustomRMSNorm, ...). "rmsnorm" has
 # no learned bias; every other family here is assumed to have one. "generic"
 # families share the base Normalization.flops_func/bytes_func; "rmsnorm" uses
-# RMSNorm's own flops()/bytes() (see _rmsnorm_flops/_rmsnorm_bytes -- RMSNorm
-# has no flops_func/bytes_func to call directly). channel_first classes
+# RMSNorm.flops_func and _rmsnorm_bytes. channel_first classes
 # normalize over axis 1 (conv-style [N, C, ...]); the rest normalize over the
 # trailing feature axis.
 _NORMALIZATION_FAMILIES: tuple[tuple[str, str, bool, bool], ...] = (
@@ -2170,7 +2170,7 @@ def _attention_extra_ops(
                     instances,
                     "Normalization (RMSNorm)",
                     "vector",
-                    _rmsnorm_flops(elements, d_h, True),
+                    RMSNorm.flops_func(elements, d_h, True),
                     (
                         _rmsnorm_bytes(elements, d_h, True, bpe, bpe)
                         if bpe is not None
@@ -2742,7 +2742,7 @@ def _draft_depth_ops(
     drawn_names = _drawn_names(drawn) if drawn else set()
     partial = drawn is not None
     norm_elems = tokens * hidden
-    norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
+    norm_flops = RMSNorm.flops_func(norm_elems, hidden, True)
     norm_bytes = (
         _rmsnorm_bytes(norm_elems, hidden, True, bpe, bpe) if bpe is not None else None
     )
@@ -3005,7 +3005,7 @@ def _mtp_stack_ops(
         # No draft layer in the source. This template is the explicit fallback:
         # two RMSNorms, a 2H→H projection, attention, and a dense MLP.
         norm_elems = tokens * hidden
-        norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
+        norm_flops = RMSNorm.flops_func(norm_elems, hidden, True)
         norm_bytes = (
             _rmsnorm_bytes(norm_elems, hidden, True, bpe, bpe)
             if bpe is not None
@@ -3704,7 +3704,7 @@ def _normalization_cost(
         return None
     is_affine = True
     if kind == "rmsnorm":
-        flops = _rmsnorm_flops(num_elems, num_channels, is_affine)
+        flops = RMSNorm.flops_func(num_elems, num_channels, is_affine)
         bytes_moved = (
             _rmsnorm_bytes(num_elems, num_channels, is_affine, bpe, bpe)
             if bpe is not None
@@ -3722,15 +3722,6 @@ def _normalization_cost(
             else None
         )
     return f"Normalization ({computation})", "vector", flops, bytes_moved
-
-
-def _rmsnorm_flops(num_elems: int, num_channels: int, is_affine: bool) -> float:
-    """Mirrors RMSNorm.flops() in TraceLens.PerfModel.perf_model (no static
-    flops_func exists there -- RMSNorm overrides the instance method directly)."""
-    non_normalized_elems = num_elems / num_channels
-    flops = non_normalized_elems * (2 * num_channels + 2)
-    flops += num_elems * (2 if is_affine else 1)
-    return flops
 
 
 def _rmsnorm_bytes(

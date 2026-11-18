@@ -4809,9 +4809,10 @@ class Normalization:
             # could potentially be log_n for sum-reduce but is not
             param_compute += num_elems * 3
 
-        # compute 1/std = inverse(sqrt(running_var + eps))
-        # for non-training this is called in native_batch_norm etc and for training this is computed once and saved for several uses
-        param_compute += num_channels * 3
+        # 1/std = rsqrt(running_var + eps), once per channel.
+        param_compute += num_channels * (
+            op_flops_per_elem("add") + op_flops_per_elem("rsqrt")
+        )
 
         actual_compute = 2 * num_elems
         return param_compute + actual_compute
@@ -5346,17 +5347,23 @@ class RMSNorm(Normalization):
             "is_training": False,
         }
 
-    # RMS norm is different enough from everything else that we are not using the base implementation
-    # flops is prod(dims that are not part of normalized_shape) * (2 * num_channels + 2) to compute rsqt
-    # multiply rsqt by each elem, then if weight is not null multiply weight by each elem
-    # sample code: https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    # x^2, mean, rsqrt(variance + eps), scale, and the weight multiply when affine.
+    # https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    @staticmethod
+    def flops_func(num_elems, num_channels, is_affine):
+        rows = num_elems / num_channels
+        per_row = num_channels * (
+            op_flops_per_elem("pow")
+            + op_flops_per_elem("mean")
+            + op_flops_per_elem("mul")
+        )
+        per_row += op_flops_per_elem("add") + op_flops_per_elem("rsqrt")
+        if is_affine:
+            per_row += num_channels * op_flops_per_elem("mul")
+        return rows * per_row
+
     def flops(self):
-        non_normalized_elems = self.num_elems / self.num_channels
-        flops = non_normalized_elems * (2 * self.num_channels + 2)  # compute rsqt
-        flops += self.num_elems * (
-            2 if self.is_affine else 1
-        )  # apply weight if affine, apply rms in any case
-        return flops
+        return self.flops_func(self.num_elems, self.num_channels, self.is_affine)
 
     def bytes(self):
         # assume caching works, read input, write output, read weight if affine
@@ -5675,7 +5682,8 @@ class CrossEntropy:
       Input Dims[0] = (batch, 1, vocab_size)  — logits
       Input Dims[1] = (batch, 1)              — targets
 
-    FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
+    FLOPS: exp, sum, log, and subtract per logit, from ``OP_FLOPS_PER_ELEM``.
+    The target lookup moves no arithmetic.
     """
 
     category = "CrossEntropy_fwd"
@@ -5704,7 +5712,13 @@ class CrossEntropy:
 
     def flops(self):
         p = self.param_details
-        return 5 * p["batch"] * p["vocab_size"]
+        per_logit = (
+            op_flops_per_elem("exp")
+            + op_flops_per_elem("sum")
+            + op_flops_per_elem("log")
+            + op_flops_per_elem("sub")
+        )
+        return per_logit * p["batch"] * p["vocab_size"]
 
     def bytes(self):
         if self.bpe is None:
