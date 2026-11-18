@@ -430,6 +430,9 @@ def resolve_perf_model_class(name):
     cls = op_to_perf_model_class_map.get(name)
     if cls is not None:
         return cls
+    # Don't resolve perf models for python function events
+    if ".py(" in name:
+        return None
     for matcher in _perf_model_matchers:
         cls = matcher(name)
         if cls is not None:
@@ -486,11 +489,7 @@ register_perf_model_matcher(_match_allreduce_fusion_1stage)
 
 def _match_mqa_logits(name):
     """Resolve gluon/deepgemm MQA logits kernels (DSA indexer) when they
-    appear as Synthetic Ops or cpu_ops — both paged and non-paged variants.
-    Excludes python_function paths (e.g. 'fp8_mqa_logits.py(82): ...')
-    to avoid intercepting the parent before the Synthetic Op is created."""
-    if ".py(" in name:
-        return None
+    appear as Synthetic Ops or cpu_ops — both paged and non-paged variants."""
     if "mqa_logits" in name:
         from TraceLens.PerfModel.extensions import (
             attention_perf_model_extensions as _a,
@@ -505,16 +504,7 @@ register_perf_model_matcher(_match_mqa_logits)
 
 def _match_muse_extend(name):
     """Resolve the Muse-Spark target-model EXTEND (chunked-prefill / verify)
-    attention kernel when it appears as a Synthetic Op. Covers the Gluon kernel
-    (``_muse_extend_kernel``) and the FlyDSL variant (``muse_extend_fly``); both
-    have identical Input Dims (GQA, paged fp8 KV cache) and share the same
-    attention roofline, but the FlyDSL kernel also runs the softmax-denominator
-    row sum on the matrix core, so it routes to ``muse_extend_fly_synthetic``
-    (base model + the ``ones x P^T`` MFMA term). Excludes python_function
-    source-line frames (e.g. 'muse_extend_gluon.py(348): ...') so the parent is
-    not intercepted before the Synthetic Op is created."""
-    if ".py(" in name:
-        return None
+    attention kernel when it appears as a Synthetic Op."""
     from TraceLens.PerfModel.extensions import (
         attention_perf_model_extensions as _a,
     )
@@ -530,11 +520,7 @@ register_perf_model_matcher(_match_muse_extend)
 
 
 def _match_dense_partial(name):
-    """Resolve the Muse-Spark bf16 split-K GEMM partials kernel
-    (``_dense_partial``) when it appears as a Synthetic Op. Excludes
-    python_function source frames."""
-    if ".py(" in name:
-        return None
+    """Resolve the Muse-Spark bf16 split-K GEMM partials kernel when it appears as a Synthetic Op."""
     if "_dense_partial" in name:
         from TraceLens.PerfModel.extensions import (
             perf_model_extensions as _p,
@@ -549,10 +535,7 @@ register_perf_model_matcher(_match_dense_partial)
 
 def _match_mfma_moe1(name):
     """Resolve the Muse-Spark MXFP4 MoE stage-1 (gate+up + SwiGLU) grouped-GEMM
-    kernel when it appears as a Synthetic Op. Excludes python_function source
-    frames so the parent is not intercepted before the Synthetic Op is created."""
-    if ".py(" in name:
-        return None
+    kernel when it appears as a Synthetic Op."""
     if "mfma_moe1_silu_mul" in name:
         from TraceLens.PerfModel.extensions import (
             moe_perf_model_extensions as _m,
@@ -567,10 +550,7 @@ register_perf_model_matcher(_match_mfma_moe1)
 
 def _match_expert_a4(name):
     """Resolve the Muse-Spark MXFP4 MoE full-expert kernel (``_expert_a4``,
-    from ``compact_a4_experts``) when it appears as a Synthetic Op. Excludes
-    python_function source frames."""
-    if ".py(" in name:
-        return None
+    from ``compact_a4_experts``) when it appears as a Synthetic Op."""
     if "_expert_a4" in name:
         from TraceLens.PerfModel.extensions import (
             moe_perf_model_extensions as _m,
@@ -585,11 +565,7 @@ register_perf_model_matcher(_match_expert_a4)
 
 def _match_fused_norm_residual(name):
     """Resolve the Muse-Spark fused residual-add + RMSNorm Triton kernel
-    (``_fused_norm_residual_triton_kernel``) when it appears as a Synthetic Op.
-    Excludes python_function source frames so the parent is not intercepted
-    before the Synthetic Op is created."""
-    if ".py(" in name:
-        return None
+    (``_fused_norm_residual_triton_kernel``) when it appears as a Synthetic Op."""
     if "_fused_norm_residual_triton_kernel" in name:
         from TraceLens.PerfModel.extensions import (
             rmsnorm_perf_model_extensions as _r,
