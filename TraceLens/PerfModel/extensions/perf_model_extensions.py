@@ -2643,27 +2643,17 @@ class topk_softplus_sqrt(topk_gating_fwd):
 
 
 class bf16_splitk_gemm_partials(GEMM):
-    """
-    Performance model for Muse-Spark's split-K GEMM partials kernel
-    (``bf16_splitk_gemm_partials -> _dense_partial``).
+    """Perf model for ``_dense_partial`` (Muse-Spark bf16 split-K GEMM).
 
-    Computes partial matmul outputs ``Y[M, N] = A[M, K] @ B[N, K].T`` split
-    across ``split_k`` K-slices; each slice writes its own FP32 partial sum to
-    ``[split_k, M, N]`` (reduced to the final ``[M, N]`` by a later op). bf16
-    inputs, fp32 partials. Seen on the decode path where M (token count) is tiny
-    and N, K are large, so it is bandwidth-bound (the B read dominates).
+    ``Y[M, N] = A[M, K] @ B[N, K].T`` split across ``split_k`` K-slices, each
+    writing its own fp32 partial to ``[split_k, M, N]`` (reduced later). bf16
+    inputs, fp32 partials.
 
-    Backfilled Synthetic Op. Expected Input Dims / type:
-        [[M, K], [N, K], [split_k, M, N]]        (A, B, partials)
-        (bf16, bf16, float)
+    Backfilled Input Dims / type:
+        [[M, K], [N, K], [split_k, M, N]]   (A, B, partials)   bf16, bf16, float
 
-    FLOPs (inherited from GEMM): ``2 * M * N * K`` -- split-K only distributes the
-    K reduction across thread blocks; the total MAC count is unchanged.
-
-    Bytes:
-        read  A         = M * K * bpe(A)               (bf16)
-        read  B         = N * K * bpe(B)               (bf16)
-        write partials  = split_k * M * N * bpe(out)   (fp32; split_k copies)
+    FLOPs: ``2 * M * N * K`` (inherited; split-K leaves the MAC count unchanged).
+    Bytes: M*K*bpe(A) + N*K*bpe(B) + split_k*M*N*bpe(partials).
     """
 
     @staticmethod

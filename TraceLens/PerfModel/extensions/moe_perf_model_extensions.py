@@ -17,7 +17,6 @@ from TraceLens.PerfModel.utils import (
     torch_dtype_map,
 )
 from TraceLens.TraceUtils.utils.annotation_utils import (
-    IterationAnnotation,
     add_logical_batch_size,
 )
 
@@ -1290,50 +1289,29 @@ class moe_opus_stage1_a8w4(UnfusedMoE_Up):
 
 
 class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
-    """
-    Performance model for mfma_moe1_silu_mul_afp4_wfp4_fp4_... (Synthetic Op).
+    """Perf model for ``mfma_moe1_silu_mul_afp4_wfp4_fp4_...`` (Muse-Spark).
 
-    Reference implementation:
-        sglang/srt/rocm_muse_spark/mxfp4_moe.py (run_a4w4) ->
-        aiter/ops/flydsl/moe_kernels.py (flydsl_moe_stage1)
+    MXFP4 MoE stage-1: the grouped gate+up projection fused with SwiGLU
+    (``silu_mul``) over the top-k routed experts, via ``run_a4w4 ->
+    flydsl_moe_stage1``. fp4 activations x fp4 weights with e8m0 MX scales.
 
-    Muse-Spark MXFP4 MoE stage-1: the grouped gate+up projection fused with the
-    SwiGLU (``silu_mul``) activation, over the top-k routed experts. afp4/wfp4 =
-    fp4 activations x fp4 weights with MX (e8m0) block scales; bf16 output.
+    Shape-backfilled through the ``run_a4w4`` launcher:
+        0  x / hidden  [num_tokens, hidden]   bf16
+        1  scores      [num_tokens, top_k]    float
+        2  ids         [num_tokens, top_k]    int
+        3  norm_weight [hidden]               bf16
+    num_tokens / hidden / top_k are read from these; the intermediate size and
+    expert count stay Muse-Spark constants (N = 4096, 256 experts).
 
-    Appears as an orphan Synthetic Op with no Input Dims, so ``num_tokens`` comes
-    from the enclosing ``step[...]`` iteration annotation and the rest are
-    Muse-Spark architecture constants:
-
-        256 routed experts, top_k 8, expert input K = 4096, moe_intermediate
-        N = 4096 (gate+up = 2N = 8192 -> SwiGLU -> N = 4096).
-
-    The experts contract a 4096-wide input -- half the 8192 model hidden --
-    which is corroborated by the fp4 activation / MX-scale / weight shapes, the
-    confirmed ``moe_intermediate_size = 4096``, and the 816B-total / 42B-active
-    parameter budget (K=4096 -> 256 experts x 60 layers x ~50M ~= 768B).
-
-    Expert parallelism: the launch is per rank and processes only the experts
-    local to it -- ``grid.x`` = local experts (e.g. 32 of 256 at EP=8) -- so it
-    covers ``local_experts / NUM_EXPERTS`` of the ``M * top_k`` routed
-    token-expert rows (uniform-routing estimate). Reading ``grid.x`` per event
-    keeps this correct across EP configs; without it the FLOPs would be ``EP x``
-    too high (and exceed the FP4 roofline).
-
-    Roofline -- FLOPs (inherited from UnfusedMoE_Up.flops_func, gated):
-        2 * local_rows * K * N * 2    where local_rows = M * top_k * grid.x / NUM_EXPERTS
-
-    Roofline -- bytes (inherited from UnfusedMoE_Up.bytes_func): fp4 activations
-    and fp4 expert weights (``grid.x`` local experts), bf16 output, plus the
-    e8m0 MX scales (one byte per MX_BLOCK fp4 values on activations and weights).
+    FLOPs (UnfusedMoE_Up.flops_func, gated gate+up):
+        2 * (num_tokens * top_k) * hidden * (2 * inter)
+    Bytes (inherited): fp4 activations + expert fp4 weights + e8m0 scales, output.
     """
 
     category = "MoE_unfused"
     bwd_category = None
 
     NUM_EXPERTS = 256
-    TOPK = 8
-    HIDDEN_DIM = 4096  # expert input (half the 8192 model hidden)
     INTER_DIM = 4096  # moe_intermediate_size
     MX_BLOCK = 32  # one e8m0 scale per 32 fp4 values
     INPUT_BPE = 0.5  # fp4 activation
@@ -1348,51 +1326,26 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
 
     @classmethod
     def get_param_details(cls, event):
-        args = event.get("args") or {}
-        dims = args.get("Input Dims")
-        # Preferred: the ``run_a4w4`` shape-backfill records the stage-1 launcher
-        # tensor args, so num_tokens / hidden / top_k come straight from shapes:
+        # The run_a4w4 shape-backfill records the stage-1 launcher tensor args:
         #   0  x / hidden states  (num_tokens, hidden)   bf16
         #   1  scores             (num_tokens, top_k)    float
         #   2  ids                (num_tokens, top_k)    int
         #   3  norm_weight        (hidden,)              bf16
-        # The intermediate size and expert count are not carried by the
-        # launcher, so they stay Muse-Spark constants.
-        if dims:
-            try:
-                num_tokens, hidden = dims[0][0], dims[0][1]
-                topk = dims[1][1] if len(dims[1]) > 1 else cls.TOPK
-            except (IndexError, TypeError):
-                return {"_no_perf": True}
-            if num_tokens <= 0 or hidden <= 0 or topk <= 0:
-                return {"_no_perf": True}
-            return {
-                "num_tokens": num_tokens * topk,  # routed token-expert rows
-                "hidden_dim": hidden,
-                "inter_dim": cls.INTER_DIM,
-                "num_experts": cls.NUM_EXPERTS,
-                "topk": 1,
-                "gated": True,
-            }
-        # Fallback (orphan op, no backfill): num_tokens from the step annotation,
-        # local experts from the launch grid, EP-sharded row count.
+        # The intermediate size and expert count are not carried by the launcher,
+        # so they stay Muse-Spark constants.
+        dims = (event.get("args") or {}).get("Input Dims")
         try:
-            stats = IterationAnnotation(str(event.get("annotation"))).chunk_stats()
-            num_tokens = stats["c_sq"] + stats["g_sq"]
-            local_experts = int((args.get("grid") or [])[0])
-        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            num_tokens, hidden = dims[0][0], dims[0][1]
+            topk = dims[1][1]
+        except (IndexError, TypeError):
             return {"_no_perf": True}
-        if num_tokens <= 0 or not 0 < local_experts <= cls.NUM_EXPERTS:
+        if num_tokens <= 0 or hidden <= 0 or topk <= 0:
             return {"_no_perf": True}
-        # EP-sharded per-rank launch: grid.x = experts local to this rank, so it
-        # processes local_experts/NUM_EXPERTS of the M*top_k routed token-expert
-        # rows. Fold routing into the row count (one expert read per row).
-        local_rows = num_tokens * cls.TOPK * local_experts // cls.NUM_EXPERTS
         return {
-            "num_tokens": local_rows,
-            "hidden_dim": cls.HIDDEN_DIM,
+            "num_tokens": num_tokens * topk,  # routed token-expert rows
+            "hidden_dim": hidden,
             "inter_dim": cls.INTER_DIM,
-            "num_experts": local_experts,
+            "num_experts": cls.NUM_EXPERTS,
             "topk": 1,
             "gated": True,
         }
@@ -2443,36 +2396,26 @@ def _optional_tensor_bytes(dims, types, index):
 
 
 class compact_a4_experts_synthetic:
-    """
-    Performance model for Muse-Spark's MXFP4 MoE expert kernel
-    (``compact_a4_experts -> _expert_a4`` (Synthetic Op)).
+    """Perf model for ``compact_a4_experts -> _expert_a4`` (Muse-Spark MXFP4 MoE).
 
-    Runs the full routed-expert MLP in one launch: the gate+up projection with
-    SwiGLU, then the down projection, over the compacted (token, expert) rows.
-    fp4 activations x fp4 expert weights with MX (e8m0) block scales, bf16
-    output. On the decode path the whole local expert weight set is streamed to
-    process only a handful of tokens, so it is strongly weight-/bandwidth-bound.
+    Runs the full routed-expert MLP in one launch -- gate+up with SwiGLU, then
+    down -- over the compacted (token, expert) rows. fp4 activations x fp4 expert
+    weights with e8m0 MX scales, bf16 output. Weight-/bandwidth-bound.
 
-    Backfilled Synthetic Op. Input Dims / type:
+    Backfilled Input Dims / type:
         0 act         [num_tokens, hidden]              bf16
         1 ids         [num_tokens, top_k]               int
         2 w1 (gate+up)[num_experts, 2*inter, hidden/2]  fp4 (uint8-packed)
         3 w2 (down)   [num_experts, hidden, inter/2]    fp4
-        4 w1 scale    [num_experts, 2*inter, hidden/32] e8m0 (uint8)
+        4 w1 scale    [num_experts, 2*inter, hidden/32] e8m0
         5 w2 scale    [num_experts, hidden, inter/32]   e8m0
         6 act_q       [num_tokens, hidden/2]            fp4
         7 act scale   [num_tokens, hidden/32]           e8m0
 
-    num_rows = num_tokens * top_k  (compacted routed token-expert pairs).
-
-    FLOPs (two grouped GEMMs; the SwiGLU activation is O(num_rows*inter),
-    negligible for roofline):
-        up   = 2 * num_rows * (2*inter) * hidden
-        down = 2 * num_rows * hidden    * inter
-             = 2 * num_rows * hidden * (2*inter + inter)
-
-    Bytes = every recorded input tensor read once (the expert fp4 weights + MX
-    scales dominate) + the bf16 expert output ``[num_rows, hidden]``.
+    num_rows = num_tokens * top_k.
+    FLOPs (gate+up + down): 2 * num_rows * hidden * (2*inter + inter).
+    Bytes: every recorded input read once (expert fp4 weights + scales dominate)
+    + the bf16 output [num_rows, hidden].
     """
 
     category = "MoE_unfused"

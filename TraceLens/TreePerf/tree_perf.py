@@ -207,16 +207,6 @@ def event_process_thread_names(tree, event):
 
 
 # World size (= TP group size) encoded as an integer template param on aiter's
-# tensor-parallel collective kernels: the fused 1-stage all-reduce plus the
-# all-gather / reduce-scatter boundary collectives, matched in both demangled
-# (``<dtype, ngpus>``) and Itanium-mangled (``I<dtype>Li<ngpus>E``) name forms.
-_TP_WORLD_SIZE_RES = (
-    re.compile(r"allreduce_fusion_kernel_1stage<[^,]+,\s*[^,]+,\s*(\d+)"),
-    re.compile(r"(?:allgather_vec|reduce_scatter_split_first_dim)<[^,>]+,\s*(\d+)"),
-    re.compile(r"(?:allgather_vec|reduce_scatter_split_first_dim)\w*?Li(\d+)E"),
-)
-
-
 def _propagate_annotation_to_synthetic_ops(tree, events):
     """Copy the enclosing iteration annotation onto Synthetic Op events
     that were created after ``apply_annotation`` ran.

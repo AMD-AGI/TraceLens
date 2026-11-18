@@ -687,27 +687,19 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
 
 
 class fused_norm_residual_triton(RMSNorm):
-    """
-    Performance model for ``_fused_norm_residual_triton_kernel`` (Muse-Spark),
-    the fused residual-add + RMSNorm issued through ``forward_triton``.
+    """Perf model for ``_fused_norm_residual_triton_kernel`` (Muse-Spark).
 
-    Backfilled Synthetic Op: the ``launcher_shapes::forward_triton`` launcher
-    records the two data tensors, both ``[M, N]`` (N = hidden width):
-        0  residual  [M, N]  fp32   (residual stream kept in fp32)
-        1  hidden    [M, N]  bf16    (layer input / activation)
-    The affine weight ``[N]`` and the two outputs (updated fp32 residual and the
-    bf16 normed output) are not separately recorded; they are modelled from the
-    fused op's semantics:
-        new_residual = residual + hidden                  (fp32, written back)
-        out          = rmsnorm(new_residual) * weight      (bf16)
+    Fused residual-add + RMSNorm issued through ``forward_triton``:
+        new_residual = residual + hidden               (fp32, written back)
+        out          = rmsnorm(new_residual) * weight    (bf16)
+
+    Backfilled Input Dims / type (the affine weight and the two outputs are
+    modelled from the op, not recorded):
+        0  residual  [M, N]  fp32
+        1  hidden    [M, N]  bf16
 
     FLOPs: residual-add (``num_elems``) + RMSNorm (inherited).
-    Bytes: each ``[M, N]`` tensor is read once and its same-dtype output written
-    once, plus the small affine weight:
-        2 * num_elems * (bpe_residual + bpe_hidden) + N * bpe_hidden
-    Memory-bound (FLOPs/byte << 1), so the roofline is bandwidth-limited. The
-    byte model is symmetric in the two tensor dtypes, so it is robust to the
-    order the residual and hidden tensors appear in.
+    Bytes: 2 * num_elems * (bpe_residual + bpe_hidden) + N * bpe_hidden.
     """
 
     @staticmethod

@@ -1742,31 +1742,12 @@ class muse_extend_synthetic(InferenceAttention):
     through the aiter extend backend (``_forward_extend_unified``). Standard
     causal GQA attention over a paged KV cache; not MLA.
 
-    The kernel launches without a cpu_op parent, so it surfaces as a Synthetic
-    Op. The report's shape-backfill wraps it in a
-    ``launcher_shapes::muse_extend_attention`` launcher that carries the
-    kernel's tensor shapes, so head geometry and dtypes are read straight from
-    ``Input Dims`` / ``Input type`` (the standard InferenceAttention path) --
-    no architecture side-channels needed. The per-request sequence aggregates
-    still come from the enclosing ``step[EXTEND ...]`` iteration annotation.
-
     Arg layout (sglang kernels/ops/attention/muse_extend_gluon.py):
         0  Q        (N_Q, H_Q, d_h_qk)                    fp8 e4m3
         1  K cache  (num_blocks, block_size, H_KV, d_h)   fp8 e4m3  (paged)
         2  V cache  (num_blocks, block_size, H_KV, d_h)   fp8 e4m3  (paged)
         3  output   (N_Q, H_Q, d_h_v)                     bf16
         4..9        scalars / metadata (scales, cu_seqlens)
-
-    H_Q query heads and H_KV key/value heads per rank (GQA). The base
-    ``k_shape[-3:]`` slice reads ``(block_size, H_KV, d_h)`` from the 4-D paged
-    cache, yielding the correct ``H_KV`` and head dim. FLOPs and bytes are
-    inherited from :class:`InferenceAttention`: fp8 Q/K/V reads, bf16 output,
-    and the chunked-prefill FLOPs formula applies the intra-chunk causal
-    correction.
-
-    If the shapes are absent -- an un-backfilled report, e.g. the bare
-    ``hipModuleLaunchKernel->_muse_extend_kernel`` launch with no Input Dims --
-    the base returns no perf estimate rather than guessing.
     """
 
     category = "InferenceAttention"
@@ -1811,8 +1792,8 @@ class muse_extend_synthetic(InferenceAttention):
         )
         if not bpe_out or bpe_out == bpe_q:
             return base
-        pd = self.param_details
-        out_elems = pd["B"] * (pd["c_sq"] + pd["g_sq"]) * pd["H_Q"] * pd["d_h_v"]
+        p = self.param_details
+        out_elems = p["B"] * (p["c_sq"] + p["g_sq"]) * p["H_Q"] * p["d_h_v"]
         return base + out_elems * (bpe_out - bpe_q)
 
 
@@ -1820,21 +1801,11 @@ class muse_extend_fly_synthetic(muse_extend_synthetic):
     """Perf model for ``muse_extend_fly`` (FlyDSL extend attention).
 
     Identical attention to the Gluon :class:`muse_extend_synthetic`
-    (``_muse_extend_kernel``) -- same causal GQA over a paged fp8 KV cache, same
-    API, same result -- but this op always dispatches to the FlyDSL kernel,
-    which computes the softmax denominator (the per-row sum of P) on the matrix
-    core as a ``ones x P^T`` MFMA rather than with VALU adds. That is an extra
-    contraction of depth ``D_ROWSUM = 32`` (the single ``ones`` row padded to a
-    32-wide MFMA fragment) over the same query-key interactions as ``P.V``, and
-    the kernel always issues it, so it is counted in this op's FLOPs:
+    (``_muse_extend_kernel``), but this op always dispatches to the FlyDSL kernel,
+    which computes the softmax denominator on the matrix core as a ``ones x P^T``
+    MFMA rather than with VALU adds.
 
         flops = H_Q * I * (d_h_qk + d_h_v + D_ROWSUM)
-
-    i.e. ``(d_qk + d_v + 32) / (d_qk + d_v)`` x the base attention FLOPs
-    (= 160/128 = 1.25x for the d=64 geometry). Bytes are unchanged: the ``ones``
-    vector is kernel-generated and P is already resident from the P.V pass, so
-    the denominator adds no HBM traffic (confirmed: measured bytes match the
-    Gluon kernel exactly).
     """
 
     D_ROWSUM = 32
