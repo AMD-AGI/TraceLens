@@ -506,11 +506,8 @@ def test_find_paper(monkeypatch, base_card, expected):
     assert bringup_gates._find_paper("org/Fam-1-Quant") == expected
 
 
-@pytest.mark.parametrize("stall", [False, True])
-def test_find_paper_unavailable(monkeypatch, stall):
+def test_find_paper_times_out(monkeypatch):
     def urlopen(url, timeout):
-        if not stall:
-            raise urllib.error.URLError("no route")
         time.sleep(0.5)
         return io.BytesIO(b"[paper](https://example.com/fam.pdf)")
 

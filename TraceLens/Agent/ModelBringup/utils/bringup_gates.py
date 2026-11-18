@@ -91,11 +91,12 @@ MODEL_CONFIG = "cache/model_config.json"
 PAPER_BUDGET_S = 10
 CARD_URL = "https://huggingface.co/{}/raw/main/README.md"
 PAPER_URL = "https://huggingface.co/api/papers/{}"
-# Group 1: arXiv id; group 2: a .pdf URL that is not on arXiv.
-PAPER_LINK = re.compile(
+ARXIV_ID = re.compile(
     r"(?:arxiv\.org/(?:abs|pdf|html)|huggingface\.co/papers)/(\d{4}\.\d{4,5})"
-    r"|(https?://(?!(?:www\.)?arxiv\.org/)[^\s<>()\"'\]]+\.pdf)"
 )
+PDF_LINK = re.compile(r"https?://(?!(?:www\.)?arxiv\.org/)[^\s<>()\"'\]]+\.pdf")
+# The card's base_model: the value, or the first entry of a list.
+BASE_MODEL = re.compile(r"^base_model:[\s-]*['\"]?([\w.-]+/[\w.-]+)", re.M)
 NAME_STEM = re.compile(r"[A-Za-z]+")
 ARCH_FIELDS = (
     "model_type",
@@ -637,39 +638,30 @@ def _find_paper(model_id):
 
 
 def _paper_from_cards(model_id):
-    """First arXiv link titled for the model, else first PDF link; else follow base_model."""
+    """First arXiv link titled for the model, else first PDF link, on its card or its base_model's."""
 
     def _get(url):
         try:
             with urllib.request.urlopen(url, timeout=PAPER_BUDGET_S) as response:
                 return response.read().decode()
         except urllib.error.HTTPError:
-            return None
+            return ""
 
-    visited = set()
-    while isinstance(model_id, str) and model_id not in visited:
-        visited.add(model_id)
-        card = _get(CARD_URL.format(model_id)) or ""
+    for _ in range(2):  # the card, then its base_model's card
+        card = _get(CARD_URL.format(model_id))
         stem = NAME_STEM.search(model_id.rsplit("/", 1)[-1]).group().lower()
-        checked, pdf_paper = set(), None
-        for arxiv_id, pdf in PAPER_LINK.findall(card):
-            if pdf:
-                pdf_paper = pdf_paper or {"url": pdf, "title": None}
-            elif arxiv_id not in checked:
-                checked.add(arxiv_id)
-                body = _get(PAPER_URL.format(arxiv_id))
-                title = (json.loads(body).get("title") or "") if body else ""
-                if stem in title.lower():
-                    return {"url": f"https://arxiv.org/abs/{arxiv_id}", "title": title}
-        if pdf_paper:
-            return pdf_paper
-        front = card.split("---", 2)[1] if card.startswith("---") else ""
-        try:
-            meta = yaml.safe_load(front)
-        except yaml.YAMLError:
-            meta = None
-        base = meta.get("base_model") if isinstance(meta, dict) else None
-        model_id = base[0] if isinstance(base, list) and base else base
+        for arxiv_id in dict.fromkeys(ARXIV_ID.findall(card)):
+            paper = json.loads(_get(PAPER_URL.format(arxiv_id)) or "{}")
+            title = paper.get("title") or ""
+            if stem in title.lower():
+                return {"url": f"https://arxiv.org/abs/{arxiv_id}", "title": title}
+        pdf = PDF_LINK.search(card)
+        if pdf:
+            return {"url": pdf.group(), "title": None}
+        base = BASE_MODEL.search(card)
+        if not base:
+            break
+        model_id = base.group(1)
     return None
 
 
