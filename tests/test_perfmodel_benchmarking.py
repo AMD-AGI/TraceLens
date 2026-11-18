@@ -1488,20 +1488,20 @@ class TestFp4Fp6Helpers:
 @pytest.mark.gpu
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 class TestMicrobenchGpuBenchmarks:
-    def test_bench_gemm_smoke(self):
+    def test_bench_gemm_smoke(self, monkeypatch):
         torch = _require_cuda_gpu()
         mb = _import_microbench()
-        mb.WARMUP = 1
-        mb.REP = 1
+        monkeypatch.setattr(mb, "WARMUP", 1)
+        monkeypatch.setattr(mb, "REP", 1)
         tflops = mb.bench_gemm(64, 64, 64, torch.float16, device=0)
         assert tflops > 0
 
     @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
-    def test_fma_chain_matches_reference(self, dtype_name):
+    def test_fma_chain_matches_reference(self, dtype_name, monkeypatch):
         torch = _require_cuda_gpu()
         mb = _import_microbench()
-        mb.WARMUP = 1
-        mb.REP = 1
+        monkeypatch.setattr(mb, "WARMUP", 1)
+        monkeypatch.setattr(mb, "REP", 1)
         dtype = getattr(torch, dtype_name)
         acc_fp32 = dtype != torch.float16
         n, repeat = 4096, 20
@@ -1528,12 +1528,12 @@ class TestMicrobenchGpuBenchmarks:
         assert c.shape == (64, 64)
         assert c.device.type == "cuda"
 
-    def test_microbench_rocprof_single_run_json(self, tmp_path: Path):
+    def test_microbench_rocprof_single_run_json(self, tmp_path: Path, monkeypatch):
         _require_cuda_gpu()
         mb = _import_microbench()
         rp = _import_microbench_rocprof()
-        mb.WARMUP = 1
-        mb.REP = 1
+        monkeypatch.setattr(mb, "WARMUP", 1)
+        monkeypatch.setattr(mb, "REP", 1)
         out_json = tmp_path / "timing.json"
         M, N, K = 64, 64, 64
         result = rp._run_single("matrix_fp16", M, N, K, device=0)
