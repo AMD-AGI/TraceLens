@@ -116,7 +116,7 @@ from TraceLens.PerfModel.perf_model import (
     Softmax,
     UnaryElementwise,
 )
-from TraceLens.PerfModel.triton_compiled_perf_model import _FLOPS_PER_ELEM
+from TraceLens.PerfModel.op_flops import op_flops_per_elem
 from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 from TraceLens.TreePerf.tree_perf import compute_roofline_time_and_bound
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
@@ -246,12 +246,21 @@ _UNARY_POINTWISE_COMPUTATIONS = frozenset(
         "cast",
     }
 )
-# Graph labels whose aten name is not the label itself. The flop weight still
-# comes from _FLOPS_PER_ELEM; a label the table does not name stays at
-# one flop per element rather than the fused kernel's "unknown op is zero".
-_UNARY_LABEL_TO_ATEN_SUFFIX = {
+# Graph labels whose OP_FLOPS_PER_ELEM row is not the label itself.
+_LABEL_TO_OP_FLOPS_ROW = {
     "negate": "neg",
     "reciprocal sqrt": "rsqrt",
+    "cosine": "cos",
+    "sine": "sin",
+    "cast": "to",
+    "subtract": "sub",
+    "multiply": "mul",
+    "divide": "div",
+    "power": "pow",
+    "elementwise_add": "add",
+    "elementwise_mul": "mul",
+    "variance": "var",
+    "product": "prod",
 }
 _BINARY_POINTWISE_COMPUTATIONS = frozenset(
     {
@@ -3429,12 +3438,16 @@ def _dispatch_op_cost(
         return _softmax_cost(output_shape, bpe)
     label = computation.lower()
     if label in _REDUCTION_COMPUTATIONS:
-        return _reduce_cost(input_shapes, output_shape, bpe)
+        return _reduce_cost(
+            input_shapes, output_shape, bpe, _label_flops_per_element(label)
+        )
     if label in _BINARY_POINTWISE_COMPUTATIONS:
-        return _binary_elementwise_cost(input_shapes, output_shape, bpe)
+        return _binary_elementwise_cost(
+            input_shapes, output_shape, bpe, _label_flops_per_element(label)
+        )
     if label in _UNARY_POINTWISE_COMPUTATIONS:
         return _unary_elementwise_cost(
-            output_shape, bpe, _unary_flops_per_element(label)
+            output_shape, bpe, _label_flops_per_element(label)
         )
     if _is_embedding_lookup(computation):
         return _embedding_lookup_cost(input_shapes, output_shape, bpe)
@@ -3744,26 +3757,20 @@ def _softmax_cost(
     return "Softmax", "vector", flops, bytes_moved
 
 
-def _unary_flops_per_element(label: str) -> int:
-    """Per-element flops from ``_FLOPS_PER_ELEM``, or 1 when it has no row.
-
-    The table is the same one fused Triton kernels use. A missing row there
-    means "this name contributed nothing we could identify inside a fused
-    kernel," which is the wrong default for a standalone unary op.
-    """
-    suffix = _UNARY_LABEL_TO_ATEN_SUFFIX.get(label, label)
-    return _FLOPS_PER_ELEM.get(f"aten.{suffix}", 1)
+def _label_flops_per_element(label: str) -> int:
+    """Per-element flops of a pointwise or reduction label, from ``OP_FLOPS_PER_ELEM``."""
+    return op_flops_per_elem(_LABEL_TO_OP_FLOPS_ROW.get(label, label))
 
 
 def _unary_elementwise_cost(
     output_shape: tuple[int, ...],
     bpe: float | None,
-    flops_per_elem: int = 1,
+    flops_per_elem: int,
 ) -> tuple[str, str, float, float | None] | None:
     if not output_shape:
         return None
     nelems = prod(output_shape)
-    flops = flops_per_elem * nelems
+    flops = UnaryElementwise.flops_func(nelems, flops_per_elem)
     bytes_moved = (
         UnaryElementwise.bytes_func(nelems, bpe, bpe) if bpe is not None else None
     )
@@ -3774,6 +3781,7 @@ def _binary_elementwise_cost(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
+    flops_per_elem: int,
 ) -> tuple[str, str, float, float | None] | None:
     if not output_shape:
         return None
@@ -3784,7 +3792,7 @@ def _binary_elementwise_cost(
     shape2 = input_shapes[1] if len(input_shapes) > 1 else None
     nelems_in1 = prod(shape1) if shape1 else 1
     nelems_in2 = prod(shape2) if shape2 else 1
-    flops = BinaryElementwise.flops_func(nelems_out)
+    flops = BinaryElementwise.flops_func(nelems_out, flops_per_elem)
     bytes_moved = (
         BinaryElementwise.bytes_func(nelems_in1, nelems_in2, nelems_out, bpe, bpe, bpe)
         if bpe is not None
@@ -3797,13 +3805,14 @@ def _reduce_cost(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
+    flops_per_elem: int,
 ) -> tuple[str, str, float, float | None] | None:
     if not input_shapes or not input_shapes[0]:
         return None
     input_shape = input_shapes[0]
     num_input_elems = prod(input_shape)
     num_output_elems = prod(output_shape) if output_shape else 1
-    flops = Reduce.flops_func(num_input_elems, num_output_elems)
+    flops = Reduce.flops_func(num_input_elems, flops_per_elem)
     bytes_moved = (
         Reduce.bytes_func(num_input_elems, num_output_elems, bpe, bpe)
         if bpe is not None

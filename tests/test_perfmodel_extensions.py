@@ -2187,9 +2187,9 @@ class TestPerfModelExtensions:
     @pytest.mark.parametrize(
         "model_cls,flops_per_elem",
         [
-            (aiter_silu_and_mul, 5),
-            (aiter_gelu_and_mul, 8),
-            (aiter_gelu_tanh_and_mul, 10),
+            (aiter_silu_and_mul, 15),
+            (aiter_gelu_and_mul, 13),
+            (aiter_gelu_tanh_and_mul, 17),
         ],
     )
     def test_gated_activation_extensions(self, model_cls, flops_per_elem):
@@ -2604,7 +2604,7 @@ class TestConvCoverage:
 
 class TestSoftmaxAndSdpaCoverage:
     def test_softmax_static_methods(self):
-        assert perf_model.Softmax.flops(4, 8) == 4 * 3 * 8
+        assert perf_model.Softmax.flops(4, 8) == 4 * 12 * 8
         assert perf_model.Softmax.bytes(4, 8, 2) == 128
         assert perf_model.Softmax.flops_bwd(4, 8) == 2 * perf_model.Softmax.flops(4, 8)
         t = perf_model.Softmax.get_time(_ARCH, 4, 8, 2, force_to_l1=True)
@@ -2712,49 +2712,64 @@ class TestSoftmaxAndSdpaCoverage:
 
 
 class TestElementwiseReduceCoverage:
-    def test_aten_unary_elementwise(self):
+    @pytest.mark.parametrize(
+        "name,flops_per_elem",
+        [
+            ("aten::copy_", 0),
+            ("aten::neg", 1),
+            ("aten::clamp_min_", 1),
+            ("aten::rsqrt", 4),
+            ("aten::sqrt_", 4),
+            ("aten::reciprocal", 4),
+            ("aten::exp", 8),
+            ("aten::tanh_", 8),
+            ("aten::sigmoid", 14),
+            ("aten::silu", 14),
+        ],
+    )
+    def test_aten_unary_elementwise_reads_the_op_table(self, name, flops_per_elem):
         event = {
+            "name": name,
             "args": {
                 "Input Dims": [(4, 256), (4, 256)],
                 "Input type": ["c10::BFloat16", "c10::BFloat16"],
                 "Input Strides": [(256, 1), (256, 1)],
-            }
+            },
         }
-        model = perf_model.aten_unary_elementwise(event)
-        assert model.flops() == 4 * 256
-        assert model.bytes() > 0
-
-    def test_aten_rsqrt_counts_two_flops_per_element(self):
-        event = {
-            "args": {
-                "Input Dims": [(4, 256), (4, 256)],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
-                "Input Strides": [(256, 1), (256, 1)],
-            }
-        }
-        model = perf_model.aten_rsqrt(event)
-        assert model.flops() == 2 * 4 * 256
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == flops_per_elem * 4 * 256
         assert model.bytes() == 2 * 4 * 256 * 2
-        assert op_to_perf_model_class_map["aten::rsqrt"] is perf_model.aten_rsqrt
-        assert op_to_perf_model_class_map["aten::rsqrt_"] is perf_model.aten_rsqrt
 
-    def test_sqrt_and_reciprocal_count_two_flops_per_element(self):
+    @pytest.mark.parametrize(
+        "exponent,flops_per_elem",
+        [("2", 1), ("3", 2), ("0.5", 4), ("-1", 4), ("2.5", 17), ("", 17)],
+    )
+    def test_aten_pow_prices_its_exponent(self, exponent, flops_per_elem):
         event = {
+            "name": "aten::pow",
             "args": {
-                "Input Dims": [(4, 256), (4, 256)],
-                "Input type": ["c10::BFloat16", "c10::BFloat16"],
-                "Input Strides": [(256, 1), (256, 1)],
-            }
+                "Input Dims": [(4, 256), []],
+                "Input type": ["float", "Scalar"],
+                "Input Strides": [(256, 1), []],
+                "Concrete Inputs": ["", exponent],
+            },
         }
-        for cls, name, inplace in (
-            (perf_model.aten_sqrt, "aten::sqrt", "aten::sqrt_"),
-            (perf_model.aten_reciprocal, "aten::reciprocal", "aten::reciprocal_"),
-        ):
-            model = cls(event)
-            assert model.flops() == 2 * 4 * 256
-            assert model.bytes() == 2 * 4 * 256 * 2
-            assert op_to_perf_model_class_map[name] is cls
-            assert op_to_perf_model_class_map[inplace] is cls
+        model = op_to_perf_model_class_map["aten::pow"](event)
+        assert model.flops() == flops_per_elem * 4 * 256
+
+    @pytest.mark.parametrize("approximate,flops_per_elem", [("none", 12), ("tanh", 16)])
+    def test_aten_gelu_prices_its_approximation(self, approximate, flops_per_elem):
+        event = {
+            "name": "aten::gelu",
+            "args": {
+                "Input Dims": [(4, 256), []],
+                "Input type": ["c10::BFloat16", "Scalar"],
+                "Input Strides": [(256, 1), []],
+                "Concrete Inputs": ["", approximate],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::gelu"](event)
+        assert model.flops() == flops_per_elem * 4 * 256
 
     def test_clone_is_left_to_its_copy(self):
         # aten::clone allocates and calls aten::copy_. Modeling the parent
@@ -2764,34 +2779,37 @@ class TestElementwiseReduceCoverage:
 
     def test_to_casts_between_the_recorded_scalar_types(self):
         event = {
+            "name": "aten::to",
             "args": {
                 "Input Dims": [[4], [], [], [], []],
                 "Input type": ["long int", "Scalar", "Scalar", "Scalar", ""],
                 "Input Strides": [[1], [], [], [], []],
                 "Concrete Inputs": ["", "3", "False", "False", ""],
-            }
+            },
         }
         model = perf_model.aten_to(event)
         assert model.flops() == 0
         assert model.bytes() == 4 * (8 + 4)
         copied = {
+            "name": "aten::_to_copy",
             "args": {
                 "Input Dims": [[4, 128], [], [], [], [], [], []],
                 "Input type": ["int", "Scalar", "", "", "", "Scalar", ""],
                 "Input Strides": [[128, 1], [], [], [], [], [], []],
                 "Concrete Inputs": ["", "4", "", "", "", "False", ""],
-            }
+            },
         }
         cast = perf_model.aten_to(copied)
         assert cast.flops() == 0
         assert cast.bytes() == 4 * 128 * (4 + 8)
         same_device = {
+            "name": "aten::to",
             "args": {
                 "Input Dims": [[4, 128], [], [], [], []],
                 "Input type": ["int", "Scalar", "Scalar", "Scalar", ""],
                 "Input Strides": [[128, 1], [], [], [], []],
                 "Concrete Inputs": ["", "", "False", "False", ""],
-            }
+            },
         }
         moved = perf_model.aten_to(same_device)
         assert moved.bytes() == 2 * 4 * 128 * 4
@@ -2813,16 +2831,39 @@ class TestElementwiseReduceCoverage:
         assert model.bytes() == (4 * 8194 + 4 * 8256) * 4
         assert op_to_perf_model_class_map["aten::pad"] is perf_model.aten_pad
 
-    def test_aten_binary_elementwise(self):
+    @pytest.mark.parametrize(
+        "name,flops_per_elem",
+        [
+            ("aten::add_", 1),
+            ("aten::sub", 1),
+            ("aten::div", 4),
+            ("aten::sigmoid_backward", 3),
+        ],
+    )
+    def test_aten_binary_elementwise(self, name, flops_per_elem):
         event = {
+            "name": name,
             "args": {
                 "Input Dims": [(4, 256), (256,), (4, 256)],
                 "Input type": ["c10::BFloat16"] * 3,
                 "Input Strides": [(256, 1), (1,), (256, 1)],
-            }
+            },
         }
-        model = perf_model.aten_binary_elementwise(event)
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == flops_per_elem * 4 * 256
+
+    def test_comparison_writes_a_bool(self):
+        event = {
+            "name": "aten::lt",
+            "args": {
+                "Input Dims": [(4, 256), (4, 256)],
+                "Input type": ["c10::BFloat16"] * 2,
+                "Input Strides": [(256, 1), (256, 1)],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::lt"](event)
         assert model.flops() == 4 * 256
+        assert model.bytes() == 4 * 256 * (2 + 2 + 1)
 
     def test_binary_broadcast_error(self):
         with pytest.raises(ValueError):
@@ -2837,7 +2878,7 @@ class TestElementwiseReduceCoverage:
             }
         }
         model = perf_model.liger_silu_mul_function(event)
-        assert model.flops() == 4 * 256
+        assert model.flops() == (14 + 1) * 4 * 256
 
     def test_aten_reduce_sum(self):
         event = {
@@ -2863,6 +2904,28 @@ class TestElementwiseReduceCoverage:
         }
         model = perf_model.aten_reduce(event)
         assert model.param_details["num_output_elems"] == 4 * 256
+
+    @pytest.mark.parametrize(
+        "name,flops_per_elem",
+        [
+            ("aten::sum", 1),
+            ("aten::amax", 1),
+            ("aten::linalg_norm", 2),
+            ("aten::var", 4),
+            ("aten::logsumexp", 11),
+        ],
+    )
+    def test_aten_reduce_prices_each_input_element(self, name, flops_per_elem):
+        event = {
+            "name": name,
+            "args": {
+                "Input Dims": [(4, 256)],
+                "Input type": ["c10::BFloat16"],
+                "Concrete Inputs": ["", 1, False],
+            },
+        }
+        model = perf_model.aten_reduce(event)
+        assert model.flops() == flops_per_elem * 4 * 256
 
 
 class TestNormalizationCoverage:

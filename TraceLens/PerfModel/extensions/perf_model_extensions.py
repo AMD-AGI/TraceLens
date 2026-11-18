@@ -17,6 +17,7 @@ from TraceLens.PerfModel.perf_model import (
     FusedRoPE,
     UnaryElementwise,
 )
+from TraceLens.PerfModel.op_flops import op_flops_per_elem
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
     name2bpe,
@@ -1146,7 +1147,12 @@ class aiter_silu_and_mul(UnaryElementwise):
 
     Expected Input type from trace:
         [dtype_out, dtype_input]  (note: reversed — out is arg 0, input is arg 1)
+
+    FLOPs: the activation's ``OP_FLOPS_PER_ELEM`` cost plus the gate multiply,
+    per output element.
     """
+
+    activation = "silu"
 
     @staticmethod
     def get_param_details(event):
@@ -1165,7 +1171,8 @@ class aiter_silu_and_mul(UnaryElementwise):
         }
 
     def flops(self):
-        return 5 * prod(self.param_details["op_shape"])
+        per_elem = op_flops_per_elem(self.activation) + op_flops_per_elem("mul")
+        return per_elem * prod(self.param_details["op_shape"])
 
     def bytes(self):
         return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
@@ -1212,12 +1219,10 @@ class aiter_gelu_and_mul(aiter_silu_and_mul):
     Expected Input Dims from trace:
         [out_shape, input_shape]
 
-    FLOPs: ~8 per output element (erf-based GELU: div, erf, add, mul, mul; then gate mul).
-    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    FLOPs and bytes: as aiter_silu_and_mul, with the erf GELU.
     """
 
-    def flops(self):
-        return 8 * prod(self.param_details["op_shape"])
+    activation = "gelu"
 
 
 class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
@@ -1234,12 +1239,10 @@ class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
     Expected Input Dims from trace:
         [out_shape, input_shape]
 
-    FLOPs: ~10 per output element (tanh GELU: x^3, coefficients, tanh, scale; then gate mul).
-    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    FLOPs and bytes: as aiter_silu_and_mul, with the tanh GELU.
     """
 
-    def flops(self):
-        return 10 * prod(self.param_details["op_shape"])
+    activation = "gelu_tanh"
 
 
 class gemm_afp4wfp4(GEMM):

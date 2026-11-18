@@ -316,9 +316,14 @@ FLOPs are computed by summing per-element operation costs across all fused ATen 
 flops = sum(flops_per_elem[op] for op in fused_aten_ops) * xnumel * rnumel
 ```
 
-The `flops_per_elem` table is in `_FLOPS_PER_ELEM`. Examples: `add`=1, `mul`=1,
-`silu`=4, `gelu`=8, `exp`=4, `pow`=2, `rsqrt`=2. Memory-only ops (`clone`,
-`_to_copy`, `_unsafe_view`) contribute 0.
+The `flops_per_elem` table is `OP_FLOPS_PER_ELEM` in
+`TraceLens/PerfModel/op_flops.py`. Standalone ATen perf models and the
+model-explorer roofline price ops from the same table. An add, multiply, or
+compare is 1. Divide and square-root ops are 4, and exp, log, tanh, and erf are 8,
+following the normalized weights of the Livermore Fortran Kernels. A composite
+op is the sum of its formula: `silu`=14, `gelu`=12. `pow` is 1 because Inductor
+fuses it as the square in RMSNorm. Memory-only ops (`clone`, `_to_copy`) and
+ops the table does not list (`_unsafe_view`) contribute 0.
 
 ### Bytes
 
@@ -417,14 +422,14 @@ Fused ops parsed from the kernel name: `aten._unsafe_view`, `aten.mul`, `aten.si
 |----|-------------------|
 | `aten._unsafe_view` | 0 (memory-only) |
 | `aten.mul` | 1 |
-| `aten.silu` | 4 |
-| Total | 5 |
+| `aten.silu` | 14 |
+| Total | 15 |
 
 ```
-flops = 5 * xnumel * rnumel
-      = 5 * 268,435,456 * 1
-      = 1,342,177,280
-GFLOPS = 1,342,177,280 / 1e9 = 1.342
+flops = 15 * xnumel * rnumel
+      = 15 * 268,435,456 * 1
+      = 4,026,531,840
+GFLOPS = 4,026,531,840 / 1e9 = 4.027
 ```
 
 ### Throughput metrics
@@ -433,7 +438,7 @@ GPU kernel time from the Chrome trace: 505.3 us
 
 ```
 TB/s     = (1,610,612,736 / 1e12) / (505.3 / 1e6) = 3.19 TB/s
-TFLOPS/s = (1.342 / 1e3) / (505.3 / 1e6)          = 2.66 TFLOPS/s
+TFLOPS/s = (4.027 / 1e3) / (505.3 / 1e6)          = 7.97 TFLOPS/s
 ```
 
 ### Summary
@@ -441,10 +446,10 @@ TFLOPS/s = (1.342 / 1e3) / (505.3 / 1e6)          = 2.66 TFLOPS/s
 | Metric | Value |
 |--------|-------|
 | Data Moved | 1,536 MB |
-| GFLOPS | 1.342 |
-| FLOPS/Byte | 0.833 |
+| GFLOPS | 4.027 |
+| FLOPS/Byte | 2.50 |
 | TB/s | 3.19 |
-| TFLOPS/s | 2.66 |
+| TFLOPS/s | 7.97 |
 
 ## Worked example: reduction kernel (RMSNorm)
 
@@ -522,13 +527,13 @@ Fused ops: `aten.add`, `aten.mean`, `aten.mul`, `aten.pow`, `aten.rsqrt`
 | `aten.add` | 1 |
 | `aten.mean` | 1 |
 | `aten.mul` | 1 |
-| `aten.pow` | 2 |
-| `aten.rsqrt` | 2 |
-| Total | 7 |
+| `aten.pow` | 1 |
+| `aten.rsqrt` | 4 |
+| Total | 8 |
 
 ```
-flops = 7 * 32,768 * 2,048 = 469,762,048
-GFLOPS = 0.470
+flops = 8 * 32,768 * 2,048 = 536,870,912
+GFLOPS = 0.537
 ```
 
 ### Throughput metrics
@@ -537,7 +542,7 @@ GPU kernel time: 79.4 us
 
 ```
 TB/s     = (268,439,552 / 1e12) / (79.4 / 1e6)  = 3.38 TB/s
-TFLOPS/s = (0.470 / 1e3) / (79.4 / 1e6)         = 5.92 TFLOPS/s
+TFLOPS/s = (0.537 / 1e3) / (79.4 / 1e6)         = 6.76 TFLOPS/s
 ```
 
 ## Results for the example transformer block
@@ -547,9 +552,9 @@ seq_len=4096, dtype=bf16. Traced with PyTorch 2.11+rocm7.2 on AMD Instinct™ MI
 
 | Kernel | GFLOPS | Data Moved (MB) | FLOPS/Byte | TB/s | TFLOPS/s |
 |--------|--------|-----------------|------------|------|----------|
-| `triton_red_fused_add_mean_mul_pow_rsqrt_0` (RMSNorm) | 0.470 | 256 | 1.75 | 3.38 | 5.92 |
-| `triton_red_fused__unsafe_view_add_mean_mul_pow_rsqrt_1` (RMSNorm+residual) | 0.470 | 384 | 1.17 | 4.32 | 5.04 |
-| `triton_poi_fused__unsafe_view_mul_silu_2` (SwiGLU) | 1.342 | 1,536 | 0.83 | 3.19 | 2.66 |
+| `triton_red_fused_add_mean_mul_pow_rsqrt_0` (RMSNorm) | 0.537 | 256 | 2.00 | 3.38 | 6.76 |
+| `triton_red_fused__unsafe_view_add_mean_mul_pow_rsqrt_1` (RMSNorm+residual) | 0.537 | 384 | 1.33 | 4.32 | 5.76 |
+| `triton_poi_fused__unsafe_view_mul_silu_2` (SwiGLU) | 4.027 | 1,536 | 2.50 | 3.19 | 7.97 |
 | `triton_poi_fused__unsafe_view_add_3` (residual add) | 0.067 | 512 | 0.12 | 3.81 | 0.48 |
 
 ## Related topics
