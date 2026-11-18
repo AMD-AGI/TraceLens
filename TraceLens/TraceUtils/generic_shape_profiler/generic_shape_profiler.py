@@ -153,7 +153,7 @@ _JIT_MODULES = ("triton", "flydsl", "tvm_ffi", "tilelang", "tvm")
 # Individual modules that are launch machinery inside an otherwise ordinary
 # package: aiter's HsacoKernel.__getitem__ closure sits between the caller and
 # run_hsaco(), but the cpp_itfs wrappers next to it are real launchers.
-_JIT_HELPER_MODULES = ("csrc.cpp_itfs.utils", "aiter.ops.flydsl.kernels.tensor_shim")
+_JIT_HELPER_MODULES = ("csrc.cpp_itfs.utils", "aiter.ops.flydsl.kernels.tensor_shim", "aiter.ops.flydsl.moe_kernels")
 
 # aiter names compiled cpp_itfs entry points <md_name>_<md5 of the template
 # args>; the hash only makes op names unreadable.
@@ -1039,6 +1039,34 @@ def install_aiter_flydsl_hooks() -> bool:
     _installed["aiter.flydsl"] = f"{mod.__name__}._run_compiled"
     if _should_break("aiter.flydsl"):
         _break_hooks.add("aiter.flydsl")
+    return True
+
+
+def install_aiter_flydsl_moe_hooks() -> bool:
+    """Hook ``moe_kernels._run_compiled`` (FP4 MoE path, e.g. MuseSpark).
+
+    Same dispatch pattern as ``tensor_shim._run_compiled`` but in a separate
+    module (``aiter.ops.flydsl.moe_kernels``).
+    """
+    mod = sys.modules.get("aiter.ops.flydsl.moe_kernels")
+    original = getattr(mod, "_run_compiled", None) if mod is not None else None
+    if not callable(original):
+        return False
+    if getattr(original, "_jit_shape_traced", False):
+        return True
+
+    @functools.wraps(original)
+    def _run_compiled(exe, *args, **kwargs):
+        if not _enabled:
+            return original(exe, *args, **kwargs)
+        name = _name_of(exe) or "flydsl_kernel"
+        return _trace_launch("aiter.flydsl.moe", name, None, lambda: original(exe, *args, **kwargs))
+
+    _run_compiled._jit_shape_traced = True
+    mod._run_compiled = _run_compiled
+    _installed["aiter.flydsl.moe"] = f"{mod.__name__}._run_compiled"
+    if _should_break("aiter.flydsl.moe"):
+        _break_hooks.add("aiter.flydsl.moe")
     return True
 
 
