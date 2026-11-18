@@ -1,29 +1,17 @@
 """
 Auto-loaded shim that turns on kernel-shape annotation without patching the
-inference server (SGLang / vLLM / any torch workload).
+server. CPython imports ``sitecustomize`` at startup when it is on ``sys.path``.
 
-CPython imports a top-level module named ``sitecustomize`` automatically at
-interpreter startup for every process, as long as its directory is on
-``sys.path`` (i.e. on ``PYTHONPATH``). This shim uses that hook to:
+It installs the ``generic_shape_profiler`` hooks as their libraries load, and
+drives ``enable()`` / ``disable()`` from the torch-profiler window.
 
-  1. install the Triton / FlyDSL / tvm-ffi / aiter / TileLang hooks from
-     ``generic_shape_profiler`` as soon as those libraries are imported, and
-  2. drive ``enable()`` / ``disable()`` from the torch-profiler window, so
-     shape annotation costs nothing outside a profiling run.
-
-Activation (both required):
+Activation:
     export PYTHONPATH=/path/to/TraceLens/TraceLens/TraceUtils/generic_shape_profiler:$PYTHONPATH
     export TRACELENS_SHAPE_DISCOVERY=1
 
-Behaviour when ``TRACELENS_SHAPE_DISCOVERY`` is unset/false: this shim installs
-nothing observable -- every hook short-circuits, so it is safe to leave the
-directory on ``PYTHONPATH`` permanently.
-
-torch is usually not imported yet when ``sitecustomize`` runs, so patches are
-registered as *pending* and applied by a ``sys.meta_path`` finder the moment
-the target module finishes importing. All hooks are idempotent (guarded by a
-sentinel attribute) and crash-proof (wrapped in ``try/except``) so they can
-never break the workload.
+With ``TRACELENS_SHAPE_DISCOVERY`` unset every hook short-circuits, so the
+directory can stay on ``PYTHONPATH``. All patches are idempotent and wrapped in
+``try/except``.
 """
 
 import os
@@ -43,22 +31,13 @@ def _shape_discovery_on() -> bool:
     return _flag_on(_ENV_FLAG, "0")
 
 
-# ---------------------------------------------------------------------------
-# Lazy handle to the co-located tracer.
-#
-# We intentionally do NOT import generic_shape_profiler (which imports torch) at
-# sitecustomize time -- that would force a heavy torch import at interpreter
-# startup and run torch's import-time side effects too early. Instead we import
-# it lazily, once a hook actually needs it and torch is already loaded.
-# ---------------------------------------------------------------------------
+# Imported lazily: the core imports torch, which must not load at startup.
 _tracer = None
 
 
 def _get_tracer():
     global _tracer
     if _tracer is None:
-        # Make sure this file's own directory is importable even if only the
-        # parent ended up on sys.path.
         here = os.path.dirname(os.path.abspath(__file__))
         if here not in sys.path:
             sys.path.insert(0, here)
@@ -85,17 +64,13 @@ def _disable_tracer() -> None:
         pass
 
 
-# Number of torch-profiler windows currently open. Nested/overlapping windows
-# must not disable the tracer until the last one closes.
+# Open profiler windows; the tracer turns off when the last one closes.
 _profiler_active = [0]
 
 
 # ---------------------------------------------------------------------------
-# Patch: install the JIT hooks.
-#   The hooks themselves are inert until enable() is called, so installing them
-#   eagerly (at Triton/FlyDSL import) is free and guarantees they are in place
-#   before the first profiler window opens. Deferred until torch is loaded so
-#   we never drag torch into a process that does not already use it.
+# JIT hooks. Inert until enable(), so they are installed as early as possible
+# (but never before torch is loaded).
 # ---------------------------------------------------------------------------
 def _install_jit_hooks() -> bool:
     if "torch" not in sys.modules:
@@ -107,12 +82,7 @@ def _install_jit_hooks() -> bool:
 
 
 def _installer(fn_name: str):
-    """Pending patch for one tracer hook, so it is retried until that hook lands.
-
-    These must go in before the first kernel is loaded: tvm-ffi modules and
-    aiter's run_lib cache the functions they hand out, so a late hook would
-    miss every kernel resolved before it.
-    """
+    """Pending patch for one hook that must land before its first kernel loads."""
 
     def install() -> bool:
         if "torch" not in sys.modules:
@@ -126,9 +96,7 @@ def _installer(fn_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Patch: torch.profiler.profile.start / stop
-#   enable() runs just before the profiler starts recording so the first
-#   captured launch already carries shape metadata; stop() turns it back off.
+# torch.profiler.profile.start / stop drive enable() / disable().
 # ---------------------------------------------------------------------------
 def _patch_torch_profiler_profile() -> bool:
     try:
@@ -169,11 +137,7 @@ def _patch_torch_profiler_profile() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Patch: _KinetoProfile.__init__  -> force record_shapes=True
-#   The annotation ops only surface "Input Dims" / "Input type" in the trace
-#   when the profiler was constructed with record_shapes=True. Force it on (opt
-#   out with TRACELENS_SHAPE_FORCE_RECORD_SHAPES=0) so shape annotation "just
-#   works" regardless of how the server configured its profiler.
+# Force record_shapes=True: Input Dims only surface when shapes are recorded.
 # ---------------------------------------------------------------------------
 def _patch_kineto_record_shapes() -> bool:
     try:
@@ -208,7 +172,7 @@ def _patch_torch_profiler_both() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Patch: torch.cuda.profiler.start / stop  (legacy profiling API)
+# torch.cuda.profiler.start / stop (legacy API).
 # ---------------------------------------------------------------------------
 def _patch_torch_cuda_profiler() -> bool:
     try:
@@ -245,11 +209,7 @@ def _patch_torch_cuda_profiler() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Pending-patch registry + import hook.
-#
-# Kernels launched during CUDA-graph replay need no special handling: their
-# shapes are recorded when the graph is *captured*, and capture that happens
-# inside a profiler window is already covered by the flag being on.
+# Pending patches, applied when their module finishes importing.
 # ---------------------------------------------------------------------------
 _PENDING_PATCHES = {
     "torch.profiler": _patch_torch_profiler_both,
@@ -305,8 +265,7 @@ class _PatchOnLoad:
         try:
             self._loader.exec_module(module)
         finally:
-            # Hand the module back its real loader; only the post-load
-            # callback needed this wrapper.
+            # Restore the real loader on the module and its spec.
             if getattr(module, "__loader__", None) is self:
                 module.__loader__ = self._loader
             spec = getattr(module, "__spec__", None)
@@ -321,12 +280,8 @@ class _PatchOnLoad:
 class _PostImportFinder:
     """``sys.meta_path`` finder that observes the first import of watched modules.
 
-    Python only consults ``sys.meta_path`` for modules not yet in
-    ``sys.modules``, so -- unlike a ``builtins.__import__`` wrapper -- this
-    costs nothing for the ``import`` statements a server executes on its hot
-    paths, and adds no frames to a ``with_stack`` profiler trace. Watched:
-    every pending patch target, plus ``torch``, which most patches need fully
-    loaded before they can apply.
+    Only consulted for modules not yet in ``sys.modules``, so hot-path imports
+    cost nothing and add no ``with_stack`` frames.
     """
 
     def find_spec(self, fullname, path, target=None):
@@ -367,9 +322,7 @@ def _remove_finder() -> None:
 
 
 def _bootstrap() -> None:
-    # Even when the flag is off we still install the (cheap) hooks: they all
-    # short-circuit via _shape_discovery_on(), and installing unconditionally
-    # keeps behaviour stable if the flag is toggled between fork/exec boundaries.
+    # Hooks are installed even with the flag off; they short-circuit on it.
     if getattr(sys, "_tracelens_shape_bootstrapped", False):
         return
     sys._tracelens_shape_bootstrapped = True
