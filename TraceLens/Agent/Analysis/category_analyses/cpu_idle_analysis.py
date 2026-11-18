@@ -25,6 +25,7 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     SystemFindings,
     load_manifest,
     perf_report_csv_dir,
+    timeline_rows,
     write_metrics_json,
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
@@ -40,13 +41,7 @@ def load_gpu_timeline(output_dir: str) -> dict[str, dict[str, float]]:
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"GPU timeline not found: {csv_path}")
 
-    df = pd.read_csv(csv_path)
-
-    timeline = {}
-    for _, row in df.iterrows():
-        timeline[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
-
-    return timeline
+    return timeline_rows(pd.read_csv(csv_path))
 
 
 def load_ops_summary(output_dir: str) -> pd.DataFrame | None:

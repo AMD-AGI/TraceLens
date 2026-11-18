@@ -2148,6 +2148,23 @@ def test_gpu_utilization_metrics_stacked_nodes():
         gpu_utilization_from_timeline(df[df["node"] != "all"])
 
 
+def test_gpu_utilization_metrics_micro_macro_idle():
+    # --micro_idle_thresh_us writes these two rows and no idle_time row.
+    df = pd.DataFrame(
+        {
+            "type": ["total_time", "micro_idle_time", "macro_idle_time"],
+            "time ms": [100.0, 2.0, 30.0],
+            "percent": [100.0, 2.0, 30.0],
+        }
+    )
+    assert gpu_utilization_from_timeline(df)["idle_time_percent"] == 32.0
+    m = gpu_utilization_from_timeline(
+        pd.concat([df.assign(node="n0"), df.assign(node="all")])
+    )
+    assert m["idle_time_percent"] == 32.0
+    assert m["nodes"]["n0"]["idle_time_percent"] == 32.0
+
+
 def test_gpu_utilization_metrics_missing_rows_default_zero():
     df = pd.DataFrame(
         {

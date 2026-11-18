@@ -179,6 +179,25 @@ def focus_job_utilization(manifest: dict) -> dict:
     return gpu_util
 
 
+def timeline_rows(gpu_timeline: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """gpu_timeline.csv rows keyed by ``type``, as ``{"time_ms", "percent"}``.
+
+    ``--micro_idle_thresh_us`` writes ``micro_idle_time`` and ``macro_idle_time``
+    instead of ``idle_time``; they are summed back into ``idle_time`` here so
+    readers see the same idle number with or without the flag.
+    """
+    rows = {
+        row["type"]: {"time_ms": row["time ms"], "percent": row["percent"]}
+        for _, row in gpu_timeline.iterrows()
+    }
+    split = [rows[t] for t in ("micro_idle_time", "macro_idle_time") if t in rows]
+    if "idle_time" not in rows and split:
+        rows["idle_time"] = {
+            k: sum(r[k] for r in split) for k in ("time_ms", "percent")
+        }
+    return rows
+
+
 def gpu_utilization_from_timeline(gpu_timeline: pd.DataFrame) -> dict:
     """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows.
 
@@ -193,9 +212,7 @@ def gpu_utilization_from_timeline(gpu_timeline: pd.DataFrame) -> dict:
         if ALL_NODES not in blocks:
             raise ValueError(f"gpu_timeline.csv has no {ALL_NODES!r} block.")
         return {**blocks.pop(ALL_NODES), "nodes": blocks}
-    gpu_data = {}
-    for _, row in gpu_timeline.iterrows():
-        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
+    gpu_data = timeline_rows(gpu_timeline)
     return {
         "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
         "computation_time_percent": gpu_data.get("computation_time", {}).get(

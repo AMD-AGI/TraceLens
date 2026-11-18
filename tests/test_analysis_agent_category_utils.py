@@ -1311,6 +1311,22 @@ def test_load_gpu_timeline_reads_rows(tmp_path):
     assert tl["total_time"]["time_ms"] == 100.0
 
 
+def test_load_gpu_timeline_sums_micro_macro_idle(tmp_path):
+    # --micro_idle_thresh_us writes these two rows and no idle_time row.
+    csv_dir = tmp_path / "perf_report_csvs"
+    csv_dir.mkdir()
+    pd.DataFrame(
+        {
+            "type": ["micro_idle_time", "macro_idle_time", "total_time"],
+            "time ms": [2.0, 30.0, 100.0],
+            "percent": [2.0, 30.0, 100.0],
+        }
+    ).to_csv(csv_dir / "gpu_timeline.csv", index=False)
+    tl = load_gpu_timeline(str(tmp_path))
+    assert tl["idle_time"] == {"time_ms": 32.0, "percent": 32.0}
+    assert tl["macro_idle_time"]["percent"] == 30.0
+
+
 # ----- elementwise / norm one-liner extractors -----
 
 
