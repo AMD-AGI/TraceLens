@@ -52,6 +52,8 @@ MODEL_OUTPUT_COLUMNS = ("GFLOPS", "Data Moved (MB)")
 UNCATEGORIZED = ("", "other")
 # Newer TraceLens embeds the call stack in the summary CSV; prefer the full one.
 CALL_STACK_COLUMNS = ("call_stack_full", "call_stack", "trunc_call_stack")
+# Kernel names inside a report's kernel_details_summary cell.
+KERNEL_NAME_RE = re.compile(r"'name': '([^']*)'")
 REPO_HINTS = (
     (r"aiter/", "AITER (aiter/…)"),
     (r"vllm/", "vLLM (vllm/…)"),
@@ -127,7 +129,7 @@ def categorized_names(rows: List[Row]) -> set:
 
 
 def validation_cases(report_dir: Path) -> List[Dict]:
-    """One validator case per unique (name, Input Dims, Input type) with a perf model.
+    """One validator case per unique (name, Input Dims, Input type, Concrete Inputs) with a perf model.
 
     Attention parameters come from InferenceAttention_fwd.csv when it exists.
     """
@@ -144,7 +146,12 @@ def validation_cases(report_dir: Path) -> List[Dict]:
     rows, _ = load_rows(report_dir / "unified_perf_summary.csv")
     cases, seen = [], set()
     for r in rows:
-        key = (r.get("name", ""), r.get("Input Dims", ""), r.get("Input type", ""))
+        key = (
+            r.get("name", ""),
+            r.get("Input Dims", ""),
+            r.get("Input type", ""),
+            r.get("Concrete Inputs", ""),
+        )
         if not row_has_perf_model(r) or key in seen or not key[1]:
             continue
         seen.add(key)
@@ -158,6 +165,9 @@ def validation_cases(report_dir: Path) -> List[Dict]:
                 "concrete_inputs": _literal(r.get("Concrete Inputs")),
                 "perf_params": _literal(r.get("perf_params")),
                 "attn_params": attn.get((key[0], key[1])),
+                "trace_kernels": sorted(
+                    set(KERNEL_NAME_RE.findall(r.get("kernel_details_summary") or ""))
+                ),
                 "csv_flops": _float(r.get("GFLOPS")) * 1e9,
                 "csv_bytes": _float(r.get("Data Moved (MB)")) * 1024 * 1024,
             }

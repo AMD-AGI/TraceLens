@@ -44,8 +44,11 @@ workflow index below names the section for every step.
 
 ## Inputs
 
-- A cases JSON (`--cases`) built from a perf report, or an op key with dimensions.
-- A GPU, its `--arch`, and an output directory.
+- A perf report's `perf_report_csvs` directory and the op names to validate (the
+  perf-model-generate skill's Outputs), or an op key with dimensions. Build the
+  cases JSON from the directory as "How a run works" in reference.md describes,
+  and pass it with `--cases` and `--only-ops`.
+- A GPU, its `--arch` (required), and an output directory.
 - Where to run it, given by the user: a Python environment (conda env or
   virtual environment), a Docker image, or the name of a running container.
   It must meet the prerequisites in [reference.md](reference.md); the serving image of the framework that
@@ -55,7 +58,7 @@ workflow index below names the section for every step.
 
 ## Outputs
 
-`validation_report_<timestamp>.csv` with one row per op or shape, and a directory per op. Each row has two statuses:
+`validation_report.csv` (fixed name; use a new `--output-dir` for a rerun) with one row per op or shape, and a directory per op. Each row has two statuses, plus the `precision_check` and `kernel_match` columns described under Counters in reference.md:
 
 - `run_status`: whether the op could be measured. `OK`, `MODEL_ONLY` (predicted only, not run) or `FAIL: <reason>`. A `--cases` run exits 1 when any row is `FAIL`.
 - `match_status`: how the prediction compares, from the ratio bands in `TraceLens/Agent/PerfModel/validate_perf_model/ratio_bands.py`. Empty unless `run_status` is `OK`; otherwise:
@@ -63,7 +66,8 @@ workflow index below names the section for every step.
   - `over-predicted`: a ratio below its range, so the model predicts more than was measured. Never acceptable;
   - `deviation-suspect`: a ratio above its range, not yet explained. The validator writes this;
   - `deviation-explained`: a ratio above its range whose cause was found in the code (see "Investigating a deviation" in reference.md). Only the investigating agent sets this;
-  - `no prediction`: the perf model returned nothing.
+  - `no prediction`: the perf model returned nothing;
+  - `precision-mismatch`: an MFMA op whose dominant counter is not the one its compute precision expects. Never acceptable.
 
 Per-ratio bands are in `flops_band` and `bytes_band`. Both ranges start at 1.0, since a model must never predict more than was measured: FLOPs 1.0–1.05, bytes 1.0–1.2.
 
@@ -83,9 +87,9 @@ An op with no harness yet: see "Adding an op: where things go".
 ## Rules
 
 - Change the perf model only when the analytical model is wrong, never just to match a counter.
-- `over-predicted` is never acceptable.
+- `over-predicted` and `precision-mismatch` are never acceptable.
 - Edit the validation CSV only as "Investigating a deviation" allows: one row's `match_status` and `comment`, after the investigation.
-- The harness must run the same kernel as the trace; check the kernel name before trusting a ratio.
+- The harness must run the same kernel as the trace; in `--cases` runs, a `kernel_match` of `mismatch` means it did not, so fix the inputs before trusting a ratio.
 - Run only where the user said, with the GPU and output directory they gave.
 
 ## Error handling

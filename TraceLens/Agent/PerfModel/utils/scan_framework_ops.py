@@ -6,7 +6,7 @@
 ###############################################################################
 
 """
-EP3 — Framework source scanner for unified-perf-model-extension.
+EP3 — Framework source scanner for the perf-model-generate skill.
 
 Statically scans framework repos (aiter, vLLM, SGLang / sgl_kernel) for
 Python-side torch op registrations that TraceLens can model.
