@@ -1617,12 +1617,18 @@ class SDPA:
         bytes_per_element,
         kv_bytes_per_element=None,
     ):
-        # Q and the output move at the activation width. K and V are the cache,
-        # which an fp8 KV cache stores at one byte even when Q is bfloat16.
+        # One attention moves
+        #   (Q + Out) * bytes_per_element + (K + V) * kv_bpe
+        # where
+        #   Q   = B * N_Q * H_Q * d_h_qk
+        #   Out = B * N_Q * H_Q * d_h_v
+        #   K   = B * N_KV * H_KV * d_h_qk
+        #   V   = B * N_KV * H_KV * d_h_v
+        # Q and the output use the activation width. K and V are the cache, so
+        # they use kv_bytes_per_element when it is set: an fp8 cache is 1 byte
+        # while a bfloat16 Q stays 2. Unset, K and V use bytes_per_element too.
         kv_bpe = (
-            bytes_per_element
-            if kv_bytes_per_element is None
-            else kv_bytes_per_element
+            bytes_per_element if kv_bytes_per_element is None else kv_bytes_per_element
         )
         elems_q_read = B * N_Q * H_Q * d_h_qk
         elems_k_read = B * N_KV * H_KV * d_h_qk
