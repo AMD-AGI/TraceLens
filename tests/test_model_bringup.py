@@ -47,6 +47,20 @@ def _gate(bringup, name):
     return json.loads((bringup / "gates" / f"{name}.json").read_text())
 
 
+def _accept_op(bringup, op_slug, status="pass", problems=()):
+    """Write the op-result gate Step 6 leaves for an op."""
+    gates = bringup / "gates"
+    gates.mkdir(exist_ok=True)
+    (gates / f"op_result_{op_slug}.json").write_text(
+        json.dumps({"status": status, "problems": list(problems)})
+    )
+
+
+def _write_gaps(bringup, *op_slugs):
+    ops = [{"name": s, "op_slug": s} for s in op_slugs]
+    (bringup / "gaps.json").write_text(json.dumps({"ops": ops, "comm_excluded": []}))
+
+
 def _modeled_op(bringup, csv_rows):
     (bringup / "cache").mkdir()
     (bringup / "cache" / "bringup_config.yaml").write_text(
@@ -179,6 +193,8 @@ def test_coverage_needs_all_rows_ok_and_summary(tmp_path):
             }
         )
     )
+    _accept_op(tmp_path, "op_a")
+    _write_gaps(tmp_path, "op_a")
     args = ["coverage", "--bringup-dir", str(tmp_path)]
     args += ["--before", str(after), "--after", str(after)]
     assert bringup_gates.main(args) == 1
@@ -364,6 +380,28 @@ def test_coverage_needs_categorized_op_to_have_a_category(tmp_path, category, co
             }
         )
     )
+    _accept_op(tmp_path, "op_a")
     args = ["coverage", "--bringup-dir", str(tmp_path)]
     args += ["--before", str(after), "--after", str(after)]
     assert bringup_gates.main(args) == code
+
+
+def test_excluded_and_skipped_ops(tmp_path):
+    op_dir, args = _modeled_op(tmp_path, _OK_ROW)
+    (op_dir / "perf_model_pr.md").write_text("## Operator\n")
+    assert bringup_gates.main(args) == 1
+    gate = _gate(tmp_path, "op_result_op_a")
+    assert gate["status"] == "fail" and gate["problems"]
+
+    after = _write_csv(tmp_path / "after.csv", ["op_a,GEMM,,,10,False,,\n"])
+    cov = ["coverage", "--bringup-dir", str(tmp_path)]
+    assert (
+        bringup_gates.main(cov + ["--before", str(after), "--after", str(after)]) == 0
+    )
+
+    _write_gaps(tmp_path, "op_a", "op_b")
+    bringup_gates.main(["summary", "--bringup-dir", str(tmp_path)])
+    text = (tmp_path / "bringup_summary.md").read_text()
+    assert f"| op_a | excluded | {gate['problems'][0]} |" in text
+    assert "| op_b | skipped | not launched |" in text
+    assert "Publish with" not in text

@@ -6,8 +6,9 @@
 
 """Gates for the model-bringup skill.
 
-Each gate exits 0 (pass), 1 (fail) or 2 (input error). All but ``gaps``, ``cases``
-and ``op-result`` write ``<bringup_dir>/gates/<name>.json``::
+Each gate exits 0 (pass), 1 (fail) or 2 (input error). All but ``gaps`` and
+``cases`` write ``<bringup_dir>/gates/<name>.json``; ``op-result`` writes
+``gates/op_result_<op_slug>.json``::
 
     python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates <subcommand> --bringup-dir B ...
 """
@@ -216,14 +217,16 @@ def cases(args):
 def op_result(args):
     """Check a perf-model sub-agent's result.json: schema; modeled implies a commit and validation rows that ran and match or have an explained deviation; categorized implies a commit and no validation; the draft leaks no run input, uses only the template's tables (the validation table whenever rows exist) and explains every ratio deviation."""
     path = Path(args.result)
+    gate = f"op_result_{path.parent.name}"
     if not path.is_file():
         print(f"missing {path}", file=sys.stderr)
+        args.bringup.write_gate(gate, False, problems=[f"missing {path.name}"])
         return 2
     try:
         result = json.loads(path.read_text())
     except json.JSONDecodeError as e:
         print(f"invalid JSON: {e}", file=sys.stderr)
-        return 1
+        return args.bringup.write_gate(gate, False, problems=[f"invalid JSON: {e}"])
     problems = [f"missing key: {k}" for k in RESULT_KEYS if k not in result]
     outcome = result.get("outcome")
     if outcome not in DRAFT_FILES:
@@ -264,7 +267,7 @@ def op_result(args):
                 problems += draft.unexplained_ratios(rows)
     for problem in problems:
         print(problem, file=sys.stderr)
-    return 1 if problems else 0
+    return args.bringup.write_gate(gate, not problems, problems=problems)
 
 
 def analysis_result(args):
@@ -331,13 +334,10 @@ def summary(args):
     lines += ["| Gate | Status |", "|---|---|"]
     for name in ("prepare", "profile_health", "analysis", "report_health", "coverage"):
         lines.append(f"| {name} | {bringup.gate_status(name)} |")
-    results = bringup.results()
+    rows = bringup.op_rows()
     lines += ["", "| Op | Outcome | Reason |", "|---|---|---|"]
-    lines += [
-        f"| {r['op_slug']} | {r['outcome']} | {r.get('reason') or ''} |"
-        for r in results
-    ]
-    drafted = [r["op_slug"] for r in results if r["outcome"] in DRAFT_FILES]
+    lines += [f"| {slug} | {outcome} | {reason} |" for slug, outcome, reason in rows]
+    drafted = [slug for slug, outcome, _ in rows if outcome in DRAFT_FILES]
     if drafted:
         lines += [
             "",
@@ -393,12 +393,41 @@ class BringupDir:
         )
         return 0 if passed else 1
 
+    def op_gate_status(self, op_slug):
+        """``pass``, ``fail`` or ``not_run`` for the op-result gate of ``op_slug``."""
+        return self.gate_status(f"op_result_{op_slug}")
+
     def results(self):
-        """Every perf-model sub-agent's ``result.json``, in op-slug order."""
+        """``result.json`` of every op whose op-result gate passed, in op-slug order."""
         return [
             json.loads(p.read_text())
             for p in sorted(self.root.glob("perf_models/*/result.json"))
+            if self.op_gate_status(p.parent.name) == "pass"
         ]
+
+    def op_rows(self):
+        """``(op_slug, outcome, reason)`` for every op in ``gaps.json``.
+
+        An op whose op-result gate passed shows its worker's outcome; one whose
+        gate failed (twice, in Step 6) is ``excluded``; one never launched is
+        ``skipped``.
+        """
+        if not self.gaps_json.is_file():
+            return []
+        rows = []
+        for op in json.loads(self.gaps_json.read_text())["ops"]:
+            slug = op["op_slug"]
+            status = self.op_gate_status(slug)
+            if status == "not_run":
+                rows.append((slug, "skipped", "not launched"))
+            elif status == "fail":
+                problems = json.loads(self.gate_path(f"op_result_{slug}").read_text())
+                rows.append((slug, "excluded", problems["problems"][0]))
+            else:
+                result_path = self.root / "perf_models" / slug / "result.json"
+                result = json.loads(result_path.read_text())
+                rows.append((slug, result["outcome"], result.get("reason") or ""))
+        return rows
 
     def leak_tokens(self):
         """Normalized run-specific names (and their raw form) a public draft must not carry."""
