@@ -447,7 +447,6 @@ def test_model_config_resolves(tmp_path, monkeypatch):
         "TP": 8,
         "EXTRA_SGLANG_ARGS": "--dp 8 --enable-dp-attention",
     }
-    assert out["arch"]["hidden_size"] == 64
     assert out["config"].items() >= hf_config.items()
     assert out["paper"] == paper
 
@@ -460,7 +459,7 @@ def test_model_config_unresolved(tmp_path, monkeypatch):
     monkeypatch.setattr(bringup_gates, "_find_paper", lambda model_id: None)
     rc, out = _model_config(tmp_path, "sglang", {"TP": 4})
     assert rc == 1
-    assert out["arch"] is None and out["config"] is None
+    assert out["config"] is None
     assert out["launch"] == {"TP": 4}
     assert _gate(tmp_path, "model_config") == {
         "status": "fail",

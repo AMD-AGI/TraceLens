@@ -47,7 +47,6 @@ from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
     MATCH,
 )
 from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
-from TraceLens.ModelUtils.extract import parse_architecture
 from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
     CustomCollective,
 )
@@ -98,21 +97,6 @@ PDF_LINK = re.compile(r"https?://(?!(?:www\.)?arxiv\.org/)[^\s<>()\"'\]]+\.pdf")
 # The card's base_model: the value, or the first entry of a list.
 BASE_MODEL = re.compile(r"^base_model:[\s-]*['\"]?([\w.-]+/[\w.-]+)", re.M)
 NAME_STEM = re.compile(r"[A-Za-z]+")
-ARCH_FIELDS = (
-    "model_type",
-    "attention_type",
-    "hidden_size",
-    "num_hidden_layers",
-    "num_attention_heads",
-    "num_key_value_heads",
-    "head_dim",
-    "intermediate_size",
-    "vocab_size",
-    "num_experts",
-    "num_experts_per_tok",
-    "num_shared_experts",
-    "moe_intermediate_size",
-)
 LAUNCH_KEYS = ("TP", "EP_SIZE", "EP", "DP_ATTENTION")
 SUMMARY_GATES = (
     "prepare",
@@ -193,14 +177,11 @@ def model_config(args):
     launch = {k: envs[k] for k in (*LAUNCH_KEYS, extra_args) if k in envs}
     model_path = envs.get("MODEL_PATH")
     checkpoint = model_path if model_path and Path(model_path).is_dir() else model_id
-    arch = config = error = None
+    config = error = None
     try:
-        config, label = load_checkpoint_config(checkpoint)
+        config, _ = load_checkpoint_config(checkpoint)
     except (OSError, ValueError) as e:
         error = str(e)
-    else:
-        spec = parse_architecture(config, label)
-        arch = {field: getattr(spec, field) for field in ARCH_FIELDS}
     # HF_HUB_OFFLINE only pins the config read; the card lookup is plain urllib.
     paper = _find_paper(model_id)
     out = args.bringup.root / MODEL_CONFIG
@@ -210,7 +191,6 @@ def model_config(args):
             {
                 "model_id": model_id,
                 "launch": launch,
-                "arch": arch,
                 "config": config,
                 "paper": paper,
             },
@@ -218,6 +198,51 @@ def model_config(args):
         )
     )
     return args.bringup.write_gate("model_config", error is None, error=error)
+
+
+def _find_paper(model_id):
+    """The model's paper link from its card, or None if absent or not found in time."""
+    result = []
+
+    def run():
+        try:
+            result.append(_paper_from_cards(model_id))
+        except (OSError, ValueError):
+            pass
+
+    # urllib's timeout does not cover name resolution, so bound the whole lookup.
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(PAPER_BUDGET_S)
+    return result[0] if result else None
+
+
+def _paper_from_cards(model_id):
+    """First arXiv link titled for the model, else first PDF link, on its card or its base_model's."""
+
+    def _get(url):
+        try:
+            with urllib.request.urlopen(url, timeout=PAPER_BUDGET_S) as response:
+                return response.read().decode()
+        except urllib.error.HTTPError:
+            return ""
+
+    for _ in range(2):  # the card, then its base_model's card
+        card = _get(CARD_URL.format(model_id))
+        stem = NAME_STEM.search(model_id.rsplit("/", 1)[-1]).group().lower()
+        for arxiv_id in dict.fromkeys(ARXIV_ID.findall(card)):
+            paper = json.loads(_get(PAPER_URL.format(arxiv_id)) or "{}")
+            title = paper.get("title") or ""
+            if stem in title.lower():
+                return {"url": f"https://arxiv.org/abs/{arxiv_id}", "title": title}
+        pdf = PDF_LINK.search(card)
+        if pdf:
+            return {"url": pdf.group(), "title": None}
+        base = BASE_MODEL.search(card)
+        if not base:
+            break
+        model_id = base.group(1)
+    return None
 
 
 def report_health(args):
@@ -618,51 +643,6 @@ def _all_rows_ok(rows):
 
 def _norm(text):
     return re.sub(r"[^a-z0-9]", "", text.lower())
-
-
-def _find_paper(model_id):
-    """The model's paper link from its card, or None if absent or not found in time."""
-    result = []
-
-    def run():
-        try:
-            result.append(_paper_from_cards(model_id))
-        except (OSError, ValueError):
-            pass
-
-    # urllib's timeout does not cover name resolution, so bound the whole lookup.
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    thread.join(PAPER_BUDGET_S)
-    return result[0] if result else None
-
-
-def _paper_from_cards(model_id):
-    """First arXiv link titled for the model, else first PDF link, on its card or its base_model's."""
-
-    def _get(url):
-        try:
-            with urllib.request.urlopen(url, timeout=PAPER_BUDGET_S) as response:
-                return response.read().decode()
-        except urllib.error.HTTPError:
-            return ""
-
-    for _ in range(2):  # the card, then its base_model's card
-        card = _get(CARD_URL.format(model_id))
-        stem = NAME_STEM.search(model_id.rsplit("/", 1)[-1]).group().lower()
-        for arxiv_id in dict.fromkeys(ARXIV_ID.findall(card)):
-            paper = json.loads(_get(PAPER_URL.format(arxiv_id)) or "{}")
-            title = paper.get("title") or ""
-            if stem in title.lower():
-                return {"url": f"https://arxiv.org/abs/{arxiv_id}", "title": title}
-        pdf = PDF_LINK.search(card)
-        if pdf:
-            return {"url": pdf.group(), "title": None}
-        base = BASE_MODEL.search(card)
-        if not base:
-            break
-        model_id = base.group(1)
-    return None
 
 
 def main(argv=None):
