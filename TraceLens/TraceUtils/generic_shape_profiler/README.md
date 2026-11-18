@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+See LICENSE for license information.
+-->
+
 # generic_shape_profiler
 
 Annotate **tensor shapes and dtypes of GPU kernels that bypass the PyTorch
