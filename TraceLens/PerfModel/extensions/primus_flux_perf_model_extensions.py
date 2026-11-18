@@ -8,15 +8,10 @@
 Performance models for Primus Flux operations.
 """
 
-import collections
 from math import prod
 
 from TraceLens.PerfModel.perf_model import GEMM, UnaryElementwise
 from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
-from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
-    get_bwd_ops_for_fwd_op,
-    inject_pseudo_op_above_cpu_op,
-)
 
 
 class a6w4_mm_qa(GEMM):
@@ -224,98 +219,3 @@ class quantize_mxfp4_h16_dual(_QuantizeMxfp4Base):
             * name2bpe("c10::Float8_e8m0fnu")
         )
         return bytes_read + bytes_write_fp4 + bytes_write_scales
-
-
-# ── Tree postprocess: fwd/bwd pseudo-op labeling ──────────────────────────
-
-_GEMM_OP_NAMES = frozenset(
-    {
-        "primus_turbo::gemm_fp4_impl",
-        "primus_flux::a6w4_mm_qa",
-        "primus_flux::a6w4_mm_qa_prequant_w",
-    }
-)
-
-
-def _suffix_for_op(name):
-    if "a6w4" in name:
-        return "a6w4"
-    return "gemm"
-
-
-def _collect_gemm_children(tree, parent_event):
-    result = [
-        child
-        for child in tree.get_children_events(parent_event)
-        if child.get("name") in _GEMM_OP_NAMES
-    ]
-    result.sort(key=lambda e: e["ts"])
-    return result
-
-
-def _collect_gemm_descendants(tree, parent_event):
-    result = []
-    queue = collections.deque(parent_event.get("children", []))
-    while queue:
-        uid = queue.popleft()
-        evt = tree.get_UID2event(uid)
-        if evt.get("name") in _GEMM_OP_NAMES:
-            result.append(evt)
-        queue.extend(evt.get("children", []))
-    result.sort(key=lambda e: e["ts"])
-    return result
-
-
-def _label_fwd_gemms(tree, fwd_event, prefix, processed_uids):
-    """Wrap forward GEMM children in yfwd pseudo ops."""
-    for gemm_evt in _collect_gemm_children(tree, fwd_event):
-        if gemm_evt["UID"] in processed_uids:
-            continue
-        processed_uids.add(gemm_evt["UID"])
-        suffix = _suffix_for_op(gemm_evt["name"])
-        inject_pseudo_op_above_cpu_op(
-            tree, gemm_evt, f"{prefix}_yfwd_{suffix}", shape_donor_evt=gemm_evt
-        )
-
-
-def _label_bwd_gemms(tree, fwd_event, prefix, processed_uids):
-    """Wrap backward GEMM descendants in xgrad/wgrad pseudo ops."""
-    for bwd_op in get_bwd_ops_for_fwd_op(tree, fwd_event):
-        for i, gemm_evt in enumerate(_collect_gemm_descendants(tree, bwd_op)):
-            if gemm_evt["UID"] in processed_uids:
-                continue
-            processed_uids.add(gemm_evt["UID"])
-            suffix = _suffix_for_op(gemm_evt["name"])
-            label = "xgrad" if i == 0 else "wgrad"
-            inject_pseudo_op_above_cpu_op(
-                tree,
-                gemm_evt,
-                f"{prefix}Backward_{label}_{suffix}",
-                shape_donor_evt=gemm_evt,
-            )
-
-
-def tree_postprocess_extension(trace_tree):
-    """Create fwd/bwd pseudo ops for MXFP4 GEMM events.
-
-    Wraps each ``primus_turbo::gemm_fp4_impl`` / ``primus_flux::a6w4_mm_qa*``
-    inside ``_MXFP4*Function`` (forward) or ``_MXFP4*FunctionBackward``
-    (backward) in a pseudo op named e.g. ``_MXFP4Linear_yfwd_gemm``,
-    ``_MXFP4LinearBackward_xgrad_gemm``, or ``_MXFP4LinearBackward_wgrad_gemm``.
-    """
-    fwd_names = [
-        name
-        for name in trace_tree.name2event_uids
-        if name.startswith("_MXFP4") and "Backward" not in name
-    ]
-    if not fwd_names:
-        return
-
-    processed_uids = set()
-
-    for fwd_name in fwd_names:
-        prefix = fwd_name.removesuffix("Function")
-        for fwd_uid in list(trace_tree.name2event_uids[fwd_name]):
-            fwd_event = trace_tree.get_UID2event(fwd_uid)
-            _label_fwd_gemms(trace_tree, fwd_event, prefix, processed_uids)
-            _label_bwd_gemms(trace_tree, fwd_event, prefix, processed_uids)
