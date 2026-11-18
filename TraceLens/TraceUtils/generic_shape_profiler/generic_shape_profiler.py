@@ -153,7 +153,11 @@ _JIT_MODULES = ("triton", "flydsl", "tvm_ffi", "tilelang", "tvm")
 # Individual modules that are launch machinery inside an otherwise ordinary
 # package: aiter's HsacoKernel.__getitem__ closure sits between the caller and
 # run_hsaco(), but the cpp_itfs wrappers next to it are real launchers.
-_JIT_HELPER_MODULES = ("csrc.cpp_itfs.utils", "aiter.ops.flydsl.kernels.tensor_shim", "aiter.ops.flydsl.moe_kernels")
+_JIT_HELPER_MODULES = (
+    "csrc.cpp_itfs.utils",
+    "aiter.ops.flydsl.kernels.tensor_shim",
+    "aiter.ops.flydsl.moe_kernels",
+)
 
 # aiter names compiled cpp_itfs entry points <md_name>_<md5 of the template
 # args>; the hash only makes op names unreadable.
@@ -167,7 +171,9 @@ _NO_PROMOTE_MODULES = _JIT_MODULES + ("torch",)
 # replaces the launcher's code object calls back through it.
 _TRAMPOLINE_GLOBAL = "__generic_shape_profiler_call__"
 
-_CO_NO_PROMOTE = inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
+_CO_NO_PROMOTE = (
+    inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
+)
 
 # Cap on tensors recorded per launch, so a pathological kernel cannot blow up
 # the trace. Triton kernels realistically take fewer than a dozen.
@@ -455,7 +461,11 @@ def _calling_launcher():
     while frame is not None and depth < 20:
         module = frame.f_globals.get("__name__") or ""
         root = module.split(".", 1)[0]
-        if root not in _JIT_MODULES and module != __name__ and module not in _JIT_HELPER_MODULES:
+        if (
+            root not in _JIT_MODULES
+            and module != __name__
+            and module not in _JIT_HELPER_MODULES
+        ):
             if not frame.f_code.co_name.startswith("<"):
                 return frame
         frame = frame.f_back
@@ -499,7 +509,9 @@ class _Promoted:
         self.kwdefaults = func.__kwdefaults__
         self.had_signature = "__signature__" in func.__dict__
 
-        orig = types.FunctionType(self.code, func.__globals__, func.__name__, self.defaults)
+        orig = types.FunctionType(
+            self.code, func.__globals__, func.__name__, self.defaults
+        )
         orig.__kwdefaults__ = self.kwdefaults
         orig.__qualname__ = func.__qualname__
         self.orig = orig
@@ -594,8 +606,10 @@ def _maybe_promote(frame, name: str) -> bool:
             return False
         root = (frame.f_globals.get("__name__") or "").split(".", 1)[0]
         func = None
-        if root not in _NO_PROMOTE_MODULES and not code.co_freevars and not (
-            code.co_flags & _CO_NO_PROMOTE
+        if (
+            root not in _NO_PROMOTE_MODULES
+            and not code.co_freevars
+            and not (code.co_flags & _CO_NO_PROMOTE)
         ):
             try:
                 func = _function_for(frame)
@@ -632,7 +646,11 @@ def _call_launcher(key: int, args: tuple, kwargs: dict) -> Any:
         return orig(*args, **kwargs)
     try:
         tensors = _collect_tensors(args, kwargs)
-        op = _op_for(LAUNCHER_NAMESPACE, entry.name, len(tensors)) if tensors else _BROKEN
+        op = (
+            _op_for(LAUNCHER_NAMESPACE, entry.name, len(tensors))
+            if tensors
+            else _BROKEN
+        )
     except Exception:  # pragma: no cover - never break the workload
         op = _BROKEN
     if op is _BROKEN:
@@ -750,7 +768,9 @@ def _wrap_launch(
             name = name_of(self) or fallback_name
         except Exception:  # pragma: no cover - never break the workload
             return original(self, *args, **kwargs)
-        return _trace_launch(hook_id, name, tensors, lambda: original(self, *args, **kwargs))
+        return _trace_launch(
+            hook_id, name, tensors, lambda: original(self, *args, **kwargs)
+        )
 
     setattr(cls, method, traced)
     setattr(cls, sentinel, True)
@@ -765,7 +785,9 @@ def _should_break(hook_id: str) -> bool:
         return False
     if _BREAK_SPEC in ("1", "true", "yes", "on", "all"):
         return True
-    return any(hook_id.startswith(p.strip()) for p in _BREAK_SPEC.split(",") if p.strip())
+    return any(
+        hook_id.startswith(p.strip()) for p in _BREAK_SPEC.split(",") if p.strip()
+    )
 
 
 def _break_rank_matches() -> bool:
@@ -798,9 +820,7 @@ def install_triton_hooks() -> bool:
         ):
             cls = getattr(tuner_mod, cls_name, None)
             if isinstance(cls, type):
-                ok |= _wrap_launch(
-                    cls, "run", _name_of, "triton_kernel", hook_id
-                )
+                ok |= _wrap_launch(cls, "run", _name_of, "triton_kernel", hook_id)
 
     return ok
 
@@ -842,7 +862,9 @@ class _TracedForeignCall:
             return func(*args, **kwargs)
         if tensors is not None and not tensors:
             return func(*args, **kwargs)
-        return _trace_launch(self._hook_id, self._name, tensors, lambda: func(*args, **kwargs))
+        return _trace_launch(
+            self._hook_id, self._name, tensors, lambda: func(*args, **kwargs)
+        )
 
     def __getattr__(self, attr: str) -> Any:
         return getattr(self._func, attr)
@@ -944,7 +966,9 @@ def install_aiter_cpp_itfs_hooks() -> bool:
             if not tensors:
                 return run_hsaco(func_name, *args, **kwargs)
             return _trace_launch(
-                "aiter.hsaco", str(func_name), tensors,
+                "aiter.hsaco",
+                str(func_name),
+                tensors,
                 lambda: run_hsaco(func_name, *args, **kwargs),
             )
 
@@ -1000,7 +1024,9 @@ def install_triton_compiled_hooks() -> bool:
         runner = original(self, grid)
         if not _enabled:
             return runner
-        return _traced_tensor_call(runner, getattr(self, "name", None) or "triton_kernel", "triton.compiled")
+        return _traced_tensor_call(
+            runner, getattr(self, "name", None) or "triton_kernel", "triton.compiled"
+        )
 
     cls.__getitem__ = __getitem__
     cls._jit_shape_traced_getitem = True
@@ -1032,7 +1058,9 @@ def install_aiter_flydsl_hooks() -> bool:
         if not _enabled:
             return original(exe, *args, **kwargs)
         name = _name_of(exe) or "flydsl_kernel"
-        return _trace_launch("aiter.flydsl", name, None, lambda: original(exe, *args, **kwargs))
+        return _trace_launch(
+            "aiter.flydsl", name, None, lambda: original(exe, *args, **kwargs)
+        )
 
     _run_compiled._jit_shape_traced = True
     mod._run_compiled = _run_compiled
@@ -1060,7 +1088,9 @@ def install_aiter_flydsl_moe_hooks() -> bool:
         if not _enabled:
             return original(exe, *args, **kwargs)
         name = _name_of(exe) or "flydsl_kernel"
-        return _trace_launch("aiter.flydsl.moe", name, None, lambda: original(exe, *args, **kwargs))
+        return _trace_launch(
+            "aiter.flydsl.moe", name, None, lambda: original(exe, *args, **kwargs)
+        )
 
     _run_compiled._jit_shape_traced = True
     mod._run_compiled = _run_compiled
@@ -1142,7 +1172,9 @@ def install_tilelang_kernel_hooks() -> bool:
     cls = getattr(mod, "JITKernel", None) if mod is not None else None
     if not isinstance(cls, type):
         return False
-    return _wrap_launch(cls, "__call__", _tilelang_name, "tilelang_kernel", "tilelang.jit")
+    return _wrap_launch(
+        cls, "__call__", _tilelang_name, "tilelang_kernel", "tilelang.jit"
+    )
 
 
 def install_tilelang_jit_hooks() -> bool:
@@ -1192,5 +1224,14 @@ def install_hooks() -> bool:
     compile_ops = install_aiter_compile_ops_hooks()
     tilelang = install_tilelang_kernel_hooks()
     tilelang_names = install_tilelang_jit_hooks()
-    return (triton or compiled or flydsl or tvm_ffi or cpp_itfs or aiter_flydsl
-            or compile_ops or tilelang or tilelang_names)
+    return (
+        triton
+        or compiled
+        or flydsl
+        or tvm_ffi
+        or cpp_itfs
+        or aiter_flydsl
+        or compile_ops
+        or tilelang
+        or tilelang_names
+    )
