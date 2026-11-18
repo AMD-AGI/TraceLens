@@ -17,6 +17,7 @@ from TraceLens.PerfModel.perf_model import (
     FusedRoPE,
     UnaryElementwise,
 )
+from TraceLens.PerfModel.op_flops import op_flops_per_elem
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
     name2bpe,
@@ -1146,7 +1147,12 @@ class aiter_silu_and_mul(UnaryElementwise):
 
     Expected Input type from trace:
         [dtype_out, dtype_input]  (note: reversed — out is arg 0, input is arg 1)
+
+    FLOPs: the activation's ``OP_FLOPS_PER_ELEM`` cost plus the gate multiply,
+    per output element.
     """
+
+    activation = "silu"
 
     @staticmethod
     def get_param_details(event):
@@ -1165,7 +1171,8 @@ class aiter_silu_and_mul(UnaryElementwise):
         }
 
     def flops(self):
-        return 5 * prod(self.param_details["op_shape"])
+        per_elem = op_flops_per_elem(self.activation) + op_flops_per_elem("mul")
+        return per_elem * prod(self.param_details["op_shape"])
 
     def bytes(self):
         return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
@@ -1212,12 +1219,10 @@ class aiter_gelu_and_mul(aiter_silu_and_mul):
     Expected Input Dims from trace:
         [out_shape, input_shape]
 
-    FLOPs: ~8 per output element (erf-based GELU: div, erf, add, mul, mul; then gate mul).
-    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    FLOPs and bytes: as aiter_silu_and_mul, with the erf GELU.
     """
 
-    def flops(self):
-        return 8 * prod(self.param_details["op_shape"])
+    activation = "gelu"
 
 
 class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
@@ -1234,12 +1239,10 @@ class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
     Expected Input Dims from trace:
         [out_shape, input_shape]
 
-    FLOPs: ~10 per output element (tanh GELU: x^3, coefficients, tanh, scale; then gate mul).
-    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    FLOPs and bytes: as aiter_silu_and_mul, with the tanh GELU.
     """
 
-    def flops(self):
-        return 10 * prod(self.param_details["op_shape"])
+    activation = "gelu_tanh"
 
 
 class gemm_afp4wfp4(GEMM):
@@ -2444,7 +2447,7 @@ class topk_softplus(_MHCBase):
         }
 
     def flops(self):
-        return 6 * self.M * self.param_details["E"]
+        return _SQRTSOFTPLUS_FLOPS * self.M * self.param_details["E"]
 
     def bytes(self):
         if self.bpe_in is None:
@@ -2458,12 +2461,20 @@ class topk_softplus(_MHCBase):
         return read_gating + read_bias + write_w + write_idx
 
 
-_SQRTSOFTPLUS_FLOPS = 6  # mul, exp2, add, log2, mul, sqrt
-_SIGMOID_FLOPS = 5  # mul, neg, exp2, add, rcp
+# Fast score formulas, each term priced from OP_FLOPS_PER_ELEM.
+# sqrt(softplus): scale, exp2, add, log2, scale, sqrt.
+_SQRTSOFTPLUS_FLOPS = (
+    op_flops_per_elem("mul")
+    + op_flops_per_elem("exp")
+    + op_flops_per_elem("add")
+    + op_flops_per_elem("log")
+    + op_flops_per_elem("mul")
+    + op_flops_per_elem("sqrt")
+)
 _SCORE_FLOPS = {
     "sqrtsoftplus": _SQRTSOFTPLUS_FLOPS,
-    "sigmoid": _SIGMOID_FLOPS,
-    "softmax": 0,
+    "sigmoid": op_flops_per_elem("sigmoid"),
+    "softmax": op_flops_per_elem("softmax"),
 }
 # Comparator counts in topk_gating_kernels.cu sort_network_desc.
 _SORT_NETWORK_COMPARATORS = {1: 0, 2: 1, 3: 3, 4: 5, 6: 12, 8: 19}
