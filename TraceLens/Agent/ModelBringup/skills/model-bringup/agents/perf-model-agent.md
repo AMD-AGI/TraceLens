@@ -79,7 +79,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 
 Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`: `op category`, `Input Dims`, `Input type`, `Concrete Inputs`, the kernel names in `kernel_details_summary`, `entry_point` (the launcher) and `call_stack_full`. Find the op's source from `entry_point` and the call stack under `<framework_src>`.
 
-Read `model_config.json`: trace `Input Dims` are per rank and win; compare a global value only after dividing by the degree that shards it; report a mismatch no degree explains in the draft, never patch it; `null` is unknown.
+Read `model_config.json`: `launch` holds the run's TP, EP and DP settings verbatim (under AgentX the recipe overrides them); trace `Input Dims` are per rank and win; report a mismatch no setting explains in the draft, never patch it; `null` is unknown. `paper` links the model's paper or tech report; read its architecture section when the op's math depends on it (sparsity, compression, routing, cache layout); when it is `null`, find the paper yourself.
 
 ### Step 2: Decide
 

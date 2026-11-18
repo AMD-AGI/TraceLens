@@ -19,6 +19,9 @@ import functools
 import json
 import re
 import sys
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import yaml
@@ -84,7 +87,16 @@ DRAFT_FILES = {
 COMMITTED_OUTCOMES = ("modeled", "categorized")
 EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
 MODEL_CONFIG = "cache/model_config.json"
-TL_ENV = "cache/tracelens.env"
+# Per-request socket timeout and thread join timeout of the paper lookup.
+PAPER_BUDGET_S = 10
+CARD_URL = "https://huggingface.co/{}/raw/main/README.md"
+PAPER_URL = "https://huggingface.co/api/papers/{}"
+# Group 1: arXiv id; group 2: a .pdf URL that is not on arXiv.
+PAPER_LINK = re.compile(
+    r"(?:arxiv\.org/(?:abs|pdf|html)|huggingface\.co/papers)/(\d{4}\.\d{4,5})"
+    r"|(https?://(?!(?:www\.)?arxiv\.org/)[^\s<>()\"'\]]+\.pdf)"
+)
+NAME_STEM = re.compile(r"[A-Za-z]+")
 ARCH_FIELDS = (
     "model_type",
     "attention_type",
@@ -100,13 +112,7 @@ ARCH_FIELDS = (
     "num_shared_experts",
     "moe_intermediate_size",
 )
-DP_FLAGS = ("--dp", "--dp-size", "--data-parallel-size")
-EP_FLAGS = ("--ep", "--ep-size", "--expert-parallel-size")
-DP_ATTENTION_FLAG = "--enable-dp-attention"
-ENABLE_EP_FLAG = "--enable-expert-parallel"
-FLAG_ALIASES = {**dict.fromkeys(DP_FLAGS, "dp"), **dict.fromkeys(EP_FLAGS, "ep")}
-# The values Magpie's AgentXConfig.from_value reads as enabled.
-AGENTX_ENABLED = ("true", "enabled", "enable", "yes", "1")
+LAUNCH_KEYS = ("TP", "EP_SIZE", "EP", "DP_ATTENTION")
 SUMMARY_GATES = (
     "prepare",
     "model_config",
@@ -169,14 +175,21 @@ def prepare(args):
 
 
 def model_config(args):
-    """Write the model config and parallel degrees of the profiled run for op agents."""
+    """Write the model config, launch settings and paper link for op agents."""
     path = Path(args.profile_dir) / "benchmark.yaml"
-    benchmark = _read_mapping(path).get("benchmark")
+    try:
+        data = yaml.safe_load(path.read_text())
+    except FileNotFoundError:
+        raise BringupInputError(f"missing {path}") from None
+    except yaml.YAMLError as e:
+        raise BringupInputError(f"malformed {path}: {e}") from None
+    benchmark = data.get("benchmark") if isinstance(data, dict) else None
     if not isinstance(benchmark, dict) or not benchmark.get("model"):
         raise BringupInputError(f"{path} has no benchmark.model")
     model_id = benchmark["model"]
     envs = {str(k).upper(): v for k, v in (benchmark.get("envs") or {}).items()}
-    parallel = _parallel(benchmark, envs)
+    extra_args = f"EXTRA_{str(benchmark.get('framework')).upper()}_ARGS"
+    launch = {k: envs[k] for k in (*LAUNCH_KEYS, extra_args) if k in envs}
     model_path = envs.get("MODEL_PATH")
     checkpoint = model_path if model_path and Path(model_path).is_dir() else model_id
     arch = config = error = None
@@ -187,23 +200,22 @@ def model_config(args):
     else:
         spec = parse_architecture(config, label)
         arch = {field: getattr(spec, field) for field in ARCH_FIELDS}
+    # HF_HUB_OFFLINE only pins the config read; the card lookup is plain urllib.
+    paper = _find_paper(model_id)
     out = args.bringup.root / MODEL_CONFIG
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(
             {
                 "model_id": model_id,
-                "parallel": parallel,
+                "launch": launch,
                 "arch": arch,
                 "config": config,
+                "paper": paper,
             },
             indent=2,
         )
     )
-    env = [f"TL_MODEL={model_id}"]
-    if parallel["attn_tp"] is not None:
-        env.append(f"TL_TP={parallel['attn_tp']}")
-    (args.bringup.root / TL_ENV).write_text("\n".join(env) + "\n")
     return args.bringup.write_gate("model_config", error is None, error=error)
 
 
@@ -436,7 +448,16 @@ class BringupDir:
 
     @functools.cached_property
     def config(self):
-        return _read_mapping(self.root / EFFECTIVE_CONFIG)
+        path = self.root / EFFECTIVE_CONFIG
+        try:
+            config = yaml.safe_load(path.read_text())
+        except FileNotFoundError:
+            raise BringupInputError(f"missing {path}") from None
+        except yaml.YAMLError as e:
+            raise BringupInputError(f"malformed {path}: {e}") from None
+        if not isinstance(config, dict):
+            raise BringupInputError(f"{path} is not a mapping")
+        return config
 
     def capture_folder(self, rank):
         return self.root / f"capture_rank{rank}"
@@ -565,68 +586,6 @@ class PerfModelDraft:
         ]
 
 
-def _read_mapping(path):
-    """The YAML mapping at ``path``; a missing, malformed or non-mapping file is an input error."""
-    try:
-        data = yaml.safe_load(path.read_text())
-    except FileNotFoundError:
-        raise BringupInputError(f"missing {path}") from None
-    except yaml.YAMLError as e:
-        raise BringupInputError(f"malformed {path}: {e}") from None
-    if not isinstance(data, dict):
-        raise BringupInputError(f"{path} is not a mapping")
-    return data
-
-
-def _positive_int(value):
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
-
-
-def _parallel(benchmark, envs):
-    """tp, ep, dp and attention tp of the run; 1 (the engine default) when the YAML sets nothing, None when unknown.
-
-    AgentX overwrites the envs with its recipe entry, so all four are unknown there.
-    """
-    agentx = benchmark.get("agentx")
-    if isinstance(agentx, dict):
-        agentx = agentx.get("enabled", True)
-    if str(agentx).lower() in AGENTX_ENABLED:
-        return {"tp": None, "ep": None, "dp": None, "attn_tp": None}
-    tokens = str(
-        envs.get(f"EXTRA_{str(benchmark.get('framework')).upper()}_ARGS") or ""
-    )
-    tokens = tokens.split()
-    flags = {}
-    for i, token in enumerate(tokens):
-        if token.startswith("--"):
-            name, eq, value = token.partition("=")
-            if not eq and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-                value = tokens[i + 1]
-            flags[FLAG_ALIASES.get(name, name)] = value
-
-    tp = _positive_int(envs["TP"]) if "TP" in envs else 1
-    dp_attention = (
-        DP_ATTENTION_FLAG in flags or str(envs.get("DP_ATTENTION")).lower() == "true"
-    )
-    dp_value = flags.get("dp")
-    dp = _positive_int(dp_value) if dp_value else (None if dp_attention else 1)
-    attn_tp = tp
-    if dp_attention:
-        attn_tp = tp // dp if tp and dp and tp % dp == 0 else None
-    ep_value = flags.get("ep") or envs.get("EP_SIZE") or envs.get("EP")
-    if ep_value:
-        ep = _positive_int(ep_value)
-    elif ENABLE_EP_FLAG in flags:
-        ep = tp * dp if tp and dp else None
-    else:
-        ep = 1
-    return {"tp": tp, "ep": ep, "dp": dp, "attn_tp": attn_tp}
-
-
 def _read_validation_csv(csv_path):
     """Rows of a validation CSV; [] when ``csv_path`` is unset or not a file."""
     if not csv_path or not Path(csv_path).is_file():
@@ -658,6 +617,60 @@ def _all_rows_ok(rows):
 
 def _norm(text):
     return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _find_paper(model_id):
+    """The model's paper link from its card, or None if absent or not found in time."""
+    result = []
+
+    def run():
+        try:
+            result.append(_paper_from_cards(model_id))
+        except (OSError, ValueError):
+            pass
+
+    # urllib's timeout does not cover name resolution, so bound the whole lookup.
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(PAPER_BUDGET_S)
+    return result[0] if result else None
+
+
+def _paper_from_cards(model_id):
+    """First arXiv link titled for the model, else first PDF link; else follow base_model."""
+
+    def _get(url):
+        try:
+            with urllib.request.urlopen(url, timeout=PAPER_BUDGET_S) as response:
+                return response.read().decode()
+        except urllib.error.HTTPError:
+            return None
+
+    visited = set()
+    while isinstance(model_id, str) and model_id not in visited:
+        visited.add(model_id)
+        card = _get(CARD_URL.format(model_id)) or ""
+        stem = NAME_STEM.search(model_id.rsplit("/", 1)[-1]).group().lower()
+        checked, pdf_paper = set(), None
+        for arxiv_id, pdf in PAPER_LINK.findall(card):
+            if pdf:
+                pdf_paper = pdf_paper or {"url": pdf, "title": None}
+            elif arxiv_id not in checked:
+                checked.add(arxiv_id)
+                body = _get(PAPER_URL.format(arxiv_id))
+                title = (json.loads(body).get("title") or "") if body else ""
+                if stem in title.lower():
+                    return {"url": f"https://arxiv.org/abs/{arxiv_id}", "title": title}
+        if pdf_paper:
+            return pdf_paper
+        front = card.split("---", 2)[1] if card.startswith("---") else ""
+        try:
+            meta = yaml.safe_load(front)
+        except yaml.YAMLError:
+            meta = None
+        base = meta.get("base_model") if isinstance(meta, dict) else None
+        model_id = base[0] if isinstance(base, list) and base else base
+    return None
 
 
 def main(argv=None):

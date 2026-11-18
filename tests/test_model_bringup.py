@@ -4,7 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import io
 import json
+import time
+import urllib.error
 
 import pytest
 import yaml
@@ -408,15 +411,10 @@ def test_excluded_and_skipped_ops(tmp_path):
     assert "Publish with" not in text
 
 
-def _model_config(bringup, framework, envs, **extra):
+def _model_config(bringup, framework, envs):
     profile = bringup / "profile"
     profile.mkdir()
-    benchmark = {
-        "framework": framework,
-        "model": "org/Model-A",
-        "envs": envs,
-        **extra,
-    }
+    benchmark = {"framework": framework, "model": "org/Model-A", "envs": envs}
     (profile / "benchmark.yaml").write_text(yaml.safe_dump({"benchmark": benchmark}))
     args = [
         "model-config",
@@ -429,91 +427,29 @@ def _model_config(bringup, framework, envs, **extra):
     return rc, json.loads((bringup / "cache" / "model_config.json").read_text())
 
 
-@pytest.mark.parametrize(
-    "framework,envs,parallel,tl_env,extra",
-    [
-        (
-            "sglang",
-            {
-                "TP": 8,
-                "EXTRA_SGLANG_ARGS": "--dp=8 --enable-dp-attention --ep-size 8",
-            },
-            {"tp": 8, "ep": 8, "dp": 8, "attn_tp": 1},
-            "TL_MODEL=org/Model-A\nTL_TP=1\n",
-            {},
-        ),
-        (
-            "vllm",
-            {
-                "TP": 2,
-                "EXTRA_VLLM_ARGS": "--data-parallel-size 2 --enable-expert-parallel",
-            },
-            {"tp": 2, "ep": 4, "dp": 2, "attn_tp": 2},
-            "TL_MODEL=org/Model-A\nTL_TP=2\n",
-            {},
-        ),
-        (
-            "sglang",
-            {"TP": 1},
-            {"tp": 1, "ep": 1, "dp": 1, "attn_tp": 1},
-            "TL_MODEL=org/Model-A\nTL_TP=1\n",
-            {},
-        ),
-        (
-            "sglang",
-            {"TP": 8, "EXTRA_SGLANG_ARGS": "--enable-dp-attention"},
-            {"tp": 8, "ep": 1, "dp": None, "attn_tp": None},
-            "TL_MODEL=org/Model-A\n",
-            {},
-        ),
-        (
-            "sglang",
-            {
-                "TP": 8,
-                "EXTRA_SGLANG_ARGS": "--dp 3 --enable-dp-attention",
-            },
-            {"tp": 8, "ep": 1, "dp": 3, "attn_tp": None},
-            "TL_MODEL=org/Model-A\n",
-            {},
-        ),
-        (
-            "sglang",
-            {"tp": 8, "EP_SIZE": 1, "extra_sglang_args": "--ep-size 8"},
-            {"tp": 8, "ep": 8, "dp": 1, "attn_tp": 8},
-            "TL_MODEL=org/Model-A\nTL_TP=8\n",
-            {},
-        ),
-        (
-            "vllm",
-            {"TP": 8},
-            {"tp": None, "ep": None, "dp": None, "attn_tp": None},
-            "TL_MODEL=org/Model-A\n",
-            {"agentx": True},
-        ),
-    ],
-    ids=[
-        "sglang_dp_attention",
-        "vllm_expert_parallel",
-        "bare_tp",
-        "dp_unknown",
-        "dp_not_dividing_tp",
-        "flag_beats_env_lowercase_keys",
-        "agentx_recipe_owned",
-    ],
-)
-def test_model_config_resolves(tmp_path, framework, envs, parallel, tl_env, extra):
+def test_model_config_resolves(tmp_path, monkeypatch):
+    paper = {"url": "https://example.com/paper.pdf", "title": None}
+    monkeypatch.setattr(bringup_gates, "_find_paper", lambda model_id: paper)
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     hf_config = {"model_type": "example_moe", "hidden_size": 64, "num_experts": 4}
     (checkpoint / "config.json").write_text(json.dumps(hf_config))
-    rc, out = _model_config(
-        tmp_path, framework, {**envs, "MODEL_PATH": str(checkpoint)}, **extra
-    )
+    envs = {
+        "tp": 8,
+        "CONC": 64,
+        "EXTRA_SGLANG_ARGS": "--dp 8 --enable-dp-attention",
+        "MODEL_PATH": str(checkpoint),
+    }
+    rc, out = _model_config(tmp_path, "sglang", envs)
     assert rc == 0 and _gate(tmp_path, "model_config")["status"] == "pass"
-    assert out["model_id"] == "org/Model-A" and out["parallel"] == parallel
-    assert out["arch"]["hidden_size"] == 64 and out["arch"]["num_experts"] == 4
+    assert out["model_id"] == "org/Model-A"
+    assert out["launch"] == {
+        "TP": 8,
+        "EXTRA_SGLANG_ARGS": "--dp 8 --enable-dp-attention",
+    }
+    assert out["arch"]["hidden_size"] == 64
     assert out["config"].items() >= hf_config.items()
-    assert (tmp_path / "cache" / "tracelens.env").read_text() == tl_env
+    assert out["paper"] == paper
 
 
 def test_model_config_unresolved(tmp_path, monkeypatch):
@@ -521,11 +457,63 @@ def test_model_config_unresolved(tmp_path, monkeypatch):
         raise FileNotFoundError("no cached config")
 
     monkeypatch.setattr(bringup_gates, "load_checkpoint_config", offline)
+    monkeypatch.setattr(bringup_gates, "_find_paper", lambda model_id: None)
     rc, out = _model_config(tmp_path, "sglang", {"TP": 4})
     assert rc == 1
     assert out["arch"] is None and out["config"] is None
-    assert out["parallel"]["tp"] == 4
+    assert out["launch"] == {"TP": 4}
     assert _gate(tmp_path, "model_config") == {
         "status": "fail",
         "error": "no cached config",
     }
+
+
+@pytest.mark.parametrize(
+    "base_card, expected",
+    [
+        (
+            "[report](https://example.com/fam.pdf) "
+            "[paper](https://arxiv.org/pdf/2402.00002.pdf)",
+            {
+                "url": "https://arxiv.org/abs/2402.00002",
+                "title": "Fam Technical Report",
+            },
+        ),
+        (
+            "[report](https://example.com/fam.pdf)",
+            {"url": "https://example.com/fam.pdf", "title": None},
+        ),
+    ],
+)
+def test_find_paper(monkeypatch, base_card, expected):
+    hub = "https://huggingface.co/"
+    pages = {
+        hub
+        + "org/Fam-1-Quant/raw/main/README.md": (
+            "---\nbase_model: org/Fam-1\n---\nhttps://arxiv.org/abs/2401.00001v2"
+        ),
+        hub + "api/papers/2401.00001": '{"title": "Other Method"}',
+        hub + "org/Fam-1/raw/main/README.md": base_card,
+        hub + "api/papers/2402.00002": '{"title": "Fam Technical Report"}',
+    }
+
+    def urlopen(url, timeout):
+        if url not in pages:
+            raise urllib.error.HTTPError(url, 404, "not found", {}, None)
+        return io.BytesIO(pages[url].encode())
+
+    monkeypatch.setattr(bringup_gates.urllib.request, "urlopen", urlopen)
+    assert bringup_gates._find_paper("org/Fam-1-Quant") == expected
+
+
+@pytest.mark.parametrize("stall", [False, True])
+def test_find_paper_unavailable(monkeypatch, stall):
+    def urlopen(url, timeout):
+        if not stall:
+            raise urllib.error.URLError("no route")
+        time.sleep(0.5)
+        return io.BytesIO(b"[paper](https://example.com/fam.pdf)")
+
+    monkeypatch.setattr(bringup_gates.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(bringup_gates, "PAPER_BUDGET_S", 0.05)
+    assert bringup_gates._find_paper("org/Fam-1") is None

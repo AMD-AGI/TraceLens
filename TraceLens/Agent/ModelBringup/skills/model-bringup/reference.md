@@ -31,7 +31,7 @@ Derived:
 |---|---|---|
 | `<magpie_prefix>` | `ssh <node> "cd <magpie_dir> && PYTHONPATH=<magpie_dir> {CMD}"` | 0 |
 | `<container>` | `bringup_<basename of <bringup_dir>>` | 0 |
-| `<prefix>` | `ssh <node> "docker exec -i --env-file <bringup_dir>/cache/tracelens.env -w <tracelens_dir> <container> bash -c '{CMD}'"` | 0 |
+| `<prefix>` | `ssh <node> "docker exec -i -w <tracelens_dir> <container> bash -c '{CMD}'"` | 0 |
 | `<bringup_gates>` | `python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates` | 0 |
 | `<tl_extension>`, `<gpu_devices>`, `<framework_src>`, `<gfx_arch>`, `<platform>`, `<image_path>`, `<user>`, `<uid_gid>`, `<device_gids>` | printed in Step 0 | 0 |
 | `<gpu_count>` | the number of `<gpu_devices>` | 0 |
@@ -65,7 +65,7 @@ To stop at any step after Step 0: `<prefix> <bringup_gates> summary --bringup-di
 
    ```bash
    <magpie_prefix> python3 -c "import yaml, numpy, Magpie"
-   ssh <node> "set -o pipefail; mkdir -p <bringup_dir>/cache && : > <bringup_dir>/cache/tracelens.env && ls -d <tracelens_internal_dir>/*/Agent/Analysis/utils/arch | sed 's|.*/\([^/]*\)/Agent/Analysis/utils/arch|tl_extension=\1|'"
+   ssh <node> "set -o pipefail; mkdir -p <bringup_dir>/cache && ls -d <tracelens_internal_dir>/*/Agent/Analysis/utils/arch | sed 's|.*/\([^/]*\)/Agent/Analysis/utils/arch|tl_extension=\1|'"
    ssh <node> "grep -ls '^simd_count [1-9]' /sys/class/kfd/kfd/topology/nodes/*/properties | xargs -r grep -h '^drm_render_minor' | sed 's|drm_render_minor |/dev/dri/renderD|'"
    ssh <node> "docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <serving_image> | sed -n 's/^PATH=/image_path=/p'"
    ssh <node> 'echo user=$(id -un) uid_gid=$(id -u):$(id -g); stat -c device_gid=%g /dev/kfd <gpu_devices> | sort -u'
