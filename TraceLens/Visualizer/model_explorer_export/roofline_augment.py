@@ -106,9 +106,12 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
                 "bytes": 0.0,
                 "roofline_time_us": 0.0,
                 "bound_time": {},
-                # Per-invocation (one layer, one forward) FLOPs/bytes of the
-                # category's dominant op, used to scale against a trace kernel's
-                # measured per-invocation cost.
+                # Launches in one forward: each projected row is ``instances``
+                # launches of one op (one per layer).
+                "invocations": 0,
+                # Per-invocation FLOPs/bytes of the category's dominant op. Only a
+                # fallback for a rollup that has no invocation count: the
+                # measurement scales the category total by launches/invocations.
                 "flops_per_invocation": 0.0,
                 "bytes_per_invocation": 0.0,
                 "_dominant_flops": -1.0,
@@ -117,6 +120,7 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
         acc["flops"] += op.total_flops or 0.0
         acc["bytes"] += op.total_bytes or 0.0
         acc["roofline_time_us"] += op.total_roofline_time_us or 0.0
+        acc["invocations"] += op.instances or 0
         if op.roofline_bound:
             acc["bound_time"][op.roofline_bound] = acc["bound_time"].get(
                 op.roofline_bound, 0.0
@@ -143,6 +147,7 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
             "bytes": acc["bytes"],
             "flops_per_invocation": acc["flops_per_invocation"],
             "bytes_per_invocation": acc["bytes_per_invocation"],
+            "invocations": acc["invocations"],
             "vs_ridge": (
                 None
                 if ai is None or ridge is None
@@ -155,21 +160,27 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
 def achieved_from_measurement(
     facts: dict, time_ms: float | None, count: int | None, arch: dict | None
 ) -> dict | None:
-    """Combine a kernel's measured time with the analytical per-invocation
-    FLOPs/bytes to report achieved throughput vs peak -- the measured side of a
-    roofline that the main report would compute from trace Input Dims.
+    """Combine a kernel's measured time with the projected FLOPs and bytes.
 
-    Each of ``count`` invocations is assumed to run the projected per-invocation
-    (one-layer) shape. That holds for a single-regime capture; a mixed-regime
-    one (e.g. an agentic prefill+decode replay) will skew it, which the caller
-    must flag."""
+    The numerator is one forward's cost times ``count / invocations``: how many
+    forwards those launches are. Scaling the forward, not one op, keeps the
+    result right when the category mixes ops of different cost, instead of
+    crediting every launch with the costliest op. A summary with no invocation
+    count falls back to the per-invocation cost times ``count``. Either reading
+    assumes the capture is one regime; a mixed one (an agentic prefill+decode
+    replay) skews it, which the caller must flag."""
     if not time_ms or not count:
         return None
-    fpi = facts.get("flops_per_invocation") or 0.0
-    bpi = facts.get("bytes_per_invocation") or 0.0
+    invocations = facts.get("invocations") or 0
+    if invocations:
+        flops = (facts.get("flops") or 0.0) * count / invocations
+        nbytes = (facts.get("bytes") or 0.0) * count / invocations
+    else:
+        flops = (facts.get("flops_per_invocation") or 0.0) * count
+        nbytes = (facts.get("bytes_per_invocation") or 0.0) * count
     seconds = time_ms / 1000.0
-    achieved_tflops = (fpi * count) / seconds / 1e12 if fpi else None
-    achieved_gbps = (bpi * count) / seconds / 1e9 if bpi else None
+    achieved_tflops = flops / seconds / 1e12 if flops else None
+    achieved_gbps = nbytes / seconds / 1e9 if nbytes else None
     peak_tflops = (arch or {}).get("peak_tflops")
     mem_bw_gbps = (arch or {}).get("mem_bw_gbps")
     # Report utilisation against whichever ceiling the roofline bound selects.
@@ -244,8 +255,9 @@ def _note(
         achieved_txt = (
             f" Measured throughput ≈ {thr} = **{achieved['pct_of_peak']:.1f}% of "
             f"{achieved['ceiling']}** (from the kernel's trace time against the "
-            f"config-derived FLOPs/bytes; assumes every invocation runs the "
-            f"projected {phase}-phase shape, so a mixed-regime capture skews it)."
+            f"config-derived FLOPs/bytes, scaled by launches/invocations so the "
+            f"numerator is the mean launch of the projected {phase}-phase shape; "
+            f"a mixed-regime capture skews it)."
         )
     return (
         f"> **Analytical roofline (model-explorer, config-derived):** the trace "

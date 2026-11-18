@@ -1591,6 +1591,89 @@ def _assigned_value_for_attr(
     return result
 
 
+def _stmt_assigns_self_attr(stmt: ast.stmt, attr: str) -> bool:
+    if isinstance(stmt, ast.Assign):
+        return any(
+            isinstance(target, ast.Attribute)
+            and target.attr == attr
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            for target in stmt.targets
+        )
+    if isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        target = stmt.target
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == attr
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        )
+    return False
+
+
+def _body_assigns_self_attr(stmts: list[ast.stmt], attr: str) -> bool:
+    """True when any statement, in any branch, assigns ``self.<attr>``."""
+    for stmt in stmts:
+        if _stmt_assigns_self_attr(stmt, attr):
+            return True
+        if isinstance(stmt, ast.If):
+            if _body_assigns_self_attr(stmt.body, attr) or _body_assigns_self_attr(
+                stmt.orelse, attr
+            ):
+                return True
+        elif isinstance(stmt, (ast.For, ast.While, ast.With)):
+            if _body_assigns_self_attr(list(stmt.body), attr):
+                return True
+        elif isinstance(stmt, ast.Try):
+            if any(
+                _body_assigns_self_attr(block, attr)
+                for block in (stmt.body, stmt.orelse, stmt.finalbody)
+            ):
+                return True
+    return False
+
+
+def _assignment_fate(
+    stmts: list[ast.stmt],
+    attr: str,
+    config: dict[str, Any],
+    self_values: dict[str, Any],
+    param_values: dict[str, Any] | None,
+) -> str:
+    """Whether ``self.<attr>`` is built down *stmts*.
+
+    ``present`` when a taken path assigns it, ``absent`` when every assignment
+    sits in an ``if`` arm the config rejects, ``unknown`` when an assignment
+    sits in a branch this cannot decide (or in a loop). An unknown fate keeps
+    the structural first-match; an absent one means the instance builds nothing
+    there, which a flat walk would miss by reading the rejected arm.
+    """
+    for stmt in stmts:
+        if _stmt_assigns_self_attr(stmt, attr):
+            return "present"
+        if isinstance(stmt, ast.If):
+            taken = _config_value(stmt.test, config, self_values, param_values)
+            if not isinstance(taken, bool):
+                if _body_assigns_self_attr(stmt.body, attr) or _body_assigns_self_attr(
+                    stmt.orelse, attr
+                ):
+                    return "unknown"
+                continue
+            branch = stmt.body if taken else stmt.orelse
+            fate = _assignment_fate(branch, attr, config, self_values, param_values)
+            if fate != "absent":
+                return fate
+        elif isinstance(stmt, (ast.For, ast.While, ast.With, ast.Try)):
+            blocks = [list(stmt.body)]
+            if isinstance(stmt, (ast.For, ast.While)):
+                blocks.append(list(stmt.orelse))
+            elif isinstance(stmt, ast.Try):
+                blocks.extend([list(stmt.orelse), list(stmt.finalbody)])
+            if any(_body_assigns_self_attr(block, attr) for block in blocks):
+                return "unknown"
+    return "absent"
+
+
 def instance_submodule_class(
     cls: "ClassStructure",
     attr: str,
@@ -1634,6 +1717,15 @@ def instance_submodule_class(
     # ternary (IfExp) cases _instance_constructed_class already handles.
     assigned = _assigned_value_for_attr(init.body, attr, config, self_values, params)
     if assigned is None:
+        # No assignment on a path the config takes. A flat walk would still
+        # find the assignment in the arm that was rejected (``if block_type ==
+        # "linear_attention": self.linear_attn = ... elif ...: self.self_attn``),
+        # and then every layer would be told it builds both. An assignment that
+        # lives only in a rejected arm builds nothing on this instance.
+        if _body_assigns_self_attr(init.body, attr):
+            fate = _assignment_fate(init.body, attr, config, self_values, params)
+            if fate == "absent":
+                return INSTANCE_SUBMODULE_ABSENT
         assigned = next(
             (
                 stmt.value

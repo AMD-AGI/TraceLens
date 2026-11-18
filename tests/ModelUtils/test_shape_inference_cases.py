@@ -2447,6 +2447,8 @@ def test_quant_storage_dtype_across_methods():
     )
     assert _quant_storage_dtype({"quant_method": "gptq", "bits": 4}) == "int4"
     assert _quant_storage_dtype({"quant_method": "awq", "bits": 8}) == "int8"
+    # OpenAI MXFP4 (gpt-oss): expert weights are stored as fp4.
+    assert _quant_storage_dtype({"quant_method": "mxfp4"}) == "fp4"
     # Quark (AMD) nests the scheme under global_quant_config.weight.dtype.
     assert (
         _quant_storage_dtype(

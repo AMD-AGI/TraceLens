@@ -78,8 +78,8 @@ def test_summarize_projection_derives_ai_bound_and_per_gpu():
     assert summary["Attention"]["roofline_us_per_gpu"] == 1000.0 * 66
     assert summary["MoE"]["arithmetic_intensity"] == 400.0
     assert summary["MoE"]["vs_ridge"] == "above"
-    # Per-invocation (one layer) FLOPs/bytes of the dominant op are carried for
-    # the measured-throughput comparison.
+    # Per-invocation FLOPs/bytes of the dominant op are the fallback for a
+    # rollup that has no invocation count.
     assert summary["Attention"]["flops_per_invocation"] == 1.0e12
     assert summary["Attention"]["bytes_per_invocation"] == 1.25e11
 
@@ -115,6 +115,28 @@ def test_achieved_from_measurement_uses_ceiling_of_bound():
     assert round(comp["pct_of_peak"]) == 100
     # No measured time/count -> no achieved block.
     assert achieved_from_measurement({"bound": "MEMORY_BOUND"}, None, 10, arch) is None
+
+
+def test_achieved_throughput_uses_the_mean_launch_not_the_costliest():
+    proj = RooflineProjection(batch_size=1, seq_len=1)
+    # Two attention ops, ten layers each. The first costs 100x the second.
+    proj.ops.append(
+        _op("Attention", True, 1.0e14, 1.0e11, "COMPUTE_BOUND", instances=10)
+    )
+    proj.ops.append(
+        _op("Attention", True, 1.0e12, 1.0e9, "COMPUTE_BOUND", instances=10)
+    )
+    summary = summarize_projection(proj, tp=1, ridge=200.0)
+    # Ten launches in one second. The mean launch is (1e15 + 1e13) / 20 FLOPs,
+    # so 505 TFLOP/s. Crediting every launch with the costliest op would be 1000.
+    got = achieved_from_measurement(
+        summary["Attention"],
+        time_ms=1000.0,
+        count=10,
+        arch={"peak_tflops": 2000.0, "mem_bw_gbps": 1000.0},
+    )
+    assert round(got["achieved_tflops"]) == 505
+    assert got["ceiling"] == "compute peak"
 
 
 def test_augment_picks_dominant_unmodeled_kernel_per_category(tmp_path):

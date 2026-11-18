@@ -621,6 +621,7 @@ def test_parse_architecture_with_code_analysis_end_to_end():
 
 
 def test_vision_tower_detection_and_export_tree(monkeypatch):
+    pytest.importorskip("transformers")
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
     tower = _structure(
@@ -957,6 +958,7 @@ def test_image_placeholder_token_id_absent_or_invalid_is_none():
 def test_build_export_block_trees_appends_vision_tower_section(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    pytest.importorskip("transformers")
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 
     source = """

@@ -71,9 +71,10 @@ Known approximations, stated once here rather than scattered in comments:
     ``num_experts`` passes -- the router picks a subset per token, so costing
     every expert for every token would overstate FLOPs by
     ``num_experts / experts_per_tok``. The expert GEMMs use :class:`GroupedGemm`
-    over ``G = min(num_experts, active_tokens)`` distinct weight matrices, so the
-    weight-byte term reflects the experts actually streamed (``G`` falls back to
-    1, the prior single-weight cost, when ``num_experts`` is unknown). Tensor
+    over ``G`` distinct weight matrices, the experts the routed rows are expected
+    to reach (``num_experts * (1 - (1 - 1/num_experts) ** active_tokens)``), so
+    the weight-byte term reflects the experts actually streamed (``G`` falls back
+    to 1, the prior single-weight cost, when ``num_experts`` is unknown). Tensor
     parallel column-shards each expert's intermediate width; expert parallel
     gives one GPU ``1/EP`` of the routed rows and adds the dispatch/combine
     all-to-all as FLOPs-free data movement (:class:`MoEComm`). The router's
@@ -475,6 +476,7 @@ def project_roofline(
     checkpoint: str | Path | None = None,
     routing_balance: float = 0.9,
     phase: str = "prefill",
+    kv_cache_bpe: float | None = None,
 ) -> RooflineProjection:
     """Project a kernel-by-kernel roofline for *spec* at a concrete batch/seq length.
 
@@ -502,6 +504,8 @@ def project_roofline(
     )
     _populate_introspection(spec)
     _RT.routing_balance = routing_balance
+    # K and V are read from the cache. ``None`` keeps them at the activation width.
+    _RT.kv_cache_bpe = kv_cache_bpe
     routing_note = _apply_expert_routing(dims, extra_dims)
     moe_top_k = spec.num_experts_per_tok
     moe_intermediate_size = spec.moe_intermediate_size or spec.intermediate_size
@@ -520,6 +524,22 @@ def project_roofline(
     result = RooflineProjection(batch_size=batch_size, seq_len=seq_len)
     if routing_note:
         result.notes.append(routing_note)
+    # An opaque attention block (role attention, not one step of the softmax)
+    # already prices the whole layer. The eager matmul chain under it must not
+    # be priced again. A chain with no such block is the eager expansion of
+    # softmax attention, whose shapes stop at S and miss the KV cache.
+    opaque_attention: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        parsed = _parse_op_node(node)
+        if parsed is None:
+            continue
+        if _attr_text(node.get("attrs"), "role_basis") == ROLE_BASIS_COMPUTATION:
+            continue
+        if parsed[6] == "attention" and not _is_gated_delta(parsed[1]):
+            opaque_attention.add(str(node.get("id")))
+    replaced_eager_attention: set[str] = set()
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -539,6 +559,20 @@ def project_roofline(
         namespace = str(node.get("namespace") or "")
         instances = _repeat_count(namespace, node)
         node_id = str(node.get("id"))
+        # The conv call is the kernel. Its reference body (slice, silu) is not
+        # a second pass over the activation.
+        if _RT.sconv_kernel and _is_expanded_conv_body(node_id):
+            continue
+        # No attention mask is passed, so this function returns the activation
+        # unchanged. The multiply and the cast are inside that branch.
+        if _is_padding_mask_body(node_id):
+            continue
+        # fp8 SwiGLU stores neither the SiLU result nor the bf16 product.
+        # down_proj's activation quant reads both branches.
+        if _RT.weight_bpe == 1 and _is_mlp_activation_interior(
+            namespace, node_id, computation
+        ):
+            continue
         # A leaf whose role was read from its own computation is one step of
         # that computation (the score matmul, the softmax, the value matmul).
         # Each is costed as the op it is. The boundary formulas below price a
@@ -568,6 +602,29 @@ def project_roofline(
         if _node_is_draft_container(node):
             # The synthetic stack, or the container's own drawn children, costs
             # this module. The container node itself is not a second copy.
+            continue
+        if _is_eager_softmax_step(node_id, computation, computation_role):
+            scope = _attention_scope(node_id)
+            if scope in opaque_attention:
+                continue
+            if scope not in replaced_eager_attention:
+                replaced_eager_attention.add(scope)
+                _dims_only, dtype = _split_shape_text(output_text)
+                bpe = (
+                    _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+                )
+                boundary = _softmax_attention_row(
+                    scope,
+                    section,
+                    instances,
+                    dims,
+                    bpe,
+                    dtype,
+                    gpu_arch,
+                    heads=_eager_qk_heads(output_text, input_texts, dims),
+                )
+                if boundary is not None:
+                    result.ops.append(boundary)
             continue
         result.ops.append(op)
         _dims_only, dtype = _split_shape_text(output_text)
@@ -1062,9 +1119,37 @@ def _quant_matrix_rows(
             )
         )
 
-    _unary("weight_dequant", weight_elements, _RT.weight_bpe, bpe)
+    # fp8 weights are read by the GEMM itself (aiter/ck block-scale). A separate
+    # dequant would materialize a bf16 copy that those kernels do not write.
+    # Narrower schemes (fp4, int4) still expand the weight before the multiply.
+    if _RT.weight_bpe != 1:
+        _unary("weight_dequant", weight_elements, _RT.weight_bpe, bpe)
     if _RT.weight_bpe == 1:
-        _unary("act_quant", act_elements, bpe, _RT.weight_bpe)
+        # SwiGLU's down projection consumes gate and up. The quant kernel
+        # reads both and writes the packed activation once.
+        reads = act_elements * (2 if _swiglu_down_projection(node_id) else 1)
+        op = RooflineOp(
+            name=f"{node_id}.act_quant",
+            section=section,
+            computation="act_quant",
+            operation="",
+            category=None,
+            modeled=False,
+            reason=None,
+            output_elements=act_elements,
+            instances=instances,
+        )
+        ops.append(
+            _finish_op(
+                op,
+                "UnaryElementwise",
+                "vector",
+                UnaryElementwise.flops_func(act_elements),
+                reads * bpe + act_elements * _RT.weight_bpe,
+                dtype,
+                gpu_arch,
+            )
+        )
     return ops
 
 
@@ -1186,6 +1271,23 @@ def _project_op(
     # Introspective boundaries: the modeling source tags each module with a role
     # ("attention"/"ffn") and the arch spec says whether the model is MoE, so we
     # cost the custom attention and routed-expert blocks without matching names.
+    if role == "attention" and _is_gated_delta(computation):
+        # gdn_attention_core prices the fused recurrent update. The chunked
+        # kernels are a different algorithm and have no performance model.
+        # The SDPA boundary below is the full-attention layer.
+        if _is_recurrent_gated_delta(computation):
+            gdn = _gated_delta_cost(input_texts, dims, bpe)
+            if gdn is not None:
+                category, maf_type, flops, bytes_moved = gdn
+                try:
+                    oshape = resolve_shape(_dims_only, dims)
+                    base.output_elements = prod(oshape) if oshape else 1
+                except DimResolutionError:
+                    base.output_elements = None
+                return _finish_op(
+                    base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
+                )
+        return base
     if role == "attention":
         att = _attention_boundary_cost(dims, bpe)
         if att is not None:
@@ -1438,6 +1540,10 @@ class _RuntimeIntrospection:
         "dense_intermediate",
         "mtp_layers",
         "compress_ratios",
+        "config_attn_heads",
+        "config_attn_kv_heads",
+        "config_attn_head_dim",
+        "kv_cache_bpe",
     )
 
     def __init__(self):
@@ -1485,6 +1591,10 @@ class _RuntimeIntrospection:
         self.dense_intermediate = None
         self.mtp_layers = None
         self.compress_ratios = ()
+        self.config_attn_heads = None
+        self.config_attn_kv_heads = None
+        self.config_attn_head_dim = None
+        self.kv_cache_bpe = None
 
 
 _RT = _RuntimeIntrospection()
@@ -1587,6 +1697,12 @@ def _populate_introspection(spec):
     _RT.attention_bias = tcfg.get("attention_bias") is True
     _RT.mlp_bias = tcfg.get("mlp_bias") is True
     _RT.head_bias = tcfg.get("lm_head_bias", tcfg.get("head_bias")) is True
+    # Kept from the checkpoint. A hybrid model resolves a different head count
+    # in the linear-attention class, and that single constructor value must not
+    # become the softmax attention's width.
+    _RT.config_attn_heads = _RT.attn_heads
+    _RT.config_attn_kv_heads = _RT.attn_kv_heads
+    _RT.config_attn_head_dim = _RT.attn_head_dim
     _RT.variant_windows = _variant_windows(
         tcfg, _RT.sliding_window
     ) or _windows_from_variants(spec, tcfg, _RT.sliding_window)
@@ -1615,7 +1731,11 @@ def _populate_introspection(spec):
     _RT.tp = tp if isinstance(tp, int) and tp > 0 else 1
     _RT.ep = ep if isinstance(ep, int) and ep > 0 else 1
     _RT.sconv_kernel = _config_int(
-        tcfg, "sconv_kernel_size", "conv_kernel_size", "short_conv_kernel_size"
+        tcfg,
+        "sconv_kernel_size",
+        "conv_kernel_size",
+        "short_conv_kernel_size",
+        "linear_conv_kernel_dim",
     )
     # The dense MLP's width, when the checkpoint distinguishes it from the
     # routed experts' width. Absent, the model's intermediate size is the
@@ -1920,12 +2040,45 @@ def _looks_like_moe(class_name: str) -> bool:
 
 def _is_short_conv(computation: str, class_name: str) -> bool:
     """A depthwise 1D short / causal conv, not a spatial Conv2d/Conv3d."""
-    text = f"{computation} {class_name}".lower().replace("_", "")
+    text = f"{computation} {class_name}".lower().replace("_", "").replace(" ", "")
     if "conv2d" in text or "conv3d" in text:
         return False
     return any(
         token in text for token in ("shortconv", "sconv", "causalconv", "conv1d")
     )
+
+
+def _is_expanded_conv_body(node_id: str) -> bool:
+    """Reference body of ``causal_conv1d_fn``. The call site is the kernel."""
+    return "causal_conv1d_fn" in node_id
+
+
+def _is_padding_mask_body(node_id: str) -> bool:
+    """Body of ``apply_mask_to_padding_states``.
+
+    The function multiplies by the mask only when one is passed. A shape-only
+    projection has no mask, and that multiply is not HBM traffic.
+    """
+    return "apply_mask_to_padding_states" in node_id
+
+
+def _is_mlp_activation_interior(namespace: str, node_id: str, computation: str) -> bool:
+    """SiLU and the gate×up multiply inside an MLP.
+
+    With fp8 weights the activation quant on ``down_proj`` is that epilogue:
+    it reads both GEMM outputs and writes the packed activation. The SiLU
+    result and the bf16 product are not stored. The node id carries the
+    ``mlp`` segment; the namespace alone is the parent section.
+    """
+    text = f"{namespace}/{node_id}".lower()
+    if "/mlp/" not in text:
+        return False
+    return computation.lower() in {"silu", "gelu", "relu", "multiply", "mul"}
+
+
+def _swiglu_down_projection(node_id: str) -> bool:
+    """The third SwiGLU GEMM, whose input is the product of the two branches."""
+    return "down_proj" in node_id.lower()
 
 
 def _is_leaf_computation(computation: str) -> bool:
@@ -1981,6 +2134,178 @@ def _shard_heads(n: int, degree: int) -> int:
 
 
 _WINDOW_UNSET = object()
+
+
+def _is_gated_delta(computation: str) -> bool:
+    return "gated_delta" in (computation or "").lower()
+
+
+def _is_recurrent_gated_delta(computation: str) -> bool:
+    """The fused per-token update that ``gdn_attention_core`` models.
+
+    The chunked prefill kernels share the ``gated_delta`` name and run a
+    different algorithm, with no performance model of their own.
+    """
+    lowered = (computation or "").lower()
+    return "recurrent" in lowered and "gated_delta" in lowered
+
+
+def _attention_scope(node_id: str) -> str:
+    """The attention module a step belongs to.
+
+    Expanded steps are ``.../self_attn/seq:15:@attention:@op_...``. The marker
+    is ``@attention``, not a path segment, so every step of one module shares
+    one scope and is priced once.
+    """
+    head, sep, _tail = node_id.partition("@attention")
+    return head.rstrip("/:") if sep else node_id
+
+
+def _is_eager_softmax_step(
+    node_id: str, computation: str, computation_role: str
+) -> bool:
+    """A matmul/softmax that is one step of an expanded attention, not the block."""
+    return (
+        computation_role == ATTENTION_ROLE
+        and "@attention" in node_id
+        and not _is_gated_delta(computation)
+    )
+
+
+def _gated_delta_cost(
+    input_texts: list[list[str]],
+    dims: dict[str, Any],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """One recurrent gated-delta layer from its own q/k/v shapes.
+
+    This is ``gdn_attention_core``: the fused update whose state stays in
+    registers, at ``7 · d_v · d_k`` FLOPs per token and value head. The stopped
+    kernel is called with q, k, v as ``[B, S, H, D]``, but the drawn node also
+    carries the packed projection and the per-head gates, so the value tensor
+    is the rank-4 input with the most heads. Projections are separate GEMMs.
+    """
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        gdn_attention_core,
+    )
+
+    try:
+        rank4 = [
+            shape
+            for text in input_texts
+            if text and (shape := resolve_shape(text, dims)) and len(shape) == 4
+        ]
+    except DimResolutionError:
+        return None
+    if not rank4:
+        return None
+    q = rank4[0]
+    v = max(rank4, key=lambda shape: shape[-2])
+    tokens = prod(q[:-2]) if len(q) > 2 else q[0]
+    h_v = v[-2]
+    d_v = v[-1]
+    d_k = q[-1]
+    if tokens <= 0 or h_v <= 0 or d_v <= 0 or d_k <= 0:
+        return None
+    flops = float(gdn_attention_core._gdn_flops_func(h_v, d_k, d_v, tokens))
+    bytes_moved = None
+    if bpe is not None:
+        bytes_moved = float(
+            gdn_attention_core._gdn_bytes_func(h_v, d_k, d_v, tokens, bpe)
+        )
+    return ATTENTION_CATEGORY, "matrix", flops, bytes_moved
+
+
+def _eager_qk_heads(
+    output_text: str,
+    input_texts: list[list[str]],
+    dims: dict[str, Any],
+) -> tuple[int, int] | None:
+    """``(query heads, head dim)`` from an expanded QK matmul, when it has them.
+
+    The query is ``[B, H, S, D]``. A hybrid checkpoint's linear attention
+    publishes a different head count, so the score matmul is the one that
+    says how wide this softmax layer is.
+    """
+    try:
+        shapes = [resolve_shape(text, dims) for text in input_texts[:2] if text]
+    except DimResolutionError:
+        return None
+    for shape in shapes:
+        if (
+            shape
+            and len(shape) == 4
+            and shape[-1] != shape[-2]
+            and shape[-1] > 1
+            and shape[-3] > 1
+        ):
+            return int(shape[-3]), int(shape[-1])
+    return None
+
+
+def _softmax_attention_row(
+    name: str,
+    section: str,
+    instances: int,
+    dims: dict[str, Any],
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+    heads: tuple[int, int] | None = None,
+) -> RooflineOp | None:
+    """One SDPA layer in place of the eager QK/softmax/AV chain.
+
+    That chain's key length is the query length, so a decode step (S=1) costs
+    nothing and a prefill is the full non-causal score matrix. These layers
+    are the full-attention variant, so the KV length is the whole cache and
+    the head count is this matmul's, not the linear attention's.
+    """
+    try:
+        b = resolve_dim(dims["B"], dims)
+        s = resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError):
+        return None
+    past = _resolve_past(dims)
+    n_kv = past + s
+    if heads is not None:
+        h_q, d_h = heads
+    else:
+        h_q = _RT.config_attn_heads or _RT.attn_heads
+        d_h = _RT.config_attn_head_dim or _RT.attn_head_dim
+    h_kv = _RT.config_attn_kv_heads or _RT.attn_kv_heads or h_q
+    if not h_q or not d_h or not h_kv:
+        att = _attention_boundary_cost(dims, bpe)
+        if att is None:
+            return None
+        category, maf_type, flops, bytes_moved = att
+    else:
+        h_q = _shard_heads(h_q, _RT.tp)
+        h_kv = _shard_heads(h_kv, _RT.tp)
+        causal = bool(_RT.causal_attention and past == 0 and s == n_kv)
+        flops = float(SDPA.flops_func(b, s, h_q, n_kv, h_kv, d_h, d_h, causal))
+        bytes_moved = (
+            float(
+                SDPA.bytes_func(
+                    b, s, h_q, n_kv, h_kv, d_h, d_h, causal, bpe,
+                    kv_bytes_per_element=_RT.kv_cache_bpe,
+                )
+            )
+            if bpe is not None
+            else None
+        )
+        category, maf_type = ATTENTION_CATEGORY, "matrix"
+    row = RooflineOp(
+        name=name,
+        section=section,
+        computation="sdpa",
+        operation="",
+        category=None,
+        modeled=False,
+        reason=None,
+        output_elements=None,
+        instances=instances,
+    )
+    return _finish_op(row, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
 
 
 def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
@@ -2055,7 +2380,10 @@ def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
     causal = _RT.causal_attention and past == 0 and s == eff_n_kv
     flops = SDPA.flops_func(b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal)
     bytes_moved = (
-        SDPA.bytes_func(b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal, bpe)
+        SDPA.bytes_func(
+            b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal, bpe,
+            kv_bytes_per_element=_RT.kv_cache_bpe,
+        )
         if bpe is not None
         else None
     )
@@ -3305,6 +3633,20 @@ def _mtp_stack_ops(
     return ops
 
 
+def _experts_touched(experts: int, routed_rows: int) -> float:
+    """Expected distinct experts that ``routed_rows`` rows reach.
+
+    A row picks an expert uniformly, so an expert is missed with probability
+    ``(1 - 1/experts) ** routed_rows``. A few rows reach about one expert each;
+    many rows reach them all. Charging every expert whenever ``routed_rows``
+    exceeds the expert count would read weights no row selected: 256 rows over
+    128 experts reach about 111, not 128.
+    """
+    if experts <= 0 or routed_rows <= 0:
+        return 0.0
+    return experts * (1.0 - (1.0 - 1.0 / experts) ** routed_rows)
+
+
 def _moe_cost(
     dims: dict[str, Any],
     top_k: int | None,
@@ -3321,9 +3663,9 @@ def _moe_cost(
     declared, which is the wrong width for the routed experts this costs.
 
     The expert GEMMs are costed with :class:`GroupedGemm` over
-    ``G = min(num_experts, active_tokens)`` distinct expert weight matrices --
-    the weights actually streamed from HBM for this token count -- rather than a
-    single shared weight. FLOPs are unchanged (only the selected token-expert
+    ``G`` distinct expert weight matrices -- the experts ``active_tokens`` routed
+    rows are expected to reach under uniform routing, see
+    :func:`_experts_touched` -- rather than a single shared weight. FLOPs are unchanged (only the selected token-expert
     pairs compute); the weight-byte term now scales with the experts touched, so
     the memory-bound/compute-bound crossover tracks the real prefill-vs-decode
     behaviour instead of understating decode weight traffic by ~``G``x. When
@@ -3349,7 +3691,7 @@ def _moe_cost(
     intermediate_size = _shard(intermediate_size, _RT.tp)
     active_tokens = _shard(tokens * top_k, _RT.ep)
     experts_here = _shard(_RT.moe_num_experts, _RT.ep) if _RT.moe_num_experts else 0
-    groups = min(experts_here, active_tokens) if experts_here else 1
+    groups = _experts_touched(experts_here, active_tokens) if experts_here else 1
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
     # gate_up_proj: [active_tokens, hidden] x per-expert [hidden, 2*intermediate].
     gate_up_flops = GroupedGemm.flops_func(active_tokens, hidden, 2 * intermediate_size)
@@ -3388,23 +3730,19 @@ def _formula_quant_rows(
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
 ) -> list[RooflineOp]:
-    """Quant rows for a formula-costed GEMM or MoE that is not an nn.Linear leaf."""
+    """Quant rows for a formula-costed GEMM that is not an nn.Linear leaf."""
+    if category == "MoE":
+        # A grouped expert GEMM reads its packed (e.g. MXFP4) weights directly,
+        # as the aiter/cktile and Triton MoE kernels do. No separate dequant pass
+        # runs beside it, so the expert weight bytes come from _moe_cost alone.
+        return []
     try:
         tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
         hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
     except (KeyError, DimResolutionError):
         return []
     matrices: list[tuple[int, int, int]] = []
-    if category == "MoE" and _RT.moe_top_k and _RT.moe_intermediate:
-        intermediate = _shard(_RT.moe_intermediate, _RT.tp)
-        active = _shard(tokens * _RT.moe_top_k, _RT.ep)
-        experts = _shard(_RT.moe_num_experts, _RT.ep) if _RT.moe_num_experts else 0
-        groups = min(experts, active) if experts else 1
-        matrices = [
-            (active, groups * 2 * intermediate, hidden),
-            (active, groups * hidden, intermediate),
-        ]
-    elif category == "GEMM" and role in ("ffn", "moe") and _RT.dense_intermediate:
+    if category == "GEMM" and role in ("ffn", "moe") and _RT.dense_intermediate:
         intermediate = _shard(_RT.dense_intermediate, _RT.tp)
         matrices = [
             (tokens, 2 * intermediate, hidden),
@@ -4030,7 +4368,10 @@ def _sdpa_cost(
     causal = n_q == n_kv
     flops = SDPA.flops_func(b, n_q, h_q, n_kv, h_kv, d_h_qk, d_h_v, causal)
     bytes_moved = (
-        SDPA.bytes_func(b, n_q, h_q, n_kv, h_kv, d_h_qk, d_h_v, causal, bpe)
+        SDPA.bytes_func(
+            b, n_q, h_q, n_kv, h_kv, d_h_qk, d_h_v, causal, bpe,
+            kv_bytes_per_element=_RT.kv_cache_bpe,
+        )
         if bpe is not None
         else None
     )
