@@ -11,8 +11,10 @@ See LICENSE for license information.
 ```
 
 `TraceLens_e2e_roofline_plot` draws one log-log roofline for a model regime.
-Each point is an operation (prefill attention, decode attention, routed MoE, or
-the whole forward) at one concurrency.
+Each point is an operation (prefill attention, decode attention, routed MoE,
+a report category, or the whole forward) at one concurrency. `--top-kernels`
+replaces those category markers with the longest-running kernels and end to
+end. With no count it draws 10 kernels. `--top-kernels 20` draws 20.
 
 - **X** is arithmetic intensity: FLOPs divided by compulsory HBM bytes. Both
   come from the profile when the kernel's `GFLOPS` and `FLOPS/Byte` are
@@ -35,7 +37,8 @@ FLOPs divided by its roofline time, so each point sits on the roof its shapes
 imply. A profile whose graph capture restored the CPU ops has `GFLOPS` for
 those ops. The plot uses the profile for every kernel that has it and the
 projection for the rest. Whole model is the sum of those categories at one
-concurrency.
+concurrency. `--top-kernels` draws the longest-running kernels and end to end
+instead of those categories.
 
 ## Run the tool
 
@@ -109,6 +112,12 @@ this total when every kernel matched to it has both cells. One kernel without
 them means the profile does not describe the series, and the projection
 supplies the whole series.
 
+When the series does have those cells, the marker is the measured FLOPs and an
+arrow runs to the projection's FLOPs and bytes over the same kernel time. The
+open marker at the arrowhead is the modeled point. The arrow is drawn only for
+a profile: `--model-only` has no measured FLOPs, and a series the profile did
+not cost is already the projection, so neither gets an arrow.
+
 The projection gives the FLOPs of one forward, and the number of times each op
 occurs in it (`instances`, written to the augmentation as `invocations`). The
 numerator is then the series' FLOPs times `launches / instances`, which is the
@@ -144,6 +153,28 @@ Categories with no matched kernel are left out, because there is no time to put
 their FLOPs against. In a mixed capture, pass `--kernels PHASE|Whole model|SUBSTRING`
 for the kernels whose names do not say which phase they ran. The printed
 `source` is `profile`, `export`, or `mixed`.
+
+## The longest-running kernels
+
+`--top-kernels` replaces the category markers with the kernels that have the
+most `Kernel Time (µs)_sum`, plus end to end. With no count the plot draws 10
+kernels. `--top-kernels 20` draws 20. Communication kernels are left out. Each
+kernel marker uses that kernel's own `GFLOPS` and `FLOPS/Byte` over its own
+time. A kernel without those cells is named on stderr and not drawn. End to
+end is still the whole forward: every kernel the projection accounts for, not
+only the ones in the top N.
+
+```bash
+TraceLens_e2e_roofline_plot \
+    --gpu-arch-name MI300X \
+    --projection decode:48:decode.json \
+    --profile-dir <perf_report_csvs> \
+    --top-kernels 10 \
+    --title "decode concurrency 48" \
+    --output roofline.png
+```
+
+`--top-kernels` needs a profile. `--model-only` keeps the category markers.
 
 ## A point above the roof is an error in the inputs
 

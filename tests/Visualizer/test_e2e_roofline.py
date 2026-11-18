@@ -15,15 +15,20 @@ import pytest
 
 matplotlib.use("Agg")
 
+import matplotlib.pyplot as plt
+
 from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     DEFAULT_SERIES,
     Regime,
+    RooflinePoint,
+    _draw_flop_arrows,
     achieved_tflops,
     bandwidth_tb_s,
     blend_peak_tflops,
     build_points,
     flag_points_above_roof,
     load_profile_kernels,
+    modeled_position,
     points_from_model,
     main,
     model_coverage,
@@ -33,6 +38,7 @@ from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     report_kernel_category,
     roof_tflops,
     ridge_flops_per_byte,
+    top_kernel_series,
 )
 
 _ARCH = {
@@ -433,6 +439,68 @@ def test_profile_flops_replace_the_export_when_every_kernel_has_them():
     assert point.cost_source == "profile"
     assert point.arithmetic_intensity == 80.0
     assert point.achieved_tflops == pytest.approx(8.0e9 / 20.0e-6 / 1e12)
+    # One forward of the projection: 40 launches over 40 instances.
+    assert point.modeled_flops == pytest.approx(4.0e9)
+    assert point.modeled_bytes == pytest.approx(2.0e8)
+    intensity, rate = modeled_position(point)
+    assert intensity == pytest.approx(20.0)
+    assert rate == pytest.approx(4.0e9 / 20.0e-6 / 1e12)
+
+
+def test_arrow_runs_from_measured_flops_to_modeled(tmp_path):
+    point = RooflinePoint(
+        series="Decode attention",
+        phase="decode",
+        concurrency=3,
+        arithmetic_intensity=80.0,
+        achieved_tflops=400.0,
+        flops=8.0e9,
+        bytes=1.0e8,
+        time_us=20.0,
+        cost_source="profile",
+        modeled_flops=4.0e9,
+        modeled_bytes=2.0e8,
+    )
+    same = RooflinePoint(
+        series="GEMM",
+        phase="decode",
+        concurrency=3,
+        arithmetic_intensity=20.0,
+        achieved_tflops=200.0,
+        flops=4.0e9,
+        bytes=2.0e8,
+        time_us=20.0,
+        cost_source="profile",
+        modeled_flops=4.0e9,
+        modeled_bytes=2.0e8,
+    )
+    assert modeled_position(same) is None
+    fig, ax = plt.subplots()
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    assert _draw_flop_arrows(ax, [point, same], {3: "#336699"}, DEFAULT_SERIES)
+    arrows = [text for text in ax.texts if text.arrow_patch is not None]
+    assert len(arrows) == 1
+    assert arrows[0].xy == pytest.approx(modeled_position(point))
+    assert arrows[0].xyann == pytest.approx(
+        (point.arithmetic_intensity, point.achieved_tflops)
+    )
+    plt.close(fig)
+
+    regime = Regime(
+        "decode",
+        3,
+        (_op("Attention", 4.0e9, 2.0e8, instances=40, spec="matrix_bf16"),),
+    )
+    kernel = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    kernel["flops"] = 8.0e9
+    kernel["bytes"] = 1.0e8
+    points, _warnings = build_points([regime], [kernel])
+    output = tmp_path / "arrow.png"
+    plot_e2e_roofline(
+        points, _ARCH, [regime], title="measured to modeled", output_path=output
+    )
+    assert output.stat().st_size > 0
 
 
 def test_one_uncosted_kernel_keeps_the_export_for_the_category():
@@ -452,6 +520,8 @@ def test_one_uncosted_kernel_keeps_the_export_for_the_category():
     )
     point = next(item for item in points if item.series == "Routed MoE")
     assert point.cost_source == "export"
+    assert point.modeled_flops is None
+    assert modeled_position(point) is None
     # The profile FLOPs are ignored: one kernel has no shape, so the export
     # describes the category. Same launch count, so the two kernels are one launch.
     assert point.achieved_tflops == pytest.approx(
@@ -734,6 +804,8 @@ def test_model_only_points_sit_on_the_roof():
     assert any("Whole model" in warning for warning in warnings)
     attention = by_series["Decode attention"]
     assert attention.cost_source == "model"
+    assert attention.modeled_flops is None
+    assert modeled_position(attention) is None
     assert attention.arithmetic_intensity == pytest.approx(20.0)
     assert attention.achieved_tflops == pytest.approx(160.0)
     assert attention.achieved_tflops == pytest.approx(
@@ -790,6 +862,24 @@ def test_cli_model_only_reads_no_profile(tmp_path, capsys):
     stdout = capsys.readouterr().out
     assert "source=model" in stdout
     assert "Decode attention" in stdout
+    assert "modeled=" not in stdout
+    refused_top = main(
+        [
+            "--model-only",
+            "--top-kernels",
+            "4",
+            "--title",
+            "model",
+            "--output",
+            str(output),
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--projection",
+            f"decode:48:{path}",
+        ]
+    )
+    assert refused_top == 1
+    assert "needs a profile" in capsys.readouterr().err
     refused = main(
         [
             "--model-only",
@@ -807,3 +897,152 @@ def test_cli_model_only_reads_no_profile(tmp_path, capsys):
     )
     assert refused == 1
     assert "does not read a profile" in capsys.readouterr().err
+
+
+def test_profile_plot_keeps_the_slowest_kernels_and_end_to_end(tmp_path, capsys):
+    kernels = []
+    for index in range(12):
+        kernels.append(
+            {
+                "name": f"hipGraphLaunch->kernel_{index:02d}",
+                "time_us": (index + 1) * 10.0,
+                "count": 1,
+                "flops": 1.0e9 * (index + 1),
+                "bytes": 1.0e8,
+            }
+        )
+    kernels.append(
+        {
+            "name": "nccl_allreduce",
+            "time_us": 1.0e9,
+            "count": 1,
+            "flops": 1.0,
+            "bytes": 1.0,
+        }
+    )
+    kernels.append(
+        {"name": "hipGraphLaunch->bare_kernel", "time_us": 500.0, "count": 1}
+    )
+    series = top_kernel_series(kernels, 3)
+    assert [spec.kernel_name for spec in series if spec.kernel_name] == [
+        "hipGraphLaunch->bare_kernel",
+        "hipGraphLaunch->kernel_11",
+        "hipGraphLaunch->kernel_10",
+    ]
+    assert [spec.label for spec in series] == [
+        "bare_kernel",
+        "kernel_11",
+        "kernel_10",
+        "End to end",
+    ]
+    assert len(top_kernel_series(kernels)) == 11
+    regime = Regime("decode", 3, (_op("GEMM", 4.0e9, 2.0e8, instances=1),))
+    points, warnings = build_points([regime], kernels, series=series)
+    assert any(
+        "bare_kernel" in warning and "no profile FLOPs" in warning
+        for warning in warnings
+    )
+    labels = {point.series for point in points}
+    assert labels == {"kernel_11", "kernel_10", "End to end"}
+    slowest = next(point for point in points if point.series == "kernel_11")
+    assert slowest.flops == pytest.approx(12.0e9)
+    assert slowest.time_us == 120.0
+    assert slowest.cost_source == "profile"
+    assert modeled_position(slowest) is None
+    end = next(point for point in points if point.series == "End to end")
+    assert end.flops > slowest.flops
+
+    peeled = top_kernel_series(
+        [
+            _kernel("hipGraphLaunch->gemm", 30.0, 1),
+            _kernel("gemm", 20.0, 1),
+        ],
+        2,
+    )
+    assert {spec.label for spec in peeled} == {
+        "hipGraphLaunch->gemm",
+        "gemm",
+        "End to end",
+    }
+
+    projection = {
+        "ops": [
+            {
+                "category": "GEMM",
+                "total_flops": 4.0e9,
+                "total_bytes": 2.0e8,
+                "compute_spec": "matrix_bf16",
+                "instances": 1,
+                "total_roofline_time_us": 25.0,
+            }
+        ]
+    }
+    path = tmp_path / "decode.json"
+    path.write_text(json.dumps(projection), encoding="utf-8")
+    (tmp_path / "profile.json").write_text(json.dumps(kernels), encoding="utf-8")
+    arch_path = tmp_path / "arch.json"
+    arch_path.write_text(json.dumps(_ARCH), encoding="utf-8")
+    output = tmp_path / "top.png"
+    exit_code = main(
+        [
+            "--title",
+            "top kernels",
+            "--output",
+            str(output),
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--projection",
+            f"decode:3:{path}",
+            "--profile-json",
+            str(tmp_path / "profile.json"),
+            "--top-kernels",
+            "3",
+        ]
+    )
+    assert exit_code == 0
+    assert output.is_file()
+    stdout = capsys.readouterr().out
+    assert "kernel_11" in stdout
+    assert "kernel_10" in stdout
+    assert "End to end" in stdout
+    assert "kernel_00" not in stdout
+    assert "Decode attention" not in stdout
+    assert "GEMM phase" not in stdout
+    category = main(
+        [
+            "--title",
+            "categories",
+            "--output",
+            str(output),
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--projection",
+            f"decode:3:{path}",
+            "--profile-json",
+            str(tmp_path / "profile.json"),
+        ]
+    )
+    assert category == 0
+    category_out = capsys.readouterr()
+    assert "End to end" in category_out.out
+    assert "kernel_11" not in category_out.out
+    assert "GEMM" in category_out.err
+    bare = main(
+        [
+            "--title",
+            "top ten",
+            "--output",
+            str(output),
+            "--gpu-arch-json-path",
+            str(arch_path),
+            "--projection",
+            f"decode:3:{path}",
+            "--profile-json",
+            str(tmp_path / "profile.json"),
+            "--top-kernels",
+        ]
+    )
+    assert bare == 0
+    bare_out = capsys.readouterr().out
+    assert "kernel_03" in bare_out
+    assert "kernel_02" not in bare_out
