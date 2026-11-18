@@ -25,6 +25,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from TraceLens.TraceUtils.utils import trace_check
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     IDLE_PCT_THRESHOLD,
     focus_job_utilization,
@@ -105,8 +106,6 @@ _MAIN_TRACE_PATTERNS = ("*TP-0*.json*", "*rank0*.json*")
 # Trace files larger than this (bytes) are skipped by detection checks: parsing
 # multi-GB traces in-process is too costly for a fast triage pass.
 _MAX_TRACE_BYTES = 5_000_000_000
-# Traces below this (bytes) are treated as empty / warmup-only.
-_MIN_TRACE_BYTES = 100_000
 # "Significant op" band for unified_perf_summary rows.
 _SIGNIFICANT_CUM_PCT_MAX = 90
 _SIGNIFICANT_PCT_MIN = 4
@@ -290,25 +289,16 @@ def _load_manifest(run_dir):
 @functools.lru_cache(maxsize=1)
 def _load_trace_json(trace_path):
     """Parse a trace file (plain or gzipped) via the library loader. Returns
-    parsed data or raises.
+    ``(events, metadata)`` or raises.
 
-    Delegates to ``DataLoader.load_data`` (orjson, strict UTF-8) and caches the
-    single most-recent parse so checks resolving the same rank-0 file don't
-    re-parse a multi-GB trace. ``orjson.JSONDecodeError`` subclasses
+    Delegates to ``DataLoader.load_trace_events`` (orjson, strict UTF-8) and
+    caches the single most-recent parse so checks resolving the same rank-0
+    file don't re-parse a multi-GB trace. ``orjson.JSONDecodeError`` subclasses
     ``json.JSONDecodeError``, so callers guarding ``(OSError, json.JSONDecodeError)``
     still catch parse failures; ``lru_cache`` does not memoize exceptions, so a
     corrupt file re-raises on every call.
     """
-    return DataLoader.load_data(trace_path)
-
-
-def _events_of(data):
-    """Extract the trace-event list from parsed trace data.
-
-    Traces are either a bare event list or a dict with a ``traceEvents`` key; a
-    dict without that key yields ``[]`` (empty, not an error).
-    """
-    return data if isinstance(data, list) else data.get("traceEvents", [])
+    return DataLoader.load_trace_events(trace_path)
 
 
 def _load_events(trace_path):
@@ -323,7 +313,8 @@ def _load_events(trace_path):
     if os.path.getsize(trace_path) > _MAX_TRACE_BYTES:
         return None
     try:
-        return _events_of(_load_trace_json(trace_path))
+        events, _ = _load_trace_json(trace_path)
+        return events
     except (OSError, ValueError):
         return None
 
@@ -347,28 +338,6 @@ def _load_unified_perf_summary(run_dir):
             return list(csv.DictReader(f))
     except (OSError, csv.Error):
         return None
-
-
-def _load_gpu_timeline(run_dir):
-    """Parse ``perf_report_csvs/gpu_timeline.csv`` into ``{type: percent}``.
-
-    Returns ``None`` if the file is missing or unreadable.
-    """
-    path = os.path.join(run_dir, "perf_report_csvs", "gpu_timeline.csv")
-    if not os.path.isfile(path):
-        return None
-    out = {}
-    try:
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                t = (row.get("type") or "").strip()
-                pct = _parse_float(row.get("percent"))
-                if not t or pct is None:
-                    continue
-                out[t] = pct
-    except (OSError, csv.Error):
-        return None
-    return out
 
 
 def _significant_rows(rows):
@@ -419,10 +388,10 @@ def _first_load_capture_event_set(capture_folder):
     )
     for fname in candidates:
         try:
-            data = _load_trace_json(os.path.join(capture_folder, fname))
+            events, _ = _load_trace_json(os.path.join(capture_folder, fname))
         except (OSError, json.JSONDecodeError):
             continue
-        return _events_of(data)
+        return events
     return None
 
 
@@ -536,18 +505,10 @@ def check_trace_size(run_dir, _stream_file):
     trace_path = resolve_trace_path(run_dir)
     if not trace_path or not os.path.exists(trace_path):
         return None
-    size = os.path.getsize(trace_path)
-    if size < _MIN_TRACE_BYTES:
+    findings = trace_check._check_trace_file_size({"filepath": trace_path})
+    if findings:
         return FindingDraft(
-            "Trace files too small (< 100KB)",
-            f"Trace file is {size:,} bytes — may be empty or warmup-only",
-            "Profiling window too short or no GPU ops captured",
-        )
-    if size > _MAX_TRACE_BYTES:
-        return FindingDraft(
-            "Trace files too large (> 5GB)",
-            f"Trace file is {size / 1e9:.1f} GB — consider splitting",
-            "Too many steps are being analyzed; reduce profiling window",
+            findings[0].message, findings[0].message, findings[0].message
         )
     return None
 
@@ -556,11 +517,10 @@ def check_no_gpu_kernels(run_dir, _stream_file):
     events = _load_events(resolve_trace_path(run_dir))
     if events is None:
         return None
-    if not any(e.get("cat") == "kernel" for e in events):
+    findings = trace_check._check_kernels_present({"events": events})
+    if findings:
         return FindingDraft(
-            "No GPU kernel events in trace",
-            "Trace contains no events with cat='kernel'",
-            "Ensure ProfilerActivity.CUDA is enabled in profiler config",
+            findings[0].message, findings[0].message, findings[0].message
         )
     return None
 
@@ -597,26 +557,45 @@ def check_capture_missing(run_dir, _stream_file):
 
 
 def check_high_idle(run_dir, _stream_file):
-    timeline = _load_gpu_timeline(run_dir)
-    idle = None
-    source = None
-    if timeline is not None and "idle_time" in timeline:
-        idle = timeline["idle_time"]
-        source = "perf_report_csvs/gpu_timeline.csv"
-    else:
-        manifest = _load_manifest(run_dir)
-        if manifest:
-            idle = manifest.get("gpu_utilization", {}).get("idle_time_percent")
-            if idle is not None:
-                source = "category_manifest.json gpu_utilization.idle_time_percent"
+    # Idle computation lives in trace_check._check_gpu_idle; feed it the
+    # gpu_timeline sheet (or the manifest fallback) and keep triage's threshold.
+    import pandas as pd
 
-    if idle is not None and idle > IDLE_PCT_THRESHOLD:
-        return FindingDraft(
-            f"High idle time (> {IDLE_PCT_THRESHOLD}% GPU idle)",
-            f"GPU idle time is {idle:.1f}% ({source})",
-            "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
-        )
-    return None
+    timeline_csv = os.path.join(run_dir, "perf_report_csvs", "gpu_timeline.csv")
+    source = None
+    df = None
+    if os.path.isfile(timeline_csv):
+        try:
+            df = pd.read_csv(timeline_csv)
+            source = "perf_report_csvs/gpu_timeline.csv"
+        except (OSError, ValueError):
+            df = None
+    if df is None:
+        # No sheet on disk — fall back to the manifest's single idle number.
+        manifest = _load_manifest(run_dir)
+        idle = (manifest or {}).get("gpu_utilization", {}).get("idle_time_percent")
+        if idle is not None:
+            source = "category_manifest.json gpu_utilization.idle_time_percent"
+            df = pd.DataFrame({"type": ["idle_time"], "percent": [idle]})
+    if df is None:
+        return None
+
+    thr = trace_check.QualityThresholds(idle_pct_warn=IDLE_PCT_THRESHOLD)
+    findings = trace_check._check_gpu_idle(
+        {
+            "dfs": {"gpu_timeline": df},
+            "sheets": trace_check._SHEETS["pytorch"],
+            "thr": thr,
+        }
+    )
+    if not findings:
+        return None
+    idle_pct = findings[0].metrics["idle_pct"]
+    return FindingDraft(
+        f"High idle time (> {IDLE_PCT_THRESHOLD}% GPU idle)",
+        f"GPU idle time is {idle_pct:.1f}% ({source})",
+        "Investigate CPU bottlenecks, graph capture enablement, host-side overhead",
+    )
 
 
 def check_corrupt_json(run_dir, _stream_file):
@@ -651,19 +630,10 @@ def check_missing_cpu_op_shapes(run_dir, _stream_file):
     events = _first_load_capture_event_set(capture_folder)
     if events is None:
         return None
-    cpu_ops = [e for e in events if e.get("cat") == "cpu_op"]
-    if not cpu_ops:
+    findings = trace_check._check_cpu_op_shapes_basic({"events": events})
+    if findings:
         return FindingDraft(
-            "Trace missing cpu_op events with input shapes",
-            f"Capture file has zero cpu_op events ({capture_folder})",
-            "Profile with cpu_callstack and record_shapes enabled in profiler config",
-        )
-    with_shapes = sum(1 for e in cpu_ops if "Input Dims" in (e.get("args") or {}))
-    if with_shapes < _MIN_CPU_OP_SHAPES:
-        return FindingDraft(
-            "Trace missing cpu_op events with input shapes",
-            f"Only {with_shapes} of {len(cpu_ops)} cpu_op events carry 'Input Dims' in capture trace",
-            "Profile with cpu_callstack and record_shapes enabled in profiler config",
+            findings[0].message, findings[0].message, findings[0].message
         )
     return None
 
@@ -679,7 +649,7 @@ def check_inference_annotation_missing(run_dir, _stream_file):
     if os.path.getsize(main_path) > _MAX_TRACE_BYTES:
         return None
     try:
-        data = _load_trace_json(main_path)
+        events, _ = _load_trace_json(main_path)
     except (OSError, json.JSONDecodeError):
         # Narrow on purpose: main_path is glob-restricted to a .json* file, so the
         # bare ValueError("Unknown file type") that check_corrupt_json guards against
@@ -689,7 +659,6 @@ def check_inference_annotation_missing(run_dir, _stream_file):
             f"JSONDecodeError reading trace at path: {main_path}",
             "Verify the correct trace was selected and that the inference mode was enabled",
         )
-    events = _events_of(data)
     execs = sum(
         1
         for e in events
@@ -809,26 +778,24 @@ def check_split_low_gpu_kernels(run_dir, _stream_file):
 
 
 def check_runtime_instability(run_dir, _stream_file):
+    # CV computation lives in trace_check._check_runtime_instability; keep
+    # triage's 0.25 threshold and rebuild the evidence from its metrics.
+    import pandas as pd
+
     rows = _load_unified_perf_summary(run_dir)
     if not rows:
         return None
-    unstable = []
-    for row in rows:
-        mean = _parse_float(row.get("Kernel Time (µs)_mean"))
-        std = _parse_float(row.get("Kernel Time (µs)_std"))
-        if not mean or std is None or mean <= 0:
-            continue
-        cv = std / mean
-        if cv > _RUNTIME_INSTABILITY_CV:
-            unstable.append((cv, row))
-    if not unstable:
+    thr = trace_check.QualityThresholds(runtime_cv_warn=_RUNTIME_INSTABILITY_CV)
+    findings = trace_check._check_runtime_instability(
+        {"dfs": {"unified_perf_summary": pd.DataFrame(rows)}, "thr": thr}
+    )
+    if not findings:
         return None
-    unstable.sort(key=lambda x: x[0], reverse=True)
-    top = [r for _, r in unstable[:3]]
-    names = ", ".join((r.get("name") or "")[:60] for r in top)
+    m = findings[0].metrics
     return FindingDraft(
         "Run-time instability across iterations / per cpu_op",
-        f"{len(unstable)} ops have Kernel Time std/mean > {_RUNTIME_INSTABILITY_CV} (e.g. {names})",
+        f"{m['unstable_count']} ops have Kernel Time std/mean > "
+        f"{_RUNTIME_INSTABILITY_CV} (e.g. {m['examples']})",
         "Likely a profiler or system issue; verify if the variance is expected",
     )
 

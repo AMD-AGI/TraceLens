@@ -9,7 +9,14 @@ import warnings
 from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-from .utils import name2bpe, optional_float, parse_bool, torch_dtype_map
+from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem, pow_flops_per_elem
+from .utils import (
+    name2bpe,
+    optional_float,
+    parse_bool,
+    scalar_type_bpe,
+    torch_dtype_map,
+)
 
 
 # 1. GEMM
@@ -282,12 +289,11 @@ class aten_scaled_mm(GEMM):
                 f"Data sizes of A and B are different: {dtype_A_B} for aten_scaled_mm. "
             )
         self.bpe = bpeA  # or bpeB, they are the same
-        # assumption:
-        # for fp8 the output dtype is fp16
-        # for fp16, bf16, fp32 the output dtype is the same as the input dtype
-        if self.bpe == 1:
+        # fp8 and a packed FP4 element are one byte, and both write an
+        # fp16/bf16 result. fp16, bf16, and fp32 keep the input width.
+        if self.bpe is not None and self.bpe <= 1:
             out_bpe = 2
-        elif self.bpe in [2, 4]:
+        elif self.bpe in (2, 4):
             out_bpe = self.bpe
         else:
             out_bpe = None
@@ -1480,11 +1486,7 @@ class Softmax:
 
     @staticmethod
     def flops_func(M, N, B=1):
-        # softmax is O(N) for each element, so total is O(N^2)
-        # 3 ops : Exponent, Division and Addition
-        # Let's assume for now exponent and division are implement by LUT and hence
-        # take 1 cycle
-        return B * M * (3 * N)
+        return B * M * N * OP_FLOPS_PER_ELEM["softmax"]
 
     @staticmethod
     def bytes_func(M, N, bytes_per_element, B=1):
@@ -3541,8 +3543,8 @@ class UnaryElementwise:
             self.bpe_out = self.bpe_in
 
     @staticmethod
-    def flops_func(nelems):
-        return nelems
+    def flops_func(nelems, flops_per_elem=1):
+        return flops_per_elem * nelems
 
     def flops(self):
         return self.flops_func(self.nelems)
@@ -3567,6 +3569,10 @@ class UnaryElementwise:
 
 
 class aten_unary_elementwise(UnaryElementwise):
+    """A traced unary ATen op, priced per element from ``OP_FLOPS_PER_ELEM``."""
+
+    def flops(self):
+        return self.flops_func(self.nelems, op_flops_per_elem(self.event["name"]))
 
     @staticmethod
     def get_param_details(event):
@@ -3586,6 +3592,49 @@ class aten_unary_elementwise(UnaryElementwise):
             "stride_input": stride_input,
             "stride_output": stride_output,
         }
+
+
+class aten_pow(aten_unary_elementwise):
+    """``aten::pow`` and ``aten::pow_``.
+
+    ``Concrete Inputs[1]`` holds a scalar exponent. Tensor exponents leave it
+    empty and pay the general ``exp(y * log(x))`` cost.
+    """
+
+    def flops(self):
+        concrete = self.event["args"].get("Concrete Inputs") or ()
+        try:
+            exponent = float(concrete[1])
+        except (IndexError, TypeError, ValueError):
+            exponent = None
+        return self.flops_func(self.nelems, pow_flops_per_elem(exponent))
+
+
+class aten_gelu(aten_unary_elementwise):
+    """``aten::gelu`` and ``aten::gelu_``; ``Concrete Inputs[1]`` is ``approximate``."""
+
+    def flops(self):
+        concrete = self.event["args"].get("Concrete Inputs") or ()
+        approximate = concrete[1] if len(concrete) > 1 else ""
+        op = "gelu_tanh" if "tanh" in str(approximate) else "gelu"
+        return self.flops_func(self.nelems, op_flops_per_elem(op))
+
+
+class aten_to(aten_unary_elementwise):
+    """``aten::to`` and ``aten::_to_copy``: a dtype or device copy.
+
+    No arithmetic. Bytes are the source width plus the destination width.
+    ``Concrete Inputs[1]`` is the ``ScalarType`` ordinal of a dtype cast. A
+    value that is not an ordinal keeps the source width, which is a same-dtype
+    copy onto another device.
+    """
+
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
+        concrete = (event.get("args") or {}).get("Concrete Inputs") or ()
+        dest = scalar_type_bpe(concrete[1] if len(concrete) > 1 else None)
+        if dest is not None:
+            self.bpe_out = dest
 
 
 class aten_replication_pad(UnaryElementwise):
@@ -3629,6 +3678,19 @@ class aten_replication_pad(UnaryElementwise):
         nelems_in = prod(self.param_details["input_shape"])
         nelems_out = self.nelems  # prod(output_shape) from base class
         return nelems_in * self.bpe_in + nelems_out * self.bpe_out
+
+
+class aten_pad(aten_replication_pad):
+    """``aten::pad`` copies the input into a padded buffer.
+
+    No arithmetic. ``Concrete Inputs[1]`` holds the pad widths, innermost
+    dimension first, the same order ``aten_replication_pad`` reads. Bytes read
+    the input and write the padded output.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
 
 
 class aten_upsample_nearest(UnaryElementwise):
@@ -3723,8 +3785,8 @@ class BinaryElementwise:
         return bpe_in1
 
     @staticmethod
-    def flops_func(nelems_out):
-        return nelems_out
+    def flops_func(nelems_out, flops_per_elem=1):
+        return flops_per_elem * nelems_out
 
     def flops(self):
         return self.flops_func(self.nelems_out)
@@ -3772,6 +3834,10 @@ class BinaryElementwise:
 
 
 class aten_binary_elementwise(BinaryElementwise):
+    """A traced binary ATen op, priced per output from ``OP_FLOPS_PER_ELEM``."""
+
+    def flops(self):
+        return self.flops_func(self.nelems_out, op_flops_per_elem(self.event["name"]))
 
     @staticmethod
     def get_param_details(event):
@@ -3799,10 +3865,22 @@ class aten_binary_elementwise(BinaryElementwise):
         }
 
 
+class aten_comparison(aten_binary_elementwise):
+    """``aten::eq``, ``ne``, ``lt``, and ``gt``: the output is a bool tensor."""
+
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
+        self.bpe_out = name2bpe("bool")
+
+
 class liger_silu_mul_function(BinaryElementwise):
     # LigerSiLUMulFunction(a, b)  — from linkedin/Liger-Kernel (swiglu.py)
     # Fused Triton kernel: output = SiLU(a) * b
     # a, b: same shape; output has the same shape and dtype.
+
+    def flops(self):
+        per_elem = op_flops_per_elem("silu") + op_flops_per_elem("mul")
+        return self.flops_func(self.nelems_out, per_elem)
 
     @staticmethod
     def get_param_details(event):
@@ -3861,18 +3939,14 @@ class Reduce:
             self.bpe_out = self.bpe_in
 
     @staticmethod
-    def flops_func(num_input_elems, num_output_elems, reduce_type="sum"):
-        # Each input element is read and combined: ~1 op per input element.
-        # Sum/mean: N-1 adds (and 1 div for mean) over reduced dimension(s).
-        # Max/min: N-1 comparisons. Norm: N muls + N-1 adds + 1 sqrt.
-        # Use num_input_elems as the dominant term for roofline modeling.
-        return num_input_elems
+    def flops_func(num_input_elems, flops_per_elem=1):
+        # Per-output finishing work (the mean's divide, the norm's sqrt) is one
+        # op per reduced row and is left out.
+        return flops_per_elem * num_input_elems
 
     def flops(self):
         return self.flops_func(
-            self.num_input_elems,
-            self.num_output_elems,
-            self.param_details.get("reduce_type", "sum"),
+            self.num_input_elems, op_flops_per_elem(self.event.get("name", ""))
         )
 
     def get_compute_precision(self):
@@ -4735,9 +4809,10 @@ class Normalization:
             # could potentially be log_n for sum-reduce but is not
             param_compute += num_elems * 3
 
-        # compute 1/std = inverse(sqrt(running_var + eps))
-        # for non-training this is called in native_batch_norm etc and for training this is computed once and saved for several uses
-        param_compute += num_channels * 3
+        # 1/std = rsqrt(running_var + eps), once per channel.
+        param_compute += num_channels * (
+            op_flops_per_elem("add") + op_flops_per_elem("rsqrt")
+        )
 
         actual_compute = 2 * num_elems
         return param_compute + actual_compute
@@ -5272,17 +5347,23 @@ class RMSNorm(Normalization):
             "is_training": False,
         }
 
-    # RMS norm is different enough from everything else that we are not using the base implementation
-    # flops is prod(dims that are not part of normalized_shape) * (2 * num_channels + 2) to compute rsqt
-    # multiply rsqt by each elem, then if weight is not null multiply weight by each elem
-    # sample code: https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    # x^2, mean, rsqrt(variance + eps), scale, and the weight multiply when affine.
+    # https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    @staticmethod
+    def flops_func(num_elems, num_channels, is_affine):
+        rows = num_elems / num_channels
+        per_row = num_channels * (
+            op_flops_per_elem("pow")
+            + op_flops_per_elem("mean")
+            + op_flops_per_elem("mul")
+        )
+        per_row += op_flops_per_elem("add") + op_flops_per_elem("rsqrt")
+        if is_affine:
+            per_row += num_channels * op_flops_per_elem("mul")
+        return rows * per_row
+
     def flops(self):
-        non_normalized_elems = self.num_elems / self.num_channels
-        flops = non_normalized_elems * (2 * self.num_channels + 2)  # compute rsqt
-        flops += self.num_elems * (
-            2 if self.is_affine else 1
-        )  # apply weight if affine, apply rms in any case
-        return flops
+        return self.flops_func(self.num_elems, self.num_channels, self.is_affine)
 
     def bytes(self):
         # assume caching works, read input, write output, read weight if affine
@@ -5601,7 +5682,8 @@ class CrossEntropy:
       Input Dims[0] = (batch, 1, vocab_size)  — logits
       Input Dims[1] = (batch, 1)              — targets
 
-    FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
+    FLOPS: exp, sum, log, and subtract per logit, from ``OP_FLOPS_PER_ELEM``.
+    The target lookup moves no arithmetic.
     """
 
     category = "CrossEntropy_fwd"
@@ -5630,7 +5712,13 @@ class CrossEntropy:
 
     def flops(self):
         p = self.param_details
-        return 5 * p["batch"] * p["vocab_size"]
+        per_logit = (
+            op_flops_per_elem("exp")
+            + op_flops_per_elem("sum")
+            + op_flops_per_elem("log")
+            + op_flops_per_elem("sub")
+        )
+        return per_logit * p["batch"] * p["vocab_size"]
 
     def bytes(self):
         if self.bpe is None:
@@ -6158,10 +6246,10 @@ class hipblaslt_gemm_fp4(GEMM):
         assert (
             bpeA is not None and bpeB is not None
         ), f"Data types of A and B are not supported: {dtype_A_B}"
-        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
-        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
-        # bypass it and compute bytes explicitly so we can fold in the
-        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
+        # K is the unpacked element count. A traced Float4 element is one
+        # byte, so operand bytes use the packed shape (K_packed = K/2).
+        # GEMM.bytes_func cannot fold in the E8M0 block scales, which add
+        # about 3% to the operand bandwidth.
         M, N, K = self.M, self.N, self.K
         block = self.MXFP4_BLOCK_SIZE
         scales_per_row = (K + block - 1) // block

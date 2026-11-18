@@ -107,8 +107,8 @@ def test_liger_silu_mul_dtype_bfloat16():
 
 
 def test_liger_silu_mul_flops():
-    # BinaryElementwise convention: 1 FLOP per output element
-    expected = 1 * 2911 * 256
+    # silu (14) plus the gate multiply (1) per output element
+    expected = 15 * 2911 * 256
     evt = _event()
     m = liger_silu_mul_function(evt)
     assert m.flops() == expected

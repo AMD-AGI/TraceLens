@@ -388,7 +388,7 @@ def test_ce_mapped():
 
 def test_ce_flops():
     model = cross_entropy_fwd(_ce_event(batch=4096, vocab_size=163840))
-    expected = 5 * 4096 * 163840
+    expected = 18 * 4096 * 163840
     assert model.flops() == expected
 
 
