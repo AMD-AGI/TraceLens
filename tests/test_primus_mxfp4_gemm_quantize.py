@@ -710,6 +710,7 @@ def test_gemm_fp4_impl_bytes_includes_scales():
         M * K_packed * bpe_fp4_packed  # A
         + N * K_packed * bpe_fp4_packed  # B
         + M * N * bpe_out  # Y
+        + M * K_scale * bpe_scale  # A scales
         + N * K_scale * bpe_scale  # B scales
     )
     assert model.bytes() == expected
@@ -728,7 +729,8 @@ def test_gemm_fp4_impl_bytes_with_bias():
         + N * K_packed * bpe_fp4_packed
         + M * N * bpe_out
         + N * bpe_out  # bias (BF16)
-        + N * K_scale * bpe_scale
+        + M * K_scale * bpe_scale  # A scales
+        + N * K_scale * bpe_scale  # B scales
     )
     assert model.bytes() == expected
 
