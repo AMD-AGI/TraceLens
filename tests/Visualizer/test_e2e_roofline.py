@@ -1046,3 +1046,327 @@ def test_profile_plot_keeps_the_slowest_kernels_and_end_to_end(tmp_path, capsys)
     bare_out = capsys.readouterr().out
     assert "kernel_03" in bare_out
     assert "kernel_02" not in bare_out
+
+
+def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
+    from TraceLens.Visualizer.model_explorer_export import e2e_roofline as e2e
+
+    with pytest.raises(ValueError, match="at least 1"):
+        e2e.top_kernel_series([_kernel("a", 1.0, 1)], 0)
+    assert e2e._scaled_export(0.0, 1.0, 1, 1, None, one_forward=False) == (0.0, 0.0)
+    with pytest.raises(ValueError, match="positive"):
+        achieved_tflops(1.0, 1, 1, 0.0)
+
+    assert report_kernel_category("aten::add") == "elementwise"
+    projection = {
+        "ops": [
+            {"total_flops": 1.0},
+            {
+                "category": "NormalizationRMS",
+                "total_flops": 1.0,
+                "total_bytes": 1.0,
+                "roofline_time_us": 2.0,
+                "instances": 3,
+            },
+            {"category": "Reduce", "total_flops": 1.0, "total_bytes": 1.0},
+            {"category": "Conv1d", "total_flops": 1.0, "total_bytes": 1.0},
+            {"category": "IndexedCopy", "total_flops": 1.0, "total_bytes": 1.0},
+            {
+                "category": "UnaryElementwise",
+                "computation": "quant",
+                "total_flops": 1.0,
+                "total_bytes": 1.0,
+            },
+            {
+                "category": "BinaryElementwise",
+                "computation": "add",
+                "total_flops": 1.0,
+                "total_bytes": 1.0,
+            },
+            {"category": "Other", "total_flops": 1.0, "total_bytes": 1.0},
+            {
+                "category": "GEMM",
+                "total_flops": 4.0,
+                "total_bytes": 2.0,
+                "flops": 1.0,
+                "instances": 2,
+                "total_roofline_time_us": 5.0,
+            },
+        ]
+    }
+    path = tmp_path / "projection.json"
+    path.write_text(json.dumps(projection), encoding="utf-8")
+    regime = e2e.regime_from_projection(path, "decode", 1)
+    categories = {op["category"] for op in regime.ops}
+    assert categories == {
+        "RMSNorm",
+        "reduce",
+        "CONV_fwd",
+        "IndexedCopy",
+        "GroupQuant",
+        "elementwise",
+        "Other",
+        "GEMM",
+    }
+    assert regime.ops[0]["roofline_time_us"] == 6.0
+
+    singular = e2e.regimes_from_augmentation(
+        {
+            "regime": {"phase": "decode", "batch_size": 1},
+            "roofline_by_category": {"Attention": {"flops": 1.0, "bytes": 1.0}},
+        }
+    )
+    assert singular[0].phase == "decode"
+    with pytest.raises(ValueError, match="one category summary"):
+        e2e.regimes_from_augmentation(
+            {"regimes": [{}, {}], "roofline_by_category": [{}]}
+        )
+
+    (tmp_path / "not_a_list.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="list of kernel"):
+        e2e.load_profile_json(tmp_path / "not_a_list.json")
+    csv_dir = tmp_path / "csvs"
+    csv_dir.mkdir()
+    (csv_dir / "bad_ops.csv").write_text(
+        "name,operation_count\nfoo,1\n", encoding="utf-8"
+    )
+    (csv_dir / "ops_ops.csv").write_text(
+        "name,Kernel Time (µs)_sum,operation_count,GFLOPS,FLOPS/Byte\n"
+        "empty,,1,1,1\n"
+        "zero,10,1,0,1\n"
+        "ok,10,2,2,4\n",
+        encoding="utf-8",
+    )
+    loaded = {kernel["name"]: kernel for kernel in load_profile_kernels(csv_dir)}
+    assert loaded["zero"]["flops"] is None
+    assert loaded["ok"]["flops"] == pytest.approx(4.0e9)
+
+    attention = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    attention["flops"] = 8.0e9
+    attention["bytes"] = 1.0e8
+    scaled, _warnings = build_points(
+        [
+            Regime(
+                "decode",
+                3,
+                (_op("Attention", 4.0e9, 2.0e8, instances=40),),
+            )
+        ],
+        [attention],
+        time_overrides_us={("decode", "Decode attention"): 10.0},
+    )
+    point = next(item for item in scaled if item.series == "Decode attention")
+    assert point.time_us == 10.0
+    assert point.cost_source == "profile"
+
+    build_points(
+        [Regime("decode", 1, (_op("Attention", 0.0, 0.0),))],
+        [_kernel("aiter::mla_qseqlen1", 20.0, 4)],
+    )
+    prefill = _kernel("opus_mla_v4_prefill", 20.0, 1)
+    prefill["flops"] = 1.0e9
+    prefill["bytes"] = 1.0e8
+    build_points(
+        [Regime("decode", 1, (_op("GEMM", 1.0e9, 1.0e8, instances=1),))],
+        [prefill],
+        series=top_kernel_series([prefill], 1),
+    )
+    slow = _kernel("slow_kernel", 20.0, 1)
+    slow["flops"] = 1.0e9
+    slow["bytes"] = 1.0e8
+    build_points(
+        [Regime("decode", 1, (_op("GEMM", 1.0e9, 1.0e8, instances=1),))],
+        [slow],
+        series=top_kernel_series([slow], 1),
+        time_overrides_us={("decode", "slow_kernel"): 0.0},
+    )
+
+    idle = Regime(
+        "decode",
+        1,
+        (_op("Other", 0.0, 0.0), _op("Attention", 4.0e9, 2.0e8, spec="matrix_bf16")),
+    )
+    idle.ops[1]["roofline_time_us"] = 10.0
+    assert points_from_model([idle])[0]
+    empty_cat = Regime(
+        "decode", 1, ({"category": "", "total_flops": 1.0, "total_bytes": 1.0},)
+    )
+    assert (
+        model_coverage(
+            [empty_cat],
+            [_kernel("foo", 0.0, 1), _kernel("nccl_allreduce", 5.0, 1)],
+        )
+        is None
+    )
+    assert model_coverage([idle], []) is None
+
+    flat = {
+        "name": "Flat",
+        "mem_bw_gbps": 8000,
+        "max_achievable_tflops": {"matrix_bf16": 100.0, "matrix_fp8": 100.0},
+    }
+    mixed = (
+        _op("Attention", 4.0e9, 2.0e8, spec="matrix_bf16"),
+        _op("GEMM", 1.0e9, 1.0e8, spec="matrix_fp4"),
+    )
+    points = [
+        RooflinePoint("Prefill attention", "prefill", 4, 20.0, 100.0, 1.0, 1.0, 1.0),
+        RooflinePoint("Decode attention", "decode", 8, 20.0, 100.0, 1.0, 1.0, 1.0),
+    ]
+    output = tmp_path / "edges.png"
+    plot_e2e_roofline(
+        points,
+        _ARCH,
+        [Regime("decode", 4, mixed), Regime("prefill", 4, mixed)],
+        title="edges",
+        output_path=output,
+    )
+    plot_e2e_roofline([], flat, [], title="flat", output_path=output)
+    plot_e2e_roofline([], _ARCH, [], title="empty", output_path=output)
+    with pytest.raises(ValueError, match="no bfloat16"):
+        plot_e2e_roofline(
+            [], {"mem_bw_gbps": 8000}, [], title="no peaks", output_path=output
+        )
+
+    arch_path = tmp_path / "arch.json"
+    arch_path.write_text(json.dumps(_ARCH), encoding="utf-8")
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps([{"name": "aiter::mla_qseqlen1", "time_us": 20.0, "count": 4}]),
+        encoding="utf-8",
+    )
+    common = [
+        "--title",
+        "edges",
+        "--output",
+        str(output),
+        "--gpu-arch-json-path",
+        str(arch_path),
+        "--projection",
+        f"decode:1:{path}",
+        "--profile-json",
+        str(profile_path),
+    ]
+    assert (
+        main(
+            common
+            + [
+                "--kernels",
+                "decode|Decode attention|mla",
+                "--time-us",
+                "decode|End to end|1000",
+            ]
+        )
+        == 0
+    )
+    assert main(common + ["--time-us", "bad"]) == 1
+    assert "expected phase" in capsys.readouterr().err
+    assert main(common + ["--projection", "nocolon"]) == 1
+    assert main(common + ["--projection", "decode:nope:file"]) == 1
+    assert (
+        main(
+            [
+                "--title",
+                "t",
+                "--output",
+                str(output),
+                "--projection",
+                f"decode:1:{path}",
+            ]
+        )
+        == 1
+    )
+    assert "gpu-arch" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "--title",
+                "t",
+                "--output",
+                str(output),
+                "--gpu-arch-json-path",
+                str(arch_path),
+            ]
+        )
+        == 1
+    )
+    assert (
+        main(
+            [
+                "--title",
+                "t",
+                "--output",
+                str(output),
+                "--gpu-arch-json-path",
+                str(arch_path),
+                "--projection",
+                f"decode:1:{path}",
+            ]
+        )
+        == 1
+    )
+    assert "profile" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "--title",
+                "dir",
+                "--output",
+                str(output),
+                "--gpu-arch-json-path",
+                str(arch_path),
+                "--projection",
+                f"decode:1:{path}",
+                "--profile-dir",
+                str(csv_dir),
+            ]
+        )
+        == 0
+    )
+    bare_projection = tmp_path / "bare.json"
+    bare_projection.write_text(
+        json.dumps(
+            {"ops": [{"category": "Attention", "total_flops": 1.0, "total_bytes": 1.0}]}
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "--model-only",
+                "--title",
+                "t",
+                "--output",
+                str(output),
+                "--gpu-arch-name",
+                "NotARealGPU",
+                "--projection",
+                f"decode:1:{bare_projection}",
+            ]
+        )
+        == 1
+    )
+    assert (
+        main(
+            [
+                "--model-only",
+                "--title",
+                "t",
+                "--output",
+                str(output),
+                "--gpu-arch-json-path",
+                str(arch_path),
+                "--projection",
+                f"decode:1:{bare_projection}",
+            ]
+        )
+        == 1
+    )
+    assert "no points" in capsys.readouterr().err
+
+    monkeypatch.setattr(e2e, "_CATEGORY_MARKERS", ())
+    with pytest.raises(RuntimeError, match="distinct markers"):
+        e2e._category_series(("GEMM",))
+    monkeypatch.setattr(e2e, "_CATEGORY_MARKERS", ("o",))
+    with pytest.raises(ValueError, match="distinct markers"):
+        e2e.top_kernel_series([_kernel("a", 2.0, 1), _kernel("b", 1.0, 1)], 2)
