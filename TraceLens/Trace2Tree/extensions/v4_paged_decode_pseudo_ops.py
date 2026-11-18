@@ -14,6 +14,14 @@ HCA) and geometry (H_Q, d_h) from its kernels, and stamp variant config as
 
 Works for both DeepSeek-V4-Flash (TP=1) and DeepSeek-V4-Pro (TP=4); mode mix and
 head count are detected from the trace.
+
+The variant and tensor-parallel size come from the ``TL_MODEL`` and ``TL_TP``
+environment variables, read here and stamped as ``v4_*`` args so the perf model
+never reads the environment. If ``TL_MODEL`` is unset or unrecognized the perf
+model falls back to DeepSeek-V4-Flash, so a Pro run looks valid with the wrong
+index top-k and head count: set it and check the pseudo-op args. DeepSeek-V4-Flash
+is not FlashAttention (``flash_attention`` / ``flash_impl``), which reads neither
+variable.
 """
 
 import os

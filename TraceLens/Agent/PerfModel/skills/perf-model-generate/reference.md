@@ -27,8 +27,8 @@ python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops \
 ```
 
 This groups rows by `name`, sums runtime across all shapes, keeps names whose
-summed runtime is at least `--threshold` of the global total and `has_perf_model == False`,
-and prints a confirmable candidate table.  Add `--emit-extension` to write a
+summed runtime is at least `--threshold` of the global total and that have no perf model
+(`row_has_perf_model`: `has_perf_model` true with non-zero GFLOPS or Data Moved), and prints a confirmable candidate table.  Add `--emit-extension` to write a
 starter `<csv_stem>_triage_extension.py` beside the CSV.
 
 Also run the legacy `other-bucket` mode (default) to catch ops in the "other"
@@ -76,8 +76,8 @@ The script performs a **static source scan** (no GPU/run required):
 Add `--check-mapping` to mark ops that already have a built-in perf model
 (needs TraceLens importable, e.g. `pip install -e .`).
 
-For each matched op it outputs: registered name, source file, reconstructed
-call chain to kernel, and any sibling `test_<op>` / `benchmark_<op>` files
+For each matched op it outputs: registered name, source file, a regex-based
+hint of the call chain to the kernel (confirm it in the source), and any sibling `test_<op>` / `benchmark_<op>` files
 (roofline reference).
 
 For deep or ambiguous chains, instruct an explore sub-agent to traverse the
@@ -352,13 +352,15 @@ op_category_extension = {
 python3 -m py_compile /path/to/extension_or_module.py
 ```
 
-Regenerate the report:
+Regenerate the report from the checkout that contains the new perf model, with
+the same config path the model-bringup skill uses:
 ```bash
-/path/to/env/python TraceLens/Reporting/generate_perf_report_pytorch_inference.py \
-    --profile_json_path /path/to/profile.json \
-    --output_csvs_dir /path/to/perf_report_csvs \
-    --enable_pseudo_ops \
-    [--extension_file /path/to/extension.py]   # extension-only mode only
+python3 -m TraceLens.Agent.Analysis.utils.config_utils build --scope standalone \
+    --analysis_mode inference --output_dir /path/to/report \
+    --job trace_path=/path/to/trace.json.gz,platform=<platform>[,capture_folder=/path/to/captures] \
+    [--set extension_file=/path/to/extension.py]   # extension-only mode only
+python3 -m TraceLens.Reporting.generate_perf_report_from_config \
+    --config /path/to/report/cache/run_config.yaml
 ```
 
 Re-check `has_perf_model`, `op category`, GFLOPS, Data Moved, and
@@ -427,38 +429,14 @@ Report it like this:
 
 ---
 
-## Validate with hardware counters
+## Hand off to validation
 
-Validation is on by default. Only in standalone use, ask first:
-
-> "Do you want to validate these perf models against hardware counters using
-> the `validate-perf-model` skill (rocprofv3 on a real AMD GPU)?"
-
-To validate, hand off to
-the validate-perf-model skill
-(`TraceLens/Agent/PerfModel/skills/validate-perf-model/SKILL.md`). The
-validator only loads perf models integrated into TraceLens core, so an
-extension-only model must be integrated before it can be validated.
-Provide:
-- The `OP_REGISTRY` key (op name used in the validator)
-- The profiler trace `name(s)` (for `trace_names=` in its `register(...)` call
-  in `harnesses.py`)
-- The perf model class name and module path
-- Where to run it: the Python environment, Docker image or container name the
-  user gave
-- A representative shape and dtype for defaults
-- The traced cases to validate, one per unique shape. Each case carries the
-  row's `Input Dims`, `Input type`, `Input Strides` and `Concrete Inputs`, plus:
-  - the parameters the new perf model parsed (`perf_params` in the report). The
-    harness runs the same logical sizes the model predicts for, and the
-    validator evaluates the model from them. So `get_param_details` must return
-    every value the model uses, including those taken from the annotation
-    (such as `c_sq` … `g_sqsk`), not just the shapes.
-
-  From a report, `python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates cases --report-dir <perf_report_csvs> --out cases.json`
-  builds these cases. Pass them to the validator with `--cases cases.json`.
-  Build the report from the code that contains the new perf model, so
-  `perf_params` comes from it.
+Hand the regenerated `perf_report_csvs` directory and the op name to the
+validate-perf-model skill (`TraceLens/Agent/PerfModel/skills/validate-perf-model/SKILL.md`),
+which takes them as its Inputs along with the GPU, `--arch` and output directory
+it requires. The validator loads only perf models integrated into TraceLens core,
+so integrate an extension-only model first. In standalone use, ask before
+validating.
 
 ---
 
@@ -629,18 +607,6 @@ result when a wrong assumption would change the report, unless the
 approximation is documented in the class docstring. Show the value that was
 used in `param_details`.
 
-### DeepSeek-V4 Pro and Flash
-
-`create_pseudo_ops_v4_paged_decode` reads `TL_MODEL` (variant) and `TL_TP`
-(tensor-parallel size), and tries to take mode, local query-head count, and
-head dimension from kernel names. Those are stored as `v4_*` args. If
-`TL_MODEL` is unset or unrecognized, the perf model falls back to
-DeepSeek-V4-Flash, so a Pro run can look valid with the wrong index top-k and
-head count. Set the variant and check the pseudo-op args.
-
-DeepSeek-V4-Flash is not FlashAttention (`flash_attention` / `flash_impl`).
-FlashAttention does not use `TL_MODEL` or `TL_TP`.
-
 ---
 
 ## Pitfalls
@@ -664,8 +630,6 @@ FlashAttention does not use `TL_MODEL` or `TL_TP`.
 | Wrapper, kernel, and vendor formula disagree | Investigate; do not pick the convenient number |
 | Modeling one dtype from one trace | Cover every dtype the binding can emit |
 | Missing compute precision or compute unit | Roofline percentage is blank and impact score uses a heuristic |
-| Reading `TL_MODEL` / `TL_TP` inside `flops()` | Stamp them onto the event while injecting the pseudo op |
-| Unset `TL_MODEL` on a DeepSeek-V4-Pro trace | Fallback is DeepSeek-V4-Flash (wrong top-k and head count) |
 | Pseudo op for an op that already has a stable cpu_op | Register that name directly |
 | Pseudo-op rule tied to one UID or timestamp | Detect from op name, call stack, or kernel family |
 | Generic key (e.g. `aten::topk`, or a kernel shared by several models) mapped to a model-specific class | List its callers across frameworks; keep the model generic or guard it so other callers get no-perf |

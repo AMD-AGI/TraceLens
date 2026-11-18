@@ -15,8 +15,9 @@ scripts live in `TraceLens/Agent/PerfModel/validate_perf_model/`.
 - `aiter` installed in the Python environment or container the user named
 - vLLM for `vllm_*` ops and SGLang (`sgl_kernel`) for SGLang ops; ops from a
   framework that is not installed are reported as failures, the rest still run
-- AMD GPU: MI300X or MI325X (`--arch gfx942`, the default), or MI350X or MI355X
-  (`--arch gfx950`)
+- AMD GPU: MI300X or MI325X (`--arch gfx942`), or MI350X or MI355X
+  (`--arch gfx950`). `--arch` is required; a wrong one mismeasures, for example
+  FP4 work on gfx950
 - TraceLens importable (installed, or this repo checkout)
 - The perf model integrated into TraceLens core. Models that exist only in an
   extension file (`--extension_file`) cannot be validated
@@ -81,8 +82,9 @@ For each op, `validator.py`:
 
 In `--cases` mode the op list comes from a cases JSON that
 `python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates cases --report-dir
-<perf_report_csvs> --out cases.json` builds from `unified_perf_summary.csv`: rows with
-`has_perf_model == True`, deduplicated by (name, Input Dims, Input type). Cases whose
+<perf_report_csvs> --out cases.json` builds from `unified_perf_summary.csv`: rows with a
+perf model (`has_perf_model` true with non-zero GFLOPS or Data Moved), deduplicated by
+(name, Input Dims, Input type, Concrete Inputs). Cases whose
 `name` is in no op's `trace_names` are skipped. The prediction
 comes from the traced event (`run_perf_model_from_event`) and the kernel is
 replayed either through the op's own `test_<key>` (`csv_harness=True`) or
@@ -174,7 +176,19 @@ Comparisons in the report:
   The check compares the reported precision with the measured counter only;
   it does not adjust for the architecture. When the expected counter does not
   exist on the target (fp4 on gfx942), the result is still a mismatch, and the
-  report and the CSV `comment` give that as the reason.
+  report and the CSV `comment` give that as the reason. The result is the
+  `precision_check` column. A `MISMATCH` sets `match_status` to
+  `precision-mismatch` for MFMA ops (GEMM, MoE, attention categories), except
+  when the expected counter does not exist on the target. For other ops,
+  dominated by 32-bit VALU work whatever their dtype, it is reported only.
+- **Report check** (`--cases`): the validator's prediction must equal the
+  report's FLOPs and bytes for the same event within rounding; otherwise the
+  row is `FAIL: prediction ... != report ...` (a different TraceLens import or a
+  lossy annotation rebuild).
+- **Kernel check** (`--cases`): `kernel_match` is `match` when a measured kernel
+  has the same family (name before template arguments or Triton tuning
+  suffixes) as a kernel in the trace row, `mismatch` otherwise. A mismatch means
+  the harness ran another code path; fix the inputs before trusting a ratio.
 
 - **Throughput** (TF/s, TB/s): uses the kernel runtime from the
   `--kernel-trace` pass.
@@ -303,7 +317,7 @@ python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --discover
 `python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --help` lists every op key and category.
 
 Output in `--output-dir`:
-- `validation_report_<timestamp>.csv`: one row per op with predictions,
+- `validation_report.csv`: one row per op with predictions,
   counter totals, ratios, runtime, perf model class and source location
 - per-op directories (`<op>/` for batch runs, `<idx>_<trace name>/` for
   `--cases` runs) with `validation_report.txt` and the rocprofv3 CSVs and logs

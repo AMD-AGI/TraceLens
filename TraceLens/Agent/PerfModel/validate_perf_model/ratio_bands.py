@@ -20,6 +20,7 @@ DEVIATION = "deviation"
 DEVIATION_SUSPECT = "deviation-suspect"
 DEVIATION_EXPLAINED = "deviation-explained"
 NO_PREDICTION = "no prediction"
+PRECISION_MISMATCH = "precision-mismatch"
 
 
 def ratio_band(column, ratio):
@@ -36,12 +37,13 @@ def ratio_band(column, ratio):
     return MATCH if ratio <= high else DEVIATION
 
 
-def match_status(run_status, bands):
-    """Combine a row's bands into one match status.
+def match_status(run_status, bands, precision_ok=True):
+    """Combine a row's bands and precision check into one match status.
 
     Empty unless the run status is ``OK``; ``no prediction`` when a ratio is
     missing; ``over-predicted`` when any ratio is below its range;
-    ``deviation-suspect`` when any is above it; otherwise ``match``. Only the
+    ``precision-mismatch`` when ``precision_ok`` is false; ``deviation-suspect``
+    when any ratio is above its range; otherwise ``match``. Only the
     investigating agent turns ``deviation-suspect`` into
     ``deviation-explained``.
     """
@@ -51,6 +53,8 @@ def match_status(run_status, bands):
         return NO_PREDICTION
     if OVER_PREDICTED in bands:
         return OVER_PREDICTED
+    if not precision_ok:
+        return PRECISION_MISMATCH
     if DEVIATION in bands:
         return DEVIATION_SUSPECT
     return MATCH

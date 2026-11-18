@@ -39,11 +39,11 @@ workflow index below names the section for every step.
 | A TraceLens checkout to edit, and a Python environment (or command prefix) that imports it | yes | — |
 | Depth: full model or categorize-only | no | full; categorize-only for a `(Synthetic Op)` name |
 | Output mode: integrate or extension-only | no | integrate |
-| Validate with hardware counters | no | yes, with the validate-perf-model skill |
+| Validate | no | yes: the validate-perf-model skill takes the Outputs below as its Inputs |
 
 ## Outputs
 
-The perf model for the op in the chosen depth and mode, and a regenerated report. For a full model the op has `has_perf_model` true; a categorize-only op keeps it false.
+The perf model for the op in the chosen depth and mode, the regenerated report's `perf_report_csvs` directory, and the op name; the last two are the validate-perf-model skill's Inputs. For a full model the op is covered (`has_perf_model` true with non-zero GFLOPS or Data Moved); a categorize-only op keeps `has_perf_model` false.
 
 ## Workflow index
 
@@ -54,7 +54,7 @@ The perf model for the op in the chosen depth and mode, and a regenerated report
 | 3 | Map `Input Dims` to the signature; pick the base class | Step 3, Step 4 |
 | 4 | Implement FLOPs, bytes, precision and annotation use; write the docstring | Step 5, Perf model class docstring template |
 | 5 | Register the op; `py_compile`; regenerate the report and check it | Step 6, Step 7, Output modes |
-| 6 | Hand off to hardware-counter validation | Validate with hardware counters |
+| 6 | Hand the report directory and op name to the validate-perf-model skill | Hand off to validation |
 
 A pseudo op is never part of this flow by default: see "Pseudo ops" in reference.md.
 
