@@ -11,9 +11,11 @@ own sections, so that keys are comparable across boards and runs:
 
 - Timing: about 3 s of back-to-back calls before each section, then a 1 s
   ``do_bench`` window per config reported as the median, with the sysfs shader,
-  memory and fabric clocks, power and power cap of that window.
+  memory and fabric clocks, power and power cap of that window. A config whose
+  call takes over 0.5 s is timed one call at a time instead.
 - Matrix: the best library GEMM over hipBLASLt and rocBLAS in the NN and NT
-  layouts, over the suite's shapes plus two deep-K shapes for the WMMA formats.
+  layouts (FP32 and FP64 through rocBLAS only on gfx1151), over the suite's
+  shapes plus two deep-K shapes for the WMMA formats.
   A Triton WMMA loop on register tiles is recorded next to the keys with its
   clock; it is not a key.
 - Vector: the best of the suite's FMA chain and an [ILP, BLOCK] accumulator
@@ -91,6 +93,12 @@ if triton is not None:
 
 # The do_bench warm-up inside each window; the section warm-up comes before it.
 DO_BENCH_WARMUP_MS = 30
+# do_bench queues about 7 calls (5 to estimate the time per call) before it
+# syncs. A call slower than this is timed one call at a time instead, so a
+# display server on the same GPU is not starved past the driver's 10 s gfx ring
+# timeout, which resets the GPU.
+RDNA_SERIAL_CALL_S = 0.5
+RDNA_SERIAL_MIN_CALLS = 3
 # GEMM libraries, as (name, ``torch.backends.cuda.preferred_blas_library``
 # value), and layouts every floating-point matrix key takes the best of. ``nt``
 # is the layout ``nn.Linear`` passes; on gfx1100 it is hipBLASLt's faster one,
@@ -100,6 +108,12 @@ RDNA_BLAS_LIBRARIES: Tuple[Tuple[str, str], ...] = (
     ("rocblas", "cublas"),
 )
 RDNA_GEMM_LAYOUTS: Tuple[str, ...] = ("nn", "nt")
+# Libraries left out per target and dtype. On gfx1151 hipBLASLt has no tuned
+# FP32 kernel: its fallback reaches 0.2-2.1 TFLOPS against rocBLAS's 1.5-3.0 at
+# seconds per call, a third of the run time. Its FP64 GEMM runs rocBLAS's kernel.
+RDNA_BLAS_SKIPS: Dict[str, Dict[torch.dtype, Tuple[str, ...]]] = {
+    "gfx1151": {torch.float32: ("hipblaslt",), torch.float64: ("hipblaslt",)},
+}
 # Shapes added to the suite's for the WMMA formats: the fastest found on gfx1151
 # (2560x1920x32896, hipBLASLt) and on gfx1201 (4096x4096x16512, NT). The suite's
 # are wide and shallow, sized for MI300X's 304 CUs. K is a multiple of 128 but
@@ -332,11 +346,31 @@ def _time_clean(
     return statistics.median(begin.elapsed_time(end) for begin, end in events)
 
 
+def _time_serial(
+    fn: Callable[[], Any], window_ms: float, call_s: float
+) -> Tuple[float, int]:
+    """Median ms per call of *fn* over about *window_ms* of calls, at least
+    ``RDNA_SERIAL_MIN_CALLS``, each finished before the next is queued; and the
+    number of calls."""
+    calls = max(RDNA_SERIAL_MIN_CALLS, int(window_ms * 1e-3 / call_s))
+    times = []
+    for _ in range(calls):
+        begin = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        begin.record()
+        fn()
+        end.record()
+        end.synchronize()
+        times.append(begin.elapsed_time(end))
+    return statistics.median(times), calls
+
+
 class _RdnaProtocol:
     """
     Timing on RDNA targets: about *warm_s* of back-to-back calls before each
     section, then a ``do_bench`` window of *window_ms* reporting the median ms
-    per call, with the sysfs clocks of that window.
+    per call (one call at a time for calls over ``RDNA_SERIAL_CALL_S``), with
+    the sysfs clocks of that window.
     """
 
     def __init__(
@@ -363,12 +397,20 @@ class _RdnaProtocol:
     def time(
         self, fn: Callable[[], Any], window_ms: Optional[int] = None
     ) -> Tuple[float, Dict[str, Any]]:
+        """Median ms per call over a ``do_bench`` window, or over
+        :func:`_time_serial` when one call takes over ``RDNA_SERIAL_CALL_S``
+        (recorded as ``synced_calls``)."""
+        window_ms = window_ms or self.window_ms
         t0 = time.time()
+        start = time.perf_counter()
+        fn()
+        torch.cuda.synchronize()
+        call_s = time.perf_counter() - start
+        if call_s > RDNA_SERIAL_CALL_S:
+            ms, calls = _time_serial(fn, window_ms, call_s)
+            return ms, {**self.clocks(t0, time.time()), "synced_calls": calls}
         ms = do_bench(
-            fn,
-            warmup=DO_BENCH_WARMUP_MS,
-            rep=window_ms or self.window_ms,
-            return_mode="median",
+            fn, warmup=DO_BENCH_WARMUP_MS, rep=window_ms, return_mode="median"
         )
         return ms, self.clocks(t0, time.time())
 
@@ -473,8 +515,9 @@ def _fp8_call(M: int, N: int, K: int, dev: str, fp8_dtype: torch.dtype):
 
 
 def _library_gemms(
-    dtype: torch.dtype, shapes: Sequence[Tuple[int, int, int]], dev: str
+    dtype: torch.dtype, shapes: Sequence[Tuple[int, int, int]], dev: str, gfx: str
 ) -> List[_Candidate]:
+    skipped = RDNA_BLAS_SKIPS.get(gfx, {}).get(dtype, ())
     return [
         _Candidate(
             {"library": lib, "layout": layout, "shape": [M, N, K]},
@@ -483,6 +526,7 @@ def _library_gemms(
             blas=backend,
         )
         for lib, backend in RDNA_BLAS_LIBRARIES
+        if lib not in skipped
         for layout in RDNA_GEMM_LAYOUTS
         for M, N, K in shapes
     ]
@@ -492,17 +536,17 @@ def _matrix_plans(
     device: int, gfx: str, suite: SuiteParts
 ) -> Dict[str, List[_Candidate]]:
     """The configs each matrix key an RDNA target has a path for takes the best
-    of: FP16, BF16, FP32 and FP64 through both GEMM libraries in both layouts,
-    INT8 through ``torch._int_mm`` in both layouts, and FP8 through
-    ``torch._scaled_mm`` on gfx12."""
+    of: FP16, BF16, FP32 and FP64 through both GEMM libraries (less
+    ``RDNA_BLAS_SKIPS``) in both layouts, INT8 through ``torch._int_mm`` in both
+    layouts, and FP8 through ``torch._scaled_mm`` on gfx12."""
     dev = f"cuda:{device}"
     shapes = list(suite.gemm_shapes)
     wmma_shapes = shapes + [s for s in RDNA_DEEP_K_SHAPES if s not in shapes]
     plans = {
-        "matrix_fp16": _library_gemms(torch.float16, wmma_shapes, dev),
-        "matrix_bf16": _library_gemms(torch.bfloat16, wmma_shapes, dev),
-        "matrix_fp32": _library_gemms(torch.float32, shapes, dev),
-        "matrix_fp64": _library_gemms(torch.float64, RDNA_FP64_SHAPES, dev),
+        "matrix_fp16": _library_gemms(torch.float16, wmma_shapes, dev, gfx),
+        "matrix_bf16": _library_gemms(torch.bfloat16, wmma_shapes, dev, gfx),
+        "matrix_fp32": _library_gemms(torch.float32, shapes, dev, gfx),
+        "matrix_fp64": _library_gemms(torch.float64, RDNA_FP64_SHAPES, dev, gfx),
         "matrix_int8": [
             _Candidate(
                 {"library": "torch._int_mm", "layout": layout, "shape": [M, N, K]},

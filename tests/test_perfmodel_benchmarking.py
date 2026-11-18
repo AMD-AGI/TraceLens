@@ -744,6 +744,80 @@ class TestRdnaProtocolHelpers:
         no_fp8 = rd.SuiteParts(mb.GEMM_SHAPES, None, lambda *a: None)
         assert rd._matrix_plans(0, "gfx1201", no_fp8)["matrix_fp8"] == []
 
+    @pytest.mark.parametrize("gfx", ["gfx1100", "gfx1151", "gfx1201"])
+    def test_gfx1151_runs_fp32_and_fp64_through_rocblas(self, gfx):
+        rd = _import_microbench_rdna()
+        mb = _import_microbench()
+        suite = rd.SuiteParts(mb.GEMM_SHAPES, None, lambda *a: None)
+        plans = rd._matrix_plans(0, gfx, suite)
+        both = {lib for lib, _ in rd.RDNA_BLAS_LIBRARIES}
+        wide = {"rocblas"} if gfx == "gfx1151" else both
+        for key, libs in (
+            ("matrix_fp16", both),
+            ("matrix_bf16", both),
+            ("matrix_fp32", wide),
+            ("matrix_fp64", wide),
+        ):
+            assert {c.config["library"] for c in plans[key]} == libs
+        if gfx == "gfx1151":
+            assert {c.blas for c in plans["matrix_fp32"]} == {"cublas"}
+            assert len(plans["matrix_fp32"]) == len(mb.GEMM_SHAPES) * len(
+                rd.RDNA_GEMM_LAYOUTS
+            )
+
+    @pytest.mark.parametrize("call_s", [0.8, 0.01])
+    def test_slow_calls_are_timed_one_at_a_time(self, call_s):
+        # Past RDNA_SERIAL_CALL_S no call is queued behind another; below it,
+        # do_bench as before.
+        rd = _import_microbench_rdna()
+        state = types.SimpleNamespace(wall=0.0, gpu=0.0, queued=0, most_queued=0)
+
+        def call():
+            state.wall += call_s
+            state.gpu += call_s
+            state.queued += 1
+            state.most_queued = max(state.most_queued, state.queued)
+
+        def sync():
+            state.queued = 0
+
+        class FakeEvent:
+            def __init__(self, enable_timing=False):
+                self.at = 0.0
+
+            def record(self):
+                self.at = state.gpu
+
+            def synchronize(self):
+                sync()
+
+            def elapsed_time(self, other):
+                return (other.at - self.at) * 1e3
+
+        fake_time = types.SimpleNamespace(
+            perf_counter=lambda: state.wall, time=lambda: state.wall
+        )
+        proto = rd._RdnaProtocol(
+            SysfsTelemetry("0000:99:00.0", root="/nonexistent"),
+            warm_s=3.0,
+            window_ms=1000,
+        )
+        bench = MagicMock(return_value=call_s * 1e3)
+        with patch.object(rd, "time", fake_time), patch.object(
+            rd.torch.cuda, "Event", FakeEvent
+        ), patch.object(rd.torch.cuda, "synchronize", sync), patch.object(
+            rd, "do_bench", bench
+        ):
+            ms, clock = proto.time(call)
+        assert ms == pytest.approx(call_s * 1e3)
+        if call_s > rd.RDNA_SERIAL_CALL_S:
+            bench.assert_not_called()
+            assert clock == {"synced_calls": rd.RDNA_SERIAL_MIN_CALLS}
+            assert state.most_queued == 1
+        else:
+            bench.assert_called_once()
+            assert clock == {}
+
     def test_config_label(self):
         rd = _import_microbench_rdna()
         label = rd._config_label(
