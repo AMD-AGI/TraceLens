@@ -130,18 +130,15 @@ class a6w4_mm_qa_prequant_w(GEMM):
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        dims = self.event["args"]["Input Dims"]
+        types = self.event["args"].get("Input type", []) or []
         dtype_A_B = self.param_details["dtype_A_B"]
-        self.bpe_mat1 = name2bpe(dtype_A_B[0])
-        self.bpe_mat2 = name2bpe(dtype_A_B[1])
-
-        self.bpe_output = name2bpe(dtype_A_B[2])
-        self.bpe_bias = name2bpe(dtype_A_B[2])
-        return super().bytes(
-            bpe_mat1=self.bpe_mat1,
-            bpe_mat2=self.bpe_mat2,
-            bpe_bias=self.bpe_bias,
-            bpe_output=self.bpe_output,
-        )
+        M, N, K = self.M, self.N, self.K
+        bytes_act = M * K * name2bpe(dtype_A_B[0])
+        bytes_w = prod(dims[2]) * name2bpe(types[2])
+        bytes_output = M * N * name2bpe(dtype_A_B[2])
+        bytes_bias = N * name2bpe(dtype_A_B[2]) if self.param_details["bias"] else 0
+        return bytes_act + bytes_w + bytes_output + bytes_bias
 
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")  # Compute precision not in trace

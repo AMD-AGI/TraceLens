@@ -191,9 +191,12 @@ def test_a6w4_mm_qa_prequant_w_bytes():
     model = a6w4_mm_qa_prequant_w(_a6w4_mm_qa_prequant_w_event(M, N, K, has_bias=True))
     bpe_u8 = 1
     bpe_bf16 = 2
+    K_packed = K // 2
     expected = (
         M * K * bpe_u8  # activation (u8)
-        + N * K * bpe_u8  # weight (u8 packed, bpe from trace = unsigned char = 1)
+        + N
+        * K_packed
+        * bpe_u8  # weight (FP4 packed as unsigned char, traced shape [N, K//2])
         + M * N * bpe_bf16  # output
         + N * bpe_bf16  # bias
     )
