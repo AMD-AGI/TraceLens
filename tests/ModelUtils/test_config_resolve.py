@@ -49,6 +49,7 @@ def test_score_prefers_text_encoder():
 
 
 def test_discover_minimax_h3_config():
+    pytest.importorskip("huggingface_hub")
     config, label = discover_remote_config("MiniMaxAI/MiniMax-H3")
     assert "text_encoder/config.json" in label
     assert config["num_hidden_layers"] == 64

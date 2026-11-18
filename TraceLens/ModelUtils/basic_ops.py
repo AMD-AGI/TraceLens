@@ -37,11 +37,14 @@ ROOFLINE_LEAF_PATTERNS: tuple[str, ...] = (
     r"(?i)^Identity$",
     r"(?i)^Parameter$",
     r"(?i)^Conv\d*d$",
-    r"(?i)^RMSNorm$",
-    r"(?i)^LayerNorm$",
-    r"(?i)^GroupNorm$",
-    r"(?i)^BatchNorm\d*d$",
-    r"(?i)^InstanceNorm\d*d$",
+    # Subclasses (Qwen3_5RMSNorm, LlamaRMSNorm, RMSNormGated) are the same
+    # formula. An exact ``^RMSNorm$`` lets the eager mean/rsqrt/cast chain
+    # through, and that chain is not the kernel's HBM traffic.
+    r"(?i)rmsnorm",
+    r"(?i)layernorm",
+    r"(?i)groupnorm",
+    r"(?i)batchnorm",
+    r"(?i)instancenorm",
     r"(?i)^Softmax$",
 )
 
@@ -74,6 +77,7 @@ class BasicOpFilter:
         patterns: list[str | re.Pattern[str]],
         *,
         basic_only: bool = False,
+        roofline: bool = False,
     ) -> None:
         compiled: list[re.Pattern[str]] = []
         for pattern in patterns:
@@ -82,6 +86,9 @@ class BasicOpFilter:
             )
         self.patterns = compiled
         self.basic_only = basic_only
+        # Set by for_roofline(). A norm subclass stays a leaf so its eager
+        # body is not costed as kernel traffic. Detailed diagrams leave this off.
+        self.roofline = roofline
 
     @classmethod
     def from_cli(
@@ -126,7 +133,7 @@ class BasicOpFilter:
         for pattern in ROOFLINE_LEAF_PATTERNS:
             if pattern not in patterns:
                 patterns.append(pattern)
-        return cls(patterns, basic_only=True)
+        return cls(patterns, basic_only=True, roofline=True)
 
     def is_basic(self, *names: str) -> bool:
         for name in names:

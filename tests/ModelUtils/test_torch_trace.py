@@ -21,6 +21,10 @@ import sys
 import types
 
 import pytest
+
+pytest.importorskip("torch")
+pytest.importorskip("transformers")
+
 import torch
 import torch.nn as nn
 import transformers

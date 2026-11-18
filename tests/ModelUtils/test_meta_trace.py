@@ -19,6 +19,10 @@ import types
 from dataclasses import dataclass
 
 import pytest
+
+pytest.importorskip("torch")
+pytest.importorskip("transformers")
+
 import torch
 import torch.nn as nn
 

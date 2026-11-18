@@ -26,6 +26,8 @@ crashed the entire GPT-2 build.
 
 from __future__ import annotations
 
+import pytest
+
 from TraceLens.ModelUtils.extract import (
     _config_has_per_layer_typing,
     _with_derived_config_values,
@@ -96,7 +98,7 @@ class TestAConfigKeyIsNotAlwaysAString:
 
 def _patched(monkeypatch, config, live):
     """Run the filler against *live* without touching the hub."""
-    import transformers
+    transformers = pytest.importorskip("transformers")
 
     class _AutoConfig:
         @staticmethod
