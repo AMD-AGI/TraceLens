@@ -6,13 +6,13 @@ CPython imports a top-level module named ``sitecustomize`` automatically at
 interpreter startup for every process, as long as its directory is on
 ``sys.path`` (i.e. on ``PYTHONPATH``). This shim uses that hook to:
 
-  1. install the Triton / FlyDSL / tvm-ffi / aiter cpp_itfs hooks from
-     ``jit_shape_tracer`` as soon as those libraries are imported, and
+  1. install the Triton / FlyDSL / tvm-ffi / aiter / TileLang hooks from
+     ``generic_shape_profiler`` as soon as those libraries are imported, and
   2. drive ``enable()`` / ``disable()`` from the torch-profiler window, so
      shape annotation costs nothing outside a profiling run.
 
 Activation (both required):
-    export PYTHONPATH=/path/to/kernel_shape_tool:$PYTHONPATH
+    export PYTHONPATH=/path/to/TraceLens/TraceLens/TraceUtils/generic_shape_profiler:$PYTHONPATH
     export TRACELENS_SHAPE_DISCOVERY=1
 
 Behaviour when ``TRACELENS_SHAPE_DISCOVERY`` is unset/false: this shim installs
@@ -46,7 +46,7 @@ def _shape_discovery_on() -> bool:
 # ---------------------------------------------------------------------------
 # Lazy handle to the co-located tracer.
 #
-# We intentionally do NOT import jit_shape_tracer (which imports torch) at
+# We intentionally do NOT import generic_shape_profiler (which imports torch) at
 # sitecustomize time -- that would force a heavy torch import at interpreter
 # startup and run torch's import-time side effects too early. Instead we import
 # it lazily, once a hook actually needs it and torch is already loaded.
@@ -62,9 +62,9 @@ def _get_tracer():
         here = os.path.dirname(os.path.abspath(__file__))
         if here not in sys.path:
             sys.path.insert(0, here)
-        import jit_shape_tracer as _jst  # noqa: E402
+        import generic_shape_profiler as _gsp  # noqa: E402
 
-        _tracer = _jst
+        _tracer = _gsp
     return _tracer
 
 

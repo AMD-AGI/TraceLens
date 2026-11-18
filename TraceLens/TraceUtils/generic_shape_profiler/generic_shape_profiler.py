@@ -1,5 +1,6 @@
 """
-Framework-agnostic kernel-shape tracing for JIT-compiled GPU kernels.
+Generic shape profiler: framework-agnostic operand shapes for GPU kernels that
+bypass the PyTorch dispatcher.
 
 Why this exists
 ---------------
@@ -11,14 +12,19 @@ with ``Input Dims`` / ``Input type`` for free.
 JIT-compiled kernels are the exception. They are launched straight from Python
 onto the stream, bypassing the dispatcher entirely, so they show up in the
 trace as bare GPU kernels with no operand information -- which makes them
-impossible to roofline. Four launch paths are hooked:
+impossible to roofline. These launch paths are hooked:
 
-* Triton (``JITFunction`` / ``Autotuner`` / ``Heuristics``.run)
-* FlyDSL (``JitFunction.__call__``)
+* Triton: ``JITFunction`` / ``Autotuner`` / ``Heuristics``.run, and relaunches
+  of an already-compiled kernel through ``CompiledKernel.__getitem__``
+* FlyDSL: ``JitFunction.__call__``, plus aiter's ``tensor_shim._run_compiled``,
+  which launches cached FlyDSL executables without re-entering it
 * tvm-ffi modules (``Module.__getattr__``), which back SGLang's ``load_jit``
   C++ kernels such as ``clamp_position``
 * aiter's ``csrc.cpp_itfs`` (``run_lib`` / ``run_hsaco``), which back its
   ctypes kernels such as ``paged_attention_ragged``
+* aiter's ``compile_ops``, for the few ops it leaves off the dispatcher
+  (``NONE_WRAPPED_OP``: custom all-reduce / all-gather)
+* TileLang: ``JITKernel.__call__``, named after the ``@tilelang.jit`` factory
 
 This module closes exactly that gap, and nothing else. It hooks the JIT launch
 entry points and, for every launch, calls a no-op dispatcher op named after the
@@ -30,12 +36,12 @@ Design
 * **No framework knowledge.** The hooks are installed on the JIT libraries' own
   classes and loaders, so every launch is observed regardless of who calls it.
   There is no registry of entry points, no module scanning, no source-code
-  heuristics, and no awareness of SGLang / vLLM / any serving stack. (aiter's
-  ``compile_ops`` needs no hook: it registers its ops as ``torch.ops.aiter.*``,
-  so they are already shaped natively.)
+  heuristics, and no awareness of SGLang / vLLM / ATOM / any serving stack.
+  Every other ``compile_ops`` op is registered as ``torch.ops.aiter.*`` and is
+  already shaped natively, so it is left alone.
 * **Pointer-only launches use the launcher's tensors.** A ctypes entry point
-  receives raw pointers, so its operands are read from the calling wrapper's
-  tensor arguments instead.
+  or a FlyDSL executable receives raw pointers, so its operands are read from
+  the calling wrapper's tensor arguments instead.
 * **Install once, gate with a flag.** Hooks are installed permanently the first
   time the JIT modules appear, and short-circuit on a boolean. ``enable()`` /
   ``disable()`` flip that boolean; the only thing they swap is the code of
@@ -66,8 +72,8 @@ Design
 
 Namespaces
 ----------
-``kernel_shapes::<kernel>``    named after the kernel (Triton/FlyDSL kernel,
-                               tvm-ffi export, cpp_itfs entry point)
+``kernel_shapes::<kernel>``    named after the kernel (Triton/FlyDSL/TileLang
+                               kernel, tvm-ffi export, cpp_itfs entry point)
 ``launcher_shapes::<caller>``  named after the Python function that launched it
 
 Both carry the same operands, so pick one granularity when summing FLOPs.
@@ -95,7 +101,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 import torch
 from torch.library import Library
 
-logger = logging.getLogger("jit_shape_tracer")
+logger = logging.getLogger("generic_shape_profiler")
 
 # Dispatcher namespace for kernel-level annotations (named after the kernel).
 NAMESPACE = "kernel_shapes"
@@ -159,7 +165,7 @@ _NO_PROMOTE_MODULES = _JIT_MODULES + ("torch",)
 
 # Name injected into a promoted launcher's module globals; the trampoline that
 # replaces the launcher's code object calls back through it.
-_TRAMPOLINE_GLOBAL = "__jit_shape_tracer_call__"
+_TRAMPOLINE_GLOBAL = "__generic_shape_profiler_call__"
 
 _CO_NO_PROMOTE = inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
 
@@ -200,7 +206,7 @@ def enable() -> None:
         for entry in _promoted.values():
             entry.swap_in()
     logger.info(
-        "jit_shape_tracer enabled (hooks: %s)",
+        "generic_shape_profiler enabled (hooks: %s)",
         ", ".join(sorted(_installed.values())) or "none available",
     )
 
@@ -215,7 +221,7 @@ def disable() -> None:
             entry.swap_out()
         window = _launches - _window_start
     logger.info(
-        "jit_shape_tracer disabled (%d launches this window, %d total, "
+        "generic_shape_profiler disabled (%d launches this window, %d total, "
         "%d distinct kernels, %d distinct launchers, %d promoted)",
         window,
         _launches,
@@ -340,8 +346,8 @@ def mark_launch(kernel_name: str, tensors: Sequence[torch.Tensor]) -> None:
     """Record one kernel launch's operands into the dispatcher.
 
     Safe to call from anywhere; a no-op unless tracing is enabled. Use this to
-    annotate launchers that are neither Triton nor FlyDSL (a hand-written HIP
-    extension, a CuTe kernel, ...) without teaching this module about them.
+    annotate launch paths that are not hooked (a hand-written HIP extension, a
+    CuTe kernel, ...) without teaching this module about them.
     """
     global _launches
     if not _enabled or not tensors:
@@ -507,7 +513,7 @@ class _Promoted:
             f"    return {_TRAMPOLINE_GLOBAL}({key}, args, kwargs)\n"
         )
         ns: Dict[str, Any] = {}
-        exec(compile(src, "<jit_shape_tracer>", "exec"), {}, ns)
+        exec(compile(src, "<generic_shape_profiler>", "exec"), {}, ns)
         trampoline = ns[self.code.co_name].__code__
         if hasattr(trampoline, "co_qualname"):
             trampoline = trampoline.replace(co_qualname=self.code.co_qualname)
