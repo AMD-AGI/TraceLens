@@ -6507,7 +6507,14 @@ class gemm_fp4_impl(GEMM):
         bpe_scale = name2bpe(self.param_details["scale_dtype"])
         bytes_a_scale = prod(self.param_details["a_scale_shape"]) * bpe_scale
         bytes_b_scale = prod(self.param_details["b_scale_shape"]) * bpe_scale
-        return bytes_A + bytes_B + bytes_output + bytes_bias + bytes_a_scale + bytes_b_scale
+        return (
+            bytes_A
+            + bytes_B
+            + bytes_output
+            + bytes_bias
+            + bytes_a_scale
+            + bytes_b_scale
+        )
 
     def get_compute_precision(self):
         return torch_dtype_map(
