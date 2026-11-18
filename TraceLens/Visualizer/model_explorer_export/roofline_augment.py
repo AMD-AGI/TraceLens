@@ -17,7 +17,8 @@ This utility closes that gap *without* needing trace shapes. It runs TraceLens's
 model-explorer roofline (:func:`...roofline_cli.run_projection`), which derives
 op shapes from the model config, at one or more runtime regimes (decode/prefill,
 batch, context). It maps the dominant unmodeled kernel of each roofline category
-(Attention, MoE, ...) to the matching orchestrator finding by kernel name, then:
+to the matching orchestrator finding by the category ``categorize_torch_op``
+gives that kernel, then:
 
 - writes ``cache/roofline_augmentation.json`` (the full record), and
 - merges an additive ``roofline`` block onto the matching
@@ -46,41 +47,42 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Substrings (lowercased) in a KERNEL NAME that identify its roofline op
-# category. Name-based, not module-based: a bare projection GEMM launched from
-# an attention module is a GEMM, not the attention core, so matching on the
-# module chain would mis-map it. A GEMM kernel maps to "GEMM" (and is dropped
-# when the roofline has no standalone GEMM category, i.e. projections are folded
-# into the attention/MoE boundary ops).
-_CATEGORY_MATCHERS: dict[str, tuple[str, ...]] = {
-    "Attention": (
-        "rel_attention",
-        "flash_attn",
-        "flashmla",
-        "fmha",
-        "sdpa",
-        "_attn_",
-        "attention",
-        # Fused latent attention. ``mla`` covers ``aiter::mla_*``,
-        # ``opus_mla_v4_*`` and ``flashmla``; it is not a module-name match.
-        "mla",
-    ),
-    "MoE": ("fused_moe", "moe_", "_moe", "grouped_gemm", "expert"),
-    "GEMM": ("cijk", "tensile", "cutlass", "::mm", "addmm", "gemm"),
+from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
+
+# ``categorize_torch_op`` returns one of these when no rule matches. They are
+# not a roofline category.
+_UNCLASSIFIED = frozenset({"", "other", "unknown", "others"})
+
+# The roofline projection names an attention op ``Attention`` and an MoE op
+# ``MoE``. These are the report categories that are that op.
+_PROJECTION_CATEGORY = {
+    "SDPA_fwd": "Attention",
+    "SDPA_bwd": "Attention",
+    "InferenceAttention": "Attention",
+    "MoE_fused": "MoE",
+    "MoE_unfused": "MoE",
+    "MoE_aux": "MoE",
+    "MoE_comm_fwd": "MoE",
+    "MoE_comm_bwd": "MoE",
 }
 
 
 def classify_kernel(kernel_name: str | None, module_chain: Any = None) -> str | None:
-    """Map a trace kernel to a roofline op category by its NAME.
+    """Category of a kernel, from the perf report's categorizer.
 
-    Attention/MoE win over the generic GEMM bucket. ``module_chain`` is accepted
-    for signature compatibility but intentionally unused — matching on it would
-    mis-map a projection GEMM (launched from an attention module) to Attention."""
-    name = (kernel_name or "").lower()
-    for category in ("Attention", "MoE", "GEMM"):
-        if any(token in name for token in _CATEGORY_MATCHERS[category]):
-            return category
-    return None
+    The category is ``categorize_torch_op`` on the op name. Attention and MoE
+    report labels use the projection's names for those ops. Every other report
+    label is returned as the report wrote it. ``module_chain`` is accepted for
+    signature compatibility and unused. An unclassified name returns ``None``.
+    """
+    del module_chain
+    name = kernel_name or ""
+    if not name:
+        return None
+    category = categorize_torch_op({"name": name})
+    if not category or category.lower() in _UNCLASSIFIED:
+        return None
+    return _PROJECTION_CATEGORY.get(category, category)
 
 
 def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, dict]:

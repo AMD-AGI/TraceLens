@@ -539,6 +539,20 @@ _COMPUTATION_CATEGORY = (
 _SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
 
 
+def _report_op_name(name: str) -> str:
+    """Op name the perf report would categorize.
+
+    A graph launch names the device kernel after ``->``. A leading ``prefill/``
+    or ``decode/`` is this plot's phase tag, not part of the op name.
+    """
+    computation = _kernel_computation(name)
+    lowered = computation.lower()
+    for prefix in ("prefill/", "decode/"):
+        if lowered.startswith(prefix):
+            return computation[len(prefix) :]
+    return computation
+
+
 def _kernel_computation(name: str) -> str:
     """The device kernel. Text before ``->`` is a launcher or a display name."""
     body = (
@@ -559,16 +573,15 @@ def report_kernel_category(name: str) -> str | None:
 
     A launcher or Python display name is not a computation: ``qwen_gdn_attention_core``
     launches a conv, the chunked delta kernels, and a prepare kernel, and only
-    the kernel symbol says which. The recurrent update is Attention because
-    that is the kernel ``gdn_attention_core`` models. Attention, MoE, and GEMM
-    still use the kernel-name match, then the perf report's own category.
-    ``unknown`` and ``other`` match no series unless the kernel symbol itself
-    names a group quant or one of the computations above.
+    the kernel symbol says which. The category is ``categorize_torch_op``, the
+    same function the perf report uses. ``unknown`` and ``other`` match no
+    series unless the kernel symbol itself names a group quant or one of the
+    computations the registry does not.
     """
-    computation = _kernel_computation(name)
-    legacy = classify_kernel(computation)
-    if legacy:
-        return legacy
+    computation = _report_op_name(name)
+    report = classify_kernel(computation)
+    if report:
+        return report
     report = categorize_torch_op({"name": computation})
     if report and report.lower() not in _UNCLASSIFIED:
         return report

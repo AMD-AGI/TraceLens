@@ -353,9 +353,8 @@ def build_model_explorer_payload(
         shape_inferencer=inferencer,
         inline_expansion=inline_expansion,
     )
-    # A primitive op's role comes from its own computation, not from the name of
-    # the module that holds it. The attention score/softmax/value path is read
-    # off the dataflow here, once the edges are final.
+    # A primitive op's role comes from the category the perf report would give
+    # its name, not from the module that holds it.
     stamp_computation_roles(graph)
     if spec.nested_module_groups and meta_shapes_checkpoint is not None:
         # A non-uniform CNN's convs are emitted per stage, but symbolic [B, S, H]

@@ -29,11 +29,17 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
 )
 
 
-def test_classify_kernel_by_name_not_module():
-    assert classify_kernel("_inkling_rel_attention_kernel.kd") == "Attention"
-    assert classify_kernel("fused_moe_kernel.kd") == "MoE"
-    # A bare Tensile GEMM is a GEMM even when launched from an attention module.
-    assert classify_kernel("Cijk_Alik_Bljk_BBS_BH.kd", ["Model", "Attention"]) == "GEMM"
+def test_classify_kernel_uses_the_report_category():
+    assert classify_kernel("flash_attn::_flash_attn_forward") == "Attention"
+    assert classify_kernel("aiter::moe_align_block_size") == "MoE"
+    assert classify_kernel("primus_turbo::grouped_gemm") == "GroupedGEMM_fwd"
+    # The module that launched a GEMM does not change the report's category.
+    assert classify_kernel("aten::mm", ["Model", "Attention"]) == "GEMM"
+    # A device symbol the report does not name stays unclassified.
+    assert (
+        classify_kernel("_inkling_rel_attention_kernel.kd", ["Model", "Attention"])
+        is None
+    )
     assert classify_kernel("__amd_rocclr_copyBuffer.kd") is None
     assert classify_kernel("") is None
 
@@ -143,22 +149,22 @@ def test_augment_picks_dominant_unmodeled_kernel_per_category(tmp_path):
             {
                 "operations": [
                     {
-                        "kernel_name": "_inkling_rel_attention_kernel.kd",
+                        "kernel_name": "flash_attn::_flash_attn_forward",
                         "time_ms": 8000.0,
                         "count": 528,
                         "impact_estimate_method": "heuristic",
                         "module_chain": ["Model", "Attention"],
                     },
                     {
-                        "kernel_name": "fused_moe_kernel.kd",
+                        "kernel_name": "primus_turbo::grouped_gemm",
                         "time_ms": 1600.0,
                         "count": 1024,
                         "impact_estimate_method": "heuristic",
                     },
-                    # Smaller MoE aux kernel: same category, must NOT be picked
-                    # (only the dominant per category is augmented).
+                    # Smaller kernel of the same report category: must NOT be
+                    # picked (only the dominant per category is augmented).
                     {
-                        "kernel_name": "moe_align_block_size_kernel.kd",
+                        "kernel_name": "flash_attn::_flash_attn_varlen_forward",
                         "time_ms": 90.0,
                         "count": 512,
                         "impact_estimate_method": "heuristic",
@@ -187,7 +193,7 @@ def test_augment_picks_dominant_unmodeled_kernel_per_category(tmp_path):
             "bytes_per_invocation": 1.0e9,
             "vs_ridge": "below",
         },
-        "MoE": {
+        "GroupedGEMM_fwd": {
             "bound": "COMPUTE_BOUND",
             "arithmetic_intensity": 608.0,
             "roofline_us_per_gpu": 124.0,
@@ -204,19 +210,27 @@ def test_augment_picks_dominant_unmodeled_kernel_per_category(tmp_path):
     payload = augment(tmp_path, summary, regime, ridge=200.7, arch=arch)
 
     kernels = {e["kernel"]: e for e in payload["entries"]}
-    assert set(kernels) == {"_inkling_rel_attention_kernel.kd", "fused_moe_kernel.kd"}
-    attn = kernels["_inkling_rel_attention_kernel.kd"]
+    assert set(kernels) == {
+        "flash_attn::_flash_attn_forward",
+        "primus_turbo::grouped_gemm",
+    }
+    attn = kernels["flash_attn::_flash_attn_forward"]
     assert attn["roofline_category"] == "Attention"
     assert attn["bound"] == "MEMORY_BOUND"
     # Achieved throughput is computed from measured time/count against config FLOPs/bytes.
     assert attn["achieved"] is not None
     assert attn["achieved"]["ceiling"] == "memory bandwidth"
-    assert kernels["fused_moe_kernel.kd"]["roofline_category"] == "MoE"
+    assert kernels["primus_turbo::grouped_gemm"]["roofline_category"] == (
+        "GroupedGEMM_fwd"
+    )
     # The JSON sidecar is written and report_notes reads it back keyed by kernel.
     assert (tmp_path / "cache" / "roofline_augmentation.json").is_file()
     notes = report_notes(tmp_path)
-    assert set(notes) == {"_inkling_rel_attention_kernel.kd", "fused_moe_kernel.kd"}
-    assert "Analytical roofline" in notes["_inkling_rel_attention_kernel.kd"]
+    assert set(notes) == {
+        "flash_attn::_flash_attn_forward",
+        "primus_turbo::grouped_gemm",
+    }
+    assert "Analytical roofline" in notes["flash_attn::_flash_attn_forward"]
 
 
 def test_report_notes_absent_returns_empty(tmp_path):
@@ -297,7 +311,7 @@ def test_augment_phases_omits_achieved_when_time_is_not_split(tmp_path):
             {
                 "operations": [
                     {
-                        "kernel_name": "_inkling_rel_attention_kernel.kd",
+                        "kernel_name": "flash_attn::_flash_attn_forward",
                         "time_ms": 8000.0,
                         "count": 528,
                         "impact_estimate_method": "heuristic",
@@ -326,7 +340,7 @@ def test_augment_phases_omits_achieved_when_time_is_not_split(tmp_path):
         ],
     )
     assert [entry["kernel"] for entry in payload["entries"]] == [
-        "_inkling_rel_attention_kernel.kd"
+        "flash_attn::_flash_attn_forward"
     ]
     entry = payload["entries"][0]
     assert [phase["phase"] for phase in entry["phases"]] == ["decode", "prefill"]

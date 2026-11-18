@@ -132,7 +132,8 @@ the per-launch cost times the launch count, and without that, to one forward's
 FLOPs, so the profile time has to be one forward.
 `--time-us PHASE|SERIES|MICROSECONDS` sets that one-forward time explicitly.
 
-Kernels are matched to a series by name (`classify_kernel`). A name that
+Kernels are matched to a series by the perf report's categorizer
+(`categorize_torch_op`). A name that
 contains `prefill` is prefill; a name that contains `qseqlen1` or `decode` is
 decode. Collective kernels (`allreduce`, `nccl`, and the rest of that family)
 are left out. In a capture that mixes phases, a kernel whose name does not say

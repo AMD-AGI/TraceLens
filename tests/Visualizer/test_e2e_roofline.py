@@ -98,7 +98,7 @@ def test_point_uses_projection_intensity_and_profile_time():
     )
     points, warnings = build_points(
         [regime],
-        [_kernel("aiter::mla_qseqlen1", 20.0, 40)],
+        [_kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)],
     )
     assert warnings == [
         "Whole model decode matches End to end, so only End to end is drawn"
@@ -115,8 +115,8 @@ def test_mixed_capture_keeps_phases_apart_and_skips_end_to_end():
         Regime("prefill", 1, (_op("Attention", 8.0e9, 1.0e9, per_launch=2.0e8),)),
     ]
     kernels = [
-        _kernel("aiter::mla_qseqlen1", 1.0e4, 10),
-        _kernel("opus_mla_v4_prefill", 5.0e4, 4),
+        _kernel("decode/flash_attn::_flash_attn_forward", 1.0e4, 10),
+        _kernel("prefill/flash_attn::_flash_attn_varlen_forward", 5.0e4, 4),
         _kernel("mfma_moe1_t32", 9.0e4, 100),
         _kernel("aiter::cross_device_reduce_1stage", 6.5e9, 1),
     ]
@@ -152,15 +152,15 @@ def test_include_assigns_an_unscoped_kernel_to_one_phase():
         ),
     ]
     kernels = [
-        _kernel("mfma_moe1_t32x64x256", 1.0e5, 50),
-        _kernel("mfma_moe1_t128x128x256", 2.0e5, 8),
+        _kernel("aiter::moe_align_block_size", 1.0e5, 50),
+        _kernel("aiter::moe_sum", 2.0e5, 8),
     ]
     points, _warnings = build_points(
         regimes,
         kernels,
         includes={
-            ("decode", "Routed MoE"): ("t32x64x256",),
-            ("prefill", "Routed MoE"): ("t128x128x256",),
+            ("decode", "Routed MoE"): ("align_block",),
+            ("prefill", "Routed MoE"): ("moe_sum",),
         },
     )
     moe = [point for point in points if point.series == "Routed MoE"]
@@ -177,14 +177,14 @@ def test_same_launch_count_is_one_launch_and_different_counts_add():
         (_op("MoE", 61.0e6, 30.0e6, per_launch=1.0e6, instances=61),),
     )
     kernels = [
-        _kernel("mfma_moe1_t32", 100.0, 10),
-        _kernel("mfma_moe2_t32", 50.0, 10),
-        _kernel("mfma_moe1_t64", 40.0, 4),
+        _kernel("aiter::moe_align_block_size", 100.0, 10),
+        _kernel("aiter::moe_sum", 50.0, 10),
+        _kernel("aiter::moe_fused_gate", 40.0, 4),
     ]
     points, _warnings = build_points(
         [regime],
         kernels,
-        includes={("decode", "Routed MoE"): ("mfma_moe",)},
+        includes={("decode", "Routed MoE"): ("aiter::moe",)},
     )
     point = next(item for item in points if item.series == "Routed MoE")
     assert point.time_us == 190.0
@@ -306,7 +306,7 @@ def test_perf_report_categories_are_series_and_unknown_is_not():
     points, _warnings = build_points(
         [regime],
         [
-            _kernel("prefill/aiter::gemm_a8w8_blockscale", 100.0, 4),
+            _kernel("prefill/aiter::gemm_a8w8_blockscale_ck", 100.0, 4),
             _kernel(
                 "prefill/vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant", 50.0, 4
             ),
@@ -330,7 +330,7 @@ def test_time_override_is_one_forward():
     )
     points, warnings = build_points(
         [regime],
-        [_kernel("aiter::mla_qseqlen1", 20.0, 40)],
+        [_kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)],
         time_overrides_us={("decode", "End to end"): 1.0e3},
     )
     # The regime projects a GEMM and the profile has no GEMM kernel.
@@ -345,13 +345,13 @@ def test_profile_csv_and_plot(tmp_path):
     csv_path = tmp_path / "elementwise_ops.csv"
     csv_path.write_text(
         "name,operation_count,Kernel Time (µs)_sum\n"
-        "hipGraphLaunch->aiter::mla_qseqlen1,40,20000\n",
+        "hipGraphLaunch->decode/flash_attn::_flash_attn_forward,40,20000\n",
         encoding="utf-8",
     )
     kernels = load_profile_kernels(tmp_path)
     assert kernels == [
         {
-            "name": "hipGraphLaunch->aiter::mla_qseqlen1",
+            "name": "hipGraphLaunch->decode/flash_attn::_flash_attn_forward",
             "time_us": 20000.0,
             "count": 40,
             "flops": None,
@@ -394,7 +394,15 @@ def test_cli_joins_augmentation_and_profile(tmp_path):
         json.dumps(augmentation), encoding="utf-8"
     )
     (tmp_path / "profile.json").write_text(
-        json.dumps([{"name": "aiter::mla_qseqlen1", "time_us": 2.0e4, "count": 40}]),
+        json.dumps(
+            [
+                {
+                    "name": "decode/flash_attn::_flash_attn_forward",
+                    "time_us": 2.0e4,
+                    "count": 40,
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     arch_path = tmp_path / "arch.json"
@@ -427,7 +435,7 @@ def test_profile_flops_replace_the_export_when_every_kernel_has_them():
         3,
         (_op("Attention", 4.0e9, 2.0e8, per_launch=1.0e8, instances=40),),
     )
-    kernel = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    kernel = _kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)
     # The profile's own shapes, not the projection's 4e9 FLOPs / 2e8 bytes.
     kernel["flops"] = 8.0e9
     kernel["bytes"] = 1.0e8
@@ -492,7 +500,7 @@ def test_arrow_runs_from_measured_flops_to_modeled(tmp_path):
         3,
         (_op("Attention", 4.0e9, 2.0e8, instances=40, spec="matrix_bf16"),),
     )
-    kernel = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    kernel = _kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)
     kernel["flops"] = 8.0e9
     kernel["bytes"] = 1.0e8
     points, _warnings = build_points([regime], [kernel])
@@ -509,14 +517,14 @@ def test_one_uncosted_kernel_keeps_the_export_for_the_category():
         3,
         (_op("MoE", 61.0e6, 30.0e6, per_launch=1.0e6, instances=61),),
     )
-    costed = _kernel("mfma_moe1_t32", 100.0, 10)
+    costed = _kernel("aiter::moe_align_block_size", 100.0, 10)
     costed["flops"] = 1.0e15
     costed["bytes"] = 1.0e12
-    bare = _kernel("mfma_moe_sorting", 50.0, 10)
+    bare = _kernel("aiter::moe_sum", 50.0, 10)
     points, _warnings = build_points(
         [regime],
         [costed, bare],
-        includes={("decode", "Routed MoE"): ("mfma_moe",)},
+        includes={("decode", "Routed MoE"): ("aiter::moe",)},
     )
     point = next(item for item in points if item.series == "Routed MoE")
     assert point.cost_source == "export"
@@ -538,10 +546,10 @@ def test_whole_model_uses_profile_per_category_and_export_for_the_rest():
             _op("GEMM", 6.0e9, 1.0e9, instances=20, spec="matrix_bf16"),
         ),
     )
-    attention = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    attention = _kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)
     attention["flops"] = 8.0e9
     attention["bytes"] = 1.0e8
-    gemm = _kernel("Cijk_gemm", 100.0, 20)
+    gemm = _kernel("aten::mm", 100.0, 20)
     points, warnings = build_points([regime], [attention, gemm])
     # The attributed sum is the whole forward, so Whole model is not drawn
     # beside End to end. End to end carries the same per-category mix.
@@ -569,14 +577,14 @@ def test_whole_model_include_adds_unscoped_kernels_without_dropping_tagged():
         Regime("prefill", 1, (_op("Attention", 8.0e9, 1.0e9, instances=4),)),
     ]
     kernels = [
-        _kernel("aiter::mla_qseqlen1", 100.0, 10),
-        _kernel("Cijk_Alik_Bljk", 50.0, 10),
-        _kernel("opus_mla_v4_prefill", 80.0, 4),
+        _kernel("decode/flash_attn::_flash_attn_forward", 100.0, 10),
+        _kernel("aten::mm", 50.0, 10),
+        _kernel("prefill/flash_attn::_flash_attn_varlen_forward", 80.0, 4),
     ]
     points, _warnings = build_points(
         regimes,
         kernels,
-        includes={("decode", "Whole model"): ("Cijk",)},
+        includes={("decode", "Whole model"): ("aten::mm",)},
     )
     whole = {
         point.phase: point.time_us for point in points if point.series == "Whole model"
@@ -616,7 +624,13 @@ def test_launch_scaling_uses_the_mean_launch_not_the_costliest():
     # Two forwards ran: 122 launches in 71.2 ms.
     points, _warnings = build_points(
         [regime],
-        [_kernel("hipGraphLaunch->opus_mla_v4_prefill_a8w8", 71213.7, 122)],
+        [
+            _kernel(
+                "hipGraphLaunch->prefill/flash_attn::_flash_attn_varlen_forward",
+                71213.7,
+                122,
+            )
+        ],
     )
     point = next(item for item in points if item.series == "Prefill attention")
     assert point.achieved_tflops == pytest.approx(2 * total / 71213.7e-6 / 1e12)
@@ -669,7 +683,7 @@ def test_coverage_lists_unmodeled_kernels_over_one_percent_of_the_run():
     )
     prepare = "vllm::qwen_gdn_attention_core->gdn_prepare_kernel.kd (Synthetic Op)"
     kernels = [
-        _kernel("prefill/aiter::gemm_a8w8_blockscale", 905.0, 1),
+        _kernel("prefill/aiter::gemm_a8w8_blockscale_ck", 905.0, 1),
         _kernel(f"prefill/{chunk}", 40.0, 1),
         _kernel(f"decode/{chunk}", 30.0, 1),
         _kernel(f"prefill/{prepare}", 20.0, 1),
@@ -694,7 +708,7 @@ def test_coverage_lists_unmodeled_kernels_over_one_percent_of_the_run():
 def test_unmodeled_kernels_under_one_percent_are_not_listed():
     regime = Regime("prefill", 1, (_op("GEMM", 10.0, 2.0),))
     kernels = [
-        _kernel("prefill/aiter::gemm_a8w8_blockscale", 995.0, 1),
+        _kernel("prefill/aiter::gemm_a8w8_blockscale_ck", 995.0, 1),
         _kernel("prefill/not_a_known_kernel", 5.0, 1),
     ]
     coverage = model_coverage([regime], kernels)
@@ -708,7 +722,7 @@ def test_unmodeled_kernels_under_one_percent_are_not_listed():
 def test_communication_is_outside_the_coverage():
     regime = Regime("prefill", 1, (_op("GEMM", 10.0, 2.0),))
     kernels = [
-        _kernel("prefill/aiter::gemm_a8w8_blockscale", 100.0, 1),
+        _kernel("prefill/aiter::gemm_a8w8_blockscale_ck", 100.0, 1),
         _kernel("prefill/nccl_allreduce", 900.0, 1),
     ]
     coverage = model_coverage([regime], kernels)
@@ -762,7 +776,15 @@ def test_cli_warns_when_a_point_is_above_the_roof(tmp_path, capsys):
         json.dumps(augmentation), encoding="utf-8"
     )
     (tmp_path / "profile.json").write_text(
-        json.dumps([{"name": "aiter::mla_qseqlen1", "time_us": 20.0, "count": 40}]),
+        json.dumps(
+            [
+                {
+                    "name": "decode/flash_attn::_flash_attn_forward",
+                    "time_us": 20.0,
+                    "count": 40,
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     arch_path = tmp_path / "arch.json"
@@ -1141,7 +1163,7 @@ def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
     assert loaded["zero"]["flops"] is None
     assert loaded["ok"]["flops"] == pytest.approx(4.0e9)
 
-    attention = _kernel("aiter::mla_qseqlen1", 20.0, 40)
+    attention = _kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)
     attention["flops"] = 8.0e9
     attention["bytes"] = 1.0e8
     scaled, _warnings = build_points(
@@ -1161,9 +1183,9 @@ def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
 
     build_points(
         [Regime("decode", 1, (_op("Attention", 0.0, 0.0),))],
-        [_kernel("aiter::mla_qseqlen1", 20.0, 4)],
+        [_kernel("decode/flash_attn::_flash_attn_forward", 20.0, 4)],
     )
-    prefill = _kernel("opus_mla_v4_prefill", 20.0, 1)
+    prefill = _kernel("prefill/flash_attn::_flash_attn_varlen_forward", 20.0, 1)
     prefill["flops"] = 1.0e9
     prefill["bytes"] = 1.0e8
     build_points(
@@ -1232,7 +1254,15 @@ def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
     arch_path.write_text(json.dumps(_ARCH), encoding="utf-8")
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(
-        json.dumps([{"name": "aiter::mla_qseqlen1", "time_us": 20.0, "count": 4}]),
+        json.dumps(
+            [
+                {
+                    "name": "decode/flash_attn::_flash_attn_forward",
+                    "time_us": 20.0,
+                    "count": 4,
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     common = [
