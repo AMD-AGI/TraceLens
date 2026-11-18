@@ -7,6 +7,7 @@
 import json
 
 import pytest
+import yaml
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Agent.ModelBringup.utils import bringup_gates
@@ -405,3 +406,126 @@ def test_excluded_and_skipped_ops(tmp_path):
     assert f"| op_a | excluded | {gate['problems'][0]} |" in text
     assert "| op_b | skipped | not launched |" in text
     assert "Publish with" not in text
+
+
+def _model_config(bringup, framework, envs, **extra):
+    profile = bringup / "profile"
+    profile.mkdir()
+    benchmark = {
+        "framework": framework,
+        "model": "org/Model-A",
+        "envs": envs,
+        **extra,
+    }
+    (profile / "benchmark.yaml").write_text(yaml.safe_dump({"benchmark": benchmark}))
+    args = [
+        "model-config",
+        "--bringup-dir",
+        str(bringup),
+        "--profile-dir",
+        str(profile),
+    ]
+    rc = bringup_gates.main(args)
+    return rc, json.loads((bringup / "cache" / "model_config.json").read_text())
+
+
+@pytest.mark.parametrize(
+    "framework,envs,parallel,tl_env,extra",
+    [
+        (
+            "sglang",
+            {
+                "TP": 8,
+                "EXTRA_SGLANG_ARGS": "--dp=8 --enable-dp-attention --ep-size 8",
+            },
+            {"tp": 8, "ep": 8, "dp": 8, "attn_tp": 1},
+            "TL_MODEL=org/Model-A\nTL_TP=1\n",
+            {},
+        ),
+        (
+            "vllm",
+            {
+                "TP": 2,
+                "EXTRA_VLLM_ARGS": "--data-parallel-size 2 --enable-expert-parallel",
+            },
+            {"tp": 2, "ep": 4, "dp": 2, "attn_tp": 2},
+            "TL_MODEL=org/Model-A\nTL_TP=2\n",
+            {},
+        ),
+        (
+            "sglang",
+            {"TP": 1},
+            {"tp": 1, "ep": 1, "dp": 1, "attn_tp": 1},
+            "TL_MODEL=org/Model-A\nTL_TP=1\n",
+            {},
+        ),
+        (
+            "sglang",
+            {"TP": 8, "EXTRA_SGLANG_ARGS": "--enable-dp-attention"},
+            {"tp": 8, "ep": 1, "dp": None, "attn_tp": None},
+            "TL_MODEL=org/Model-A\n",
+            {},
+        ),
+        (
+            "sglang",
+            {
+                "TP": 8,
+                "EXTRA_SGLANG_ARGS": "--dp 3 --enable-dp-attention",
+            },
+            {"tp": 8, "ep": 1, "dp": 3, "attn_tp": None},
+            "TL_MODEL=org/Model-A\n",
+            {},
+        ),
+        (
+            "sglang",
+            {"tp": 8, "EP_SIZE": 1, "extra_sglang_args": "--ep-size 8"},
+            {"tp": 8, "ep": 8, "dp": 1, "attn_tp": 8},
+            "TL_MODEL=org/Model-A\nTL_TP=8\n",
+            {},
+        ),
+        (
+            "vllm",
+            {"TP": 8},
+            {"tp": None, "ep": None, "dp": None, "attn_tp": None},
+            "TL_MODEL=org/Model-A\n",
+            {"agentx": True},
+        ),
+    ],
+    ids=[
+        "sglang_dp_attention",
+        "vllm_expert_parallel",
+        "bare_tp",
+        "dp_unknown",
+        "dp_not_dividing_tp",
+        "flag_beats_env_lowercase_keys",
+        "agentx_recipe_owned",
+    ],
+)
+def test_model_config_resolves(tmp_path, framework, envs, parallel, tl_env, extra):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    hf_config = {"model_type": "example_moe", "hidden_size": 64, "num_experts": 4}
+    (checkpoint / "config.json").write_text(json.dumps(hf_config))
+    rc, out = _model_config(
+        tmp_path, framework, {**envs, "MODEL_PATH": str(checkpoint)}, **extra
+    )
+    assert rc == 0 and _gate(tmp_path, "model_config")["status"] == "pass"
+    assert out["model_id"] == "org/Model-A" and out["parallel"] == parallel
+    assert out["arch"]["hidden_size"] == 64 and out["arch"]["num_experts"] == 4
+    assert out["config"].items() >= hf_config.items()
+    assert (tmp_path / "cache" / "tracelens.env").read_text() == tl_env
+
+
+def test_model_config_unresolved(tmp_path, monkeypatch):
+    def offline(checkpoint):
+        raise FileNotFoundError("no cached config")
+
+    monkeypatch.setattr(bringup_gates, "load_checkpoint_config", offline)
+    rc, out = _model_config(tmp_path, "sglang", {"TP": 4})
+    assert rc == 1
+    assert out["arch"] is None and out["config"] is None
+    assert out["parallel"]["tp"] == 4
+    assert _gate(tmp_path, "model_config") == {
+        "status": "fail",
+        "error": "no cached config",
+    }

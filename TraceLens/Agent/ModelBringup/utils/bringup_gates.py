@@ -43,6 +43,8 @@ from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
     DEVIATION_EXPLAINED,
     MATCH,
 )
+from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
+from TraceLens.ModelUtils.extract import parse_architecture
 from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
     CustomCollective,
 )
@@ -81,6 +83,38 @@ DRAFT_FILES = {
 # Outcomes whose commit is merged in Step 7 and published as a PR.
 COMMITTED_OUTCOMES = ("modeled", "categorized")
 EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
+MODEL_CONFIG = "cache/model_config.json"
+TL_ENV = "cache/tracelens.env"
+ARCH_FIELDS = (
+    "model_type",
+    "attention_type",
+    "hidden_size",
+    "num_hidden_layers",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "head_dim",
+    "intermediate_size",
+    "vocab_size",
+    "num_experts",
+    "num_experts_per_tok",
+    "num_shared_experts",
+    "moe_intermediate_size",
+)
+DP_FLAGS = ("--dp", "--dp-size", "--data-parallel-size")
+EP_FLAGS = ("--ep", "--ep-size", "--expert-parallel-size")
+DP_ATTENTION_FLAG = "--enable-dp-attention"
+ENABLE_EP_FLAG = "--enable-expert-parallel"
+FLAG_ALIASES = {**dict.fromkeys(DP_FLAGS, "dp"), **dict.fromkeys(EP_FLAGS, "ep")}
+# The values Magpie's AgentXConfig.from_value reads as enabled.
+AGENTX_ENABLED = ("true", "enabled", "enable", "yes", "1")
+SUMMARY_GATES = (
+    "prepare",
+    "model_config",
+    "profile_health",
+    "analysis",
+    "report_health",
+    "coverage",
+)
 LEAK_KEYS = ("node", "platform", "docker_image")
 GFX_TARGET = re.compile(r"\bgfx\d+\w*", re.I)
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "skills/model-bringup/templates"
@@ -132,6 +166,45 @@ def prepare(args):
     for key, value in values.items():
         print(f"{key}={value}")
     return args.bringup.write_gate("prepare", bool(splits), **values)
+
+
+def model_config(args):
+    """Write the model config and parallel degrees of the profiled run for op agents."""
+    path = Path(args.profile_dir) / "benchmark.yaml"
+    benchmark = _read_mapping(path).get("benchmark")
+    if not isinstance(benchmark, dict) or not benchmark.get("model"):
+        raise BringupInputError(f"{path} has no benchmark.model")
+    model_id = benchmark["model"]
+    envs = {str(k).upper(): v for k, v in (benchmark.get("envs") or {}).items()}
+    parallel = _parallel(benchmark, envs)
+    model_path = envs.get("MODEL_PATH")
+    checkpoint = model_path if model_path and Path(model_path).is_dir() else model_id
+    arch = config = error = None
+    try:
+        config, label = load_checkpoint_config(checkpoint)
+    except (OSError, ValueError) as e:
+        error = str(e)
+    else:
+        spec = parse_architecture(config, label)
+        arch = {field: getattr(spec, field) for field in ARCH_FIELDS}
+    out = args.bringup.root / MODEL_CONFIG
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "model_id": model_id,
+                "parallel": parallel,
+                "arch": arch,
+                "config": config,
+            },
+            indent=2,
+        )
+    )
+    env = [f"TL_MODEL={model_id}"]
+    if parallel["attn_tp"] is not None:
+        env.append(f"TL_TP={parallel['attn_tp']}")
+    (args.bringup.root / TL_ENV).write_text("\n".join(env) + "\n")
+    return args.bringup.write_gate("model_config", error is None, error=error)
 
 
 def report_health(args):
@@ -332,7 +405,7 @@ def summary(args):
     if stop:
         lines += [f"**Stopped:** {stop} {args.reason or ''}".rstrip(), ""]
     lines += ["| Gate | Status |", "|---|---|"]
-    for name in ("prepare", "profile_health", "analysis", "report_health", "coverage"):
+    for name in SUMMARY_GATES:
         lines.append(f"| {name} | {bringup.gate_status(name)} |")
     rows = bringup.op_rows()
     lines += ["", "| Op | Outcome | Reason |", "|---|---|---|"]
@@ -363,16 +436,7 @@ class BringupDir:
 
     @functools.cached_property
     def config(self):
-        path = self.root / EFFECTIVE_CONFIG
-        try:
-            config = yaml.safe_load(path.read_text())
-        except FileNotFoundError:
-            raise BringupInputError(f"missing {path}") from None
-        except yaml.YAMLError as e:
-            raise BringupInputError(f"malformed {path}: {e}") from None
-        if not isinstance(config, dict):
-            raise BringupInputError(f"{path} is not a mapping")
-        return config
+        return _read_mapping(self.root / EFFECTIVE_CONFIG)
 
     def capture_folder(self, rank):
         return self.root / f"capture_rank{rank}"
@@ -501,6 +565,68 @@ class PerfModelDraft:
         ]
 
 
+def _read_mapping(path):
+    """The YAML mapping at ``path``; a missing, malformed or non-mapping file is an input error."""
+    try:
+        data = yaml.safe_load(path.read_text())
+    except FileNotFoundError:
+        raise BringupInputError(f"missing {path}") from None
+    except yaml.YAMLError as e:
+        raise BringupInputError(f"malformed {path}: {e}") from None
+    if not isinstance(data, dict):
+        raise BringupInputError(f"{path} is not a mapping")
+    return data
+
+
+def _positive_int(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _parallel(benchmark, envs):
+    """tp, ep, dp and attention tp of the run; 1 (the engine default) when the YAML sets nothing, None when unknown.
+
+    AgentX overwrites the envs with its recipe entry, so all four are unknown there.
+    """
+    agentx = benchmark.get("agentx")
+    if isinstance(agentx, dict):
+        agentx = agentx.get("enabled", True)
+    if str(agentx).lower() in AGENTX_ENABLED:
+        return {"tp": None, "ep": None, "dp": None, "attn_tp": None}
+    tokens = str(
+        envs.get(f"EXTRA_{str(benchmark.get('framework')).upper()}_ARGS") or ""
+    )
+    tokens = tokens.split()
+    flags = {}
+    for i, token in enumerate(tokens):
+        if token.startswith("--"):
+            name, eq, value = token.partition("=")
+            if not eq and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                value = tokens[i + 1]
+            flags[FLAG_ALIASES.get(name, name)] = value
+
+    tp = _positive_int(envs["TP"]) if "TP" in envs else 1
+    dp_attention = (
+        DP_ATTENTION_FLAG in flags or str(envs.get("DP_ATTENTION")).lower() == "true"
+    )
+    dp_value = flags.get("dp")
+    dp = _positive_int(dp_value) if dp_value else (None if dp_attention else 1)
+    attn_tp = tp
+    if dp_attention:
+        attn_tp = tp // dp if tp and dp and tp % dp == 0 else None
+    ep_value = flags.get("ep") or envs.get("EP_SIZE") or envs.get("EP")
+    if ep_value:
+        ep = _positive_int(ep_value)
+    elif ENABLE_EP_FLAG in flags:
+        ep = tp * dp if tp and dp else None
+    else:
+        ep = 1
+    return {"tp": tp, "ep": ep, "dp": dp, "attn_tp": attn_tp}
+
+
 def _read_validation_csv(csv_path):
     """Rows of a validation CSV; [] when ``csv_path`` is unset or not a file."""
     if not csv_path or not Path(csv_path).is_file():
@@ -539,6 +665,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     commands = {
         "prepare": (prepare, ("--profile-dir", "--platform")),
+        "model-config": (model_config, ("--profile-dir",)),
         "report-health": (report_health, ("--triage-dir",)),
         "gaps": (gaps, ("--unified-csv",)),
         "cases": (cases, ("--report-dir", "--out")),

@@ -57,6 +57,7 @@ Check out [Magpie](https://github.com/AMD-AGI/Magpie).
 
    - `bringup_summary.md`: the status of each gate and the outcome and reason for each op. It ends with the Publish prompt when any op has a draft. Start here.
    - `analysis/analysis.md`: the baseline analysis report for the model.
+   - `cache/model_config.json`: the model config and parallel degrees of the profiled run, which the op sub-agents read.
    - `perf_models/<op_slug>/`: one folder per op. The draft is `perf_model_pr.md` or `perf_model_issue.md`, and `validation/` holds the validation CSV behind it. A blocked op that needed a pseudo op also has `pseudo_op_check.md`.
    - `worktrees/pm_<op_slug>/`: the op's branch checked out, to inspect or amend the code before publishing.
    - `coverage/`: the perf report rerun with the new perf models and category mappings merged.

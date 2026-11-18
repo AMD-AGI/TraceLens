@@ -40,6 +40,7 @@ workflow index below names the section for every step.
 | Depth: full model or categorize-only | no | full; categorize-only for a `(Synthetic Op)` name |
 | Output mode: integrate or extension-only | no | integrate |
 | Validate with hardware counters | no | yes, with the validate-perf-model skill |
+| Model config and parallel degrees | no | none |
 
 ## Outputs
 
