@@ -32,7 +32,7 @@ import os
 import re
 from math import prod
 
-from .utils import torch_dtype_map
+from .utils import name2bpe, torch_dtype_map
 
 logger = logging.getLogger(__name__)
 
@@ -82,17 +82,6 @@ _PTR_DTYPE_BYTES: dict[str, int] = {
     "*u8": 1,
     "*i32": 4,
     "*i64": 8,
-}
-
-_C10_DTYPE_BYTES: dict[str, int] = {
-    "c10::BFloat16": 2,
-    "c10::Half": 2,
-    "c10::Float": 4,
-    "c10::Double": 8,
-    "c10::Byte": 1,
-    "c10::Char": 1,
-    "c10::Int": 4,
-    "c10::Long": 8,
 }
 
 # ---------------------------------------------------------------------------
@@ -208,7 +197,7 @@ def _meta_from_trace_args(event: dict) -> dict | None:
     for dims, dt in zip(input_dims, input_type):
         if dt == "Scalar" or not dims:
             continue
-        bpe = _C10_DTYPE_BYTES.get(dt, 0)
+        bpe = name2bpe(dt) or 0
         ptr_bytes.append(bpe)
         ptr_shapes.append(dims)
         if dtype is None and bpe > 0:

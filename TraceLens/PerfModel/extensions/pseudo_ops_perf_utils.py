@@ -56,6 +56,7 @@ def get_pseudo_op_mappings():
         "sglang_profiler::moe_sorting_small__run_small_sort": moe_perf_model_extensions.SglangMoeSortingSmall,
         # Attention pseudo ops
         "vllm::unified_attention_with_output": attention_perf_model_extensions.vllm_unified_attention_with_output,
+        "vllm::rocm_aiter_sparse_attn_indexer": attention_perf_model_extensions.rocm_aiter_sparse_attn_indexer,
         "aiter::mha_varlen_fwd": attention_perf_model_extensions.mha_varlen_fwd,
         # Prefer the annotation-aware inference extension when annotations are
         # present; it falls back to the core SDPA model for plain training rows.
@@ -74,6 +75,11 @@ def get_pseudo_op_mappings():
         "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
+        # DeepSeek-V4 MXFP4 indexer logits
+        "aiter::_fwd_sched_raw": attention_perf_model_extensions.pa_mqa_logits_mxfp4,
+        "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
+        "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
+        "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
@@ -100,6 +106,8 @@ def get_pseudo_op_mappings():
         "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
         "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip_bounded,
         "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
+        "aiter::batched_gemm_a8w8_mxscale_bpreshuffle": perf_model_extensions.batched_gemm_a8w8_mxscale_bpreshuffle,
+        "aiter::_mxfp8_mxfp8_gemm_asm": perf_model_extensions.mxfp8_mxfp8_gemm_asm,
         "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_asm,
@@ -150,12 +158,14 @@ def get_pseudo_op_mappings():
         ## KV cache ops
         "sglang::store_cache": perf_model_extensions.sglang_store_cache,
         "aiter::fused_qk_rope_cat_and_cache_mla": perf_model_extensions.aiter_fused_qk_rope_cat_and_cache_mla,
+        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla": perf_model_extensions.fused_fp8_bmm_rope_cat_and_cache_mla,
         "sglang_profiler::fused_moe_triton_kernels_fused_append_shared_experts": moe_perf_model_extensions.sglang_fused_append_shared_experts,
         "sglang_profiler::quant_dynamic_mxfp4_quant": perf_model_extensions.sglang_quant_dynamic_mxfp4_quant,
         "aiter::fused_dynamic_mxfp4_quant_moe_sort_hip": perf_model_extensions.aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
         "aiter::dynamic_per_group_scaled_quant_fp4": perf_model_extensions.aiter_dynamic_per_group_scaled_quant_fp4,
         "aiter::_gemm_a8w8_blockscale_bpreshuffle_asm": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::mhc_post": perf_model_extensions.mhc_post,
+        "sglang_profiler::hc_combine_hc_combine_split": perf_model_extensions.sglang_hc_combine_split,
         "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
         "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
         "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,

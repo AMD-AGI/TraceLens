@@ -20,8 +20,6 @@ import os
 import re
 
 import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from TraceLens.Agent.Analysis.utils.report_utils import (
@@ -29,11 +27,17 @@ from TraceLens.Agent.Analysis.utils.report_utils import (
     load_manifest,
 )
 
+# Render without a display, even on hosts that have one.
+matplotlib.use("Agg")
+
 __all__ = [
     "generate_perf_plot",
     "generate_and_embed_plot",
     "embed_plot_in_report",
 ]
+
+# Constants
+PLOT_BASE64_FILE = "perf_improvement_base64.txt"
 
 _CAT_PALETTE = [
     "#e74c3c",
@@ -89,13 +93,12 @@ def generate_perf_plot(
         print("Invalid baseline_ms in manifest - skipping plot")
         return False
 
-    categories = []
-    for cat in manifest.get("categories", []):
-        if cat.get("tier") != "compute_kernel":
-            continue
-        if float(cat.get("gpu_kernel_time_ms", 0) or 0) <= 0:
-            continue
-        categories.append(cat)
+    categories = [
+        cat
+        for cat in manifest.get("categories", [])
+        if cat.get("tier") == "compute_kernel"
+        and float(cat.get("gpu_kernel_time_ms", 0) or 0) > 0
+    ]
     categories.sort(key=lambda c: float(c["gpu_kernel_time_ms"]), reverse=True)
     colors = {
         cat["name"]: _CAT_PALETTE[i % len(_CAT_PALETTE)]
@@ -129,7 +132,7 @@ def generate_perf_plot(
         # Above the figure edge; savefig's bbox_inches="tight" keeps it in the PNG.
         fig.suptitle(title, y=1.0, va="bottom", fontsize=12, fontweight="bold")
 
-    for ax, (axis_title, total_ms, cat_ms) in zip(axes[:, 0], bars):
+    for ax, (axis_title, total_ms, cat_ms) in zip(axes[:, 0], bars, strict=True):
         segments = [
             {"name": name, "time_ms": float(ms)}
             for name, ms in cat_ms.items()
@@ -190,7 +193,7 @@ def generate_perf_plot(
     if write_base64:
         with open(out_path, "rb") as f:
             b64_str = base64.b64encode(f.read()).decode("ascii")
-        b64_path = os.path.join(output_dir, "perf_improvement_base64.txt")
+        b64_path = os.path.join(output_dir, PLOT_BASE64_FILE)
         with open(b64_path, "w") as f:
             f.write(b64_str)
         print(f"Base64 written to {b64_path}")
@@ -219,17 +222,17 @@ def embed_plot_in_report(
         True if the plot was embedded, False otherwise
     """
     report_path = os.path.join(output_dir, report_filename)
-    b64_path = os.path.join(output_dir, "perf_improvement_base64.txt")
+    b64_path = os.path.join(output_dir, PLOT_BASE64_FILE)
 
     if not os.path.exists(report_path):
         print(f"Report file not found at {report_path} - skipping embed")
         return False
 
-    with open(report_path, "r") as f:
+    with open(report_path) as f:
         report = f.read()
 
     if os.path.exists(b64_path):
-        with open(b64_path, "r") as f:
+        with open(b64_path) as f:
             b64_str = f.read().strip()
         img_tag = f"![Performance Improvement](data:image/png;base64,{b64_str})"
         embedded = True
@@ -267,7 +270,7 @@ def generate_and_embed_plot(output_dir: str, title: str) -> dict:
     try:
         generate_priority_data(output_dir)
         results["plot_data"] = True
-    except Exception as e:
+    except Exception as e:  # the plot reads the manifest, not priority_data
         print(f"priority_data generation failed: {e}")
 
     results["plot"] = generate_perf_plot(output_dir, title)

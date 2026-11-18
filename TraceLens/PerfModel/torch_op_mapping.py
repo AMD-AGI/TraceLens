@@ -74,6 +74,12 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r".*mfma_moe1_silu_mul"), "MoE_unfused"),
     (re.compile(r".*_expert_a4"), "MoE_unfused"),
     (re.compile(r".*_fused_norm_residual_triton_kernel"), "RMSNorm"),
+    (
+        re.compile(
+            r".*->(fused_compress_attn|hca_compress_forward)_\w+ \(Synthetic Op\)"
+        ),
+        "InferenceAttention",
+    ),
 ]
 
 
@@ -298,7 +304,6 @@ unary_elemwise_ops = [
     "aten::clamp_max",
     "aten::clamp_max_",
     "aten::sigmoid",
-    "aten::rsqrt",
     "aten::silu",
     "aten::neg",
     "aten::pow",
@@ -402,6 +407,16 @@ bilinear_upsample_ops = [
 
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
+for op in ("aten::rsqrt", "aten::rsqrt_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_rsqrt
+for op in ("aten::sqrt", "aten::sqrt_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_sqrt
+for op in ("aten::reciprocal", "aten::reciprocal_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_reciprocal
+for op in ("aten::to", "aten::_to_copy"):
+    op_to_perf_model_class_map[op] = perf_model.aten_to
+for op in ("aten::pad",):
+    op_to_perf_model_class_map[op] = perf_model.aten_pad
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
 for op_name, op_class in norm_ops.items():
@@ -414,6 +429,29 @@ for op in upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
 for op in bilinear_upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
+
+# Embedding lookup is a gather: zero FLOPs, bytes for the gathered rows
+# (read and write) plus the index vector. Bag offsets are extra index reads.
+# Backward scatter-adds also re-read the updated row.
+data_movement_ops = {
+    "aten::embedding": perf_model.aten_embedding,
+    "aten::embedding_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_dense_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_forward_only": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_dense_backward": perf_model.aten_embedding_bag_dense_backward,
+    "aten::index_select": perf_model.aten_index_select,
+    "aten::index_select_backward": perf_model.aten_index_select_backward,
+    "aten::gather": perf_model.aten_gather,
+    # tensor[indices], and the write side of the same indexing.
+    "aten::index": perf_model.aten_index,
+    "aten::index_put": perf_model.aten_index_put,
+    "aten::index_put_": perf_model.aten_index_put,
+    "aten::_index_put_impl_": perf_model.aten_index_put,
+}
+for op_name, op_class in data_movement_ops.items():
+    op_to_perf_model_class_map[op_name] = op_class
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.

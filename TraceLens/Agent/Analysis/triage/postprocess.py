@@ -32,9 +32,9 @@ import shutil
 import sys
 import tarfile
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -61,37 +61,16 @@ _LOOKS_LIKE_OP = re.compile(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(slots=True)
 class TriageFinding:
-    __slots__ = (
-        "run_dir",
-        "model_name",
-        "diag_tag",
-        "category",
-        "failure_mode",
-        "evidence",
-        "remedy",
-        "implied_by",
-    )
-
-    def __init__(
-        self,
-        run_dir: str,
-        model_name: str,
-        diag_tag: str,
-        category: str,
-        failure_mode: str,
-        evidence: str,
-        remedy: str,
-        implied_by: str,
-    ):
-        self.run_dir = run_dir
-        self.model_name = model_name
-        self.diag_tag = diag_tag
-        self.category = category
-        self.failure_mode = failure_mode
-        self.evidence = evidence
-        self.remedy = remedy
-        self.implied_by = implied_by
+    run_dir: str
+    model_name: str
+    diag_tag: str
+    category: str
+    failure_mode: str
+    evidence: str
+    remedy: str
+    implied_by: str
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +88,7 @@ def sanitize_filename(name: str, max_len: int = 80) -> str:
     return s[:max_len].rstrip("_")
 
 
-def extract_action_keys(evidence: str) -> List[str]:
+def extract_action_keys(evidence: str) -> list[str]:
     """Extract op names from evidence strings like '... (e.g. op1, op2, op3)'."""
     m = _EG_RE.search(evidence)
     if not m:
@@ -123,20 +102,20 @@ def extract_action_keys(evidence: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def discover_triage_csvs(traces_root: str) -> List[str]:
+def discover_triage_csvs(traces_root: str) -> list[str]:
     """Walk traces_root to find all triage_details.csv files. Returns run_dir paths."""
-    run_dirs: List[str] = []
-    for dirpath, dirnames, filenames in os.walk(traces_root, followlinks=False):
+    run_dirs: list[str] = []
+    for dirpath, _, filenames in os.walk(traces_root, followlinks=False):
         if "triage_details.csv" in filenames:
             run_dirs.append(dirpath)
-        if len(run_dirs) % 500 == 0 and run_dirs:
-            print(f"  ... discovered {len(run_dirs)} so far", file=sys.stderr)
+            if len(run_dirs) % 500 == 0:
+                print(f"  ... discovered {len(run_dirs)} so far", file=sys.stderr)
     return sorted(run_dirs)
 
 
-def load_from_mapping(mapping_path: str) -> List[str]:
+def load_from_mapping(mapping_path: str) -> list[str]:
     """Read run_dir paths from a tab-separated mapping file."""
-    run_dirs: List[str] = []
+    run_dirs: list[str] = []
     with open(mapping_path) as fh:
         for line in fh:
             parts = line.rstrip("\n").split("\t")
@@ -150,7 +129,7 @@ def load_from_mapping(mapping_path: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def collect_findings(run_dirs: List[str]) -> Tuple[List[TriageFinding], int, int]:
+def collect_findings(run_dirs: list[str]) -> tuple[list[TriageFinding], int, int]:
     """Parse triage_details.csv from each run_dir.
 
     Returns (findings, total_runs, unassessed). ``total_runs`` counts every
@@ -159,7 +138,7 @@ def collect_findings(run_dirs: List[str]) -> Tuple[List[TriageFinding], int, int
     An unassessed run is neither "with findings" nor "clean" — it was never
     checked — so callers must not fold it into either bucket.
     """
-    findings: List[TriageFinding] = []
+    findings: list[TriageFinding] = []
     total_runs = len(run_dirs)
     unassessed = 0
 
@@ -196,13 +175,13 @@ def collect_findings(run_dirs: List[str]) -> Tuple[List[TriageFinding], int, int
 # ---------------------------------------------------------------------------
 
 
-def aggregate(findings: List[TriageFinding]) -> Dict:
-    by_category: Dict[str, Counter] = defaultdict(Counter)
+def aggregate(findings: list[TriageFinding]) -> dict:
+    by_category: dict[str, Counter] = defaultdict(Counter)
     by_failure_mode: Counter = Counter()
     by_diag_tag: Counter = Counter()
-    by_model: Dict[str, List[TriageFinding]] = defaultdict(list)
-    models_per_issue: Dict[str, Set[str]] = defaultdict(set)
-    action_keys_per_issue: Dict[str, Counter] = defaultdict(Counter)
+    by_model: dict[str, list[TriageFinding]] = defaultdict(list)
+    models_per_issue: dict[str, set[str]] = defaultdict(set)
+    action_keys_per_issue: dict[str, Counter] = defaultdict(Counter)
 
     for f in findings:
         by_category[f.category][f.failure_mode] += 1
@@ -231,25 +210,25 @@ def aggregate(findings: List[TriageFinding]) -> Dict:
 
 
 def pick_reproducers(
-    findings: List[TriageFinding],
-    agg: Dict,
+    findings: list[TriageFinding],
+    agg: dict,
     top_n: int = 3,
-) -> List[Tuple[str, str, List[TriageFinding]]]:
+) -> list[tuple[str, str, list[TriageFinding]]]:
     """Select top_n representative runs for reproducers.
 
     Strategy: score by coverage of top-10 failure modes + diversity of DIAG tags,
     preferring distinct models.
     """
-    runs: Dict[str, List[TriageFinding]] = defaultdict(list)
+    runs: dict[str, list[TriageFinding]] = defaultdict(list)
     for f in findings:
         runs[f.run_dir].append(f)
 
-    top_modes = set(m for m, _ in agg["by_failure_mode"].most_common(10))
+    top_modes = {m for m, _ in agg["by_failure_mode"].most_common(10)}
 
-    scored: List[Tuple[float, str, List[TriageFinding]]] = []
+    scored: list[tuple[float, str, list[TriageFinding]]] = []
     for run_dir, run_findings in runs.items():
-        tags = set(f.diag_tag for f in run_findings)
-        modes_hit = set(f.failure_mode for f in run_findings)
+        tags = {f.diag_tag for f in run_findings}
+        modes_hit = {f.failure_mode for f in run_findings}
         coverage = len(modes_hit & top_modes)
         diversity = len(tags)
         score = coverage * 10 + diversity
@@ -257,8 +236,8 @@ def pick_reproducers(
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    selected: List[Tuple[str, str, List[TriageFinding]]] = []
-    seen_models: Set[str] = set()
+    selected: list[tuple[str, str, list[TriageFinding]]] = []
+    seen_models: set[str] = set()
     for _score, run_dir, run_findings in scored:
         model = extract_model_name(run_dir)
         if model in seen_models:
@@ -276,7 +255,18 @@ def pick_reproducers(
 # ---------------------------------------------------------------------------
 
 
-def write_aggregated_csv(findings: List[TriageFinding], report_dir: str) -> str:
+def _pct(count: int, total: int) -> int:
+    return count * 100 // total if total else 0
+
+
+def _rerun_command(run_dir: str) -> str:
+    return (
+        "python -m TraceLens.Agent.Analysis.triage.runner "
+        f"--run-dir '{run_dir}' --detailed"
+    )
+
+
+def write_aggregated_csv(findings: list[TriageFinding], report_dir: str) -> str:
     path = os.path.join(report_dir, "aggregated_triage.csv")
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -309,17 +299,17 @@ def write_aggregated_csv(findings: List[TriageFinding], report_dir: str) -> str:
 
 
 def write_summary_report(
-    findings: List[TriageFinding],
-    agg: Dict,
+    findings: list[TriageFinding],
+    agg: dict,
     total_runs: int,
-    reproducers: List[Tuple[str, str, List[TriageFinding]]],
+    reproducers: list[tuple[str, str, list[TriageFinding]]],
     report_dir: str,
     unassessed: int = 0,
 ) -> str:
     path = os.path.join(report_dir, "summary_report.md")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    runs_with_findings = len(set(f.run_dir for f in findings))
+    runs_with_findings = len({f.run_dir for f in findings})
     # "Clean" means assessed with zero findings — a run that was never assessed
     # (no triage output) must not be counted as clean/healthy.
     clean_runs = total_runs - runs_with_findings - unassessed
@@ -334,9 +324,9 @@ def write_summary_report(
         "| Metric | Value |",
         "|---|---|",
         f"| Total runs analyzed | {total_runs} |",
-        f"| Runs with findings | {runs_with_findings} ({runs_with_findings * 100 // total_runs if total_runs else 0}%) |",
-        f"| Runs not assessed (no triage output) | {unassessed} ({unassessed * 100 // total_runs if total_runs else 0}%) |",
-        f"| Clean runs (assessed, no findings) | {clean_runs} ({clean_runs * 100 // total_runs if total_runs else 0}%) |",
+        f"| Runs with findings | {runs_with_findings} ({_pct(runs_with_findings, total_runs)}%) |",
+        f"| Runs not assessed (no triage output) | {unassessed} ({_pct(unassessed, total_runs)}%) |",
+        f"| Clean runs (assessed, no findings) | {clean_runs} ({_pct(clean_runs, total_runs)}%) |",
         f"| Total findings | {len(findings)} |",
         f"| Unique failure modes | {len(agg['by_failure_mode'])} |",
         "",
@@ -355,13 +345,13 @@ def write_summary_report(
     ):
         total = sum(mode_counts.values())
         unique = len(mode_counts)
-        affected = len(set(f.model_name for f in findings if f.category == cat))
+        affected = len({f.model_name for f in findings if f.category == cat})
         lines.append(f"| {cat} | {total} | {unique} | {affected} |")
 
     # Top failure modes
-    remedies: Dict[str, str] = {}
-    categories: Dict[str, str] = {}
-    diag_tags_per_mode: Dict[str, Set[str]] = defaultdict(set)
+    remedies: dict[str, str] = {}
+    categories: dict[str, str] = {}
+    diag_tags_per_mode: dict[str, set[str]] = defaultdict(set)
     for f in findings:
         if f.failure_mode:
             if f.failure_mode not in remedies:
@@ -387,7 +377,7 @@ def write_summary_report(
         tag = tags[0] if tags else ""
         lines.append(f"| {tag} | {mode} | {count} | {n_models} | {remedy} |")
 
-    filtered_ops: List[Tuple[str, int, str]] = []
+    filtered_ops: list[tuple[str, int, str]] = []
     for mode, op_counts in agg["action_keys_per_issue"].items():
         if mode not in _OP_ATTENTION_MODES:
             continue
@@ -424,7 +414,7 @@ def write_summary_report(
         "",
     ]
 
-    action_groups: Dict[str, List[Tuple[str, int, int]]] = defaultdict(list)
+    action_groups: dict[str, list[tuple[str, int, int]]] = defaultdict(list)
     for mode, count in agg["by_failure_mode"].most_common():
         cat = categories.get(mode, "unknown")
         n_models = len(agg["models_per_issue"].get(mode, set()))
@@ -475,10 +465,7 @@ def write_summary_report(
         lines.append("")
         lines.append("**Re-run command:**")
         lines.append("```bash")
-        lines.append(
-            f"python -m TraceLens.Agent.Analysis.triage.runner "
-            f"--run-dir '{run_dir}' --detailed"
-        )
+        lines.append(_rerun_command(run_dir))
         lines.append("```")
         lines.append("")
 
@@ -506,12 +493,12 @@ def write_summary_report(
 # ---------------------------------------------------------------------------
 
 
-def _collectible_paths(run_dir: str, max_bytes: int) -> List[Tuple[str, str]]:
+def _collectible_paths(run_dir: str, max_bytes: int) -> list[tuple[str, str]]:
     """Identify artifacts to include in a reproducer tarball.
 
     Returns list of (absolute_path, arcname) pairs, respecting max_bytes cap.
     """
-    items: List[Tuple[str, str]] = []
+    items: list[tuple[str, str]] = []
     total_size = 0
 
     def _add(abs_path: str, arc: str) -> bool:
@@ -539,10 +526,8 @@ def _collectible_paths(run_dir: str, max_bytes: int) -> List[Tuple[str, str]]:
     _add(os.path.join(run_dir, "cache", "cmd_prefix.txt"), "cache/cmd_prefix.txt")
 
     # Manifests
-    _add(
-        os.path.join(run_dir, "category_data", "category_manifest.json"),
-        "category_data/category_manifest.json",
-    )
+    manifest_path = os.path.join(run_dir, "category_data", "category_manifest.json")
+    _add(manifest_path, "category_data/category_manifest.json")
     ti_manifest = os.path.join(
         os.path.dirname(os.path.abspath(run_dir)), "trace_input_manifest.json"
     )
@@ -579,17 +564,16 @@ def _collectible_paths(run_dir: str, max_bytes: int) -> List[Tuple[str, str]]:
     capture_dir = os.path.join(
         os.path.dirname(os.path.abspath(run_dir)), "capture_traces"
     )
-    if not os.path.isdir(capture_dir):
-        manifest_path = os.path.join(run_dir, "category_data", "category_manifest.json")
-        if os.path.isfile(manifest_path):
-            try:
-                with open(manifest_path) as mf:
-                    mdata = json.load(mf)
-                cap_path = mdata.get("capture_folder_path")
-                if cap_path and os.path.isdir(cap_path):
-                    capture_dir = cap_path
-            except (OSError, ValueError):
-                pass
+    if not os.path.isdir(capture_dir) and os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path) as mf:
+                mdata = json.load(mf)
+            cap_path = mdata.get("capture_folder_path")
+            if cap_path and os.path.isdir(cap_path):
+                capture_dir = cap_path
+        except (OSError, ValueError):
+            # Unreadable manifest: fall back to no capture traces.
+            pass
 
     _add_dir_gz(capture_dir, "capture_traces")
 
@@ -597,7 +581,7 @@ def _collectible_paths(run_dir: str, max_bytes: int) -> List[Tuple[str, str]]:
 
 
 def build_reproducer_packages(
-    reproducers: List[Tuple[str, str, List[TriageFinding]]],
+    reproducers: list[tuple[str, str, list[TriageFinding]]],
     report_dir: str,
     max_pkg_size_mb: int = 200,
 ) -> int:
@@ -631,8 +615,7 @@ def build_reproducer_packages(
             "## Re-run triage",
             "",
             "```bash",
-            f"python -m TraceLens.Agent.Analysis.triage.runner "
-            f"--run-dir '{run_dir}' --detailed",
+            _rerun_command(run_dir),
             "```",
             "",
         ]
@@ -741,7 +724,7 @@ def main() -> int:
     # Select reproducers
     reproducers = pick_reproducers(findings, agg, top_n=args.top_reproducers)
     print(f"Selected {len(reproducers)} reproducer(s):")
-    for run_dir, model, rf in reproducers:
+    for _, model, rf in reproducers:
         print(f"  - {model} ({len(rf)} findings)")
 
     # Write summary report
@@ -760,11 +743,9 @@ def main() -> int:
     print("\n" + "=" * 60)
     print("POST-PROCESSING COMPLETE")
     print("=" * 60)
-    runs_with = len(set(f.run_dir for f in findings))
+    runs_with = len({f.run_dir for f in findings})
     print(f"  Total runs:        {total_runs}")
-    print(
-        f"  Runs with issues:  {runs_with} ({runs_with * 100 // total_runs if total_runs else 0}%)"
-    )
+    print(f"  Runs with issues:  {runs_with} ({_pct(runs_with, total_runs)}%)")
     print(f"  Total findings:    {len(findings)}")
     print()
     print("  Top 5 failure modes:")

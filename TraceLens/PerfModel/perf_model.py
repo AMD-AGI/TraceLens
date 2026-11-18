@@ -9,7 +9,13 @@ import warnings
 from math import prod
 
 from .kernel_name_parser import gemm_name_parser
-from .utils import name2bpe, optional_float, parse_bool, torch_dtype_map
+from .utils import (
+    name2bpe,
+    optional_float,
+    parse_bool,
+    scalar_type_bpe,
+    torch_dtype_map,
+)
 
 
 # 1. GEMM
@@ -282,12 +288,11 @@ class aten_scaled_mm(GEMM):
                 f"Data sizes of A and B are different: {dtype_A_B} for aten_scaled_mm. "
             )
         self.bpe = bpeA  # or bpeB, they are the same
-        # assumption:
-        # for fp8 the output dtype is fp16
-        # for fp16, bf16, fp32 the output dtype is the same as the input dtype
-        if self.bpe == 1:
+        # fp8 and a packed FP4 element are one byte, and both write an
+        # fp16/bf16 result. fp16, bf16, and fp32 keep the input width.
+        if self.bpe is not None and self.bpe <= 1:
             out_bpe = 2
-        elif self.bpe in [2, 4]:
+        elif self.bpe in (2, 4):
             out_bpe = self.bpe
         else:
             out_bpe = None
@@ -3127,6 +3132,398 @@ class evoformer_attention(SDPA):
         }
 
 
+class IndexedCopy:
+    """Copy the rows an index selects. An embedding lookup is one producer of this.
+
+    There are no multiply-adds. Bytes are the gathered rows read from the
+    table, those same rows written out, and the index vector that selects
+    them. Duplicate indices are not coalesced: each copy pays for its row again.
+
+    ``kind`` selects how a trace event maps onto ``(tokens, hidden)``:
+
+    * ``rows`` — ``aten::embedding`` and embedding-bag. The value tensor's
+      last dimension is the row width and the index tensor counts rows.
+    * ``index_select`` — one axis of the input is replaced by the index.
+    * ``index`` — ``aten::index`` / ``aten::index_put``. Integer indices
+      replace that many leading axes; the tail is the row that is copied.
+      A trace that records the index list as an empty placeholder charges a
+      read and a write of the indexed tensor.
+    * ``gather`` — one gathered element per index element.
+    * ``gathered`` — the value tensor is already the gathered result
+      (embedding and index-select backward).
+    """
+
+    category = "IndexedCopy"
+    bwd_category = None
+    kind = "rows"
+    # Forward reads the row and writes it. Dense backward also reads the
+    # row it scatter-adds into.
+    value_copies = 2
+    count_all_index_tensors = False
+
+    _INDEX_DTYPES = frozenset({"long int", "long", "int", "int32", "int64"})
+
+    def __init__(self, event, arch=None, **kwargs):
+        del kwargs
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        self.tokens = self.param_details["tokens"]
+        self.hidden = self.param_details["hidden"]
+        self.bpe_row = name2bpe(self.param_details["dtype_row"])
+        self.bpe_index = name2bpe(self.param_details["dtype_index"])
+        self.bpe_out = name2bpe(self.param_details["dtype_out"])
+        if self.bpe_out is None:
+            self.bpe_out = self.bpe_row
+
+    @classmethod
+    def get_param_details(cls, event):
+        if cls.kind in {"index", "index_put"}:
+            return cls._index_param_details(event)
+        values, indices = cls._split_tensors(event)
+        if not values or not indices:
+            raise ValueError(f"{cls.__name__} needs a value tensor and an index tensor")
+        value_shape, row_dtype = values[0]
+        index_shape, index_dtype = indices[0]
+        tokens = prod(index_shape)
+        if cls.kind == "gather":
+            hidden = 1
+            out_dtype = row_dtype
+            if len(values) > 1 and prod(values[1][0]) == tokens:
+                out_dtype = values[1][1]
+        elif cls.kind == "index_select":
+            dim = cls._concrete_dim(event, len(value_shape))
+            if value_shape[dim] == 0:
+                hidden = 0
+            else:
+                gathered = prod(value_shape) // value_shape[dim] * tokens
+                hidden = gathered // tokens if tokens else 0
+            out_dtype = values[1][1] if len(values) > 1 else row_dtype
+        elif cls.kind == "gathered":
+            gathered = prod(value_shape)
+            hidden = gathered // tokens if tokens else 0
+            out_dtype = row_dtype
+        else:
+            hidden = value_shape[-1]
+            out_dtype = row_dtype
+        if cls.count_all_index_tensors:
+            index_elems = sum(prod(shape) for shape, _dtype in indices)
+        else:
+            index_elems = tokens
+        return {
+            "tokens": tokens,
+            "hidden": hidden,
+            "index_elems": index_elems,
+            "dtype_row": row_dtype,
+            "dtype_index": index_dtype,
+            "dtype_out": out_dtype,
+        }
+
+    @classmethod
+    def _split_tensors(cls, event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        values = []
+        indices = []
+        for i, shape in enumerate(dims):
+            if not shape or not isinstance(shape, (list, tuple)):
+                continue
+            try:
+                parsed = tuple(int(dim) for dim in shape)
+            except (TypeError, ValueError):
+                continue
+            dtype = types[i] if i < len(types) else None
+            if isinstance(dtype, str) and dtype.lower() in cls._INDEX_DTYPES:
+                indices.append((parsed, dtype))
+            else:
+                values.append((parsed, dtype))
+        return values, indices
+
+    @staticmethod
+    def _concrete_dim(event, rank):
+        concrete = (event.get("args") or {}).get("Concrete Inputs") or []
+        for item in concrete:
+            if isinstance(item, int):
+                dim = item
+            elif isinstance(item, str) and item.strip().lstrip("-").isdigit():
+                dim = int(item.strip())
+            else:
+                continue
+            if dim < 0:
+                dim += rank
+            if 0 <= dim < rank:
+                return dim
+        return 0
+
+    @classmethod
+    def _index_param_details(cls, event):
+        """``self[indices]`` or ``index_put(self, indices, values)``.
+
+        A TensorList of indices is stored nested (``[[2, 128], []]``). Kineto
+        often records that list as an empty placeholder, in which case the
+        only known traffic is the indexed tensor itself.
+        """
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        tensors = []
+        index_shapes = []
+        index_dtype = None
+        for i, shape in enumerate(dims):
+            dtype = types[i] if i < len(types) else None
+            nested = cls._tensor_list_shapes(shape)
+            if nested is not None:
+                index_shapes.extend(nested)
+                if nested and index_dtype is None:
+                    index_dtype = dtype if cls._is_index_dtype(dtype) else "long int"
+                continue
+            parsed = cls._flat_shape(shape)
+            if parsed is None:
+                continue
+            tensors.append((parsed, dtype))
+        if not tensors:
+            raise ValueError(f"{cls.__name__} needs the tensor being indexed")
+        # The first tensor is the table, even when it stores integers. Later
+        # integer tensors are indices. ``index_put`` writes a values tensor
+        # after the index list, and that tensor is an integer as often as not.
+        value_shape, row_dtype = tensors[0]
+        rest = tensors[1:]
+        values_tensor = None
+        if cls.kind == "index_put" and rest:
+            values_tensor = rest[-1]
+            rest = rest[:-1]
+        for shape, dtype in rest:
+            if cls._is_index_dtype(dtype) or not dtype:
+                index_shapes.append(shape)
+                if cls._is_index_dtype(dtype):
+                    index_dtype = dtype
+                elif index_dtype is None:
+                    index_dtype = "long int"
+        out_dtype = row_dtype
+        if index_shapes:
+            tokens = cls._broadcast_numel(index_shapes)
+            index_elems = sum(prod(shape) for shape in index_shapes)
+            if values_tensor is not None:
+                out_dtype = values_tensor[1]
+                gathered = prod(values_tensor[0])
+            else:
+                n_index = len(index_shapes)
+                tail = value_shape[n_index:] if n_index < len(value_shape) else ()
+                gathered = tokens * (prod(tail) if tail else 1)
+            hidden = gathered // tokens if tokens else 0
+        elif values_tensor is not None:
+            # Indices were not recorded. The values tensor is the payload.
+            tokens = prod(values_tensor[0])
+            hidden = 1
+            index_elems = 0
+            index_dtype = "long int"
+            out_dtype = values_tensor[1]
+        else:
+            # The index list was not recorded. Charge the indexed tensor.
+            tokens = prod(value_shape)
+            hidden = 1
+            index_elems = 0
+            index_dtype = "long int"
+        copies = cls.value_copies
+        if cls.kind == "index_put" and cls._accumulate(event):
+            copies = 3
+        return {
+            "tokens": tokens,
+            "hidden": hidden,
+            "index_elems": index_elems,
+            "dtype_row": row_dtype,
+            "dtype_index": index_dtype,
+            "dtype_out": out_dtype,
+            "value_copies": copies,
+        }
+
+    @classmethod
+    def _is_index_dtype(cls, dtype):
+        return isinstance(dtype, str) and dtype.lower() in cls._INDEX_DTYPES
+
+    @staticmethod
+    def _flat_shape(shape):
+        if not isinstance(shape, (list, tuple)) or not shape:
+            return None
+        if not all(
+            isinstance(dim, (int, float)) and not isinstance(dim, bool) for dim in shape
+        ):
+            return None
+        return tuple(int(dim) for dim in shape)
+
+    @staticmethod
+    def _tensor_list_shapes(shape):
+        """Shapes inside a TensorList, or None when ``shape`` is not one.
+
+        Empty entries are ``None`` indices (a slice) and are skipped.
+        """
+        if not isinstance(shape, (list, tuple)) or not shape:
+            return None
+        if all(
+            isinstance(dim, (int, float)) and not isinstance(dim, bool) for dim in shape
+        ):
+            return None
+        shapes = []
+        for item in shape:
+            if item in (None, [], (), ""):
+                continue
+            if not isinstance(item, (list, tuple)) or not item:
+                return None
+            if not all(
+                isinstance(dim, (int, float)) and not isinstance(dim, bool)
+                for dim in item
+            ):
+                return None
+            shapes.append(tuple(int(dim) for dim in item))
+        return shapes
+
+    @staticmethod
+    def _broadcast_numel(shapes):
+        rank = max(len(shape) for shape in shapes)
+        aligned = [(1,) * (rank - len(shape)) + tuple(shape) for shape in shapes]
+        dims = []
+        for axis in range(rank):
+            sizes = [shape[axis] for shape in aligned]
+            dims.append(max(sizes))
+        return prod(dims)
+
+    @staticmethod
+    def _accumulate(event):
+        concrete = (event.get("args") or {}).get("Concrete Inputs") or []
+        if not concrete:
+            return False
+        last = concrete[-1]
+        if isinstance(last, bool):
+            return last
+        return isinstance(last, str) and last.strip().lower() == "true"
+
+    @staticmethod
+    def flops_func(tokens, hidden):
+        del tokens, hidden
+        return 0
+
+    def flops(self):
+        return self.flops_func(self.tokens, self.hidden)
+
+    def flops_bwd(self):
+        return 0
+
+    @staticmethod
+    def bytes_func(
+        tokens,
+        hidden,
+        row_bpe,
+        index_bpe,
+        out_bpe=None,
+        index_elems=None,
+        value_copies=2,
+    ):
+        if None in {row_bpe, index_bpe}:
+            return None
+        if out_bpe is None:
+            out_bpe = row_bpe
+        if index_elems is None:
+            index_elems = tokens
+        gathered = tokens * hidden
+        if value_copies <= 2:
+            payload = gathered * row_bpe + gathered * out_bpe
+        else:
+            payload = gathered * row_bpe + gathered * out_bpe * (value_copies - 1)
+        return payload + index_elems * index_bpe
+
+    def bytes(self):
+        return self.bytes_func(
+            self.tokens,
+            self.hidden,
+            self.bpe_row,
+            self.bpe_index,
+            out_bpe=self.bpe_out,
+            index_elems=self.param_details["index_elems"],
+            value_copies=self.param_details.get("value_copies", self.value_copies),
+        )
+
+    def bytes_bwd(self, bytes_per_element=None):
+        row_bpe = bytes_per_element if bytes_per_element is not None else self.bpe_row
+        out_bpe = bytes_per_element if bytes_per_element is not None else self.bpe_out
+        return self.bytes_func(
+            self.tokens,
+            self.hidden,
+            row_bpe,
+            self.bpe_index,
+            out_bpe=out_bpe,
+            index_elems=self.param_details["index_elems"],
+            value_copies=max(self.value_copies, 3),
+        )
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_row")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class aten_embedding(IndexedCopy):
+    """``aten::embedding(weight[V, H], indices[*]) -> [*, H]``."""
+
+
+class aten_embedding_dense_backward(IndexedCopy):
+    """Scatter-add of ``grad[* , H]`` into the table. Reads the grad row and
+    reads plus writes the table row it updates."""
+
+    kind = "rows"
+    value_copies = 3
+
+
+class aten_embedding_bag(IndexedCopy):
+    """``embedding_bag(weight[V, H], indices[N], offsets[B])``. Offsets are
+    extra index traffic; per-sample weights are not counted."""
+
+    count_all_index_tensors = True
+
+
+class aten_embedding_bag_dense_backward(aten_embedding_bag):
+    value_copies = 3
+
+
+class aten_index_select(IndexedCopy):
+    """``index_select(input, dim, index)``. The selected slice is copied."""
+
+    kind = "index_select"
+
+
+class aten_index_select_backward(IndexedCopy):
+    """Scatter of ``grad`` back to the selected input rows."""
+
+    kind = "gathered"
+    value_copies = 3
+
+
+class aten_gather(IndexedCopy):
+    """``gather``: one element read and written per index element.
+
+    ``aten::embedding`` lowers to this in some builds. The index tensor then
+    has the output shape, so the index traffic is one index per element
+    rather than one index per row.
+    """
+
+    kind = "gather"
+
+
+class aten_index(IndexedCopy):
+    """``aten::index``: ``self[indices]``, including a TensorList of indices."""
+
+    kind = "index"
+
+
+class aten_index_put(IndexedCopy):
+    """``index_put`` writes ``values`` at ``indices``. ``accumulate=True``
+    re-reads the updated elements."""
+
+    kind = "index_put"
+
+
 class UnaryElementwise:
     category = "elementwise"
     bwd_category = None
@@ -3196,6 +3593,51 @@ class aten_unary_elementwise(UnaryElementwise):
         }
 
 
+class _TwoFlopUnary(aten_unary_elementwise):
+    """One special function per element, counted as two flops.
+
+    The fused-kernel table records that cost for ``aten.sqrt``,
+    ``aten.rsqrt``, and ``aten.reciprocal``. Bytes stay one read and one write.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 2 * nelems
+
+
+class aten_rsqrt(_TwoFlopUnary):
+    """``aten::rsqrt`` and ``aten::rsqrt_``."""
+
+
+class aten_sqrt(_TwoFlopUnary):
+    """``aten::sqrt`` and ``aten::sqrt_``."""
+
+
+class aten_reciprocal(_TwoFlopUnary):
+    """``aten::reciprocal`` and ``aten::reciprocal_``."""
+
+
+class aten_to(aten_unary_elementwise):
+    """``aten::to`` and ``aten::_to_copy``: a dtype or device copy.
+
+    No arithmetic. Bytes are the source width plus the destination width.
+    ``Concrete Inputs[1]`` is the ``ScalarType`` ordinal of a dtype cast. A
+    value that is not an ordinal keeps the source width, which is a same-dtype
+    copy onto another device.
+    """
+
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
+        concrete = (event.get("args") or {}).get("Concrete Inputs") or ()
+        dest = scalar_type_bpe(concrete[1] if len(concrete) > 1 else None)
+        if dest is not None:
+            self.bpe_out = dest
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
+
+
 class aten_replication_pad(UnaryElementwise):
     category = "elementwise"
     sheet_category = "UnaryElementwise"
@@ -3237,6 +3679,19 @@ class aten_replication_pad(UnaryElementwise):
         nelems_in = prod(self.param_details["input_shape"])
         nelems_out = self.nelems  # prod(output_shape) from base class
         return nelems_in * self.bpe_in + nelems_out * self.bpe_out
+
+
+class aten_pad(aten_replication_pad):
+    """``aten::pad`` copies the input into a padded buffer.
+
+    No arithmetic. ``Concrete Inputs[1]`` holds the pad widths, innermost
+    dimension first, the same order ``aten_replication_pad`` reads. Bytes read
+    the input and write the padded output.
+    """
+
+    @staticmethod
+    def flops_func(nelems):
+        return 0
 
 
 class aten_upsample_nearest(UnaryElementwise):
@@ -5766,10 +6221,10 @@ class hipblaslt_gemm_fp4(GEMM):
         assert (
             bpeA is not None and bpeB is not None
         ), f"Data types of A and B are not supported: {dtype_A_B}"
-        # FP4 operand bytes use the packed shape directly (bpe=1, K_packed=K/2).
-        # GEMM.bytes_func computes M*K*bpe + K*N*bpe; for the FP4 path we
-        # bypass it and compute bytes explicitly so we can fold in the
-        # E8M0 block-wise scales which add ~3% to the operand bandwidth.
+        # K is the unpacked element count. A traced Float4 element is one
+        # byte, so operand bytes use the packed shape (K_packed = K/2).
+        # GEMM.bytes_func cannot fold in the E8M0 block scales, which add
+        # about 3% to the operand bandwidth.
         M, N, K = self.M, self.N, self.K
         block = self.MXFP4_BLOCK_SIZE
         scales_per_row = (K + block - 1) // block

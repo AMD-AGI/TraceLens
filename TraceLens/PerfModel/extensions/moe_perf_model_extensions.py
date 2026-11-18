@@ -21,25 +21,21 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     add_logical_batch_size,
 )
 
-DTYPE_TO_BYTES = {
-    "Float8_e4m3fn": 1,
-    "Float8_e4m3fnuz": 1,
-    "Float8_e5m2": 1,
-    "Float8_e5m2fnuz": 1,
-    "FP8": 1,
-    "FP4": 0.5,
-    "BFloat16": 2,
-    "Float16": 2,
-    "Half": 2,
-    "Float32": 4,
-    "Float": 4,
-    "c10::BFloat16": 2,
-    "c10::Float8_e4m3fn": 1,
-    "c10::Float8_e4m3fnuz": 1,
-    "c10::Float4_e2m1fn_x2": 0.5,
-    "c10::Half": 2,
-    "c10::Float": 4,
-}
+
+def _weight_bpe_on_unpacked_k(dtype):
+    """Bytes per logical weight element when K has been unpacked.
+
+    ``name2bpe`` counts one traced ``Float4_e2m1fn_x2`` element: one byte,
+    two values. These models multiply by the unpacked K, so the logical
+    width is half of that.
+    """
+    bpe = name2bpe(dtype)
+    if bpe is None:
+        return None
+    key = str(dtype).strip().lower().split("::")[-1]
+    if key == "float4_e2m1fn_x2":
+        return bpe / 2
+    return bpe
 
 
 def _wider_compute_precision(input_dtype, weight_dtype):
@@ -51,8 +47,8 @@ def _wider_compute_precision(input_dtype, weight_dtype):
     dtype's matrix peak, not the weight dtype's. Falls back to the weight
     dtype when the wider spelling has no simulation equivalent.
     """
-    known = [d for d in (input_dtype, weight_dtype) if d in DTYPE_TO_BYTES]
-    wider = torch_dtype_map(max(known, key=DTYPE_TO_BYTES.get)) if known else None
+    known = [d for d in (input_dtype, weight_dtype) if name2bpe(d) is not None]
+    wider = torch_dtype_map(max(known, key=name2bpe)) if known else None
     return wider or torch_dtype_map(weight_dtype)
 
 
@@ -245,13 +241,13 @@ class moe_aiter_fused_1stage(FusedMoE):
     def bytes(self):
         """Calculate bytes moved using the static bytes_func."""
 
-        input_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["input_dtype"], 2
-        )  # Default to 2
-        weight_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["weight_dtype"], 1
-        )  # Default to 1 (FP8)
-        output_bpe = input_bpe  # Output typically same as input
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = input_bpe
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -370,9 +366,15 @@ class moe_aiter_fused_blockscale(FusedMoE):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 1)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
-        output_bpe = DTYPE_TO_BYTES.get(self.param_details["output_dtype"], 2)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 1
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -681,13 +683,12 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
         input_dtype = self.param_details["input_dtype"]
         weight_dtype = self.param_details["weight_dtype"]
 
-        if input_dtype not in DTYPE_TO_BYTES:
+        input_bpe = name2bpe(input_dtype)
+        weight_bpe = _weight_bpe_on_unpacked_k(weight_dtype)
+        if input_bpe is None:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in DTYPE_TO_BYTES:
+        if weight_bpe is None:
             raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
-
-        input_bpe = DTYPE_TO_BYTES[input_dtype]
-        weight_bpe = DTYPE_TO_BYTES[weight_dtype]
         output_bpe = input_bpe  # Output same dtype as input
 
         return self.bytes_func(
@@ -815,13 +816,12 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
         input_dtype = self.param_details["input_dtype"]
         weight_dtype = self.param_details["weight_dtype"]
 
-        if input_dtype not in DTYPE_TO_BYTES:
+        input_bpe = name2bpe(input_dtype)
+        weight_bpe = _weight_bpe_on_unpacked_k(weight_dtype)
+        if input_bpe is None:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in DTYPE_TO_BYTES:
+        if weight_bpe is None:
             raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
-
-        input_bpe = DTYPE_TO_BYTES[input_dtype]
-        weight_bpe = DTYPE_TO_BYTES[weight_dtype]
         output_bpe = input_bpe  # Output same dtype as input
 
         return self.bytes_func(
@@ -922,15 +922,15 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
     def bytes(self):
         """Calculate bytes moved using the static bytes_func."""
 
-        input_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["input_dtype"], 2
-        )  # Default to 2
-        weight_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["weight_dtype"], 1
-        )  # Default to 1 (FP8)
-        output_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["output_dtype"], 2
-        )  # Output typically same as input
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -1026,15 +1026,15 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
     def bytes(self):
         """Calculate bytes moved using the static bytes_func."""
 
-        input_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["input_dtype"], 2
-        )  # Default to 2
-        weight_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["weight_dtype"], 1
-        )  # Default to 1 (FP8)
-        output_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["output_dtype"], 2
-        )  # Output typically same as input
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -1138,8 +1138,12 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1243,12 +1247,11 @@ class moe_opus_stage1_a8w4(UnfusedMoE_Up):
         if self.param_details.get("_no_perf"):
             return None
         input_bpe = name2bpe(self.param_details["input_dtype"])
-        packed_bpe = name2bpe(self.param_details["weight_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
         output_bpe = name2bpe(self.param_details["output_dtype"])
         scale_bpe = name2bpe(self.param_details["scale_dtype"])
-        if None in {input_bpe, packed_bpe, output_bpe, scale_bpe}:
+        if None in {input_bpe, weight_bpe, output_bpe, scale_bpe}:
             return None
-        weight_bpe = packed_bpe / 2
         total = self.bytes_func(
             self.param_details["num_tokens"],
             self.param_details["hidden_dim"],
@@ -1500,8 +1503,12 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1611,8 +1618,12 @@ class moe_flydsl_stage1(UnfusedMoE_Up):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1672,8 +1683,12 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1795,9 +1810,16 @@ class moe_triton_invoke_grouped_gemm:
 
     def bytes(self):
         p = self.param_details
-        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(p["weight_dtype"], 1)
-        output_bpe = DTYPE_TO_BYTES.get(p["output_dtype"], 2)
+        input_bpe = name2bpe(p["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        # K is the traced weight dimension, already K_packed for Float4.
+        weight_bpe = name2bpe(p["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(p["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         if None in {input_bpe, weight_bpe, output_bpe}:
             return None
@@ -1897,7 +1919,9 @@ class moe_gptq_awq_up(UnfusedMoE_Up):
 
     def bytes(self):
         p = self.param_details
-        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
+        input_bpe = name2bpe(p["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
         return self.bytes_func(
             p["num_tokens"],
             p["hidden_dim"],
@@ -1981,7 +2005,9 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
 
     def bytes(self):
         p = self.param_details
-        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
+        input_bpe = name2bpe(p["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
         return self.bytes_func(
             p["num_tokens"],
             p["hidden_dim"],

@@ -32,7 +32,7 @@ pip install -e ".[Visualizer]"
 pip install "TraceLens[Visualizer] @ git+https://github.com/AMD-AGI/TraceLens.git"
 ```
 
-Python 3.10 or newer. No GPU, ROCm, or CUDA wheel is required. A gated checkpoint needs `HF_TOKEN`.
+Python 3.10 or newer. The extra installs the CPU PyTorch wheel, so no GPU, ROCm, or CUDA wheel is required. A gated checkpoint needs `HF_TOKEN`.
 
 ### 2. Model source
 

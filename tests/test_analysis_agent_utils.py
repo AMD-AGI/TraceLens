@@ -16,18 +16,13 @@
 
 import json, os, shutil, subprocess, sys, pandas as pd, pytest, yaml
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, ANALYSIS_DIR)
-sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    SystemFindings,
     _eff_bucket,
     _extract_call_chain,
     _extract_kernel_names,
     _extract_module_chain,
     _parse_call_stack,
-    _resolve_peak_maf,
     build_category_findings,
     build_operation_metrics,
     calculate_efficiency,
@@ -40,6 +35,8 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     get_peak_specs,
     gpu_utilization_from_timeline,
     load_category_data,
+    perf_report_csv_dir,
+    resolve_peak_maf,
     standalone_efficiency,
     validate_efficiency,
     write_metrics_json,
@@ -54,12 +51,11 @@ from TraceLens.Agent.Analysis.utils.report_utils import (
 from TraceLens.Agent.Analysis.utils.validation_utils import (
     MarkerValidator,
     _ROLLUP_IMPACT_TOL,
-    _category_findings_empty,
+    _load_findings_metrics,
     _check_coverage,
     _check_priority_consistency,
     _check_time_sanity,
     _extract_detailed_analysis_subsection,
-    _iter_candidate_blocks,
     _load_valid_args,
     _metrics_json_for_findings,
     _scan_args_cells,
@@ -70,6 +66,7 @@ from TraceLens.Agent.Analysis.utils.validation_utils import (
     _validate_report_comparison_scope_diffs,
     _validate_report_priority_consistency,
     _validate_report_reasoning_candidates,
+    iter_candidate_blocks,
     validate_findings_file,
     validate_report,
     validate_subagent_outputs,
@@ -98,6 +95,7 @@ from TraceLens.Agent.Analysis.category_analyses import (
     analysis_utils as au,
     kernel_fusion_analysis as kfa,
 )
+from TraceLens.PerfModel import torch_op_mapping
 from TraceLens.Reporting import tracediff_comparison_extension as tde
 from TraceLens.TreePerf import GPUEventAnalyser
 from TraceLens.Agent.Analysis.utils.classify_kernels import (
@@ -108,6 +106,8 @@ from TraceLens.Agent.Analysis.utils.classify_kernels import (
 )
 
 # Constants
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
 _FUSION_ROW = (
     "| aten::bmm | (2,3) bf16 | a.py(1): f | k | 1.0 | 1.0 | 2 | 3.0 | "
     "50.00% of 5.3 TB/s | memory-bound |"
@@ -131,10 +131,9 @@ _FUSION_ADD_KEY = ["aten::add", "[[16, 64]]", "['float']", "", "", "p", "", "t1"
 
 @pytest.fixture
 def output_dir_with_category_data(tmp_path):
-    """Create minimal category_data + metadata for one category (gemm)."""
+    """Create minimal category_data + manifest for one category (gemm)."""
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
-    (out / "metadata").mkdir(parents=True)
 
     # gemm_ops.csv: minimal columns required by build_operation_metrics / load_category_data
     gemm_csv = out / "category_data" / "gemm_ops.csv"
@@ -151,14 +150,14 @@ def output_dir_with_category_data(tmp_path):
     )
     df.to_csv(gemm_csv, index=False)
 
-    # gemm_metadata.json
-    meta = {
-        "platform": "MI300X",
-        "peak_mem_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708, "matrix_fp16": 654},
+    manifest = {
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 708, "matrix_fp16": 654},
+        },
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
-    (out / "metadata" / "gemm_metadata.json").write_text(json.dumps(meta, indent=2))
+    (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
 
     return str(out)
 
@@ -208,7 +207,7 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 150.0,
                 "impact_score_low": 127.0,
                 "impact_score_high": 173.0,
-                "operation_count": 2,
+                "member_count": 2,
             },
         ],
     }
@@ -237,7 +236,7 @@ def output_dir_with_manifest_and_metrics(tmp_path):
                 "impact_score": 80.0,
                 "impact_score_low": 68.0,
                 "impact_score_high": 92.0,
-                "operation_count": 1,
+                "member_count": 1,
             },
         ],
     }
@@ -248,14 +247,13 @@ def output_dir_with_manifest_and_metrics(tmp_path):
 
 @pytest.fixture
 def output_dir_other_and_customcollective_nccl(tmp_path):
-    """Minimal ops CSV + metadata for ``other`` and ``customcollective`` (NCCL-style name).
+    """Minimal ops CSV + manifest for ``other`` and ``customcollective`` (NCCL-style name).
 
     ``classify_other_operation`` treats this op as communication; ``customcollective``
     analysis must still retain it, while ``other`` strips it for NCCL Analyzer routing.
     """
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
-    (out / "metadata").mkdir(parents=True)
 
     df = pd.DataFrame(
         {
@@ -271,15 +269,14 @@ def output_dir_other_and_customcollective_nccl(tmp_path):
     for cat in ("customcollective", "other"):
         df.to_csv(out / "category_data" / f"{cat}_ops.csv", index=False)
 
-    meta = {
-        "platform": "MI300X",
-        "peak_mem_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708},
+    manifest = {
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 708},
+        },
         "gpu_utilization": {"total_time_ms": 1000.0},
     }
-    meta_text = json.dumps(meta, indent=2)
-    for cat in ("customcollective", "other"):
-        (out / "metadata" / f"{cat}_metadata.json").write_text(meta_text)
+    (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
 
     return str(out)
 
@@ -564,6 +561,29 @@ def test_generate_priority_data_skips_error_metrics(tmp_path):
     assert len(data["all_estimates"]) == 0
 
 
+def test_generate_priority_data_ranks_system_findings(tmp_path):
+    cat_data = tmp_path / "category_data"
+    cat_data.mkdir()
+    (cat_data / "category_manifest.json").write_text("{}")
+    for name, entries in {
+        "cpu_idle": [SystemFindings.make("High GPU Idle Time", 1.0, 5.0)],
+        "multi_kernel": [
+            SystemFindings.make("H2D Memory Copy Overhead", 1, 1.0, 2.0),
+            SystemFindings.make("D2H Memory Copy Overhead", 1, 1.0, 2.0),
+        ],
+    }.items():
+        (cat_data / f"{name}_metrics.json").write_text(
+            json.dumps({"system_findings": entries})
+        )
+    with open(generate_priority_data(str(tmp_path))) as f:
+        ranked = json.load(f)["system_findings"]
+    assert [(e["rank"], e["title"]) for e in ranked] == [
+        (1, "High GPU Idle Time"),
+        (2, "D2H Memory Copy Overhead"),
+        (3, "H2D Memory Copy Overhead"),
+    ]
+
+
 # ----- Unit tests: write_metrics_json -----
 
 
@@ -586,13 +606,11 @@ def test_load_category_data(output_dir_with_category_data):
     assert len(df) == 2
     assert "name" in df.columns
     assert "Kernel Time (µs)_sum" in df.columns
-    assert meta["platform"] == "MI300X"
     assert meta["peak_mem_bw_tbs"] == 5.3
+    assert meta["output_dir"] == output_dir_with_category_data
 
 
 def test_load_category_data_missing_csv_raises(tmp_path):
-    (tmp_path / "metadata").mkdir(parents=True)
-    (tmp_path / "metadata" / "gemm_metadata.json").write_text("{}")
     with pytest.raises(FileNotFoundError, match="Category CSV not found"):
         load_category_data(str(tmp_path), "gemm")
 
@@ -786,6 +804,7 @@ def test_other_analysis_customcollective_keeps_communication_classified_ops(
     assert m.get("category") == "customcollective"
     assert len(m.get("operations", [])) == 1
     assert m["operations"][0]["name"] == "ncclKernel_AllReduce_RING_LL"
+    assert m["category_specific"]["communication_count"] == 1
     assert "communication_ops_skipped" not in m.get("category_specific", {})
 
 
@@ -842,7 +861,14 @@ def test_gemm_analysis_script_with_minimal_data(output_dir_with_category_data):
     env = os.environ.copy()
     env["PYTHONPATH"] = REPO_ROOT
     result = subprocess.run(
-        [sys.executable, script, "--output-dir", output_dir_with_category_data],
+        [
+            sys.executable,
+            script,
+            "--output-dir",
+            output_dir_with_category_data,
+            "--category",
+            "gemm",
+        ],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
@@ -1162,7 +1188,7 @@ def _valid_category_findings(rank=1):
 def test_check_findings_file_valid_category(tmp_path):
     p = tmp_path / "gemm_findings.md"
     _write(str(p), _valid_category_findings())
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert errors == []
 
 
@@ -1175,7 +1201,7 @@ def test_check_findings_file_missing_p_item(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert any("missing required kind=p_item" in e for e in errors)
 
 
@@ -1187,9 +1213,7 @@ def test_check_findings_file_skip_p_item_required(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(
-        str(p), "category_findings", skip_p_item_required=True
-    )
+    errors = MarkerValidator.check_findings_file(str(p), skip_p_item_required=True)
     assert errors == []
 
 
@@ -1203,7 +1227,7 @@ def test_check_findings_file_detail_estimate_missing(tmp_path):
     )
     p = tmp_path / "gemm_findings.md"
     _write(str(p), text)
-    errors = MarkerValidator.check_findings_file(str(p), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(p))
     assert any("missing" in e and "detail_estimate" in e for e in errors)
 
 
@@ -1495,6 +1519,59 @@ def test_priority_consistency_r6_node_mismatch(tmp_path):
     assert any(e.startswith("R6:") for e in errors)
 
 
+@pytest.mark.parametrize(
+    "report_cards, pd_cards, cell_edit, needle",
+    [
+        ("CI", "CI", None, None),
+        ("IC", "CI", None, "'P1: Exposed Collective Communication', 'P2: High GPU"),
+        ("C", "CI", None, "'P2: High GPU Idle Time'"),
+        ("CI", "CI", ("60.0%", "61.0%"), "Data rows"),
+        ("CI", "", None, "must be []"),
+    ],
+)
+def test_priority_consistency_r7_system_cards(
+    tmp_path, report_cards, pd_cards, cell_edit, needle
+):
+    entries = {
+        "C": {
+            "rank": 1,
+            **SystemFindings.make(
+                "Exposed Collective Communication", 600.0, 60.0, 5.0, 700.0
+            ),
+        },
+        "I": {"rank": 2, **SystemFindings.make("High GPU Idle Time", 100.0, 17.0)},
+    }
+    report = "## System-Level Optimizations\n\n"
+    report += "".join(
+        f"### P{i + 1}: {entries[c]['title']}\n\n" for i, c in enumerate(report_cards)
+    )
+    report += "## Detailed Analysis\n\n### System-Level Insights\n\n"
+    for i, c in enumerate(report_cards):
+        rows = "".join(
+            "| {} | {} |\n".format(*SystemFindings.to_cells(m))
+            for m in entries[c]["members"]
+        )
+        report += (
+            f"<!-- reasoning-candidate tier=system rank={i + 1} -->\n"
+            f"#### P{i + 1}: {entries[c]['title']}\n\n"
+            f"**Data:**\n\n| Metric | Value |\n|---|---|\n{rows}\n"
+        )
+    if cell_edit:
+        report = report.replace(*cell_edit)
+    (tmp_path / "priority_data.json").write_text(
+        json.dumps({"system_findings": [entries[c] for c in pd_cards]})
+    )
+    errors = [
+        e
+        for e in _validate_report_priority_consistency(report, str(tmp_path))
+        if e.startswith("R7:")
+    ]
+    if needle is None:
+        assert errors == []
+    else:
+        assert needle in "\n".join(errors)
+
+
 def test_priority_consistency_r4_top_ops_row_count(tmp_path):
     # Only one priority but the top_ops table has two data rows -> R4.
     content = _passing_report()
@@ -1538,6 +1615,9 @@ def test_priority_consistency_r6_detail_estimate_and_fusion_node(tmp_path):
         "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n0 -->\n"
         "<!-- impact-end -->\n"
         "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 node=n1 -->\n"
+        "<!-- impact-end -->\n\n"
+        "## System-Level Optimizations\n\n"
+        "<!-- impact-begin kind=p_item low=null mid=null high=null node=n1 -->\n"
         "<!-- impact-end -->\n"
     )
     pd_data = {"findings": [{"category": "gemm", "node": "n0"}], "priorities": []}
@@ -1548,8 +1628,9 @@ def test_priority_consistency_r6_detail_estimate_and_fusion_node(tmp_path):
     )
     errors = _validate_report_priority_consistency(content, str(tmp_path))
     r6 = [e for e in errors if e.startswith("R6:")]
-    assert len(r6) == 2
+    assert len(r6) == 3
     assert "detail_estimate" in r6[0] and "fusion P-item marker #2" in r6[1]
+    assert "system P-item marker #1" in r6[2]
 
 
 def test_priority_consistency_absent_json_is_silent(tmp_path):
@@ -1895,7 +1976,7 @@ def test_validate_exec_summary_nodes(block, expected):
     assert all(any(frag in e for e in errors) for frag in expected)
 
 
-# ----- _validate_fusion_data_tables / _iter_candidate_blocks -----
+# ----- _validate_fusion_data_tables / iter_candidate_blocks -----
 
 
 def _fusion_block(header=_STANDALONE_HEADER, tier="fusion"):
@@ -1917,9 +1998,9 @@ def test_fusion_data_tables_canonical_header():
 
 def test_iter_candidate_blocks_filters_by_tier():
     content = _fusion_block() + _fusion_block(tier="compute")
-    assert [rank for _, _, rank in _iter_candidate_blocks(content, "fusion")] == [1]
-    assert len(list(_iter_candidate_blocks(content, "compute"))) == 1
-    assert list(_iter_candidate_blocks(content, "system")) == []
+    assert [rank for _, _, rank in iter_candidate_blocks(content, "fusion")] == [1]
+    assert len(list(iter_candidate_blocks(content, "compute"))) == 1
+    assert list(iter_candidate_blocks(content, "system")) == []
 
 
 # ----- FusionCandidateBuilder: pure helpers -----
@@ -2104,6 +2185,22 @@ def test_normalize_category_missing_key_is_other():
     assert _normalize_category({}) == ("other", "Other")
 
 
+def test_category_skill_map_matches_core_emittable_labels():
+    """Every label core can emit routes explicitly; no map key is dead."""
+    classes = set(torch_op_mapping.op_to_perf_model_class_map.values())
+    raw_labels = (
+        set(torch_op_mapping.OP_CATEGORY_REGISTRY.values())
+        | {getattr(cls, "bwd_category", None) for cls in classes}
+        | {label for _, label in torch_op_mapping.OP_CATEGORY_PATTERNS}
+        | {label for _, label in torch_op_mapping._KERNEL_NAME_FALLBACK_RULES}
+        | {"other"}
+    )
+    emittable = {
+        _normalize_category({"op category": label})[0] for label in raw_labels - {None}
+    }
+    assert set(op.CATEGORY_SKILL_MAP) == emittable
+
+
 # ----- FusionCandidateBuilder: names, chains, grouping -----
 
 
@@ -2162,18 +2259,18 @@ def test_dedup_by_kernel_set_prefers_nn_module_then_deeper_chain():
 
 
 def test_group_ops():
-    def pair(name, op_uid, perf_key, dur_us):
-        return KernelRecord(name, "GEMM", dur_us, perf_key), op_uid
+    def rec(name, op_uid, perf_key, dur_us):
+        return KernelRecord(name, "GEMM", dur_us, perf_key, op_uid=op_uid)
 
     key_a, key_b = ["aten::mm", "a"], ["aten::mm", "b"]
     instances = [
         [
-            pair(_GEMM_KERNEL, 1, key_a, 100.0),
-            pair(_ADD_KERNEL, 1, key_a, 50.0),
-            pair(_RMSNORM_KERNEL, 9, None, 4.0),
+            rec(_GEMM_KERNEL, 1, key_a, 100.0),
+            rec(_ADD_KERNEL, 1, key_a, 50.0),
+            rec(_RMSNORM_KERNEL, 9, None, 4.0),
         ],
-        [pair(_GEMM_KERNEL, 2, key_a, 100.0), pair(_RMSNORM_KERNEL, 8, None, 4.0)],
-        [pair(_MUL_KERNEL, 3, key_b, 1.0)],
+        [rec(_GEMM_KERNEL, 2, key_a, 100.0), rec(_RMSNORM_KERNEL, 8, None, 4.0)],
+        [rec(_MUL_KERNEL, 3, key_b, 1.0)],
     ]
     groups = FusionCandidateBuilder._group_ops(instances)
     by_key = {tuple(g["perf_key"] or g["kernel_names"]): g for g in groups}
@@ -2204,12 +2301,14 @@ def _diff_stats_df():
 
 
 def test_diff_stats_lookups_splits_trace1_and_trace2():
-    uid_to_t1, lca_to_t2 = _builder()._diff_stats_lookups(_diff_stats_df())
+    df = _diff_stats_df().assign(cpu_op_uid=[None, None, 7, None])
+    uid_to_t1, lca_to_t2 = _builder()._diff_stats_lookups(df)
     assert set(uid_to_t1) == {100, 101}
     assert uid_to_t1[100] == (KernelRecord(_GEMM_KERNEL, "GEMM", 5.0, None, 100), 10)
     assert set(lca_to_t2) == {10, 11}
-    ((record, _),) = lca_to_t2[10]
+    (record,) = lca_to_t2[10]
     assert (record.name, record.type, record.dur_us) == (_MUL_KERNEL, "Mul", 2.0)
+    assert record.op_uid == 7
 
 
 def test_diff_stats_lookups_missing_uid_col_skips_trace1():
@@ -2421,17 +2520,17 @@ def test_standalone_efficiency_missing_roofline_is_noop():
     assert result["efficiency_percent"] is None
 
 
-# ----- analysis_utils: _resolve_peak_maf -----
+# ----- analysis_utils: resolve_peak_maf -----
 
 
 def test_resolve_peak_maf_precision_hit():
     row = pd.Series({"Compute Spec": "matrix_fp16"})
-    assert _resolve_peak_maf(row, {"matrix_bf16": 708, "matrix_fp16": 654}, 708) == 654
+    assert resolve_peak_maf(row, {"matrix_bf16": 708, "matrix_fp16": 654}, 708) == 654
 
 
 def test_resolve_peak_maf_unknown_spec_falls_back():
     row = pd.Series({"Compute Spec": "weird"})
-    assert _resolve_peak_maf(row, {"matrix_bf16": 708}, 708) == 708
+    assert resolve_peak_maf(row, {"matrix_bf16": 708}, None) is None
 
 
 # ----- analysis_utils: get_peak_specs -----
@@ -2761,11 +2860,17 @@ def test_orchestrator_main_writes_manifest(orchestrator_prepared_output):
     # cpu_idle is always inserted first as a system-tier category.
     assert "cpu_idle" in names
     assert manifest["gpu_utilization"]["total_time_ms"] > 0
-    assert manifest["focus_csv_dir"] == os.path.join(
-        orchestrator_prepared_output, "perf_report_csvs"
-    )
+    assert manifest["focus_csv_dir"] == "perf_report_csvs"
+    assert set(manifest["platform_specs"]) == {
+        "peak_mem_bw_tbs",
+        "max_achievable_tflops",
+        "memory_gb",
+    }
     assert manifest["capture_folder"] is None
     assert "focus_job" not in manifest
+    assert os.path.isfile(
+        os.path.join(orchestrator_prepared_output, "cache", "model_info.json")
+    )
 
 
 def test_orchestrator_main_exports_category_data(orchestrator_prepared_output):
@@ -2776,22 +2881,6 @@ def test_orchestrator_main_exports_category_data(orchestrator_prepared_output):
     with open(os.path.join(cat_data, "fusion_candidates.json")) as f:
         fusion = json.load(f)
     assert isinstance(fusion, list)
-
-
-def test_orchestrator_main_writes_metadata_with_time_breakdown(
-    orchestrator_prepared_output,
-):
-    meta_path = os.path.join(
-        orchestrator_prepared_output, "metadata", "gemm_metadata.json"
-    )
-    assert os.path.isfile(meta_path)
-    with open(meta_path) as f:
-        meta = json.load(f)
-    assert meta["platform"] == "MI300X"
-    assert meta["category_name"] == "gemm"
-    # Step 5.5 augments each category metadata with a time_breakdown block.
-    assert "time_breakdown" in meta
-    assert "gpu_kernel_time_ms" in meta["time_breakdown"]
 
 
 # ----- Fixtures -----
@@ -2822,21 +2911,6 @@ def _valid_compute_findings(rank=1, row=None):
         f"<!-- reasoning-candidate tier=compute rank={rank} -->\n"
         "**Data:**\n\n"
         f"{header}\n{sep}\n{row}\n"
-        "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
-        "<!-- impact-end -->\n"
-    )
-
-
-def _valid_system_findings():
-    return (
-        "## Recommendations\n\n"
-        "### P1: Fix idle\n"
-        "**Insight**\n idle high\n**Action**\n overlap\n**Impact**\n medium\n"
-        "<!-- impact-begin kind=p_item low=1.0 mid=2.0 high=3.0 -->\n"
-        "<!-- impact-end -->\n\n"
-        "## Detailed Analysis\n\n"
-        "<!-- reasoning-candidate tier=system rank=1 -->\n"
-        "System detail block.\n"
         "<!-- impact-begin kind=detail_estimate low=1.0 mid=2.0 high=3.0 -->\n"
         "<!-- impact-end -->\n"
     )
@@ -2996,25 +3070,89 @@ def test_validate_findings_file_p_item_count_mismatch(tmp_path):
     assert any("P-item count" in e or "headings but" in e for e in errors)
 
 
+_IDLE_ENTRY = {"rank": 1, **SystemFindings.make("High GPU Idle Time", 20.0, 20.0)}
+
+
+def _valid_system_findings():
+    return (
+        "## Recommendations\n\n"
+        "### P1: High GPU Idle Time\n"
+        "**Insight**: idle is high\n"
+        "**Action**: overlap host work\n"
+        "<!-- impact-begin kind=p_item low=null mid=null high=null -->\n"
+        "**Impact**: Not quantifiable from trace data\n"
+        "<!-- impact-end -->\n\n"
+        "## Detailed Analysis\n\n"
+        "<!-- reasoning-candidate tier=system rank=1 -->\n"
+        "#### High GPU Idle Time\n\n"
+        "**Identification:** Idle is 20.0%, above the 15% threshold.\n\n"
+        "**Data:**\n\n"
+        "| Metric | Value |\n|---|---|\n"
+        "| Idle Time | 20.0 ms |\n| Idle % | 20.0% |\n\n"
+        "**Impact estimate:** Impact estimate is not quantifiable from trace data.\n"
+    )
+
+
+def _write_system_findings(tmp_path, content, entries):
+    (tmp_path / "category_data").mkdir()
+    (tmp_path / "category_data" / "cpu_idle_metrics.json").write_text(
+        json.dumps({"system_findings": entries})
+    )
+    (tmp_path / "system_findings").mkdir()
+    fp = tmp_path / "system_findings" / "cpu_idle_findings.md"
+    _write(str(fp), content)
+    return str(fp)
+
+
 def test_validate_findings_file_system_pass(tmp_path):
-    fp = tmp_path / "cpu_idle_findings.md"
-    _write(str(fp), _valid_system_findings())
-    passed, errors = validate_findings_file(str(fp), "system")
+    fp = _write_system_findings(tmp_path, _valid_system_findings(), [_IDLE_ENTRY])
+    passed, errors = validate_findings_file(fp, "system")
     assert passed, errors
 
 
-def test_metrics_json_for_findings_and_empty_category(tmp_path):
+@pytest.mark.parametrize(
+    "old, new, entries",
+    [
+        ("### P1: High GPU Idle Time", "### P1: Idle", [_IDLE_ENTRY]),
+        ("### P1:", "### System P1:", [_IDLE_ENTRY]),
+        ("### P1: High GPU Idle Time", "### P1: No Actionable Issues", []),
+        ("**Action**: overlap host work\n", "", [_IDLE_ENTRY]),
+        ("| Idle % | 20.0% |", "| Idle % | 21.0% |", [_IDLE_ENTRY]),
+        (
+            "| Metric | Value |\n|---|---|",
+            "| Metric | Value | Flagged |\n|---|---|---|",
+            [_IDLE_ENTRY],
+        ),
+        ("tier=system rank=1", "tier=system rank=2", [_IDLE_ENTRY]),
+    ],
+)
+def test_validate_findings_file_system_rejects_drift(tmp_path, old, new, entries):
+    content = _valid_system_findings().replace(old, new)
+    fp = _write_system_findings(tmp_path, content, entries)
+    passed, _ = validate_findings_file(fp, "system")
+    assert not passed
+
+
+def test_validate_findings_file_system_empty_list_passes(tmp_path):
+    fp = _write_system_findings(
+        tmp_path, "## Recommendations\n\n## Detailed Analysis\n", []
+    )
+    passed, errors = validate_findings_file(fp, "system")
+    assert passed, errors
+
+
+def test_metrics_json_for_findings_and_load(tmp_path):
     fp = tmp_path / "category_findings" / "gemm_findings.md"
     fp.parent.mkdir(parents=True)
     fp.write_text("x")
     mp = _metrics_json_for_findings(str(fp))
     assert mp.endswith("category_data/gemm_metrics.json")
-    assert _category_findings_empty(str(fp)) is False
+    assert _load_findings_metrics(str(fp)) == {}
     (tmp_path / "category_data").mkdir()
     (tmp_path / "category_data" / "gemm_metrics.json").write_text(
         json.dumps({"category_findings": []})
     )
-    assert _category_findings_empty(str(fp)) is True
+    assert _load_findings_metrics(str(fp)) == {"category_findings": []}
 
 
 def test_scan_args_cells_and_load_valid_args(tmp_path):
@@ -3413,6 +3551,38 @@ def test_validate_report_r5_compute_block_needs_its_data_table():
     ]
 
 
+def test_validate_report_r5_every_compute_p_item_needs_a_block():
+    """A Detailed Analysis without compute blocks would leave analysis.json with no kernels."""
+    summary = (
+        "## Compute Kernel Optimizations\n\n### Top Operations\n\n"
+        "### 🔴 P1: GEMM (hipBLASLt)\n\nprose\n\n### 🟡 P2: Attention\n\nprose\n\n"
+    )
+    table = "\n**Data:**\n\n| Operation | Args |\n|---|---|\n| aten::mm | (4, 8) |\n"
+    block_1 = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n#### P1: GEMM\n" + table
+    )
+    block_2 = (
+        "<!-- reasoning-candidate tier=compute rank=2 -->\n#### P2: Attention\n" + table
+    )
+    detailed = "## Detailed Analysis\n\n### Compute Kernel Insights\n\n"
+
+    assert (
+        _validate_report_reasoning_candidates(summary + detailed + block_1 + block_2)
+        == []
+    )
+    expected = (
+        "R5: Compute Kernel Optimizations has 2 P-item headings but Compute Kernel "
+        "Insights has {} reasoning-candidate tier=compute blocks; add one block per "
+        "P-item, each with its **Data:** table"
+    )
+    assert _validate_report_reasoning_candidates(summary + detailed) == [
+        expected.format(0)
+    ]
+    assert _validate_report_reasoning_candidates(summary + detailed + block_1) == [
+        expected.format(1)
+    ]
+
+
 def test_extract_detailed_analysis_subsection():
     content = "## Detailed Analysis\n\n### Compute Kernel Insights\n\n#### P1: x\nbody\n### Other\n"
     sub = _extract_detailed_analysis_subsection(content, "### Compute Kernel Insights")
@@ -3423,7 +3593,7 @@ def test_extract_detailed_analysis_subsection():
 def test_marker_validator_system_findings_requires_p_item(tmp_path):
     fp = tmp_path / "cpu_idle_findings.md"
     _write(str(fp), "## Recommendations\n\n## Detailed Analysis\n")
-    errors = MarkerValidator.check_findings_file(str(fp), "system_findings")
+    errors = MarkerValidator.check_findings_file(str(fp))
     assert any("missing required kind=p_item" in e for e in errors)
 
 
@@ -3435,7 +3605,7 @@ def test_marker_validator_p_item_heading_mismatch(tmp_path):
     )
     fp = tmp_path / "gemm_findings.md"
     _write(str(fp), text)
-    errors = MarkerValidator.check_findings_file(str(fp), "category_findings")
+    errors = MarkerValidator.check_findings_file(str(fp))
     assert any("headings but" in e for e in errors)
 
 
@@ -3467,8 +3637,8 @@ def test_prepare_model_identification_standalone(tmp_path, perf_csv_dir):
     dst = os.path.join(out, "perf_report_csvs", "unified_perf_summary.csv")
     pd.read_csv(src).to_csv(dst, index=False)
     assert prepare_model_identification_data(out) is True
-    assert os.path.isfile(os.path.join(out, "metadata", "condensed_op_info.csv"))
-    nn = open(os.path.join(out, "metadata", "nn_modules.txt")).read()
+    assert os.path.isfile(os.path.join(out, "cache", "condensed_op_info.csv"))
+    nn = open(os.path.join(out, "cache", "nn_modules.txt")).read()
     assert "LlamaMLP" in nn
 
 
@@ -3648,6 +3818,7 @@ def test_generate_priority_data_exception_fallback(tmp_path):
         data = json.load(f)
     assert data["baseline_ms"] == 0
     assert data["findings"] == []
+    assert data["system_findings"] == []
 
 
 # ----- plot_utils -----
@@ -4022,6 +4193,7 @@ def test_comparative_candidates_accumulate_instances():
     assert cand.comparative
     assert (cand.kernel_count_trace1, cand.kernel_count_trace2, cand.delta) == (2, 1, 1)
     assert cand.instance_count == 2
+    assert [k.op_uid for k in cand.kernels_trace1] == [10, 11]
     assert (cand.total_kernel_time_us_trace1, cand.total_kernel_time_us_trace2) == (
         16000.0,
         12000.0,
@@ -4123,7 +4295,7 @@ def test_orchestrator_main_missing_csv_exits(tmp_path):
 
 def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
 
-    out = str(tmp_path)
+    out = str(tmp_path / "run")
     _write_minimal_orchestrator_csvs(out, comparative=True)
     # Trace 2 fuses the add into the GEMM, so trace 1 has a fusion gap.
     pd.DataFrame(
@@ -4173,14 +4345,16 @@ def test_orchestrator_main_comparative_mocked(tmp_path, monkeypatch):
     )
     assert manifest["comparison_scope"] == "comparative"
     assert "trace2_gpu_utilization" in manifest
-    assert manifest["trace2_csv_dir"] == os.path.join(out, "perf_report_trace2_csvs")
-    assert os.path.isfile(os.path.join(out, "metadata", "trace2_gpu_utilization.json"))
+    assert manifest["trace2_csv_dir"] == "perf_report_trace2_csvs"
     candidates = json.loads(
         open(os.path.join(out, "category_data", "fusion_candidates.json")).read()
     )
     assert [(c["fusion_kind"], c["delta"]) for c in candidates] == [
         ("gemm_epilogue", 1)
     ]
+    moved = tmp_path / "moved"
+    shutil.move(out, moved)
+    assert perf_report_csv_dir(str(moved)) == str(moved / "perf_report_trace1_csvs")
 
 
 @pytest.mark.parametrize("merge_ok", [True, False], ids=["merged", "merge_failed"])
@@ -4264,6 +4438,45 @@ def test_orchestrator_main_standalone_mocked(tmp_path, monkeypatch):
     ]
 
 
+def test_orchestrator_main_ignores_stale_system_data_on_trace_failure(
+    tmp_path, monkeypatch
+):
+    out = str(tmp_path)
+    _write_minimal_orchestrator_csvs(out, comparative=False)
+    category_data = os.path.join(out, "category_data")
+    os.makedirs(category_data)
+    with open(os.path.join(category_data, "multi_kernel_data.json"), "w") as f:
+        json.dump({"memcpy_summary": {"total_count": 3}, "nccl_summary": {}}, f)
+    with open(os.path.join(category_data, "fusion_candidates.json"), "w") as f:
+        json.dump([{"base_name": "MLP"}], f)
+
+    class _FailingTreePerfAnalyzer:
+        @classmethod
+        def from_file(cls, *args, **kwargs):
+            raise RuntimeError("trace load failed")
+
+    monkeypatch.setattr(op, "TreePerfAnalyzer", _FailingTreePerfAnalyzer)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrator_prepare",
+            "--trace-path",
+            "/fake/trace.json",
+            "--platform",
+            "MI300X",
+            "--output-dir",
+            out,
+        ],
+    )
+    op.main()
+
+    with open(os.path.join(category_data, "category_manifest.json")) as f:
+        names = [c["name"] for c in json.load(f)["categories"]]
+    assert "multi_kernel" not in names
+    assert "kernel_fusion" not in names
+
+
 def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
     out = str(tmp_path)
     _write_minimal_orchestrator_csvs(out)
@@ -4339,7 +4552,7 @@ def test_orchestrator_main_multi_trace_mocked(tmp_path, monkeypatch):
 
     manifest = json.load(open(os.path.join(cat_dir, "category_manifest.json")))
     assert manifest["focus_job"] == "prefill_0"
-    assert manifest["focus_csv_dir"] == os.path.join(out, "perf_report_prefill_0_csvs")
+    assert manifest["focus_csv_dir"] == "perf_report_prefill_0_csvs"
     util = manifest["gpu_utilization"]
     assert util["total_time_ms"] == 1500.0
     assert list(util["nodes"]) == ["prefill_0", "decode_0"]
@@ -4380,62 +4593,6 @@ class TestOrchestratorPhase11:
             assert exc.value.code == 1
         finally:
             sys.argv = old_argv
-
-    def test_orchestrator_bottleneck_top5_fallback(self, tmp_path, monkeypatch):
-
-        out = str(tmp_path / "orch_out")
-        _write_minimal_orchestrator_csvs(out, comparative=False)
-        csv_dir = os.path.join(out, "perf_report_csvs")
-        rows = []
-        for i in range(8):
-            rows.append(
-                {
-                    "name": f"aten::op_{i}",
-                    "op category": "GEMM",
-                    "Kernel Time (µs)_sum": float(100 + i),
-                    "total_duration_us": 60000.0,
-                    "kernel_details_summary": f"[{{'name': 'k{i}'}}]",
-                    "Data Moved (MB)": 1.0,
-                    "perf_params": "{}",
-                    "Input Dims": "[[2,3]]",
-                }
-            )
-        pd.DataFrame(rows).to_csv(
-            os.path.join(csv_dir, "unified_perf_summary.csv"), index=False
-        )
-        pd.DataFrame({"name": ["aten::op_0"], "op category": ["GEMM"]}).to_csv(
-            os.path.join(csv_dir, "ops_summary.csv"), index=False
-        )
-
-        class _FakeTPA:
-            @classmethod
-            def from_file(cls, *args, **kwargs):
-                k = _kernel_event(0, "k0", dur=100)
-                mod = {
-                    "name": "aten::mm",
-                    "_category": "aten",
-                    "gpu_events": [0],
-                    "ts": 0,
-                }
-                tree = _StubTree([mod, k], {0: k})
-                return _StubAnalyzer(tree)
-
-        monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTPA)
-        old_argv = sys.argv
-        sys.argv = [
-            "orchestrator_prepare",
-            "--trace-path",
-            NORM_TRACE,
-            "--platform",
-            "MI300X",
-            "--output-dir",
-            out,
-        ]
-        try:
-            op.main()
-        finally:
-            sys.argv = old_argv
-        assert os.path.isdir(os.path.join(out, "category_data"))
 
 
 class TestOrchestratorPhase12B:
@@ -4537,64 +4694,6 @@ class TestOrchestratorPhase12B:
             open(os.path.join(out, "category_data", "multi_kernel_data.json")).read()
         )
         assert "overlap_analysis" in data
-
-    def test_sync_bottleneck_detection(self, tmp_path, monkeypatch):
-        rows = [
-            {
-                "name": "aten::slow_sync",
-                "op category": "GEMM",
-                "Kernel Time (µs)_sum": 100.0,
-                "total_duration_us": 5000000.0,
-                "kernel_details_summary": "[{'name': 'k0'}]",
-                "Data Moved (MB)": 1.0,
-                "perf_params": "{}",
-                "Input Dims": "[[2,3]]",
-            }
-        ]
-        out = self._run_orch(tmp_path, monkeypatch, rows)
-        meta_dir = os.path.join(out, "metadata")
-        gemm_meta = os.path.join(meta_dir, "gemm_metadata.json")
-        assert os.path.isfile(gemm_meta)
-
-
-@pytest.mark.parametrize("with_manifest", [True, False])
-def test_kernel_fusion_main_writes_metrics(tmp_path, with_manifest):
-
-    out = str(tmp_path)
-    _write_minimal_orchestrator_csvs(out, comparative=False)
-    cat_dir = os.path.join(out, "category_data")
-    os.makedirs(cat_dir, exist_ok=True)
-    with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
-        json.dump([_fusion_candidate().to_dict()], f)
-    if with_manifest:
-        with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
-            json.dump(
-                {
-                    "platform": "MI300X",
-                    "comparison_scope": "standalone",
-                    "focus_csv_dir": os.path.join(out, "perf_report_csvs"),
-                    "gpu_utilization": {"total_time_ms": 1000.0},
-                },
-                f,
-            )
-        meta_dir = os.path.join(out, "metadata")
-        os.makedirs(meta_dir)
-        json.dump(
-            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp32": 100}},
-            open(os.path.join(meta_dir, "gemm_metadata.json"), "w"),
-        )
-
-    old_argv = sys.argv
-    sys.argv = ["kernel_fusion_analysis", "--output-dir", out]
-    try:
-        kfa.main()
-    finally:
-        sys.argv = old_argv
-    metrics = json.loads(
-        open(os.path.join(out, "category_data", "kernel_fusion_metrics.json")).read()
-    )
-    assert metrics["status"] == "OK"
-    assert metrics["candidate_count"] == 1
 
 
 class TestOrchestratorPhase6:
@@ -4726,16 +4825,11 @@ class TestOrchestratorPhase6:
 def test_comparative_fusion_producer_to_rows(
     tmp_path, monkeypatch, platform2, same_platform
 ):
-    t1_dir, t2_dir, cat_dir, meta_dir = (
+    t1_dir, t2_dir, cat_dir = (
         tmp_path / d
-        for d in (
-            "perf_report_trace1_csvs",
-            "perf_report_trace2_csvs",
-            "category_data",
-            "metadata",
-        )
+        for d in ("perf_report_trace1_csvs", "perf_report_trace2_csvs", "category_data")
     )
-    for d in (t1_dir, t2_dir, cat_dir, meta_dir):
+    for d in (t1_dir, t2_dir, cat_dir):
         d.mkdir()
     pd.DataFrame(
         {
@@ -4789,19 +4883,18 @@ def test_comparative_fusion_producer_to_rows(
     pd.DataFrame([{"name": "aten::mm", **_CSV_ARGS, **perf_cols}]).to_csv(
         t2_dir / "unified_perf_summary.csv", index=False
     )
-    (meta_dir / "x_metadata.json").write_text(
-        json.dumps(
-            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1000}}
-        )
-    )
     (cat_dir / "category_manifest.json").write_text(
         json.dumps(
             {
                 "comparison_scope": "comparative",
                 "platform": "GPU_A",
                 "platform2": platform2,
-                "trace2_csv_dir": str(t2_dir),
-                "focus_csv_dir": str(t1_dir),
+                "platform_specs": {
+                    "peak_mem_bw_tbs": 5.3,
+                    "max_achievable_tflops": {"matrix_bf16": 1000},
+                },
+                "trace2_csv_dir": t2_dir.name,
+                "focus_csv_dir": t1_dir.name,
                 "gpu_utilization": {"total_time_ms": 1000.0},
                 "trace2_gpu_utilization": {"total_time_ms": 800.0},
             }

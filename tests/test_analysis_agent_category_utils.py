@@ -20,10 +20,6 @@ Covers every module under category_analyses/ plus the shared kernel classifier:
 
 import json, os, sys, pandas as pd, pytest
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ANALYSIS_DIR = os.path.join(REPO_ROOT, "TraceLens", "Agent", "Analysis")
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, os.path.join(ANALYSIS_DIR, "category_analyses"))
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
@@ -282,6 +278,12 @@ def _name_key(name):
             ("add", "norm"),
         ),
         (
+            "triton_red_fused__to_copy_add_copy__mean_mul_pow_rsqrt_0",
+            "RMSNorm (fused triton residual)",
+            "Normalization",
+            ("add", "norm"),
+        ),
+        (
             "triton_poi_fused__to_copy_add_mean_moe_forward_shared_pow_rsqrt_0",
             "RMSNorm (shared expert + norm)",
             "Normalization",
@@ -517,51 +519,50 @@ def test_split_multiple_gemm_boundaries():
 
 
 def _pricer(perf_rows=None, baseline_ms=1.0):
-    """Peak memory 1 MB/us, vector 1 TFLOPS, matrix 700 TFLOPS."""
+    """Peak memory 1 MB/us, vector 1 TFLOPS (fp32 0.5), matrix 700 TFLOPS."""
     return FusionPricer(
         FusionForms(TAXONOMY),
-        (1.048576, {"matrix_bf16": 700.0, "vector_bf16": 1.0}),
+        (1.048576, {"matrix_bf16": 700.0, "vector_bf16": 1.0, "vector_fp32": 0.5}),
         perf_rows or {},
         baseline_ms,
     )
 
 
-def _ew(name, dur_us, data_in=None, data_out=None, data_moved=None, gflops=None):
+def _ew(name, dur_us, data_in=None, data_out=None):
     return {
         "name": name,
         "is_matrix": False,
         "dur_us": dur_us,
-        "data_moved_mb": data_moved,
         "data_in_mb": data_in,
         "data_out_mb": data_out,
-        "gflops": gflops,
+        "compute_us": 0.0,
         "has_perf_data": True,
     }
 
 
 def test_roofline_savings_memory_only():
     """Single memory-bound kernel: fused == memory_time, savings = dur - memory_time."""
-    enriched = [_ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0, gflops=None)]
+    enriched = [_ew("ew", dur_us=10.0, data_in=1.0, data_out=1.0)]
     # 2 MB at 1 MB/us, frac=1.0 -> memory_time = 2 us; savings = 10 - 2
-    savings = _pricer()._roofline_savings_us(enriched, 100.0)
+    savings = _pricer()._roofline_savings_us(enriched)
     assert savings == pytest.approx(8.0)
 
 
 def test_roofline_savings_no_modeled_returns_zero():
     enriched = [dict(_ew("ew", 10.0, 1.0, 1.0), has_perf_data=False)]
-    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched) == 0.0
 
 
 def test_roofline_savings_zero_external_data_returns_zero():
     enriched = [_ew("ew", 10.0, data_in=0.0, data_out=0.0)]
-    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched) == 0.0
 
 
 def test_roofline_savings_clamped_at_zero():
     """When current time is below fused time, savings clamp to 0."""
     enriched = [_ew("ew", dur_us=1.0, data_in=1.0, data_out=1.0)]
     # memory_time = 2 us > current 1.0 us -> savings clamp to 0
-    assert _pricer()._roofline_savings_us(enriched, 100.0) == 0.0
+    assert _pricer()._roofline_savings_us(enriched) == 0.0
 
 
 def test_roofline_savings_unmodeled_subtracted():
@@ -571,21 +572,18 @@ def test_roofline_savings_unmodeled_subtracted():
         dict(_ew("unmodeled", dur_us=5.0), has_perf_data=False),
     ]
     # current = 15, memory_time = 2, unmodeled = 5
-    savings = _pricer()._roofline_savings_us(enriched, 100.0)
+    savings = _pricer()._roofline_savings_us(enriched)
     assert savings == pytest.approx(8.0)
 
 
-def test_roofline_savings_overlap_blend():
-    """Blends max (perfect overlap) and sum (no overlap) via OVERLAP_EFFICIENCY."""
+def test_roofline_savings_chain_ignores_later_inputs():
+    """A later input may re-read the first: only first in + last out count."""
     enriched = [
-        _ew("ew1", dur_us=10.0, data_in=1.0, gflops=0.0005),
-        _ew("ew2", dur_us=10.0, data_out=1.0, gflops=0.0005),
+        _ew("ew1", dur_us=10.0, data_in=1.0, data_out=1.0),
+        _ew("ew2", dur_us=10.0, data_in=2.0, data_out=1.0),
     ]
-    # memory_time = 2; vector_time = (0.001e9)/(1e12)*1e6 = 1.0; matrix = 0
-    # optimal = memory_time, sum = memory_time + 1, current = 20
-    savings = _pricer()._roofline_savings_us(enriched, 100.0)
-    expected = 20.0 - (2.0 + (1.0 - OVERLAP_EFFICIENCY) * 1.0)
-    assert savings == pytest.approx(expected)
+    # memory = 1 + 1 = 2 us, not 3; savings = 20 - 2
+    assert _pricer()._roofline_savings_us(enriched) == pytest.approx(18.0)
 
 
 # ----- FusionPricer.price -----
@@ -644,6 +642,75 @@ def test_price_matrix_op_launch_is_not_epilogue():
     ]
     est = _pricer(_golden_lookup()).price(_standalone_candidate(kernels, 600, []))
     assert est.impact_score_high == 20.0
+
+
+def _kernel(name, type_, dur_us, data_in, data_out, op_uid=None):
+    return KernelRecord(
+        name,
+        type_,
+        dur_us,
+        _name_key(name),
+        op_uid=op_uid,
+        data_in_mb=data_in,
+        data_out_mb=data_out,
+    )
+
+
+def test_price_each_op_at_its_own_peak():
+    """Compute is each op's GFLOPS over its own peak: 4 us at fp32, 2 us at bf16."""
+    rows = _lookup(ew_a=(2.0, 0.002, "vector_fp32"), ew_b=(2.0, 0.002, "vector_bf16"))
+    kernels = [
+        _kernel("ew_a", "Elementwise", 100, 1.0, 1.0),
+        _kernel("ew_b", "Elementwise", 100, 1.0, 1.0),
+    ]
+    est = _pricer(rows).price(_standalone_candidate(kernels, 200, []))
+    # memory 2 us, compute 6 us: fused = 6 + 0.15 * 2 = 6.3; savings 193.7 of 200
+    assert est.impact_score_high == 19.37
+
+
+def test_price_attention_span_is_one_fused_kernel():
+    """QK, softmax, PV: external bytes Q + K + V + O, both GEMMs' compute, softmax absorbed."""
+    rows = _lookup(qk=(34.0, 42.0, "matrix_bf16"), pv=(36.0, 42.0, "matrix_bf16"))
+    kernels = [
+        _kernel("qk", "GEMM", 150, 4.0, 30.0, op_uid=0),
+        KernelRecord("softmax_stub", "Softmax", 300, op_uid=1),
+        _kernel("pv", "GEMM", 150, 34.0, 2.0, op_uid=2),
+    ]
+    est = _pricer(rows).price(_standalone_candidate(kernels, 600, [], kind="attention"))
+    # memory (4 + 34 - 30 + 2) = 10 us, compute 60 + 60 us: fused = 120 + 0.15 * 10
+    assert est.impact_score_high == 47.85
+    assert est.bound_type == "compute"
+    assert est.estimation == "partial"
+    assert "their time is saved" in est.warning
+
+
+def test_price_op_counted_once():
+    """One op launching two kernels adds its compute once; both kernels still count."""
+    rows = _lookup(ew_a=(2.0, 0.002, "vector_bf16"))
+    kernels = [_kernel("ew_a", "Elementwise", 500, 1.0, 1.0, op_uid=0)] * 2
+    est = _pricer(rows).price(_standalone_candidate(kernels, 1000, []))
+    # memory 2 us, compute 2 us: fused = 2 + 0.15 * 2 = 2.3; savings 997.7 of 1000
+    assert est.impact_score_high == 99.77
+    assert est.modeled_kernel_count == 2
+
+
+@pytest.mark.parametrize(
+    "first_type,kind,impact_high",
+    [("Elementwise", "elementwise_chain", 19.8), ("GEMM", "attention", 10.0)],
+)
+def test_price_op_without_peak(first_type, kind, impact_high):
+    """GFLOPS with no resolvable peak: a non-matrix op adds no compute (memory 2 us
+    only); a matrix op blocks span pricing, leaving the epilogue credit (ew_add's
+    time)."""
+    rows = _lookup(op_a=(2.0, 1.0, None), ew_add=(2.0, None, None))
+    kernels = [
+        _kernel("op_a", first_type, 100, 1.0, 1.0),
+        _kernel("ew_add", "Elementwise", 100, 1.0, 1.0),
+    ]
+    est = _pricer(rows).price(_standalone_candidate(kernels, 200, [], kind=kind))
+    assert est.impact_score_high == impact_high
+    assert est.estimation == "full"
+    assert est.warning is None
 
 
 @pytest.mark.parametrize(
@@ -840,6 +907,18 @@ def test_memcpy_flagged_by_count():
     assert r["issues"][0]["direction"] == "H2D"
 
 
+def test_memcpy_d2d_flagged_by_percent():
+    summary = {
+        "total_time_us": 100_000,
+        "total_count": 3,
+        "by_direction": {
+            "D2D": {"count": 3, "total_time_us": 100_000, "avg_bytes": 1024},
+        },
+    }
+    r = classify_memcpy_severity(summary, total_time_ms=1000.0)
+    assert [i["direction"] for i in r["issues"]] == ["D2D"]
+
+
 def test_memcpy_not_flagged_below_thresholds():
     summary = {
         "total_time_us": 1_000,
@@ -998,17 +1077,17 @@ def test_cross_validate_both_zero_pass():
     ],
 )
 def test_parse_perf_params_workload_type(ctx, gen, expected):
-    params = {"sum_ctx_tokens": ctx, "sum_gen_tokens": gen}
+    params = {"c_sq": ctx, "g_sq": gen}
     r = parse_perf_params(str(params))
     assert r["workload_type"] == expected
 
 
 def test_parse_perf_params_workload_type_boundaries():
     """Boundary values 0.8 and 0.2 fall into the 'mixed' band (strict >/<)."""
-    at_high = parse_perf_params(str({"sum_ctx_tokens": 800, "sum_gen_tokens": 200}))
+    at_high = parse_perf_params(str({"c_sq": 800, "g_sq": 200}))
     assert at_high["ctx_ratio"] == 0.8
     assert at_high["workload_type"] == "mixed"
-    at_low = parse_perf_params(str({"sum_ctx_tokens": 200, "sum_gen_tokens": 800}))
+    at_low = parse_perf_params(str({"c_sq": 200, "g_sq": 800}))
     assert at_low["ctx_ratio"] == 0.2
     assert at_low["workload_type"] == "mixed"
 
@@ -1070,9 +1149,10 @@ def test_parse_kernel_breakdown_fwd_kernel_type():
 
 
 def test_parse_kernel_breakdown_strips_np_float64():
-    kd = "[{'name': 'k', 'mean_duration_us': np.float64(12.5)}]"
+    kd = "[{'name': 'kernel_a(anonymous namespace)', 'mean_duration_us': np.float64(12.5)}]"
     r = parse_kernel_breakdown(kd)
     assert r["total_kernel_time_us"] == 12.5
+    assert r["kernels"][0]["name"] == "kernel_a(anonymous namespace)"
 
 
 def test_parse_kernel_breakdown_empty():
@@ -1309,29 +1389,30 @@ def test_triton_extract_tallies_and_merges_specs():
 
 
 @pytest.mark.parametrize(
-    "name,quantized",
+    "compute_spec,quantized",
     [
-        ("gemm_w8a8", True),
-        ("fp8_matmul", True),
-        ("mxfp4_gemm", True),
-        ("Cijk_regular", False),
+        ("matrix_fp8", True),
+        ("matrix_fp4", True),
+        ("matrix_int8", True),
+        ("matrix_bf16", False),
     ],
 )
-def test_detect_quantized_gemm(name, quantized):
-    assert detect_quantized_gemm(name) is quantized
+def test_detect_quantized_gemm(compute_spec, quantized):
+    assert detect_quantized_gemm(compute_spec) is quantized
 
 
 def test_classify_gemm_operation():
-    q = classify_gemm_operation("gemm_int8", None)
+    q = classify_gemm_operation("gemm_a", {"Compute Spec": "matrix_fp8"})
     assert q == {"is_quantized": True, "gemm_type": "quantized"}
-    r = classify_gemm_operation("Cijk_plain", None)
+    r = classify_gemm_operation("gemm_b", {"Compute Spec": "matrix_bf16"})
     assert r == {"is_quantized": False, "gemm_type": "regular"}
 
 
 def test_gemm_extract_counts_quant_and_missing_perf():
     df = pd.DataFrame(
         {
-            "name": ["gemm_fp8", "Cijk_plain", "gemm_w4a16"],
+            "name": ["gemm_a", "gemm_b", "gemm_c"],
+            "Compute Spec": ["matrix_fp8", "matrix_bf16", "matrix_fp4"],
             "TFLOPS/s_mean": [100.0, float("nan"), float("nan")],
         }
     )
@@ -1341,7 +1422,7 @@ def test_gemm_extract_counts_quant_and_missing_perf():
 
 
 def test_gemm_extract_missing_tflops_column():
-    df = pd.DataFrame({"name": ["Cijk_plain"]})
+    df = pd.DataFrame({"name": ["gemm_a"], "Compute Spec": ["matrix_bf16"]})
     r = gemm_extract(df, _metadata())
     assert r["quantized_count"] == 0
     assert r["missing_perf_model_count"] == 0
@@ -1478,7 +1559,7 @@ def test_sdpa_extract_paged_breakdown_and_workload():
         {
             "name": ["paged_attention_2d"],
             "kernel_details_summary": [kd],
-            "perf_params": [str({"sum_ctx_tokens": 100, "sum_gen_tokens": 900})],
+            "perf_params": [str({"c_sq": 100, "g_sq": 900})],
         }
     )
     r = sdpa_extract(df, _metadata())
@@ -1496,7 +1577,7 @@ def test_sdpa_extract_mixed_workload():
     df = pd.DataFrame(
         {
             "name": ["flash_attn::fwd"],
-            "perf_params": [str({"sum_ctx_tokens": 500, "sum_gen_tokens": 500})],
+            "perf_params": [str({"c_sq": 500, "g_sq": 500})],
         }
     )
     r = sdpa_extract(df, _metadata())
@@ -1517,20 +1598,20 @@ def test_sdpa_extract_empty():
 
 
 def _write_category_inputs(base, category, ops_df):
-    """Lay out the {category}_ops.csv + {category}_metadata.json that
+    """Lay out the {category}_ops.csv + category_manifest.json that
     load_category_data expects under an output dir."""
     cat_dir = os.path.join(base, "category_data")
-    meta_dir = os.path.join(base, "metadata")
     os.makedirs(cat_dir, exist_ok=True)
-    os.makedirs(meta_dir, exist_ok=True)
     ops_df.to_csv(os.path.join(cat_dir, f"{category}_ops.csv"), index=False)
-    metadata = {
-        "max_achievable_tflops": {"matrix_bf16": 1300.0},
-        "peak_mem_bw_tbs": 5.3,
+    manifest = {
+        "platform_specs": {
+            "max_achievable_tflops": {"matrix_bf16": 1300.0},
+            "peak_mem_bw_tbs": 5.3,
+        },
         "gpu_utilization": {"total_time_ms": 100.0},
     }
-    with open(os.path.join(meta_dir, f"{category}_metadata.json"), "w") as f:
-        json.dump(metadata, f)
+    with open(os.path.join(cat_dir, "category_manifest.json"), "w") as f:
+        json.dump(manifest, f)
 
 
 def _read_metrics(base, category):
@@ -1543,6 +1624,7 @@ def _simple_ops():
         {
             "name": ["op_a", "op_b"],
             "count": [1, 2],
+            "Compute Spec": ["matrix_bf16", "matrix_fp8"],
             "Kernel Time (µs)_sum": [500.0, 300.0],
         }
     )
@@ -1551,9 +1633,9 @@ def _simple_ops():
 @pytest.mark.parametrize(
     "mod,category",
     [
-        (convolution_analysis, "convolution"),
+        (convolution_analysis, "conv_fwd"),
         (elementwise_analysis, "elementwise"),
-        (norm_analysis, "norm"),
+        (norm_analysis, "norm_fwd"),
         (reduce_analysis, "reduce"),
         (triton_analysis, "triton"),
         (gemm_analysis, "gemm"),
@@ -1563,7 +1645,8 @@ def _simple_ops():
 def test_driver_main_writes_ok_metrics(mod, category, tmp_path, monkeypatch):
     base = str(tmp_path)
     _write_category_inputs(base, category, _simple_ops())
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    category_args = [] if mod is triton_analysis else ["--category", category]
+    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base, *category_args])
     mod.main()
     metrics = _read_metrics(base, category)
     assert metrics["status"] == "OK"
@@ -1581,7 +1664,9 @@ def test_driver_other_main_writes_ok(tmp_path, monkeypatch):
         }
     )
     _write_category_inputs(base, "other", df)
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "other"]
+    )
     other_analysis.main()
     metrics = _read_metrics(base, "other")
     assert metrics["status"] == "OK"
@@ -1592,7 +1677,9 @@ def test_driver_other_main_writes_ok(tmp_path, monkeypatch):
 def test_driver_other_main_missing_csv_errors(tmp_path, monkeypatch):
     base = str(tmp_path)
     os.makedirs(os.path.join(base, "category_data"), exist_ok=True)
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "other"]
+    )
     with pytest.raises(SystemExit):
         other_analysis.main()
     metrics = _read_metrics(base, "other")
@@ -1602,7 +1689,9 @@ def test_driver_other_main_missing_csv_errors(tmp_path, monkeypatch):
 def test_driver_moe_main_no_data(tmp_path, monkeypatch):
     base = str(tmp_path)
     os.makedirs(os.path.join(base, "category_data"), exist_ok=True)
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "moe_fused"]
+    )
     moe_analysis.main()
     metrics = _read_metrics(base, "moe_fused")
     assert metrics["status"] == "NO_DATA"
@@ -1611,7 +1700,9 @@ def test_driver_moe_main_no_data(tmp_path, monkeypatch):
 def test_driver_moe_main_with_data(tmp_path, monkeypatch):
     base = str(tmp_path)
     _write_category_inputs(base, "moe_fused", _simple_ops())
-    monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--output-dir", base, "--category", "moe_fused"]
+    )
     moe_analysis.main()
     metrics = _read_metrics(base, "moe_fused")
     assert metrics["status"] == "OK"
@@ -1632,12 +1723,24 @@ def test_driver_cpu_idle_main(tmp_path, monkeypatch):
     pd.DataFrame({"Kernel Time (µs)_sum": [50.0], "Count": [5]}).to_csv(
         os.path.join(csv_dir, "ops_summary.csv"), index=False
     )
+    with open(os.path.join(base, "category_data", "category_manifest.json"), "w") as f:
+        json.dump({"focus_csv_dir": "perf_report_csvs", "focus_job": "node_a"}, f)
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     cpu_idle_analysis.main()
     metrics = _read_metrics(base, "cpu_idle")
     assert metrics["status"] == "OK"
+    assert metrics["node"] == "node_a"
     # idle 20% > 15% threshold
-    assert metrics["idle_flagged"] is True
+    assert metrics["system_findings"] == [
+        {
+            "rank": 1,
+            "title": "High GPU Idle Time",
+            "members": [
+                {"metric": "Idle Time", "value": 20.0, "unit": "ms"},
+                {"metric": "Idle %", "value": 20.0, "unit": "%"},
+            ],
+        }
+    ]
 
 
 # ----- kernel_fusion_analysis.main() end-to-end -----
@@ -1645,9 +1748,8 @@ def test_driver_cpu_idle_main(tmp_path, monkeypatch):
 
 def _write_fusion_inputs(base, candidates):
     cat_dir = os.path.join(base, "category_data")
-    meta_dir = os.path.join(base, "metadata")
     csv_dir = os.path.join(base, "perf_report_csvs")
-    for d in (cat_dir, meta_dir, csv_dir):
+    for d in (cat_dir, csv_dir):
         os.makedirs(d, exist_ok=True)
     with open(os.path.join(cat_dir, "fusion_candidates.json"), "w") as f:
         json.dump(candidates, f)
@@ -1655,14 +1757,13 @@ def _write_fusion_inputs(base, candidates):
         json.dump(
             {
                 "platform": "MI300X",
-                "focus_csv_dir": csv_dir,
+                "focus_csv_dir": "perf_report_csvs",
                 "gpu_utilization": {"total_time_ms": 100.0},
+                "platform_specs": {
+                    "peak_mem_bw_tbs": 5.3,
+                    "max_achievable_tflops": {"matrix_bf16": 1300.0},
+                },
             },
-            f,
-        )
-    with open(os.path.join(meta_dir, "gemm_metadata.json"), "w") as f:
-        json.dump(
-            {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_bf16": 1300.0}},
             f,
         )
     pd.DataFrame(
@@ -1679,14 +1780,19 @@ def _write_fusion_inputs(base, candidates):
     ).to_csv(os.path.join(csv_dir, "unified_perf_summary.csv"), index=False)
 
 
-def test_driver_fusion_main_missing_files_errors(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "missing", ["fusion_candidates.json", "category_manifest.json"]
+)
+def test_driver_fusion_main_missing_files_errors(tmp_path, monkeypatch, missing):
     base = str(tmp_path)
-    os.makedirs(os.path.join(base, "category_data"), exist_ok=True)
+    _write_fusion_inputs(base, [])
+    os.remove(os.path.join(base, "category_data", missing))
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     with pytest.raises(SystemExit):
         kernel_fusion_analysis.main()
     metrics = _read_metrics(base, "kernel_fusion")
     assert metrics["status"] == "ERROR"
+    assert missing in metrics["error"]
 
 
 def test_driver_fusion_main_no_candidates(tmp_path, monkeypatch):
@@ -1784,7 +1890,8 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
             "total_time_us": 100_000,
             "total_count": 5,
             "by_direction": {
-                "D2H": {"count": 3, "total_time_us": 100_000, "avg_bytes": 1024}
+                "D2H": {"count": 3, "total_time_us": 100_000, "avg_bytes": 1024},
+                "D2D": {"count": 11, "total_time_us": 1_000, "avg_bytes": 64},
             },
         },
         "overlap_analysis": {
@@ -1805,13 +1912,35 @@ def test_driver_multi_kernel_main_success(tmp_path, monkeypatch):
             "percent": [100.0, 4.0],
         }
     ).to_csv(os.path.join(csv_dir, "gpu_timeline.csv"), index=False)
+    with open(os.path.join(base, "category_data", "category_manifest.json"), "w") as f:
+        json.dump({"focus_csv_dir": "perf_report_csvs", "focus_job": "node_a"}, f)
     monkeypatch.setattr(sys, "argv", ["prog", "--output-dir", base])
     multi_kernel_analysis.main()
     metrics = _read_metrics(base, "multi_kernel")
     assert metrics["status"] == "SUCCESS"
-    assert metrics["memcpy_assessment"]["flagged"] is True
-    assert metrics["overlap_assessment"]["flagged"] is True
-    assert len(metrics["patterns_detected"]) >= 1
+    assert metrics["node"] == "node_a"
+    # 11 D2D copies at 0.5% of total time: count alone does not flag D2D
+    assert metrics["system_findings"] == [
+        {
+            "rank": 1,
+            "title": "D2H Memory Copy Overhead",
+            "members": [
+                {"metric": "Copy Count", "value": 3, "unit": "count"},
+                {"metric": "Copy Time", "value": 100.0, "unit": "ms"},
+                {"metric": "Copy %", "value": 50.0, "unit": "%"},
+            ],
+        },
+        {
+            "rank": 2,
+            "title": "Exposed Collective Communication",
+            "members": [
+                {"metric": "Exposed Communication Time", "value": 8.0, "unit": "ms"},
+                {"metric": "Exposed Communication %", "value": 8.0, "unit": "%"},
+                {"metric": "Compute/Comm Overlap %", "value": 20.0, "unit": "%"},
+                {"metric": "Total Communication Time", "value": 10.0, "unit": "ms"},
+            ],
+        },
+    ]
 
 
 class TestArchUtils:
@@ -1846,14 +1975,19 @@ class TestCategoryAnalysisHelpers:
     _META = {"peak_mem_bw_tbs": 5.3, "max_achievable_tflops": {"matrix_fp16": 654}}
 
     def test_gemm_classifiers(self):
-        assert gemm_analysis.detect_quantized_gemm("aten::w8a8_mm")
-        info = gemm_analysis.classify_gemm_operation("aten::mm", None)
+        assert gemm_analysis.detect_quantized_gemm("matrix_fp8")
+        info = gemm_analysis.classify_gemm_operation(
+            "aten::mm", {"Compute Spec": "matrix_bf16"}
+        )
         assert info["gemm_type"] == "regular"
-        qinfo = gemm_analysis.classify_gemm_operation("aten::fp8_mm", None)
+        qinfo = gemm_analysis.classify_gemm_operation(
+            "aten::fp8_mm", {"Compute Spec": "matrix_fp8"}
+        )
         assert qinfo["is_quantized"] is True
         ops = pd.DataFrame(
             {
                 "name": ["aten::mm", "aten::fp8_mm"],
+                "Compute Spec": ["matrix_bf16", "matrix_fp8"],
                 "TFLOPS/s_mean": [100.0, None],
             }
         )
@@ -2019,7 +2153,6 @@ def _build_moe_tree(events: List[Dict], add_python_func: bool = False) -> TraceT
 def _setup_gemm_output_dir(tmp_path):
     out = tmp_path / "analysis_output"
     (out / "category_data").mkdir(parents=True)
-    (out / "metadata").mkdir()
     df = pd.DataFrame(
         {
             "name": ["aten::mm", "aten::addmm"],
@@ -2039,14 +2172,14 @@ def _setup_gemm_output_dir(tmp_path):
         }
     )
     df.to_csv(out / "category_data" / "gemm_ops.csv", index=False)
-    meta = {
-        "platform": "MI300X",
-        "peak_mem_bw_tbs": 5.3,
-        "max_achievable_tflops": {"matrix_bf16": 708},
+    manifest = {
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 708},
+        },
         "gpu_utilization": {"total_time_ms": 1000.0},
-        "output_dir": str(out),
     }
-    (out / "metadata" / "gemm_metadata.json").write_text(json.dumps(meta))
+    (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
     return str(out)
 
 

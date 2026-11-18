@@ -8,8 +8,6 @@
 Performance models for pseudo-op extensions.
 """
 
-import re
-
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
@@ -21,6 +19,7 @@ from TraceLens.TraceUtils.utils.annotation_utils import (
     add_logical_batch_size,
 )
 import math
+import re
 
 
 class InferenceAttention:
@@ -104,6 +103,14 @@ class InferenceAttention:
     def _parse_chunk_stats(annotation):
         """context/generation sq-sk aggregates; raises if not a full sq/sk annotation."""
         return IterationAnnotation(annotation).chunk_stats()
+
+    @staticmethod
+    def _causal_kv_pairs(stats):
+        """(query, key) pairs a causal scorer visits, from the sq/sk aggregates."""
+        return sum(
+            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
+            for p in ("c", "g")
+        )
 
     @staticmethod
     def get_param_details(event):
@@ -1251,10 +1258,7 @@ class sgl_kernel_fast_topk_transform_fused:
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         params.update(stats)
-        params["valid_scores"] = sum(
-            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
-            for p in ("c", "g")
-        )
+        params["valid_scores"] = InferenceAttention._causal_kv_pairs(stats)
         return params
 
     def flops(self):
@@ -1285,6 +1289,448 @@ class sgl_kernel_fast_topk_transform_fused:
     def get_compute_precision(self):
         dtype = self.param_details.get("dtype_score")
         return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class pa_mqa_logits_mxfp4:
+    """HBM bytes of the MXFP4 query, its e8m0 scales and per-head BF16 weights, and per scored key its MXFP4 row, scale, page id share and FP32 logit.
+
+    Each row scores ``out[r, k] = sum_h relu(q[r, h] . K[k]) * w[r, h]`` over its
+    CSA-compressed context. The cache and logits buffers are sized for the
+    longest context, so the scored keys come from the step annotation: the
+    causal (query, key) pairs over the CSA compression stride. The
+    ``q_per_block`` rows of a CTA share each KV tile they load.
+
+    Expected Input Dims (aiter::_fwd_sched_raw):
+        [1] q (T, H, D/2) uint8          [2] q_scale (T, H, D/32) uint8
+        [3] kv_cache (pages, P, D/2)     [4] kv_scale (pages, P, D/32)
+        [6] weights (T, H) bf16          Concrete Inputs[16] = q_per_block
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    _PAGE_ID_BYTES = 4
+    _LOGIT_BYTES = 4
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            rows, heads, q_row = dims[1]
+            params = {
+                "rows": min(stats["c_sq"] + stats["g_sq"], rows),
+                "heads": heads,
+                "head_dim": 2 * q_row,
+                "q_row_bytes": q_row + dims[2][2],
+                "kv_row_bytes": dims[3][2] + dims[4][2],
+                "page_size": dims[3][1],
+                "weight_bytes": name2bpe(event["args"]["Input type"][6]),
+                "q_per_block": max(int(event["args"]["Concrete Inputs"][16]), 1),
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params["keys"] = (
+            InferenceAttention._causal_kv_pairs(stats)
+            // _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+        )
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # Per head: a head_dim dot product, then the ReLU-weighted head sum.
+        return p["keys"] * p["heads"] * (2 * p["head_dim"] + 2)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf") or p["weight_bytes"] is None:
+            return None
+        query = p["rows"] * p["heads"] * (p["q_row_bytes"] + p["weight_bytes"])
+        kv_per_key = p["kv_row_bytes"] + self._PAGE_ID_BYTES / p["page_size"]
+        return query + p["keys"] * (kv_per_key / p["q_per_block"] + self._LOGIT_BYTES)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def get_compute_precision(self):
+        return None if self.param_details.get("_no_perf") else torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return None if self.param_details.get("_no_perf") else "matrix"
+
+
+class rocm_aiter_sparse_attn_indexer(InferenceAttention):
+    """
+    Performance model for vllm::rocm_aiter_sparse_attn_indexer (DeepSeek sparse
+    attention "lightning indexer": fp8 MQA index-score + top-k selection).
+
+    Scores each query token against its context keys (single shared MQA key)
+    and writes a top-k index list; no value aggregation, so only the QK score
+    term is counted.
+
+    Expected Input Dims from trace:
+        [2] k cache (num_slots, 1, cache_row); cache_row = head_dim + block scales
+        [3] q       (N_Q, H, head_dim)
+        [4] k current-chunk (N_Q, head_dim)
+    Expected Input type from trace:
+        [2] unsigned char (fp8 k cache), [3] Float8_e4m3fn (q), [4] BFloat16 (k)
+    Expected Concrete Inputs from trace:
+        [8] index_topk
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
+            dims = event["args"]["Input Dims"]
+            types = event["args"].get("Input type", []) or []
+            N_Q, H, head_dim = dims[3][0], dims[3][1], dims[3][2]
+            # Cache row width (fp8 key + per-block e8m0 scales), 1 B/elem.
+            cache_row = dims[2][-1] if len(dims) > 2 and dims[2] else head_dim
+
+            concrete = event["args"].get("Concrete Inputs", []) or []
+            index_topk = 0
+            if len(concrete) > 8 and str(concrete[8]).strip().isdigit():
+                index_topk = int(concrete[8])
+
+            params = {
+                "B": 1,
+                "N_Q": N_Q,
+                "H_Q": H,
+                "H_KV": 1,  # MQA: single shared key per token
+                "N_KV": stats["c_sk"] + stats["g_sk"],
+                "d_h_qk": head_dim,
+                "d_h_v": head_dim,
+                "dropout": 0.0,
+                "causal": True,
+                "flash_impl": True,
+                "index_topk": index_topk,
+                "cache_row": cache_row,
+                "dtype_Q": types[3] if len(types) > 3 else "c10::Float8_e4m3fn",
+                "dtype_KV": types[2] if len(types) > 2 else "unsigned char",
+                "dtype_Kcur": types[4] if len(types) > 4 else "c10::BFloat16",
+            }
+            params.update(stats)
+            return params
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return InferenceAttention.no_perf_param_details()
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf") or p.get("_no_flops"):
+            return None
+        if p["c_sq"] == 0 and p["g_sq"] == 0:
+            raise NotImplementedError(
+                "sparse_attn_indexer perf model requires sq/sk annotations"
+            )
+        H, d = self.H_Q, self.d_h_qk
+        ctx_qk = H * (2 * p["c_sqsk"] - p["c_sqsq"]) * d  # prefill (causal)
+        gen_qk = H * (2 * p["g_sqsk"]) * d  # decode
+        return ctx_qk + gen_qk
+
+    def bytes(self, bytes_per_element=None):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_q = name2bpe(p.get("dtype_Q")) or 1
+        bpe_kcur = name2bpe(p.get("dtype_Kcur")) or 2
+        N_Q, H, d = self.N_Q, self.H_Q, self.d_h_qk
+        total_sk = p["c_sk"] + p["g_sk"]
+        cached_sk = max(total_sk - N_Q, 0)
+        # MQA: keys read once (shared across the H index heads), not per head.
+        read_q = N_Q * H * d * bpe_q
+        read_k_cached = cached_sk * p["cache_row"]  # fp8 key + scales, 1 B/elem
+        read_k_current = N_Q * d * bpe_kcur
+        read_weights = N_Q * H * 4  # fp32 per-head weights
+        # Sole HBM output is the top-k index list (int32); logits are streamed.
+        avg_ctx = total_sk / N_Q if N_Q else 0
+        topk = min(p["index_topk"], avg_ctx) if p["index_topk"] else avg_ctx
+        write_topk = N_Q * topk * 4
+        return read_q + read_k_cached + read_k_current + read_weights + write_topk
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        dtype = self.param_details.get("dtype_Q")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"
+
+
+def _compressed_indexer_valid_scores(stats, stride=None):
+    """Causal-corrected sq*sk mapped into compressed indexer slots.
+
+    Annotation ``sk`` is in token space. Flash CSA lightning-indexer scores
+    against keys compressed by ``stride`` (default
+    ``_V4PagedDecodeBase.CSA_COMPRESS_STRIDE``). Using uncompressed sqsk
+    over-counts decode bytes vs hardware counters by roughly that factor.
+    """
+    if stride is None:
+        stride = _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+    stride = max(int(stride), 1)
+    total = 0
+    for phase in ("c", "g"):
+        dense = (
+            stats[f"{phase}_sqsk"]
+            - (stats[f"{phase}_sqsq"] - stats[f"{phase}_sq"]) // 2
+        )
+        if dense > 0:
+            total += (int(dense) + stride - 1) // stride
+    return total
+
+
+class sgl_kernel_deepseek_v4_topk_transform_512:
+    """
+    Perf model for ``sgl_kernel::deepseek_v4_topk_transform_512``.
+
+    Flash / DeepSeek-V4 indexer path: select top-k score indices and rewrite
+    them into a paged dst page-table (optionally gathering from a src table).
+    Despite the ``_512`` suffix in the op name, ``topk`` is the dst page-table
+    width from ``Input Dims`` (commonly 512 on Flash, 1024 on DSV4-Pro).
+
+    Approximate signature (SGLang / sgl_kernel)::
+
+        deepseek_v4_topk_transform_512(
+            score,           # [rows, L_max], score dtype (often float/fp32)
+            lengths,         # [rows], int — valid score count per row
+            src_page_table,  # [rows, aux] or similar, int indices
+            dst_page_table,  # [rows, topk], int — top-k / page indices
+            ...              # scalars / unused trailing args
+        )
+
+    Expected ``Input Dims`` / ``Input type``:
+        [0] score (rows, L_max) — dtype score
+        [1] lengths (rows,) — int
+        [2] src/aux indices — int
+        [3] dst / topk indices (rows, topk) — int; ``topk`` from this width
+    Non-tensor: step annotation supplies causal sq/sk; valid score traffic is
+    compressed by the CSA indexer stride (see ``_compressed_indexer_valid_scores``).
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            rows = dims[0][0]
+            # topk from dst page-table width (Flash 512 / Pro 1024), not the op name.
+            topk = dims[3][1] if len(dims) > 3 and dims[3] and len(dims[3]) > 1 else 512
+            params = {
+                "rows": rows,
+                "topk": topk,
+                "dtype_score": types[0],
+                "dtype_page_table": types[3] if len(types) > 3 else "int",
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params.update(stats)
+        params["valid_scores"] = _compressed_indexer_valid_scores(stats)
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["valid_scores"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_score = name2bpe(p["dtype_score"])
+        bpe_idx = name2bpe(p["dtype_page_table"]) or 4
+        if bpe_score is None:
+            return None
+        rows, topk = p["rows"], p["topk"]
+        gathered = min(topk, p["valid_scores"] / rows) if rows else 0
+        read_scores = p["valid_scores"] * bpe_score
+        return read_scores + rows * (gathered + topk) * bpe_idx
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for indexer top-k is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class sgl_kernel_fast_topk:
+    """
+    Perf model for ``sgl_kernel::fast_topk`` (Flash decode indexer selection).
+
+    Selects the top-k score indices per row from a (possibly padded) score
+    buffer; used on the Flash decode indexer path alongside
+    ``deepseek_v4_topk_transform_512``.
+
+    Approximate signature (SGLang / sgl_kernel)::
+
+        fast_topk(
+            score,      # [rows, L_max], score dtype (often float/fp32)
+            topk_idx,   # [rows, topk], int — written top-k indices
+            lengths,    # [rows], int — valid score count per row
+            ...
+        )
+
+    Expected ``Input Dims`` / ``Input type``:
+        [0] score (rows, L_max) — dtype score
+        [1] topk_idx (rows, topk) — int; ``topk`` from this width
+        [2] lengths (rows,) — int
+    Non-tensor: step annotation supplies causal sq/sk; valid score traffic is
+    compressed by the CSA indexer stride (see ``_compressed_indexer_valid_scores``).
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            rows, l_max = dims[0][0], dims[0][1]
+            topk = dims[1][1] if len(dims) > 1 and dims[1] and len(dims[1]) > 1 else 0
+            params = {
+                "rows": rows,
+                "l_max": l_max,
+                "topk": topk,
+                "dtype_score": types[0],
+                "dtype_idx": types[1] if len(types) > 1 else "int",
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params.update(stats)
+        params["valid_scores"] = _compressed_indexer_valid_scores(stats)
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return p["valid_scores"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_score = name2bpe(p["dtype_score"])
+        bpe_idx = name2bpe(p["dtype_idx"]) or 4
+        if bpe_score is None:
+            return None
+        rows, topk = p["rows"], p["topk"]
+        return p["valid_scores"] * bpe_score + rows * topk * bpe_idx
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for fast_topk is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for fast_topk is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_score")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "vector"
+
+
+class fused_k_norm_rope_q_flashmla:
+    """
+    FlashMLA fused K-RMSNorm + RoPE + Q prep
+    (`fused_k_norm_rope_q_flashmla` / `fused_k_norm_rope_flashmla_with_q`).
+
+    Geometry from injector stamps (tokens, head_dim=512, rope_dim=64 defaults).
+    """
+
+    category = "FusedRoPE"
+    bwd_category = None
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            args = event.get("args") or {}
+            annotation = str(event.get("annotation", "NA"))
+            try:
+                stats = InferenceAttention._parse_chunk_stats(annotation)
+                tokens = stats["c_sq"] + stats["g_sq"]
+            except (NotImplementedError, ValueError, TypeError):
+                tokens = int(args.get("num_tokens") or 0)
+            d_h = int(args.get("d_h") or 512)
+            rope_dim = int(args.get("rope_dim") or 64)
+            if tokens <= 0:
+                return {"_no_perf": True}
+            return {
+                "tokens": tokens,
+                "d_h": d_h,
+                "rope_dim": rope_dim,
+                "dtype": "c10::BFloat16",
+            }
+        except (ValueError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # RMSNorm ~2*d_h + RoPE ~6*rope_dim per token (sin/cos apply pair)
+        return p["tokens"] * (2 * p["d_h"] + 6 * p["rope_dim"])
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe = name2bpe(p["dtype"]) or 2
+        # read K + write rotated K (+ optional Q touch ~ same width)
+        return 3 * p["tokens"] * p["d_h"] * bpe
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "bf16"
 
     def get_maf_type(self):
         return "vector"

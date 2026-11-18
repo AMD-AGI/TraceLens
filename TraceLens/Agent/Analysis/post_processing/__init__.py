@@ -25,6 +25,8 @@ from TraceLens.Agent.Analysis.post_processing.candidate_schema import (
     FusionTask,
     Impact,
     ReportInfo,
+    SystemMember,
+    SystemTask,
     TaskMember,
     TopOperationRow,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "FusionTask",
     "Impact",
     "ReportInfo",
+    "SystemMember",
+    "SystemTask",
     "TaskMember",
     "TopOperationRow",
 ]

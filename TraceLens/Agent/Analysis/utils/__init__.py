@@ -6,10 +6,6 @@
 
 """Agent utilities package."""
 
-from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
-    build_category_findings,
-)
-
 from .arch_utils import list_platforms, load_arch
 from .deterministic_fallback import (
     GRAPH_REPLAY_FRACTION_MAX,
@@ -21,11 +17,11 @@ from .plot_utils import (
     generate_perf_plot,
 )
 from .report_utils import (
-    prepare_model_identification_data,
     generate_priority_data,
     load_findings,
     load_manifest,
     load_manifest_categories,
+    prepare_model_identification_data,
     write_csv,
 )
 from .validation_utils import (
@@ -35,11 +31,9 @@ from .validation_utils import (
 )
 
 __all__ = [
-    "build_category_findings",
-    "check_graph_replay_coverage",
-    "GraphReplayCoverage",
     "GRAPH_REPLAY_FRACTION_MAX",
-    "prepare_model_identification_data",
+    "GraphReplayCoverage",
+    "check_graph_replay_coverage",
     "generate_and_embed_plot",
     "generate_perf_plot",
     "generate_priority_data",
@@ -48,6 +42,7 @@ __all__ = [
     "load_findings",
     "load_manifest",
     "load_manifest_categories",
+    "prepare_model_identification_data",
     "validate_findings_file",
     "validate_report",
     "validate_subagent_outputs",

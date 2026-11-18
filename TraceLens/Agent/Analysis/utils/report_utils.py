@@ -14,24 +14,24 @@ for the analysis report pipeline.
 import csv
 import json
 import os
-from collections import defaultdict
-from typing import List
 import re
+from collections import defaultdict
+
 import pandas as pd
 
 from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    SystemFindings,
     focus_job_utilization,
+    load_manifest,
     node_field,
     perf_report_csv_dir,
 )
 from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
-
-def load_manifest(output_dir: str) -> dict:
-    """Load and return the category manifest JSON from output_dir."""
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    with open(manifest_path) as f:
-        return json.load(f)
+# Constants
+MODEL_INFO_FIELDS = ("model", "architecture", "scale", "precision")
+# A compute category below this share of compute time is not listed as unmodeled.
+_UNMODELED_COMPUTE_FRACTION = 0.05
 
 
 def write_csv(path, rows, fieldnames, verbose=False):
@@ -46,9 +46,9 @@ def write_csv(path, rows, fieldnames, verbose=False):
 
 
 def prepare_model_identification_data(output_dir: str) -> bool:
-    """Prepare metadata files for the model-identification subagent.
+    """Prepare input files for the model-identification subagent.
 
-    Reads unified_perf_summary.csv and writes two files under metadata/:
+    Reads unified_perf_summary.csv and writes two files under cache/:
     - condensed_op_info.csv: name, Input type, Input Dims columns for op-level inference.
     - nn_modules.txt: unique nn.Module class names from trace.
 
@@ -70,11 +70,11 @@ def prepare_model_identification_data(output_dir: str) -> bool:
     except (ValueError, KeyError):
         return False
 
-    metadata_dir = os.path.join(output_dir, "metadata")
-    os.makedirs(metadata_dir, exist_ok=True)
+    cache_dir = os.path.join(output_dir, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
 
     df[["name", "Input type", "Input Dims"]].to_csv(
-        os.path.join(metadata_dir, "condensed_op_info.csv"), index=False
+        os.path.join(cache_dir, "condensed_op_info.csv"), index=False
     )
 
     nn_modules = sorted(
@@ -84,7 +84,7 @@ def prepare_model_identification_data(output_dir: str) -> bool:
             for m in re.findall(r"nn\.Module:\s*([^\s',\]]+)", str(cell))
         }
     )
-    with open(os.path.join(metadata_dir, "nn_modules.txt"), "w") as f:
+    with open(os.path.join(cache_dir, "nn_modules.txt"), "w") as f:
         f.write("\n".join(nn_modules) + "\n" if nn_modules else "")
 
     return True
@@ -136,7 +136,7 @@ def load_manifest_categories(output_dir):
     return result
 
 
-def _scan_findings_dir(output_dir: str, subdir: str) -> dict:
+def scan_findings_dir(output_dir: str, subdir: str) -> dict:
     """Read all *_findings.md files from a subdirectory.
 
     Returns ``{category_name: file_content}`` for every findings file found.
@@ -152,6 +152,19 @@ def _scan_findings_dir(output_dir: str, subdir: str) -> dict:
     return result
 
 
+def _split_failed(raw: dict) -> tuple[dict, list]:
+    """Split ``{category_name: content}`` into the findings that completed and
+    ``[{category, content}]`` for the ones that reported ``Status: ERROR``."""
+    findings = {}
+    failed = []
+    for name, content in raw.items():
+        if "Status: ERROR" in content:
+            failed.append({"category": name, "content": content})
+        else:
+            findings[name] = content
+    return findings, failed
+
+
 def load_findings(output_dir):
     """Load all findings from system-level and compute kernel subagents.
 
@@ -163,30 +176,18 @@ def load_findings(output_dir):
         manifest: the full category manifest dict
         top_ops: list of top operations from the manifest
     """
-    raw_system = _scan_findings_dir(output_dir, "system_findings")
-    system_findings = {}
-    failed_system = []
-    for name, content in raw_system.items():
-        if "Status: ERROR" in content:
-            failed_system.append({"category": name, "content": content})
-        else:
-            system_findings[name] = content
+    system_findings, failed_system = _split_failed(
+        scan_findings_dir(output_dir, "system_findings")
+    )
+    compute_findings, failed_compute = _split_failed(
+        scan_findings_dir(output_dir, "category_findings")
+    )
 
-    raw_compute = _scan_findings_dir(output_dir, "category_findings")
-    compute_findings = {}
-    failed_compute = []
-    for name, content in raw_compute.items():
-        if "Status: ERROR" in content:
-            failed_compute.append({"category": name, "content": content})
-        else:
-            compute_findings[name] = content
-
-    manifest = {}
-    top_ops = []
-    manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    if os.path.exists(manifest_path):
+    try:
         manifest = load_manifest(output_dir)
-        top_ops = manifest.get("top_operations", [])
+    except FileNotFoundError:
+        manifest = {}
+    top_ops = manifest.get("top_operations", [])
 
     result = {
         "system_findings": system_findings,
@@ -213,7 +214,7 @@ def load_findings(output_dir):
     return result
 
 
-def _rollup_quantified(findings: List[dict], per_node: bool) -> List[dict]:
+def _rollup_quantified(findings: list[dict], per_node: bool) -> list[dict]:
     """Quantified findings summed per category (per node and category when
     ``per_node``), sorted by ``impact_score`` descending.
 
@@ -235,7 +236,7 @@ def _rollup_quantified(findings: List[dict], per_node: bool) -> List[dict]:
         entry["impact_score"] += f.get("impact_score", 0)
         entry["impact_score_low"] += f.get("impact_score_low", 0)
         entry["impact_score_high"] += f.get("impact_score_high", 0)
-        entry["operation_count"] += f.get("operation_count", 0)
+        entry["operation_count"] += f.get("member_count", 0)
     return sorted(
         [
             {
@@ -259,7 +260,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
     deterministic source of truth for report P-item ordering, the Top-Ops
     table, and the optional detailed extension plot.
 
-    Produces four top-level arrays:
+    Produces five top-level arrays:
       - ``findings``: per-(category, bound_type, library, eff_bucket) groups
         from each ``_metrics.json::category_findings``. Sorted
         globally by ``impact_score`` with ``global_rank`` / ``category_rank``
@@ -273,6 +274,9 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
         applies to each node's category time.
       - ``recommendations``: the per-category quantified rollup, capped, used by
         the extension plot.
+      - ``system_findings``: every system script's ``system_findings`` merged
+        and ranked globally by share of GPU time. The rank is the report's
+        System-Level P-number.
       - ``all_estimates``: flat unfiltered audit trail of every per-op
         estimate the analyzers emitted.
 
@@ -295,15 +299,16 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             "computation_time_percent", 0
         )
         computation_time_ms = baseline_ms * computation_pct / 100
-        threshold_ms = computation_time_ms * 0.05
+        threshold_ms = computation_time_ms * _UNMODELED_COMPUTE_FRACTION
 
-        all_estimates: List[dict] = []
-        findings: List[dict] = []
+        all_estimates: list[dict] = []
+        findings: list[dict] = []
+        system_findings: list[dict] = []
         for fname in sorted(os.listdir(category_data_dir)):
             if not fname.endswith("_metrics.json"):
                 continue
             fpath = os.path.join(category_data_dir, fname)
-            with open(fpath, "r") as f:
+            with open(fpath) as f:
                 metrics = json.load(f)
             if metrics.get("status") in ("ERROR", "NO_DATA"):
                 continue
@@ -313,6 +318,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 cf["category"] = cat
                 cf["category_rank"] = cf.pop("rank", 0)
                 findings.append(cf)
+            system_findings.extend(metrics.get("system_findings", []))
 
         node_recs = _rollup_quantified(findings, per_node=True)
         plot_recs = _rollup_quantified(findings, per_node=False)[:max_recommendations]
@@ -323,7 +329,7 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
                 "display_name", cat_entry["name"]
             )
 
-        priorities: List[dict] = []
+        priorities: list[dict] = []
         # The cap would empty short nodes' Top Ops tables: single trace only.
         for rank, rec in enumerate(
             (
@@ -397,14 +403,16 @@ def generate_priority_data(output_dir: str, max_recommendations: int = 6) -> str
             "priorities": priorities,
             "recommendations": plot_recs,
             "findings": findings,
+            "system_findings": SystemFindings.rank(system_findings),
             "all_estimates": all_estimates,
         }
-    except Exception:
+    except Exception:  # Step 8.5 calls this bare and relies on the empty fallback file
         priority_data = {
             "baseline_ms": 0,
             "priorities": [],
             "recommendations": [],
             "findings": [],
+            "system_findings": [],
             "all_estimates": [],
         }
 
