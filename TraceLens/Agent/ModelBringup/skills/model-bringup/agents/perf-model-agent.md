@@ -38,7 +38,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 
 **Output files you must write:**
 - `<op_dir>/perf_model_pr.md` or `<op_dir>/perf_model_issue.md`, the draft body
-- `<op_dir>/validation/validation_report_<ts>.csv`, written by the validator
+- `<op_dir>/validation/validation_report.csv`, written by the validator
 - `<op_dir>/result.json`
 
 ---
@@ -49,7 +49,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 {"op": "<op>", "op_slug": "<op_slug>",
  "outcome": "modeled | categorized | blocked | error",
  "commit": "<sha or null>",
- "validation_csv": "<op_dir>/validation/validation_report_<ts>.csv | null",
+ "validation_csv": "<op_dir>/validation/validation_report.csv | null",
  "reason": "<required unless outcome is modeled or categorized>"}
 ```
 
@@ -116,7 +116,7 @@ Then write `<op_dir>/perf_model_pr.md` from the PR template and fill it in.
 
 If the op is categorize-only, the outcome is `categorized`: there is no perf model to validate, so skip Step 4. Commit the category mapping in `<op_worktree>` the same way, with the message `feat(perfmodel): Categorize <op>`, set `validation_csv` to null, and write `<op_dir>/perf_model_pr.md` from the same template, keeping only Operator and Changes. Operator ends "It had no category."
 
-If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring skill's stability and cost check ("Pseudo ops" in its reference.md), write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user. Write `<op_dir>/perf_model_issue.md` from the issue template.
+If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `precision-mismatch`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring skill's stability and cost check ("Pseudo ops" in its reference.md), write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user. Write `<op_dir>/perf_model_issue.md` from the issue template.
 
 Template rules:
 - Keep the sections in order. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, the issue's Pseudo Op Check when no pseudo op is proposed, and the issue's Validation when there are no validation rows.

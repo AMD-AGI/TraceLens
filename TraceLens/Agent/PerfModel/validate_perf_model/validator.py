@@ -42,7 +42,6 @@ import subprocess
 import sys
 import textwrap
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 
 from TraceLens.Agent.PerfModel.validate_perf_model.harnesses import (
@@ -132,6 +131,24 @@ _MEM_READ_RAW_COUNTERS = {
 }
 
 CATEGORIES = sorted({entry["category"] for entry in OP_REGISTRY.values()})
+# Categories whose kernels run on MFMA, where a precision mismatch blocks the
+# row. Elementwise ops are dominated by 32-bit VALU work whatever their dtype,
+# so for them the check is reported only.
+PRECISION_GATED_CATEGORIES = (
+    "attention",
+    "dsv3_mla_decode",
+    "dsv3_moe_flydsl",
+    "gemm",
+    "moe",
+    "vllm_attention",
+    "vllm_gemm",
+)
+# Relative difference allowed between the report's FLOPs or bytes and the
+# validator's prediction for the same event (report columns are rounded).
+REPORT_MATCH_RTOL = 1e-3
+VALIDATION_CSV = "validation_report.csv"
+# Kernel family: the name before template arguments or Triton tuning suffixes.
+KERNEL_FAMILY_RE = re.compile(r"^(?:void\s+)?([^<(]*?)(?:_BLOCK_|<|\(|$)")
 
 REPLAY_RUNNER = Path(__file__).resolve().parent / "replay" / "_runner.py"
 # Kernel replay/_runner.measure() launches right before the measured call.
@@ -181,6 +198,8 @@ CSV_COLUMNS = [
     "flops_ratio",
     "bytes_ratio",
     *BAND_COLUMNS.values(),
+    "precision_check",
+    "kernel_match",
     "run_status",
     "match_status",
     "comment",
@@ -928,6 +947,7 @@ def _case_fields(entry):
     """Result-row fields that identify a ``--cases`` entry."""
     return {
         "trace_name": entry["trace_name"],
+        "trace_kernels": entry.get("trace_kernels") or [],
         "csv_reported_flops": entry["csv_flops"],
         "csv_reported_bytes": entry["csv_bytes"],
     }
@@ -1352,9 +1372,8 @@ def main():
     )
     parser.add_argument(
         "--arch",
-        default="gfx942",
         choices=list(ARCH_COUNTER_CONFIGS.keys()),
-        help="GPU architecture (default: gfx942).",
+        help="GPU architecture; required for validation runs.",
     )
     parser.add_argument(
         "--output-dir",
@@ -1393,6 +1412,8 @@ def main():
     if args.discover:
         discover_missing_coverage()
         return None
+    if args.arch is None:
+        parser.error("--arch is required for validation runs.")
 
     if args.cases:
         if not args.output_dir:
@@ -1423,9 +1444,7 @@ def main():
                 print(f'\n  FAILED: {entry["trace_name"]}: {e}')
                 results.append(_fail_row(entry["registry_key"], e, _case_fields(entry)))
         _enrich_results(results)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_filename = f"validation_report_{timestamp}.csv"
-        csv_path = os.path.join(base_output_dir, csv_filename)
+        csv_path = os.path.join(base_output_dir, VALIDATION_CSV)
         write_results_csv(results, csv_path)
         print_batch_summary(results)
         return int(
@@ -1464,9 +1483,7 @@ def main():
             print(f"\n  FAILED: {op_name}: {e}")
             results.append(_fail_row(op_name, e, {}))
     _enrich_results(results)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_filename = f"validation_report_{timestamp}.csv"
-    csv_path = os.path.join(base_output_dir, csv_filename)
+    csv_path = os.path.join(base_output_dir, VALIDATION_CSV)
     write_results_csv(results, csv_path)
     print_batch_summary(results)
     return None
@@ -1827,23 +1844,71 @@ def _generate_comment(row):
         )
     elif prec == "NO DATA":
         parts.append("No ops counters collected for precision check")
+    if row.get("kernel_match") == "mismatch":
+        parts.append("Kernel mismatch: no measured kernel matches the traced ones")
     if parts:
         return "hint: " + "; ".join(parts)
     return "OK"
 
 
+def _kernel_family(name):
+    return KERNEL_FAMILY_RE.match(name).group(1).strip()
+
+
+def _kernel_match(row):
+    """``match`` when a measured kernel shares a family with a traced one.
+
+    Empty when the row carries no traced kernels (CLI dimensions, not
+    ``--cases``) or nothing was measured.
+    """
+    traced = {_kernel_family(k) for k in row.get("trace_kernels") or []}
+    measured = {_kernel_family(k) for k in (row.get("kernel_name") or "").split("; ")}
+    measured.discard("")
+    if not traced or not measured:
+        return ""
+    return "match" if traced & measured else "mismatch"
+
+
+def _report_mismatch(row):
+    """Why the prediction differs from the report's FLOPs or bytes, or None."""
+    for label, predicted, reported in (
+        ("FLOPs", row.get("predicted_flops"), row.get("csv_reported_flops")),
+        ("bytes", row.get("predicted_bytes"), row.get("csv_reported_bytes")),
+    ):
+        if predicted is None or reported in (None, ""):
+            continue
+        predicted, reported = float(predicted), float(reported)
+        if abs(predicted - reported) > REPORT_MATCH_RTOL * max(
+            abs(predicted), abs(reported)
+        ):
+            return f"prediction {label} {predicted:.0f} != report {reported:.0f}"
+    return None
+
+
 def _enrich_results(results):
-    """Add perf-model source metadata and auto-generated comments to results."""
+    """Add source metadata, checks, statuses and comments to results."""
     for r in results:
         cls_name, src_file, src_line = model_source(r["op"])
         r["perf_model_class"] = cls_name
         r["source_file"] = src_file
         r["source_line"] = src_line
+        mismatch = _report_mismatch(r)
+        if mismatch and r.get("run_status") in ("OK", "MODEL_ONLY"):
+            r["run_status"] = f"FAIL: {mismatch}"
+        r["precision_check"] = r.get("precision") or ""
+        r["kernel_match"] = _kernel_match(r)
+        precision_ok = not (
+            r["precision_check"] == "MISMATCH"
+            and not r.get("precision_reason")
+            and OP_REGISTRY[r["op"]]["category"] in PRECISION_GATED_CATEGORIES
+        )
         r["comment"] = _generate_comment(r)
         for ratio_col, band_col in BAND_COLUMNS.items():
             r[band_col] = ratio_band(ratio_col, r.get(ratio_col))
         r["match_status"] = match_status(
-            r.get("run_status"), [r[band] for band in BAND_COLUMNS.values()]
+            r.get("run_status"),
+            [r[band] for band in BAND_COLUMNS.values()],
+            precision_ok,
         )
     return results
 

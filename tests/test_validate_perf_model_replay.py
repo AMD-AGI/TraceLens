@@ -14,6 +14,7 @@ from TraceLens.Agent.PerfModel.validate_perf_model.harnesses import (
     _CSV_ONLY_OPS,
 )
 from TraceLens.Agent.PerfModel.validate_perf_model.validator import (
+    _enrich_results,
     parse_counter_csv,
     parse_kernel_runtime_ns,
 )
@@ -92,3 +93,75 @@ def test_every_csv_only_op_has_a_call_spec():
 
     missing = [key for key, *_ in _CSV_ONLY_OPS if key not in OP_CALL_SPEC]
     assert not missing, f"no OP_CALL_SPEC entry in replay/generic.py for {missing}"
+
+
+def _row(op, **fields):
+    return {
+        "op": op,
+        "run_status": "OK",
+        "flops_ratio": 1.0,
+        "bytes_ratio": 1.0,
+        "predicted_flops": 100.0,
+        "predicted_bytes": 10.0,
+        **fields,
+    }
+
+
+def test_precision_mismatch_blocks_only_mfma_ops():
+    gemm, norm, absent = _enrich_results(
+        [
+            _row("gemm_a8w8_blockscale", precision="MISMATCH"),
+            _row("rms_norm", precision="MISMATCH"),
+            _row(
+                "gemm_a8w8_blockscale",
+                precision="MISMATCH",
+                precision_reason="fp4 counter is not available on gfx942",
+            ),
+        ]
+    )
+    assert gemm["precision_check"] == "MISMATCH"
+    assert gemm["match_status"] == "precision-mismatch"
+    assert norm["match_status"] == "match"
+    assert absent["match_status"] == "match"
+
+
+def test_report_mismatch_fails_the_row():
+    same, differs = _enrich_results(
+        [
+            _row("rms_norm", csv_reported_flops=100.0, csv_reported_bytes=10.0),
+            _row("rms_norm", csv_reported_flops=150.0, csv_reported_bytes=10.0),
+        ]
+    )
+    assert same["run_status"] == "OK"
+    assert differs["run_status"].startswith("FAIL: prediction FLOPs")
+    assert differs["match_status"] == ""
+
+
+def test_kernel_match_compares_kernel_families():
+    rows = _enrich_results(
+        [
+            _row(
+                "rms_norm",
+                trace_kernels=["_k_BLOCK_SIZE_M_32"],
+                kernel_name="_k_BLOCK_SIZE_M_64; void other<int>(x)",
+            ),
+            _row("rms_norm", trace_kernels=["_k"], kernel_name="void other<int>(x)"),
+            _row("rms_norm", kernel_name="_k"),
+        ]
+    )
+    assert [r["kernel_match"] for r in rows] == ["match", "mismatch", ""]
+
+
+def test_arch_is_required():
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "TraceLens.Agent.PerfModel.validate_perf_model.validator",
+            "--op",
+            "rms_norm",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0 and "--arch is required" in proc.stderr
