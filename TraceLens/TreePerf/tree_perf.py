@@ -217,43 +217,6 @@ _TP_WORLD_SIZE_RES = (
 )
 
 
-def _detect_tp_world_size(event):
-    """TP world size from an aiter TP collective (fused all-reduce, all-gather,
-    or reduce-scatter) kernel name on this event, or None if it is not one."""
-    name = event.get("name", "")
-    for rgx in _TP_WORLD_SIZE_RES:
-        m = rgx.search(name)
-        if m:
-            return int(m.group(1))
-    return None
-
-
-# Global run/arch facts gathered from the event stream for perf models: an
-# ``arch`` key -> a per-event detector returning its value or None. Each value
-# is a global run property, so the first event that yields one wins. Add an
-# entry here to gather another fact in the same single pass.
-_ARCH_DETECTORS = {
-    "tp_world_size": _detect_tp_world_size,
-}
-
-
-def _detect_run_arch(events):
-    """Single pass over ``events`` gathering the global run/arch facts in
-    ``_ARCH_DETECTORS`` (currently TP world size). Returns a dict of
-    the facts found; the scan stops early once every detector has a value."""
-    found = {}
-    for e in events:
-        for key, detect in _ARCH_DETECTORS.items():
-            if key in found:
-                continue
-            value = detect(e)
-            if value is not None:
-                found[key] = value
-        if len(found) == len(_ARCH_DETECTORS):
-            break
-    return found
-
-
 def _propagate_annotation_to_synthetic_ops(tree, events):
     """Copy the enclosing iteration annotation onto Synthetic Op events
     that were created after ``apply_annotation`` ran.
@@ -2084,13 +2047,6 @@ class TreePerfAnalyzer:
 
         if events is None:
             events = self.collect_unified_perf_events(include_nccl=include_nccl)
-
-        arch_facts = _detect_run_arch(events)
-        if arch_facts:
-            if self.arch is None:
-                self.arch = {}
-            for key, value in arch_facts.items():
-                self.arch.setdefault(key, value)
 
         _propagate_annotation_to_synthetic_ops(self.tree, events)
 

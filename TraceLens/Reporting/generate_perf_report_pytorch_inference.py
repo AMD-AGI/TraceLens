@@ -71,8 +71,6 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "aiter::moe_sorting_opus_fwd",
     "pseudo_vllm_sparse_attn_decode",
     "sgl_kernel::fast_topk_transform_fused",
-    "hipModuleLaunchKernel->_gluon_deepgemm_fp8_paged_mqa_logits",
-    "hipModuleLaunchKernel->_gluon_fp8_mqa_logits",
     # Covers both backfilled forms via startswith: muse_extend_attention (Gluon
     # _muse_extend_kernel) and muse_extend_attention_fly (FlyDSL muse_extend_fly).
     # Only the backfilled (launcher_shapes) forms carry Input Dims and can be

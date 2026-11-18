@@ -339,14 +339,6 @@ _CXX_DTYPE_TO_TORCH = {
 }
 
 
-def cxx_dtype_to_torch(cxx_dtype):
-    """Map a C++ type name from a HIP kernel signature to a torch dtype string.
-
-    Returns None if the type is not recognized.
-    """
-    return _CXX_DTYPE_TO_TORCH.get(cxx_dtype)
-
-
 def parse_bool(input):
     if isinstance(input, bool):
         return input

@@ -66,8 +66,6 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
-    (re.compile(r".*allreduce_fusion_kernel_1stage"), "CustomCollective"),
-    (re.compile(r".*(?:paged_)?mqa_logits"), "InferenceAttention"),
     (re.compile(r".*_muse_extend_kernel"), "InferenceAttention"),
     (re.compile(r".*muse_extend_fly"), "InferenceAttention"),
     (re.compile(r".*_dense_partial"), "GEMM"),
@@ -508,36 +506,6 @@ def _match_gsplat(name):
 
 
 register_perf_model_matcher(_match_gsplat)
-
-
-def _match_allreduce_fusion_1stage(name):
-    """Resolve the AITER fused allreduce+residual+RMSNorm 1-stage kernel when it
-    appears as a Synthetic Op (hipLaunchKernel prefix, C++ template args in name)."""
-    if "allreduce_fusion_kernel_1stage" in name:
-        from TraceLens.PerfModel.extensions import (
-            custom_collectives_perf_model_extensions as _c,
-        )
-
-        return _c.allreduce_fusion_kernel_1stage_synthetic
-    return None
-
-
-register_perf_model_matcher(_match_allreduce_fusion_1stage)
-
-
-def _match_mqa_logits(name):
-    """Resolve gluon/deepgemm MQA logits kernels (DSA indexer) when they
-    appear as Synthetic Ops or cpu_ops — both paged and non-paged variants."""
-    if "mqa_logits" in name:
-        from TraceLens.PerfModel.extensions import (
-            attention_perf_model_extensions as _a,
-        )
-
-        return _a.paged_mqa_logits_preshuffle_synthetic
-    return None
-
-
-register_perf_model_matcher(_match_mqa_logits)
 
 
 def _match_muse_extend(name):
