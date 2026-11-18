@@ -659,9 +659,12 @@ class LinearWithGradAccumulationAndAsyncCommunication(GEMM):
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
-        bpe = name2bpe(self.param_details["dtype_A_B"][0])
+        d = self.param_details["dtype_A_B"]
         return super().bytes(
-            bpe_mat1=bpe, bpe_mat2=bpe, bpe_bias=bpe, bpe_output=bpe
+            bpe_mat1=name2bpe(d[0]),
+            bpe_mat2=name2bpe(d[1]),
+            bpe_bias=name2bpe(d[0]),
+            bpe_output=name2bpe(d[2]),
         )
 
     def flops_bwd(self):
