@@ -108,6 +108,8 @@ def test_match_status():
     assert match_status("OK", ["deviation", "over-predicted"]) == "over-predicted"
     assert match_status("OK", ["match", "deviation"]) == "deviation-suspect"
     assert match_status("OK", ["match", "match"]) == "match"
+    assert match_status("OK", ["match", "match"], False) == "precision-mismatch"
+    assert match_status("OK", ["over-predicted", "match"], False) == "over-predicted"
 
 
 def test_measured_bytes():
@@ -133,6 +135,22 @@ def test_unified_perf_ops_share_and_cases(tmp_path):
     cases = validation_cases(csv.parent)
     assert [c["trace_name"] for c in cases] == ["op_a"]
     assert cases[0]["input_dims"] == [(4, 8)] and cases[0]["csv_flops"] == 2e9
+
+
+def test_cases_split_by_concrete_inputs_and_carry_trace_kernels(tmp_path):
+    report = tmp_path / "perf_report_csvs"
+    report.mkdir()
+    header = "name,Input Dims,Input type,Concrete Inputs,Kernel Time (µs)_sum,has_perf_model,GFLOPS,kernel_details_summary\n"
+    kernels = "\"[{'name': 'k_a', 'count': 1}, {'name': 'k_b', 'count': 2}]\""
+    rows = [
+        f'op_a,"((4, 8),)",bf16,"(1e-06,)",1,True,2,{kernels}\n',
+        f'op_a,"((4, 8),)",bf16,"(1e-06,)",1,True,2,{kernels}\n',
+        f'op_a,"((4, 8),)",bf16,"(1e-05,)",1,True,2,{kernels}\n',
+    ]
+    (report / "unified_perf_summary.csv").write_text(header + "".join(rows))
+    cases = validation_cases(report)
+    assert [c["concrete_inputs"] for c in cases] == [[1e-06], [1e-05]]
+    assert cases[0]["trace_kernels"] == ["k_a", "k_b"]
 
 
 def test_gaps_drops_collectives_and_slugs(tmp_path):
