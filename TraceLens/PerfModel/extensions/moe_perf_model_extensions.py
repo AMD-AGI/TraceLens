@@ -1326,13 +1326,10 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
 
     @classmethod
     def get_param_details(cls, event):
-        # The run_a4w4 shape-backfill records the stage-1 launcher tensor args:
-        #   0  x / hidden states  (num_tokens, hidden)   bf16
-        #   1  scores             (num_tokens, top_k)    float
-        #   2  ids                (num_tokens, top_k)    int
-        #   3  norm_weight        (hidden,)              bf16
-        # The intermediate size and expert count are not carried by the launcher,
-        # so they stay Muse-Spark constants.
+        # run_a4w4 launcher tensor args: x (num_tokens, hidden), scores/ids
+        # (num_tokens, top_k), norm_weight (hidden). num_tokens / hidden / top_k
+        # come from these; the intermediate size and expert count are not carried
+        # by the launcher, so they stay Muse-Spark constants.
         dims = (event.get("args") or {}).get("Input Dims")
         try:
             num_tokens, hidden = dims[0][0], dims[0][1]

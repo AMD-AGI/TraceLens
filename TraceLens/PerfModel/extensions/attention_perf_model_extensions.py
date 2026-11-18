@@ -1801,14 +1801,14 @@ class muse_extend_fly_synthetic(muse_extend_synthetic):
     """Perf model for ``muse_extend_fly`` (FlyDSL extend attention).
 
     Identical attention to the Gluon :class:`muse_extend_synthetic`
-    (``_muse_extend_kernel``), but this op always dispatches to the FlyDSL kernel,
-    which computes the softmax denominator on the matrix core as a ``ones x P^T``
-    MFMA rather than with VALU adds.
+    (``_muse_extend_kernel``), except this kernel computes the softmax
+    denominator on the matrix cores as a ``ones x P^T`` row-sum (the Gluon
+    kernel does it with VALU adds). That row-sum is a rank-1 reduction over the
+    keys, so it adds **one depth** of matrix work over the same interaction
+    count I.
 
-        flops = H_Q * I * (d_h_qk + d_h_v + D_ROWSUM)
+        flops = H_Q * I * (d_h_qk + d_h_v + 1)
     """
-
-    D_ROWSUM = 32
 
     def flops(self):
         base = super().flops()
@@ -1817,6 +1817,7 @@ class muse_extend_fly_synthetic(muse_extend_synthetic):
         depth = self.d_h_qk + self.d_h_v
         if depth <= 0:
             return base
-        # base = H_Q * I * (d_h_qk + d_h_v); add the ones x P^T denominator as an
-        # extra depth-D_ROWSUM contraction over the same interaction count I.
-        return base // depth * (depth + self.D_ROWSUM)
+        # ones x P^T softmax denominator: a rank-1 (depth-1) row-sum over the
+        # keys, adding H_Q * I matrix MACs. base = H_Q * I * depth, so this is
+        # base + base/depth.
+        return base // depth * (depth + 1)

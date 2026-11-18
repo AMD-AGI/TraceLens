@@ -452,7 +452,7 @@ class TestCustomCollectivesExtensions:
 
 
 class TestAttentionExtensions:
-    def test_muse_extend_fly_adds_rowsum(self):
+    def test_muse_extend_fly_adds_logical_denominator(self):
         from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
 
         name = (
@@ -492,11 +492,12 @@ class TestAttentionExtensions:
         m = aext.muse_extend_fly_synthetic(event)
         assert m.H_Q == 16 and m.H_KV == 2 and m.d_h_qk == 64
         assert m.get_compute_precision() == "fp8"
-        # FlyDSL adds the ones x P^T denominator pass: depth 64+64+32 (vs the
-        # Gluon 64+64), i.e. 160/128 = 1.25x the base attention FLOPs.
+        # FlyDSL computes the softmax denominator (ones x P^T) on the matrix
+        # cores: a logical depth-1 row-sum (NO tile padding), i.e. +H_Q*I over
+        # the Gluon kernel's 64+64 depth.
+        assert m.flops() == 16 * (64 + 64 + 1) * 1849600
         gluon = aext.muse_extend_synthetic(event)
-        assert m.flops() == 16 * (64 + 64 + 32) * (2 * 1849600 - 1849600)
-        assert m.flops() == gluon.flops() * 160 // 128
+        assert m.flops() == gluon.flops() + 16 * 1849600
         assert m.bytes() == gluon.bytes()  # denominator adds no HBM traffic
 
     def test_gdn_attention_core(self):

@@ -510,7 +510,11 @@ register_perf_model_matcher(_match_gsplat)
 
 def _match_muse_extend(name):
     """Resolve the Muse-Spark target-model EXTEND (chunked-prefill / verify)
-    attention kernel when it appears as a Synthetic Op."""
+    attention kernel when it appears as a Synthetic Op.
+
+    The FlyDSL (``muse_extend_fly``) kernel computes the same attention as the
+    Gluon (``_muse_extend_kernel``) one plus the softmax denominator on the
+    matrix cores, so it uses a subclass that adds that logical row-sum."""
     from TraceLens.PerfModel.extensions import (
         attention_perf_model_extensions as _a,
     )
