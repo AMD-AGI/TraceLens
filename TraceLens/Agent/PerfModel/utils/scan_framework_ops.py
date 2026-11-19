@@ -14,13 +14,13 @@ Python-side torch op registrations that TraceLens can model.
 Usage
 -----
 # Scan all frameworks under a common parent (<DIR>/aiter, <DIR>/vllm, <DIR>/sglang):
-  python3 scan_framework_ops.py --repo-root /work
+  python3 -m TraceLens.Agent.PerfModel.utils.scan_framework_ops --repo-root /work
 
 # Scan one framework with a filter:
-  python3 scan_framework_ops.py --aiter /work/aiter --filter attention
+  python3 -m TraceLens.Agent.PerfModel.utils.scan_framework_ops --aiter /work/aiter --filter attention
 
 # Write the result table to JSON:
-  python3 scan_framework_ops.py --repo-root /work --output-json /tmp/ops.json
+  python3 -m TraceLens.Agent.PerfModel.utils.scan_framework_ops --repo-root /work --output-json /tmp/ops.json
 
 Registrations found
 -------------------

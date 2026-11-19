@@ -7,13 +7,11 @@ description: >-
   (--cases, built from a perf report with each row's shapes and perf_params),
   and writes a per-op report plus a summary CSV with a run status and match status per
   row. Covers GEMM, MoE, attention, norm, quant/activation and RoPE ops from
-  aiter, vLLM, SGLang and ATOM. Use when the user asks to validate a perf model,
-  check its FLOPs or bytes against hardware counters, follow the
-  validate-perf-model skill, or when the perf-model-generate skill hands off
-  for validation.
+  aiter, vLLM, SGLang and ATOM. Use to validate a perf model, check its FLOPs or
+  bytes against hardware counters, follow the validate-perf-model skill, or when
+  the perf-model-generate skill hands off for validation.
 license: MIT
 ---
-
 
 <!--
 Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
@@ -31,8 +29,7 @@ analytical and measured values has one of two causes:
   extra loads and stores because data does not fit in a cache level.
 
 The goal is to find the gap and, where there is one, read the kernel source to
-explain it. The counters show that values differ; they do not say why. Only
-change the perf model when the analytical model itself is wrong. Kernel
+explain it. The counters show that values differ; they do not say why. Kernel
 artifacts are not part of the operation, so they stay out of the model and are
 recorded as the cause of the deviation. When tiling or padding dominates a
 small shape, also validate larger shapes or multiples of the tile size.
@@ -44,17 +41,19 @@ workflow index below names the section for every step.
 
 ## Inputs
 
+The caller, such as the model-bringup skill, supplies:
+
 - A perf report's `perf_report_csvs` directory and the op names to validate (the
   perf-model-generate skill's Outputs), or an op key with dimensions. Build the
   cases JSON from the directory as "How a run works" in reference.md describes,
   and pass it with `--cases` and `--only-ops`.
-- A GPU, its `--arch` (required), and an output directory.
-- Where to run it, given by the user: a Python environment (conda env or
-  virtual environment), a Docker image, or the name of a running container.
-  It must meet the prerequisites in [reference.md](reference.md); the serving image of the framework that
-  owns the op usually does. Do not pick one yourself; if none is given, ask.
-  For a Docker image, start a container from it with the GPU devices passed
-  through, and run the validator inside it.
+- A GPU on the target machine, its `--arch` (required), and an output directory.
+- Where to run it: a Python environment (conda env or virtual environment), a
+  Docker image, or the name of a running container, usually as a command prefix.
+  It must meet the prerequisites in [reference.md](reference.md); the serving
+  image of the framework that owns the op usually does. For a Docker image,
+  start a container from it with the GPU devices passed through, and run the
+  validator inside it.
 
 ## Outputs
 
@@ -73,29 +72,32 @@ Per-ratio bands are in `flops_band` and `bytes_band`. Both ranges start at 1.0, 
 
 ## Workflow index
 
-| Step | What | reference.md section |
+| Step | What | Section |
 |---|---|---|
-| 0 | Have every input above, and check the prerequisites | Prerequisites |
-| 1 | Pick the ops: a cases file from a perf report, an op key, a category, or all | How a run works |
-| 2 | Run the validator | Running |
-| 3 | Read `run_status` and `match_status` for every row | Counters |
-| 4 | Investigate each `deviation-suspect` row and record the result in the CSV | Investigating a deviation |
-| 5 | Cover the variants that change the work | What to validate |
-
-An op with no harness yet: see "Adding an op: where things go".
+| 0 | Have every input above, and check the prerequisites | [Prerequisites](reference.md#prerequisites) |
+| 1 | Pick the ops: a cases file from a perf report, an op key, a category, or all | [How a run works](reference.md#how-a-run-works) |
+| 2 | If the trace name is in no `trace_names=` and not in `_CSV_ONLY_OPS`, write its harness | [Adding an op: where things go](reference.md#adding-an-op-where-things-go) |
+| 3 | Run the validator | [Running](reference.md#running) |
+| 4 | Read `run_status` and `match_status` for every row | [Outputs](#outputs) |
+| 5 | Cover the variants that change the work | [What to validate](reference.md#what-to-validate) |
+| 6 | Investigate each `deviation-suspect` row and record the result in the CSV | [Investigating a deviation](reference.md#investigating-a-deviation) |
 
 ## Rules
 
 - Change the perf model only when the analytical model is wrong, never just to match a counter.
 - `over-predicted` and `precision-mismatch` are never acceptable.
-- Edit the validation CSV only as "Investigating a deviation" allows: one row's `match_status` and `comment`, after the investigation.
+- Edit the validation CSV only as "Investigating a deviation" allows.
 - The harness must run the same kernel as the trace; in `--cases` runs, a `kernel_match` of `mismatch` means it did not, so fix the inputs before trusting a ratio.
-- Run only where the user said, with the GPU and output directory they gave.
+- Run only where the caller said, with the GPU and output directory they gave.
+
+## Stop rules
+
+Stop and report the reason, rather than guess, when a required input is missing: the target machine, where to run, the output directory or the ops. Do not pick an environment yourself.
 
 ## Error handling
 
-A `FAIL: <reason>` row: the reason and the per-op `validation_report.txt` say why. Fix the registration or the formula for a stated cause and rerun. Do not change a formula only to match a counter.
+A `FAIL: <reason>` row: the reason and the per-op `validation_report.txt` say why. Fix the registration or the formula for a stated cause and rerun.
 
-## Unattended use
+## Standalone use
 
-A caller without a user, such as the model-bringup skill, supplies the target machine, where to run (a Python environment, Docker image or container, usually as a command prefix), the output directory and the ops (`--cases` with `--only-ops`). Ask nothing; where one of them is missing, stop and report it as the reason.
+When a user runs this skill directly and gives no place to run, ask where: a Python environment, a Docker image or a running container.

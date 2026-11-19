@@ -34,9 +34,9 @@ workflow index below names the section for every step.
 
 | Input | Required | Default |
 |---|---|---|
-| The op: profiler `name`, kernel names and call stack (its rows in a `unified_perf_summary.csv`, or given directly) | yes | — |
-| The vendor framework source the op comes from | yes | — |
-| A TraceLens checkout to edit, and a Python environment (or command prefix) that imports it | yes | — |
+| The op: profiler `name`, kernel names and call stack (its rows in a `unified_perf_summary.csv`, or given directly) | yes | none |
+| The vendor framework source the op comes from | yes | none |
+| A TraceLens checkout to edit, and a Python environment (or command prefix) that imports it | yes | none |
 | Depth: full model or categorize-only | no | full; categorize-only for a `(Synthetic Op)` name |
 | Output mode: integrate or extension-only | no | integrate |
 | Validate with hardware counters | no | yes, with the validate-perf-model skill |
@@ -48,16 +48,14 @@ The perf model for the op in the chosen depth and mode, the regenerated report's
 
 ## Workflow index
 
-| Step | What | reference.md section |
-|---|---|---|
-| 1 | Apply the depth and output mode | Per-op choices |
-| 2 | Locate the binding and kernel; find the vendor roofline reference | Step 1, Step 2 |
-| 3 | Map `Input Dims` to the signature; pick the base class | Step 3, Step 4 |
-| 4 | Implement FLOPs, bytes, precision and annotation use; write the docstring | Step 5, Perf model class docstring template |
-| 5 | Register the op; `py_compile`; regenerate the report and check it | Step 6, Step 7, Output modes |
-| 6 | Hand the report directory and op name to the validate-perf-model skill | Hand off to validation |
-
-A pseudo op is never part of this flow by default: see "Pseudo ops" in reference.md.
+| What | reference.md section |
+|---|---|
+| Apply the depth and output mode | [Per-op choices](reference.md#per-op-choices) |
+| Locate the binding and kernel; find the vendor roofline reference | [Locate](reference.md#locate), [Vendor reference](reference.md#vendor-reference) |
+| Map `Input Dims` to the signature; pick the base class | [Map Input Dims](reference.md#map-input-dims), [Base class](reference.md#base-class) |
+| Implement FLOPs, bytes, precision and annotation use; write the docstring | [Implement](reference.md#implement), [Perf model class docstring template](reference.md#perf-model-class-docstring-template) |
+| Register the op; `py_compile`; regenerate the report and check it | [Register](reference.md#register), [Regenerate and check](reference.md#regenerate-and-check), [Output modes](reference.md#output-modes) |
+| Hand the report directory and op name to the validate-perf-model skill | [Hand off to validation](reference.md#hand-off-to-validation) |
 
 ## Rules
 
@@ -65,7 +63,6 @@ A pseudo op is never part of this flow by default: see "Pseudo ops" in reference
 - `get_param_details` returns every value `flops()` and `bytes()` use, including annotation-derived ones; validation runs from them.
 - Every registered class has the docstring from the template.
 - No perf model class for a `(Synthetic Op)` name; categorize it only.
-- Check reference.md's Pitfalls before finishing.
 
 ## Stop rules
 
@@ -73,7 +70,7 @@ Stop and report the reason, rather than guess, when:
 - a required input is missing;
 - the kernel source cannot be found: report the op and the paths searched. Do not guess FLOPs or bytes;
 - the wrapper, the kernel and the vendor formula disagree and the cause is unresolved: report the disagreement;
-- the op needs a pseudo op: never add one yourself. Run its stability and cost check ("Pseudo ops" in reference.md) and report the table as a decision for the user.
+- the op needs a pseudo op: never add one yourself. Run its stability and cost check ([Pseudo ops](reference.md#pseudo-ops)) and report the table as a decision for the caller.
 
 ## Standalone use
 

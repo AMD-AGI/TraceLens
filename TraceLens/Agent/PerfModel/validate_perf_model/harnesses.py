@@ -11,17 +11,8 @@ CLI dimensions (an ``argparse.Namespace``) into a synthetic TraceLens event,
 and the registry pairs it with the perf-model class that scores that event.
 ``OP_REGISTRY[key]["model_fn"](args)`` returns ``(flops, bytes, precision)``.
 
-Adding an op
-------------
-1. Add a ``@register("<key>", ...)`` builder below, in the section for its
-   op family. ``model=(source, name)``: ``source`` is a module constant
-   (``PERF_MODEL_EXT``, ``ATTN_EXT``, ``CORE_OP_MAP``, ...); ``name`` is the
-   class name or its trace op name. ``trace_names`` lists the trace op names
-   that map to the op in ``--cases`` mode.
-2. Add ``test_<key>(**kwargs)`` to the matching ``replay/<module>.py``. The
-   runner finds it by name and rocprofv3 profiles it.
-3. Ops validated only from ``--cases`` have no builder: add them to
-   the ``_CSV_ONLY_OPS`` table and to ``replay/generic.OP_CALL_SPEC``.
+To add an op, see ``validate-perf-model/reference.md``, section "Adding an op:
+where things go".
 """
 
 import functools
@@ -31,6 +22,7 @@ import os
 import re
 from pathlib import Path
 
+from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
 from TraceLens.TraceUtils.utils.annotation_utils import IterationAnnotation
 
 # Constants
@@ -278,14 +270,6 @@ def run_perf_model_from_event(
         event["annotation"] = chunk_stats_annotation(attn_params)
     event["kernel_names"] = ["placeholder_kernel"]
     event["kernel_details"] = [{"name": "placeholder_kernel"}]
-    try:
-        from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
-    except ImportError:
-        from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
-            get_pseudo_op_mappings,
-        )
-
-        op_to_perf_model_class_map = get_pseudo_op_mappings()
     model_cls = op_to_perf_model_class_map.get(trace_name)
     if model_cls is None:
         raise ValueError(f"No perf model class found for trace name '{trace_name}'")
