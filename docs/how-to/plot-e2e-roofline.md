@@ -107,16 +107,10 @@ Y uses the `Kernel Time (µs)_sum` column of the perf-report `*_ops.csv` files.
 
 X uses `GFLOPS` and `FLOPS/Byte` from the same files when both are filled.
 `GFLOPS` is one launch, so the kernel's FLOPs are `GFLOPS × 1e9 ×
-operation_count` and its bytes are that divided by `FLOPS/Byte`. A series uses
-this total when every kernel matched to it has both cells. One kernel without
-them means the profile does not describe the series, and the projection
-supplies the whole series.
-
-When the series does have those cells, the marker is the measured FLOPs and an
-arrow runs to the projection's FLOPs and bytes over the same kernel time. The
-open marker at the arrowhead is the modeled point. The arrow is drawn only for
-a profile: `--model-only` has no measured FLOPs, and a series the profile did
-not cost is already the projection, so neither gets an arrow.
+operation_count` and its bytes are that divided by `FLOPS/Byte`. A series
+sums the kernels that have both cells and divides that work by their kernel
+time. A kernel without them is left off the figure. `--model-only` has no
+profile, so every marker is the projection's FLOPs over its roofline time.
 
 The projection gives the FLOPs of one forward, and the number of times each op
 occurs in it (`instances`, written to the augmentation as `invocations`). The

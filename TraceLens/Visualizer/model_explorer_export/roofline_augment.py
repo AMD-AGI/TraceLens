@@ -65,6 +65,9 @@ _PROJECTION_CATEGORY = {
     "MoE_aux": "MoE",
     "MoE_comm_fwd": "MoE",
     "MoE_comm_bwd": "MoE",
+    # The trace labels a ``conv_`` kernel ``Conv``. The projection prices the
+    # same op as CONV_fwd.
+    "Conv": "CONV_fwd",
 }
 
 

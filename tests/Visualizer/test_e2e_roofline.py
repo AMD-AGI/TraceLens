@@ -15,23 +15,21 @@ import pytest
 
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
-
 from TraceLens.Visualizer.model_explorer_export.e2e_roofline import (
     DEFAULT_SERIES,
     Regime,
     RooflinePoint,
-    _draw_flop_arrows,
     achieved_tflops,
     bandwidth_tb_s,
     blend_peak_tflops,
     build_points,
     flag_points_above_roof,
     load_profile_kernels,
-    modeled_position,
     points_from_model,
     main,
     model_coverage,
+    figure_kernel_note,
+    figure_kernel_time_share,
     model_coverage_note,
     plot_e2e_roofline,
     regimes_from_augmentation,
@@ -48,7 +46,16 @@ _ARCH = {
 }
 
 
-def _op(category, flops, bytes_, *, per_launch=None, spec=None, instances=0):
+def _op(
+    category,
+    flops,
+    bytes_,
+    *,
+    per_launch=None,
+    spec=None,
+    instances=0,
+    roofline_time_us=0,
+):
     return {
         "category": category,
         "total_flops": flops,
@@ -56,11 +63,19 @@ def _op(category, flops, bytes_, *, per_launch=None, spec=None, instances=0):
         "compute_spec": spec,
         "flops_per_launch": per_launch,
         "instances": instances,
+        "roofline_time_us": roofline_time_us,
     }
 
 
 def _kernel(name, time_us, count):
     return {"name": name, "time_us": time_us, "count": count}
+
+
+def _priced(name, time_us, count, flops=1.0e9, bytes_=1.0e6):
+    kernel = _kernel(name, time_us, count)
+    kernel["flops"] = flops
+    kernel["bytes"] = bytes_
+    return kernel
 
 
 def test_ridge_is_peak_over_bandwidth():
@@ -79,9 +94,9 @@ def test_blend_is_the_flop_weighted_harmonic_mean():
     assert peak == 1.0 / (0.25 / 10100 + 0.75 / 2500)
 
 
-def test_point_uses_projection_intensity_and_profile_time():
-    # One forward is 4e9 FLOPs over 40 launches, and the capture ran 40 launches
-    # (one forward) in 20 µs, so the achieved rate is 4e9 / 20e-6 / 1e12 = 200.
+def test_projection_is_not_used_when_the_trace_has_no_flops():
+    # The projection prices this attention op, but the traced kernel has no
+    # perf-model shape. That graph is not drawn in its place.
     regime = Regime(
         "decode",
         3,
@@ -100,13 +115,8 @@ def test_point_uses_projection_intensity_and_profile_time():
         [regime],
         [_kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)],
     )
-    assert warnings == [
-        "Whole model decode matches End to end, so only End to end is drawn"
-    ]
-    point = next(item for item in points if item.series == "Decode attention")
-    assert point.arithmetic_intensity == 4.0e9 / 2.0e8
-    assert point.achieved_tflops == pytest.approx(achieved_tflops(4.0e9, 40, 40, 20.0))
-    assert point.achieved_tflops == pytest.approx(200.0)
+    assert warnings == []
+    assert points == []
 
 
 def test_mixed_capture_keeps_phases_apart_and_skips_end_to_end():
@@ -115,8 +125,8 @@ def test_mixed_capture_keeps_phases_apart_and_skips_end_to_end():
         Regime("prefill", 1, (_op("Attention", 8.0e9, 1.0e9, per_launch=2.0e8),)),
     ]
     kernels = [
-        _kernel("decode/flash_attn::_flash_attn_forward", 1.0e4, 10),
-        _kernel("prefill/flash_attn::_flash_attn_varlen_forward", 5.0e4, 4),
+        _priced("decode/flash_attn::_flash_attn_forward", 1.0e4, 10),
+        _priced("prefill/flash_attn::_flash_attn_varlen_forward", 5.0e4, 4),
         _kernel("mfma_moe1_t32", 9.0e4, 100),
         _kernel("aiter::cross_device_reduce_1stage", 6.5e9, 1),
     ]
@@ -152,8 +162,8 @@ def test_include_assigns_an_unscoped_kernel_to_one_phase():
         ),
     ]
     kernels = [
-        _kernel("aiter::moe_align_block_size", 1.0e5, 50),
-        _kernel("aiter::moe_sum", 2.0e5, 8),
+        _priced("aiter::moe_align_block_size", 1.0e5, 50),
+        _priced("aiter::moe_sum", 2.0e5, 8),
     ]
     points, _warnings = build_points(
         regimes,
@@ -170,7 +180,7 @@ def test_include_assigns_an_unscoped_kernel_to_one_phase():
     }
 
 
-def test_same_launch_count_is_one_launch_and_different_counts_add():
+def test_kernels_without_profile_flops_are_not_priced_from_the_projection():
     regime = Regime(
         "decode",
         3,
@@ -186,12 +196,7 @@ def test_same_launch_count_is_one_launch_and_different_counts_add():
         kernels,
         includes={("decode", "Routed MoE"): ("aiter::moe",)},
     )
-    point = next(item for item in points if item.series == "Routed MoE")
-    assert point.time_us == 190.0
-    # Counts 10 and 4 are separate launches; the two kernels at 10 are one.
-    assert point.achieved_tflops == pytest.approx(
-        achieved_tflops(61.0e6, 61, 14, 190.0)
-    )
+    assert not any(point.series == "Routed MoE" for point in points)
 
 
 def test_whole_model_is_omitted_when_it_is_the_same_forward_as_end_to_end():
@@ -202,7 +207,7 @@ def test_whole_model_is_omitted_when_it_is_the_same_forward_as_end_to_end():
     )
     points, warnings = build_points(
         [regime],
-        [_kernel("decode/gemm", 1.0e3, 1)],
+        [_priced("decode/gemm", 1.0e3, 1, flops=6.0e9, bytes_=1.0e9)],
         time_overrides_us={
             ("decode", "End to end"): 1.0e3,
             ("decode", "Whole model"): 1.0e3,
@@ -241,10 +246,11 @@ def test_a_kernel_is_counted_by_its_computation_not_its_launcher():
         "prefill/vllm::qwen_gdn_attention_core->aiter::gemm_a8w8_blockscale_ck "
         "(Synthetic Op)"
     )
-    # The launcher name is not a category. ``conv_`` is the trace's Conv key.
-    assert report_kernel_category(conv) is None
+    # The launcher name is not a category. The conv kernels are the priced
+    # CONV_fwd op; the trace's ``conv_`` key is remapped to that name.
+    assert report_kernel_category(conv) == "CONV_fwd"
     assert report_kernel_category(recurrent) is None
-    assert report_kernel_category(post_conv) == "Conv"
+    assert report_kernel_category(post_conv) == "CONV_fwd"
     assert report_kernel_category(chunk_state) is None
     assert report_kernel_category(chunk_output) is None
     assert report_kernel_category(prepare) is None
@@ -277,21 +283,27 @@ def test_registered_ops_keep_the_report_category():
     )
     assert (
         report_kernel_category("prefill/vllm::rocm_aiter_act_mul_and_fp8_group_quant")
-        is None
+        == "GroupQuant"
     )
     assert (
         report_kernel_category(
             "decode/hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_kernel"
             "IDF16b (Synthetic Op)"
         )
-        is None
+        == "GroupQuant"
     )
     assert (
         report_kernel_category(
             "decode/hipGraphLaunch->_fused_rms_fp8_group_quant_kernel_BLOCK "
             "(Synthetic Op)"
         )
-        is None
+        == "GroupQuant"
+    )
+    assert (
+        report_kernel_category(
+            "prefill/triton_red_fused__to_copy_add_fused_add_rms_norm_2"
+        )
+        == "RMSNorm"
     )
     assert (
         report_kernel_category(
@@ -315,6 +327,22 @@ def test_registered_ops_keep_the_report_category():
         == "GroupQuant"
     )
     assert report_kernel_category("aiter::opus_moe_sorting_entry<K>") == "MoE"
+
+
+def test_top_kernel_markers_do_not_repeat():
+    kernels = []
+    for index in range(10):
+        kernel = _kernel(f"kernel_{index}", float(30 - index), 1)
+        kernel["flops"] = 1.0e9
+        kernel["bytes"] = 1.0e6
+        kernels.append(kernel)
+    markers = [
+        spec.marker
+        for spec in top_kernel_series(kernels, 10)
+        if spec.kernel_name is not None
+    ]
+    assert len(markers) == len(set(markers))
+    assert "D" not in markers
 
 
 def test_series_markers_do_not_repeat():
@@ -341,8 +369,8 @@ def test_perf_report_categories_are_series_and_unknown_is_not():
     points, _warnings = build_points(
         [regime],
         [
-            _kernel("prefill/aiter::gemm_a8w8_blockscale_ck", 100.0, 4),
-            _kernel(
+            _priced("prefill/aiter::gemm_a8w8_blockscale_ck", 100.0, 4),
+            _priced(
                 "prefill/vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant", 50.0, 4
             ),
             _kernel("prefill/not_a_known_kernel", 80.0, 4),
@@ -365,15 +393,17 @@ def test_time_override_is_one_forward():
     )
     points, warnings = build_points(
         [regime],
-        [_kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)],
+        [_priced("decode/flash_attn::_flash_attn_forward", 20.0, 40, 8.0e9, 1.0e8)],
         time_overrides_us={("decode", "End to end"): 1.0e3},
     )
     # The regime projects a GEMM and the profile has no GEMM kernel.
     assert warnings == ["GEMM decode: no profile time"]
     end_to_end = next(point for point in points if point.series == "End to end")
-    # 10e9 FLOPs in 1000 µs. The per-launch cost is not used.
-    assert end_to_end.achieved_tflops == pytest.approx(10.0e9 / 1.0e-3 / 1e12)
-    assert end_to_end.arithmetic_intensity == 10.0e9 / 1.2e9
+    # The traced attention work, over the one-forward time. The GEMM
+    # projection is not added.
+    assert end_to_end.flops == pytest.approx(8.0e9)
+    assert end_to_end.achieved_tflops == pytest.approx(8.0e9 / 1.0e-3 / 1e12)
+    assert end_to_end.arithmetic_intensity == pytest.approx(80.0)
 
 
 def test_profile_csv_and_plot(tmp_path):
@@ -391,6 +421,7 @@ def test_profile_csv_and_plot(tmp_path):
             "count": 40,
             "flops": None,
             "bytes": None,
+            "shape": "",
         }
     ]
     regime = Regime(
@@ -435,6 +466,8 @@ def test_cli_joins_augmentation_and_profile(tmp_path):
                     "name": "decode/flash_attn::_flash_attn_forward",
                     "time_us": 2.0e4,
                     "count": 40,
+                    "flops": 8.0e9,
+                    "bytes": 1.0e8,
                 }
             ]
         ),
@@ -468,10 +501,18 @@ def test_profile_flops_replace_the_export_when_every_kernel_has_them():
     regime = Regime(
         "decode",
         3,
-        (_op("Attention", 4.0e9, 2.0e8, per_launch=1.0e8, instances=40),),
+        (
+            _op(
+                "Attention",
+                4.0e9,
+                2.0e8,
+                per_launch=1.0e8,
+                instances=40,
+                roofline_time_us=40.0,
+            ),
+        ),
     )
     kernel = _kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)
-    # The profile's own shapes, not the projection's 4e9 FLOPs / 2e8 bytes.
     kernel["flops"] = 8.0e9
     kernel["bytes"] = 1.0e8
     points, warnings = build_points([regime], [kernel])
@@ -481,72 +522,12 @@ def test_profile_flops_replace_the_export_when_every_kernel_has_them():
     point = next(item for item in points if item.series == "Decode attention")
     assert point.cost_source == "profile"
     assert point.arithmetic_intensity == 80.0
+    assert point.flops == pytest.approx(8.0e9)
+    assert point.bytes == pytest.approx(1.0e8)
     assert point.achieved_tflops == pytest.approx(8.0e9 / 20.0e-6 / 1e12)
-    # One forward of the projection: 40 launches over 40 instances.
-    assert point.modeled_flops == pytest.approx(4.0e9)
-    assert point.modeled_bytes == pytest.approx(2.0e8)
-    intensity, rate = modeled_position(point)
-    assert intensity == pytest.approx(20.0)
-    assert rate == pytest.approx(4.0e9 / 20.0e-6 / 1e12)
 
 
-def test_arrow_runs_from_measured_flops_to_modeled(tmp_path):
-    point = RooflinePoint(
-        series="Decode attention",
-        phase="decode",
-        concurrency=3,
-        arithmetic_intensity=80.0,
-        achieved_tflops=400.0,
-        flops=8.0e9,
-        bytes=1.0e8,
-        time_us=20.0,
-        cost_source="profile",
-        modeled_flops=4.0e9,
-        modeled_bytes=2.0e8,
-    )
-    same = RooflinePoint(
-        series="GEMM",
-        phase="decode",
-        concurrency=3,
-        arithmetic_intensity=20.0,
-        achieved_tflops=200.0,
-        flops=4.0e9,
-        bytes=2.0e8,
-        time_us=20.0,
-        cost_source="profile",
-        modeled_flops=4.0e9,
-        modeled_bytes=2.0e8,
-    )
-    assert modeled_position(same) is None
-    fig, ax = plt.subplots()
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    assert _draw_flop_arrows(ax, [point, same], {3: "#336699"}, DEFAULT_SERIES)
-    arrows = [text for text in ax.texts if text.arrow_patch is not None]
-    assert len(arrows) == 1
-    assert arrows[0].xy == pytest.approx(modeled_position(point))
-    assert arrows[0].xyann == pytest.approx(
-        (point.arithmetic_intensity, point.achieved_tflops)
-    )
-    plt.close(fig)
-
-    regime = Regime(
-        "decode",
-        3,
-        (_op("Attention", 4.0e9, 2.0e8, instances=40, spec="matrix_bf16"),),
-    )
-    kernel = _kernel("decode/flash_attn::_flash_attn_forward", 20.0, 40)
-    kernel["flops"] = 8.0e9
-    kernel["bytes"] = 1.0e8
-    points, _warnings = build_points([regime], [kernel])
-    output = tmp_path / "arrow.png"
-    plot_e2e_roofline(
-        points, _ARCH, [regime], title="measured to modeled", output_path=output
-    )
-    assert output.stat().st_size > 0
-
-
-def test_one_uncosted_kernel_keeps_the_export_for_the_category():
+def test_uncosted_kernel_is_left_out_of_the_category():
     regime = Regime(
         "decode",
         3,
@@ -562,17 +543,15 @@ def test_one_uncosted_kernel_keeps_the_export_for_the_category():
         includes={("decode", "Routed MoE"): ("aiter::moe",)},
     )
     point = next(item for item in points if item.series == "Routed MoE")
-    assert point.cost_source == "export"
-    assert point.modeled_flops is None
-    assert modeled_position(point) is None
-    # The profile FLOPs are ignored: one kernel has no shape, so the export
-    # describes the category. Same launch count, so the two kernels are one launch.
-    assert point.achieved_tflops == pytest.approx(
-        achieved_tflops(61.0e6, 61, 10, 150.0)
-    )
+    # moe_sum has no traced shape. The static projection is not used for it,
+    # and its time is not added to the kernels that do have one.
+    assert point.cost_source == "profile"
+    assert point.flops == pytest.approx(1.0e15)
+    assert point.bytes == pytest.approx(1.0e12)
+    assert point.time_us == 100.0
 
 
-def test_whole_model_uses_profile_per_category_and_export_for_the_rest():
+def test_whole_model_uses_only_kernels_the_perf_model_costed():
     regime = Regime(
         "decode",
         3,
@@ -592,10 +571,12 @@ def test_whole_model_uses_profile_per_category_and_export_for_the_rest():
         "Whole model decode matches End to end, so only End to end is drawn"
     ]
     whole = next(item for item in points if item.series == "End to end")
-    assert whole.cost_source == "mixed"
-    assert whole.flops == pytest.approx(8.0e9 + 6.0e9)
-    assert whole.bytes == pytest.approx(1.0e8 + 1.0e9)
-    assert whole.time_us == 120.0
+    # aten::mm has no traced shape, so the GEMM projection is not added.
+    assert whole.cost_source == "profile"
+    assert whole.flops == pytest.approx(8.0e9)
+    assert whole.bytes == pytest.approx(1.0e8)
+    assert whole.time_us == 20.0
+    assert not any(point.series == "GEMM" for point in points)
     assert whole.arithmetic_intensity == pytest.approx(whole.flops / whole.bytes)
 
 
@@ -612,9 +593,9 @@ def test_whole_model_include_adds_unscoped_kernels_without_dropping_tagged():
         Regime("prefill", 1, (_op("Attention", 8.0e9, 1.0e9, instances=4),)),
     ]
     kernels = [
-        _kernel("decode/flash_attn::_flash_attn_forward", 100.0, 10),
-        _kernel("aten::mm", 50.0, 10),
-        _kernel("prefill/flash_attn::_flash_attn_varlen_forward", 80.0, 4),
+        _priced("decode/flash_attn::_flash_attn_forward", 100.0, 10),
+        _priced("aten::mm", 50.0, 10),
+        _priced("prefill/flash_attn::_flash_attn_varlen_forward", 80.0, 4),
     ]
     points, _warnings = build_points(
         regimes,
@@ -632,9 +613,10 @@ def test_profile_csv_reads_flops_and_bytes(tmp_path):
     # 2 GFLOP/launch * 3 launches, at 4 FLOP/byte.
     csv_path = tmp_path / "gemm_ops.csv"
     csv_path.write_text(
-        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte\n"
-        "aten::mm,3,15,2.0,4.0\n"
-        "hipGraphLaunch->mfma_moe1,61,100,,\n",
+        "name,operation_count,Kernel Time (µs)_sum,GFLOPS,FLOPS/Byte,"
+        "Roofline Time (µs)_first,Origami Time (µs)_first\n"
+        "aten::mm,3,15,2.0,4.0,10.0,30.0\n"
+        "hipGraphLaunch->mfma_moe1,61,100,,,,\n",
         encoding="utf-8",
     )
     kernels = {kernel["name"]: kernel for kernel in load_profile_kernels(tmp_path)}
@@ -656,14 +638,17 @@ def test_launch_scaling_uses_the_mean_launch_not_the_costliest():
         instances=61,
     )
     regime = Regime("prefill", 1, (rollup,))
-    # Two forwards ran: 122 launches in 71.2 ms.
+    # Two forwards ran: 122 launches in 71.2 ms. The traced work is the real
+    # total, not the rollup's costliest launch times the launch count.
     points, _warnings = build_points(
         [regime],
         [
-            _kernel(
+            _priced(
                 "prefill/flash_attn::_flash_attn_varlen_forward",
                 71213.7,
                 122,
+                flops=2 * total,
+                bytes_=2 * total / 8.0,
             )
         ],
     )
@@ -754,6 +739,73 @@ def test_unmodeled_kernels_under_one_percent_are_not_listed():
     assert "unmodeled" not in note
 
 
+def test_top_kernels_keep_one_marker_per_shape():
+    wide = _kernel("aiter::gemm", 80.0, 2)
+    wide["flops"] = 8.0e9
+    wide["bytes"] = 1.0e6
+    wide["shape"] = "((4096, 4096), ())"
+    narrow = _kernel("aiter::gemm", 20.0, 1)
+    narrow["flops"] = 1.0e9
+    narrow["bytes"] = 1.0e6
+    narrow["shape"] = "((128, 128), ())"
+    same = _kernel("aiter::gemm", 10.0, 1)
+    same["flops"] = 2.0e9
+    same["bytes"] = 1.0e6
+    same["shape"] = "((4096, 4096), ())"
+    series = top_kernel_series([wide, narrow, same], 3)
+    gemms = [spec for spec in series if spec.kernel_name == "aiter::gemm"]
+    assert {spec.kernel_shape for spec in gemms} == {
+        "((4096, 4096), ())",
+        "((128, 128), ())",
+    }
+    assert {spec.label for spec in gemms} == {
+        "aiter::gemm 4096×4096",
+        "aiter::gemm 128×128",
+    }
+    regime = Regime("prefill", 1, (_op("GEMM", 1.0, 1.0),))
+    points, _warnings = build_points([regime], [wide, narrow, same], series=series)
+    by_label = {point.series: point for point in points}
+    assert by_label["aiter::gemm 4096×4096"].flops == pytest.approx(10.0e9)
+    assert by_label["aiter::gemm 4096×4096"].time_us == 90.0
+    assert by_label["aiter::gemm 128×128"].flops == pytest.approx(1.0e9)
+    assert by_label["aiter::gemm 128×128"].time_us == 20.0
+
+
+def test_top_kernel_point_uses_the_traced_flops():
+    kernel = _kernel("aiter::gemm_a8w8_blockscale_ck", 20.0, 40)
+    kernel["flops"] = 8.0e9
+    kernel["bytes"] = 1.0e8
+    regime = Regime("prefill", 1, (_op("GEMM", 4.0e9, 2.0e8, instances=40),))
+    series = top_kernel_series([kernel], 1)
+    points, _warnings = build_points([regime], [kernel], series=series)
+    point = next(item for item in points if item.series != "End to end")
+    assert point.cost_source == "profile"
+    assert point.flops == pytest.approx(8.0e9)
+    assert point.bytes == pytest.approx(1.0e8)
+    assert point.arithmetic_intensity == pytest.approx(80.0)
+    assert point.achieved_tflops == pytest.approx(8.0e9 / 20.0e-6 / 1e12)
+
+
+def test_top_kernel_note_is_the_share_drawn_on_the_figure():
+    gemm = _kernel("gemm", 50.0, 1)
+    gemm["flops"] = 1.0e9
+    gemm["bytes"] = 1.0e6
+    quant = _kernel("quant", 20.0, 1)
+    quant["flops"] = 1.0e6
+    quant["bytes"] = 1.0e6
+    kernels = [gemm, _kernel("norm", 30.0, 1), quant]
+    series = top_kernel_series(kernels, 3)
+    # norm has no profile FLOPs, so the figure draws gemm and quant only.
+    regime = Regime("prefill", 1, (_op("GEMM", 1.0e9, 1.0e6),))
+    points, _warnings = build_points([regime], kernels, series=series)
+    share = figure_kernel_time_share(points, series, kernels)
+    assert share == pytest.approx(0.70)
+    assert figure_kernel_note(share) == (
+        "Figure shows kernels taking 70.0% of the run time."
+    )
+    assert figure_kernel_time_share(points, DEFAULT_SERIES, kernels) is None
+
+
 def test_communication_is_outside_the_coverage():
     regime = Regime("prefill", 1, (_op("GEMM", 10.0, 2.0),))
     kernels = [
@@ -817,6 +869,8 @@ def test_cli_warns_when_a_point_is_above_the_roof(tmp_path, capsys):
                     "name": "decode/flash_attn::_flash_attn_forward",
                     "time_us": 20.0,
                     "count": 40,
+                    "flops": 4.0e9,
+                    "bytes": 2.0e8,
                 }
             ]
         ),
@@ -861,8 +915,6 @@ def test_model_only_points_sit_on_the_roof():
     assert any("Whole model" in warning for warning in warnings)
     attention = by_series["Decode attention"]
     assert attention.cost_source == "model"
-    assert attention.modeled_flops is None
-    assert modeled_position(attention) is None
     assert attention.arithmetic_intensity == pytest.approx(20.0)
     assert attention.achieved_tflops == pytest.approx(160.0)
     assert attention.achieved_tflops == pytest.approx(
@@ -919,7 +971,6 @@ def test_cli_model_only_reads_no_profile(tmp_path, capsys):
     stdout = capsys.readouterr().out
     assert "source=model" in stdout
     assert "Decode attention" in stdout
-    assert "modeled=" not in stdout
     refused_top = main(
         [
             "--model-only",
@@ -981,41 +1032,38 @@ def test_profile_plot_keeps_the_slowest_kernels_and_end_to_end(tmp_path, capsys)
         {"name": "hipGraphLaunch->bare_kernel", "time_us": 500.0, "count": 1}
     )
     series = top_kernel_series(kernels, 3)
+    # bare_kernel is the longest run but has no FLOPs, so it does not take a slot.
     assert [spec.kernel_name for spec in series if spec.kernel_name] == [
-        "hipGraphLaunch->bare_kernel",
         "hipGraphLaunch->kernel_11",
         "hipGraphLaunch->kernel_10",
+        "hipGraphLaunch->kernel_09",
     ]
     assert [spec.label for spec in series] == [
-        "bare_kernel",
         "kernel_11",
         "kernel_10",
+        "kernel_09",
         "End to end",
     ]
     assert len(top_kernel_series(kernels)) == 11
     regime = Regime("decode", 3, (_op("GEMM", 4.0e9, 2.0e8, instances=1),))
     points, warnings = build_points([regime], kernels, series=series)
-    assert any(
-        "bare_kernel" in warning and "no profile FLOPs" in warning
-        for warning in warnings
-    )
+    assert not any("no profile FLOPs" in warning for warning in warnings)
     labels = {point.series for point in points}
-    assert labels == {"kernel_11", "kernel_10", "End to end"}
+    assert labels == {"kernel_11", "kernel_10", "kernel_09", "End to end"}
     slowest = next(point for point in points if point.series == "kernel_11")
     assert slowest.flops == pytest.approx(12.0e9)
     assert slowest.time_us == 120.0
     assert slowest.cost_source == "profile"
-    assert modeled_position(slowest) is None
     end = next(point for point in points if point.series == "End to end")
     assert end.flops > slowest.flops
 
-    peeled = top_kernel_series(
-        [
-            _kernel("hipGraphLaunch->gemm", 30.0, 1),
-            _kernel("gemm", 20.0, 1),
-        ],
-        2,
-    )
+    launched = _kernel("hipGraphLaunch->gemm", 30.0, 1)
+    launched["flops"] = 1.0e9
+    launched["bytes"] = 1.0e6
+    plain = _kernel("gemm", 20.0, 1)
+    plain["flops"] = 1.0e9
+    plain["bytes"] = 1.0e6
+    peeled = top_kernel_series([launched, plain], 2)
     assert {spec.label for spec in peeled} == {
         "hipGraphLaunch->gemm",
         "gemm",
@@ -1102,7 +1150,7 @@ def test_profile_plot_keeps_the_slowest_kernels_and_end_to_end(tmp_path, capsys)
     assert bare == 0
     bare_out = capsys.readouterr().out
     assert "kernel_03" in bare_out
-    assert "kernel_02" not in bare_out
+    assert "kernel_01" not in bare_out
 
 
 def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
@@ -1295,6 +1343,8 @@ def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
                     "name": "decode/flash_attn::_flash_attn_forward",
                     "time_us": 20.0,
                     "count": 4,
+                    "flops": 4.0e9,
+                    "bytes": 2.0e8,
                 }
             ]
         ),
@@ -1432,6 +1482,12 @@ def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(e2e, "_CATEGORY_MARKERS", ())
     with pytest.raises(RuntimeError, match="distinct markers"):
         e2e._category_series(("GEMM",))
-    monkeypatch.setattr(e2e, "_CATEGORY_MARKERS", ("o",))
+    monkeypatch.setattr(e2e, "_KERNEL_MARKERS", ("o",))
+    costly = []
+    for name, time_us in (("a", 2.0), ("b", 1.0)):
+        kernel = _kernel(name, time_us, 1)
+        kernel["flops"] = 1.0
+        kernel["bytes"] = 1.0
+        costly.append(kernel)
     with pytest.raises(ValueError, match="distinct markers"):
-        e2e.top_kernel_series([_kernel("a", 2.0, 1), _kernel("b", 1.0, 1)], 2)
+        e2e.top_kernel_series(costly, 2)

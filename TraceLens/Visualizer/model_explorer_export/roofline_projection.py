@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from pathlib import Path
 from dataclasses import dataclass, field, replace
 from math import prod
@@ -332,6 +333,9 @@ class RooflineOp:
     """Where the cost came from: graph leaf, parsed source, config, or fallback."""
     roofline_time_us: float | None = None
     roofline_bound: str | None = None
+    # Origami GEMM time, or the SDPA tile model timed with Origami. Set only
+    # with --enable-origami-gemm. The roofline time stays the roof.
+    origami_time_us: float | None = None
 
     @property
     def total_flops(self) -> float | None:
@@ -347,6 +351,14 @@ class RooflineOp:
             None
             if self.roofline_time_us is None
             else self.roofline_time_us * self.instances
+        )
+
+    @property
+    def total_origami_time_us(self) -> float | None:
+        return (
+            None
+            if self.origami_time_us is None
+            else self.origami_time_us * self.instances
         )
 
 
@@ -468,6 +480,7 @@ def project_roofline(
     num_predicted_tokens: int = 0,
     checkpoint: str | Path | None = None,
     kv_cache_bpe: float | None = None,
+    enable_origami_gemm: bool = False,
 ) -> RooflineProjection:
     """Project a kernel-by-kernel roofline for *spec* at a concrete batch/seq length.
 
@@ -486,6 +499,14 @@ def project_roofline(
     _populate_introspection(spec)
     # K and V are read from the cache. ``None`` keeps them at the activation width.
     _RT.kv_cache_bpe = kv_cache_bpe
+    # One flag, matching the perf report's Origami GEMM switch: GEMMs call
+    # Origami, and attention calls the SDPA tile model with Origami timing
+    # each tile GEMM.
+    global _origami_enabled, _origami_arch, _origami_arch_warned, _sim_note
+    _origami_enabled = enable_origami_gemm
+    _origami_arch = None
+    _origami_arch_warned = False
+    _sim_note = None
     moe_top_k = spec.num_experts_per_tok
     moe_intermediate_size = spec.moe_intermediate_size or spec.intermediate_size
     payload = build_model_explorer_payload(
@@ -1344,6 +1365,7 @@ def _finish_op(
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
 ) -> RooflineOp:
+    sim = _take_sim()
     base.category = category
     base.modeled = True
     base.flops = flops
@@ -1382,6 +1404,9 @@ def _finish_op(
         )
         base.roofline_time_us = roofline_time_us
         base.roofline_bound = roofline_bound
+    base.origami_time_us = _origami_time_us(
+        category, precision, dtype, bytes_moved, gpu_arch, sim
+    )
     return base
 
 
@@ -1549,6 +1574,127 @@ class _RuntimeIntrospection:
 
 
 _RT = _RuntimeIntrospection()
+
+# ``--enable-origami-gemm`` on the roofline projection. Times GEMMs with
+# Origami and attention with the SDPA tile model. Off unless the caller sets it.
+_origami_enabled = False
+# Shape note for the next ``_finish_op``. A list of ("gemm", (M, N, K, B))
+# or one ("sdpa", {B, H_Q, N_Q, N_KV, d_h, bytes}).
+_sim_note: list | None = None
+_origami_arch: dict[str, Any] | None = None
+_origami_arch_warned = False
+
+
+def _set_sim(note: list | None) -> None:
+    global _sim_note
+    _sim_note = note
+
+
+def _take_sim() -> list | None:
+    global _sim_note
+    note = _sim_note
+    _sim_note = None
+    return note
+
+
+def _origami_arch_for(gpu_arch: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Arch dict Origami and the SDPA tile model can time against.
+
+    Bundled specs name the peaks and the bandwidth. Origami also needs the
+    CU count, LDS, and clock, which a trace's deviceProperties would supply
+    to the perf report. With no trace, the installed GPU fills the gaps.
+    """
+    global _origami_arch, _origami_arch_warned
+    if gpu_arch is None:
+        return None
+    if _origami_arch is not None:
+        return _origami_arch
+    arch = dict(gpu_arch)
+    missing = [
+        key
+        for key in ("num_cus", "lds_capacity", "freq_mhz", "gemm_units_per_cu")
+        if not arch.get(key)
+    ]
+    if missing:
+        try:
+            import origami
+
+            hardware = origami.get_hardware_for_device(0)
+        except Exception as exc:  # noqa: BLE001
+            if not _origami_arch_warned:
+                warnings.warn(
+                    "Origami GEMM and SDPA times need num_cus, lds_capacity, "
+                    f"freq_mhz, and gemm_units_per_cu ({exc}).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _origami_arch_warned = True
+        else:
+            arch.setdefault("num_cus", int(hardware.N_CU))
+            arch.setdefault("lds_capacity", int(hardware.lds_capacity))
+            arch.setdefault(
+                "freq_mhz", int(round(float(hardware.compute_clock_ghz) * 1000))
+            )
+            parallel = getattr(hardware, "parallel_mi_cu", None)
+            if parallel:
+                arch.setdefault("gemm_units_per_cu", int(parallel))
+    _origami_arch = arch
+    return arch
+
+
+def _origami_time_us(
+    category: str,
+    precision: str | None,
+    dtype: str | None,
+    bytes_moved: float | None,
+    gpu_arch: dict[str, Any] | None,
+    sim: list | None,
+) -> float | None:
+    """Origami time for one launch, or None when the flag is off or it cannot time this op.
+
+    GEMM uses ``gemm_time_us``. Attention uses the SDPA tile model, which
+    times each tile GEMM with Origami. A sum of several GEMMs (a dense
+    SwiGLU tile) adds their times. Faster than the roofline is still
+    recorded; the plot keeps the roofline unless this time is slower.
+    """
+    if not _origami_enabled or not sim:
+        return None
+    arch = _origami_arch_for(gpu_arch)
+    if arch is None:
+        return None
+    from TraceLens.PerfModel import origami_helper, sdpa_tile
+
+    total = 0.0
+    timed = False
+    for kind, payload in sim:
+        try:
+            if kind == "gemm" and category == "GEMM" and precision:
+                m, n, k, batch = payload
+                part = origami_helper.gemm_time_us(
+                    arch, int(m), int(n), int(k), int(batch), precision
+                )
+            elif kind == "sdpa" and category in {ATTENTION_CATEGORY, "SDPA"}:
+                part = sdpa_tile.sdpa_fwd_time_us(
+                    arch,
+                    precision,
+                    dtype or precision,
+                    payload.get("bytes", bytes_moved),
+                    payload["B"],
+                    payload["H_Q"],
+                    payload["N_Q"],
+                    payload["N_KV"],
+                    payload["d_h"],
+                    fa=bool(arch.get("l1_bw_gbps")),
+                    gemm_time=origami_helper.gemm_time_us,
+                )
+            else:
+                part = None
+        except (KeyError, ValueError, TypeError):
+            part = None
+        if part is not None:
+            total += float(part)
+            timed = True
+    return total if timed else None
 
 
 def _excluded_from_quant(name: str) -> bool:
@@ -2241,6 +2387,21 @@ def _softmax_attention_row(
             else None
         )
         category, maf_type = ATTENTION_CATEGORY, "matrix"
+        _set_sim(
+            [
+                (
+                    "sdpa",
+                    {
+                        "B": b,
+                        "H_Q": h_q,
+                        "N_Q": s,
+                        "N_KV": n_kv,
+                        "d_h": d_h,
+                        "bytes": bytes_moved,
+                    },
+                )
+            ]
+        )
     row = RooflineOp(
         name=name,
         section=section,
@@ -2260,6 +2421,7 @@ def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
     (query/kv heads, head dim, sliding window, local/global layer mix). KV length
     is averaged across the local (windowed) and global layers so the per-layer
     cost times the layer-repeat count reproduces the true aggregate."""
+    _set_sim(None)
     if not (_RT.attn_heads and _RT.attn_head_dim):
         return None
     try:
@@ -2341,6 +2503,21 @@ def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
         )
         if bpe is not None
         else None
+    )
+    _set_sim(
+        [
+            (
+                "sdpa",
+                {
+                    "B": b,
+                    "H_Q": h_q,
+                    "N_Q": s,
+                    "N_KV": int(round(eff_n_kv)),
+                    "d_h": d_qk,
+                    "bytes": bytes_moved,
+                },
+            )
+        ]
     )
     return "Attention", "matrix", flops, bytes_moved
 
@@ -2434,6 +2611,7 @@ def _attention_extra_ops(
             if bpe is not None
             else None
         )
+        _set_sim([("gemm", (tokens, n, k, 1))])
         finished = _finish_op(op, "GEMM", "matrix", flops, byt, dtype, gpu_arch)
         finished.cost_source = "source" if width else "config"
         rows = [
@@ -2760,6 +2938,12 @@ def _dense_ffn_cost(
     down_flops = GEMM.flops_func(tokens, hidden, intermediate, _RT.mlp_bias)
     down_bytes = GEMM.bytes_func(
         tokens, hidden, intermediate, _RT.mlp_bias, wbpe, wbpe, bpe, bpe
+    )
+    _set_sim(
+        [
+            ("gemm", (tokens, 2 * intermediate, hidden, 1)),
+            ("gemm", (tokens, hidden, intermediate, 1)),
+        ]
     )
     flops = gate_up_flops + down_flops
     bytes_moved = None if bpe is None else gate_up_bytes + down_bytes
@@ -3780,6 +3964,7 @@ def _dispatch_op_cost(
     weight_bpe: float | None = None,
 ) -> tuple[str, str, float, float | None] | None:
     """Return ``(category, maf_type, flops, bytes)`` for an op, or ``None`` if unmodeled."""
+    _set_sim(None)
     if computation in _GEMM_NN_MODULE_COMPUTATIONS:
         return _gemm_cost_linear(
             input_shapes,
@@ -3888,6 +4073,7 @@ def _gemm_cost_linear(
     flops = GEMM.flops_func(m, n, k, bias)
     wbpe = weight_bpe if weight_bpe is not None else bpe
     bytes_moved = GEMM.bytes_func(m, n, k, bias, wbpe, wbpe, bpe, bpe)
+    _set_sim([("gemm", (m, n, k, 1))])
     return "GEMM", "matrix", flops, bytes_moved
 
 
@@ -3920,6 +4106,7 @@ def _gemm_cost_matmul(
         else bpe
     )
     bytes_moved = GEMM.bytes_func(m, n, k, False, bpe_a, bpe_b, bpe, bpe)
+    _set_sim([("gemm", (m, n, k, 1))])
     return "GEMM", "matrix", flops, bytes_moved
 
 
@@ -4054,6 +4241,21 @@ def _sdpa_cost(
         )
         if bpe is not None
         else None
+    )
+    _set_sim(
+        [
+            (
+                "sdpa",
+                {
+                    "B": b,
+                    "H_Q": h_q,
+                    "N_Q": n_q,
+                    "N_KV": n_kv,
+                    "d_h": d_h_qk,
+                    "bytes": bytes_moved,
+                },
+            )
+        ]
     )
     return "SDPA", "matrix", flops, bytes_moved
 

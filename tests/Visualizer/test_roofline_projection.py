@@ -1211,6 +1211,75 @@ def test_project_roofline_scales_decoder_sections_by_num_hidden_layers():
     assert embedding_op.instances == 1
 
 
+def test_enable_origami_gemm_flag_times_gemm_and_sdpa(monkeypatch):
+    import TraceLens.PerfModel.origami_helper as origami_helper
+    import TraceLens.PerfModel.sdpa_tile as sdpa_tile
+    import TraceLens.Visualizer.model_explorer_export.roofline_projection as projection
+
+    arch = {
+        "name": "MI325X",
+        "num_cus": 304,
+        "lds_capacity": 65536,
+        "freq_mhz": 2100,
+        "gemm_units_per_cu": 4,
+        "l1_bw_gbps": 100,
+        "mem_bw_gbps": 6000,
+        "max_achievable_tflops": {"matrix_bf16": 843},
+    }
+    monkeypatch.setattr(projection, "_origami_enabled", True)
+    monkeypatch.setattr(projection, "_origami_arch", arch)
+    monkeypatch.setattr(origami_helper, "gemm_time_us", lambda *args, **kwargs: 50.0)
+    monkeypatch.setattr(sdpa_tile, "sdpa_fwd_time_us", lambda *args, **kwargs: 80.0)
+    gemm = RooflineOp(
+        name="linear",
+        section="s",
+        computation="Linear",
+        operation="",
+        category=None,
+        modeled=False,
+        reason=None,
+        output_elements=1,
+        instances=1,
+    )
+    projection._set_sim([("gemm", (128, 128, 128, 1))])
+    finished = projection._finish_op(
+        gemm, "GEMM", "matrix", 2.0 * 128**3, 1024.0, "bfloat16", arch
+    )
+    assert finished.origami_time_us == pytest.approx(50.0)
+    sdpa = RooflineOp(
+        name="attn",
+        section="s",
+        computation="sdpa",
+        operation="",
+        category=None,
+        modeled=False,
+        reason=None,
+        output_elements=1,
+        instances=1,
+    )
+    projection._set_sim(
+        [
+            (
+                "sdpa",
+                {
+                    "B": 1,
+                    "H_Q": 4,
+                    "N_Q": 128,
+                    "N_KV": 128,
+                    "d_h": 64,
+                    "bytes": 1024.0,
+                },
+            )
+        ]
+    )
+    finished = projection._finish_op(
+        sdpa, "Attention", "matrix", 1.0e6, 1024.0, "bfloat16", arch
+    )
+    assert finished.origami_time_us == pytest.approx(80.0)
+    args = roofline_cli.build_parser().parse_args(["--enable-origami-gemm"])
+    assert args.enable_origami_gemm is True
+
+
 def test_project_roofline_without_gpu_arch_has_no_roofline_time():
     spec = _load_fixture_spec()
     projection = project_roofline(spec, batch_size=1, seq_len=2048)

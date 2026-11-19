@@ -6,12 +6,11 @@
 
 """End-to-end roofline plot from a profile and, where the profile has no cost, a projection.
 
-FLOPs and bytes come from the profile when its ``GFLOPS`` and ``FLOPS/Byte``
-columns are filled, and from the roofline projection otherwise. When a series
-has both, the marker is the measured FLOPs and an arrow runs to the projection's
-FLOPs over the same kernel time. ``--model-only`` reads no profile, so it has
-no measured FLOPs and draws no arrow. Hardware roofs come from the GPU arch
-spec (``load_arch``, including ``$TL_EXTENSION``).
+FLOPs and bytes come from the perf report's ``GFLOPS`` and ``FLOPS/Byte``
+columns: the PerfModel applied to the traced shapes. The marker divides that
+work by the measured kernel time. ``--model-only`` reads no profile and
+divides the projection's FLOPs by its roofline time. Hardware roofs come from
+the GPU arch spec (``load_arch``, including ``$TL_EXTENSION``).
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_PATTERNS,
     OP_CATEGORY_REGISTRY,
 )
+
 from TraceLens.Visualizer.model_explorer_export.roofline_augment import (
     categorize_operation,
 )
@@ -79,7 +79,8 @@ class Series:
     """One marker family. ``categories`` None is the whole modeled forward.
 
     ``kernel_name`` is one profile kernel. The marker is that kernel's own
-    FLOPs and time, not the category it belongs to.
+    FLOPs and time, not the category it belongs to. ``kernel_shape`` is the
+    report's ``Input Dims``; a top-kernel marker is one name at one shape.
     """
 
     label: str
@@ -88,6 +89,7 @@ class Series:
     categories: tuple[str, ...] | None
     open_marker: bool = False
     kernel_name: str | None = None
+    kernel_shape: str | None = None
 
 
 # The perf report's catch-all. It is not a series: a kernel that landed here
@@ -183,6 +185,63 @@ DEFAULT_SERIES: tuple[Series, ...] = (
 # most kernel time, plus the end-to-end forward. The category series stay the
 # default. ``--model-only`` has no kernel times.
 _DEFAULT_TOP_KERNELS = 10
+# One glyph per kernel. Closed shapes a hollow marker can still show, in an
+# order where neighbors do not read as the same symbol. The end-to-end diamond
+# is not in this list.
+_KERNEL_MARKERS = (
+    "o",
+    "s",
+    "^",
+    "v",
+    "<",
+    ">",
+    "p",
+    "h",
+    "8",
+    "*",
+    "X",
+    "P",
+    (7, 0, 0),
+    (9, 0, 0),
+    (11, 0, 0),
+    "1",
+    "2",
+    "3",
+    "4",
+    (7, 1, 0),
+    (9, 1, 0),
+    (11, 1, 0),
+)
+
+
+def _shape_tensors(shape: str) -> list[str]:
+    """Each tensor in a report ``Input Dims`` cell, as ``M×N×K``."""
+    tensors = []
+    for group in re.findall(r"\(([^()]*)\)", shape):
+        dims = [part.strip() for part in group.split(",") if part.strip()]
+        if dims and all(part.isdigit() for part in dims):
+            tensors.append("×".join(dims))
+    return tensors
+
+
+def _top_kernel_label(
+    name: str, short: str, shape: str, peers: list[tuple[str, str]]
+) -> str:
+    """Device-kernel name, with enough of the shape to tell siblings apart."""
+    same = [peer_shape for peer_short, peer_shape in peers if peer_short == short]
+    if len(same) < 2:
+        return short
+    tensors = _shape_tensors(shape)
+    if not tensors:
+        return f"{short} {shape}" if shape else name
+    for count in range(1, len(tensors) + 1):
+        bit = ", ".join(tensors[:count])
+        peer_bits = [
+            ", ".join(_shape_tensors(peer)[:count]) for peer in same
+        ]
+        if peer_bits.count(bit) == 1:
+            return f"{short} {bit}"
+    return f"{short} {shape}" if shape else name
 
 
 def top_kernel_series(
@@ -190,34 +249,51 @@ def top_kernel_series(
 ) -> tuple[Series, ...]:
     """The ``n`` kernels with the most runtime, then the end-to-end forward.
 
-    Rank is the summed ``time_us`` of each kernel name. Communication kernels
-    are left out. The label is the device kernel, and a name that peels to the
-    same text as another keeps the full profile name.
+    Rank is the summed ``time_us`` of each kernel name at one ``Input Dims``.
+    The same name at another shape is a separate marker. Communication kernels
+    are left out, and so is a shape with no profile FLOPs: ``n`` is a count of
+    markers that can be drawn. The label is the device kernel, and a name that
+    peels to the same text as another keeps the full profile name, plus the
+    shape when the name itself is shared.
     """
     if n < 1:
         raise ValueError("top kernel count must be at least 1")
-    totals: dict[str, float] = {}
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for kernel in kernels:
         name = str(kernel["name"])
         if is_communication(name):
             continue
-        totals[name] = totals.get(name, 0.0) + float(kernel["time_us"])
+        key = (name, str(kernel.get("shape") or ""))
+        groups.setdefault(key, []).append(kernel)
+    totals: dict[tuple[str, str], float] = {}
+    for key, rows in groups.items():
+        if not rows or not all(_has_profile_cost(row) for row in rows):
+            continue
+        time_us = sum(float(row["time_us"]) for row in rows)
+        if time_us > 0:
+            totals[key] = time_us
     ranked = sorted(
-        (name for name, time_us in totals.items() if time_us > 0),
-        key=lambda name: (-totals[name], name),
+        totals,
+        key=lambda key: (-totals[key], key[0], key[1]),
     )
     chosen = ranked[:n]
-    if len(chosen) > len(_CATEGORY_MARKERS):
+    if len(chosen) > len(_KERNEL_MARKERS):
         raise ValueError(
-            f"{len(chosen)} kernels and {len(_CATEGORY_MARKERS)} distinct markers"
+            f"{len(chosen)} kernels and {len(_KERNEL_MARKERS)} distinct markers"
         )
-    peeled = [_kernel_computation(name) for name in chosen]
+    peers = [(_kernel_computation(name), shape) for name, shape in chosen]
     specs = []
-    for index, name in enumerate(chosen):
-        short = peeled[index]
-        label = name if peeled.count(short) > 1 else short
+    for index, (name, shape) in enumerate(chosen):
+        short = peers[index][0]
         specs.append(
-            Series(label, _CATEGORY_MARKERS[index], None, None, kernel_name=name)
+            Series(
+                _top_kernel_label(name, short, shape, peers),
+                _KERNEL_MARKERS[index],
+                None,
+                None,
+                kernel_name=name,
+                kernel_shape=shape,
+            )
         )
     specs.append(Series("End to end", "D", None, None))
     return tuple(specs)
@@ -250,11 +326,6 @@ class RooflinePoint:
     # faster than the roof, so the projection's FLOPs or bytes, or the kernels
     # matched to it, do not describe what ran.
     above_roof: bool = False
-    # Projection FLOPs and bytes for the same launches, set only when ``flops``
-    # came from the profile. The plot draws an arrow from the measured point to
-    # this cost. ``--model-only`` has no profile, so these stay unset.
-    modeled_flops: float | None = None
-    modeled_bytes: float | None = None
 
 
 def bandwidth_tb_s(arch: dict[str, Any]) -> float:
@@ -360,6 +431,7 @@ def load_profile_kernels(directory: Path) -> list[dict[str, Any]]:
                         "count": count,
                         "flops": None if cost is None else cost[0],
                         "bytes": None if cost is None else cost[1],
+                        "shape": row.get("Input Dims") or "",
                     }
                 )
     return kernels
@@ -385,6 +457,7 @@ def load_profile_json(path: Path) -> list[dict[str, Any]]:
                 "count": int(item.get("count") or 0),
                 "flops": None if not flops else float(flops),
                 "bytes": None if not nbytes else float(nbytes),
+                "shape": str(item.get("shape") or ""),
             }
         )
     return kernels
@@ -576,12 +649,15 @@ def _matches(
     includes: tuple[str, ...],
     multi_phase: bool,
     kernel_name: str | None = None,
+    kernel_shape: str | None = None,
 ) -> bool:
     name = kernel["name"]
     if is_communication(name):
         return False
     if kernel_name is not None:
         if name != kernel_name:
+            return False
+        if kernel_shape is not None and str(kernel.get("shape") or "") != kernel_shape:
             return False
     elif categories is not None and report_kernel_category(name) not in categories:
         return False
@@ -605,6 +681,7 @@ def _matched_kernels(
     includes: tuple[str, ...],
     multi_phase: bool,
     kernel_name: str | None = None,
+    kernel_shape: str | None = None,
 ) -> list[dict[str, Any]]:
     return [
         kernel
@@ -616,6 +693,7 @@ def _matched_kernels(
             includes=includes,
             multi_phase=multi_phase,
             kernel_name=kernel_name,
+            kernel_shape=kernel_shape,
         )
     ]
 
@@ -750,27 +828,29 @@ def _category_work(
     one_forward: bool,
     prefer_profile: bool = True,
 ) -> tuple[float, float, str]:
-    """FLOPs, bytes, and which source produced them for one category.
+    """FLOPs and bytes from the PerfModel on the traced shapes.
 
-    The profile cost is used only when every matched kernel has it. One kernel
-    without ``GFLOPS`` means the profile does not describe the category, so the
-    whole category falls back to the export. ``prefer_profile`` false asks for
-    the projection even when the profile has a cost, which is the modeled end
-    of the arrow.
+    A kernel with no ``GFLOPS`` is left out. It is not filled from the static
+    projection, whose shapes are not this trace. ``prefer_profile`` false is
+    the model-only path, which has no traced rows.
     """
-    if (
-        prefer_profile
-        and kernels
-        and all(_has_profile_cost(kernel) for kernel in kernels)
-    ):
-        total_flops = sum(float(kernel["flops"]) for kernel in kernels)
-        total_bytes = sum(float(kernel["bytes"]) for kernel in kernels)
+    costed = [kernel for kernel in kernels if _has_profile_cost(kernel)]
+    if prefer_profile and not costed:
+        # A traced category with no perf-model shape, or a category the
+        # capture did not run. The static projection is a different graph.
+        return 0.0, 0.0, "none"
+    if prefer_profile and costed:
+        total_flops = sum(float(kernel["flops"]) for kernel in costed)
+        total_bytes = sum(float(kernel["bytes"]) for kernel in costed)
+        if total_flops <= 0 or total_bytes <= 0:
+            return 0.0, 0.0, "none"
         if not one_forward:
             return total_flops, total_bytes, "profile"
-        _, launches = _measured_launches(kernels)
+        _, launches = _measured_launches(costed)
         if instances and launches:
             scale = instances / launches
             return total_flops * scale, total_bytes * scale, "profile"
+        return total_flops, total_bytes, "profile"
     launch_count = 0
     if kernels and not one_forward:
         _, launch_count = _measured_launches(kernels)
@@ -840,22 +920,19 @@ def _accounted_kernels(
 ) -> list[dict[str, Any]]:
     """Kernels whose time belongs with the work ``_series_work`` counted.
 
-    A kernel with no category and no profile cost has nothing to put on either
-    axis, so its time is left out rather than diluting the point. The same
-    applies to a category the projection does not contain.
+    Only a kernel the PerfModel costed is included. A kernel with no
+    ``GFLOPS`` has no traced shape to plot, and a static projection is not
+    a substitute, so its time is not added to a point built from other shapes.
     """
     known = {str(op.get("category")) for op in _bucket_ops(ops, categories)}
     kept = []
     for kernel in matched:
-        cat = report_kernel_category(kernel["name"])
-        if _has_profile_cost(kernel) and (
-            cat is None or cat in known or categories is None
-        ):
-            if categories is not None and cat not in categories:
-                continue
-            kept.append(kernel)
+        if not _has_profile_cost(kernel):
             continue
-        if cat in known:
+        cat = report_kernel_category(kernel["name"])
+        if categories is not None and cat not in categories:
+            continue
+        if cat is None or cat in known or categories is None:
             kept.append(kernel)
     return kept
 
@@ -904,6 +981,7 @@ def build_points(
                 includes=() if spec.label == "Whole model" else include,
                 multi_phase=multi_phase,
                 kernel_name=spec.kernel_name,
+                kernel_shape=spec.kernel_shape,
             )
             # An include on Whole model adds unscoped kernels to the phase-tagged
             # ones. On any other series the include is the whole match.
@@ -969,12 +1047,15 @@ def build_points(
                         "out of a mixed capture (pass --kernels)"
                     )
             if time_us <= 0:
-                # A series the projection does not contain, and that matched no
-                # kernel, is absent rather than missing its time.
+                # No costed kernel. Kernels that ran with no perf-model shape
+                # are left off the figure rather than priced from the static
+                # graph. A series that matched no kernel at all is missing its
+                # profile time.
+                ran = any(float(kernel["time_us"]) > 0 for kernel in matched)
                 bucket_flops, bucket_bytes, _, _ = _bucket_cost(
                     regime.ops, spec.categories
                 )
-                if bucket_flops > 0 and bucket_bytes > 0:
+                if not ran and bucket_flops > 0 and bucket_bytes > 0:
                     warnings.append(f"{spec.label} {regime.phase}: no profile time")
                 continue
             total_flops, total_bytes, source = _series_work(
@@ -985,21 +1066,6 @@ def build_points(
             )
             if total_flops <= 0 or total_bytes <= 0:
                 continue
-            modeled_flops = None
-            modeled_bytes = None
-            # The arrow needs a measured start. A series the profile did not
-            # cost is already the projection, and --model-only never calls this.
-            if source == "profile":
-                export_flops, export_bytes, _export_source = _series_work(
-                    matched,
-                    regime.ops,
-                    spec.categories,
-                    one_forward=one_forward,
-                    prefer_profile=False,
-                )
-                if export_flops > 0 and export_bytes > 0:
-                    modeled_flops = export_flops
-                    modeled_bytes = export_bytes
             points.append(
                 RooflinePoint(
                     series=spec.label,
@@ -1011,8 +1077,6 @@ def build_points(
                     bytes=total_bytes,
                     time_us=time_us,
                     cost_source=source,
-                    modeled_flops=modeled_flops,
-                    modeled_bytes=modeled_bytes,
                 )
             )
     points = _drop_whole_model_matching_end_to_end(points, warnings)
@@ -1215,6 +1279,49 @@ def model_coverage(
     )
 
 
+def figure_kernel_time_share(
+    points: list[RooflinePoint],
+    series: tuple[Series, ...],
+    kernels: list[dict[str, Any]],
+) -> float | None:
+    """Share of kernel time drawn as its own marker.
+
+    ``None`` on a category plot. End to end is the whole forward, so it is not
+    part of the share. A top kernel the plot skipped has no marker and is not
+    part of it either.
+    """
+    shown = {
+        (spec.kernel_name, spec.kernel_shape)
+        for spec in series
+        if spec.kernel_name is not None
+        and any(point.series == spec.label for point in points)
+    }
+    if not any(spec.kernel_name is not None for spec in series):
+        return None
+    total = 0.0
+    drawn = 0.0
+    unscoped = {label for label, shape in shown if shape is None}
+    shaped = {(label, shape) for label, shape in shown if shape is not None}
+    for kernel in kernels:
+        name = str(kernel["name"])
+        if is_communication(name):
+            continue
+        time_us = float(kernel.get("time_us") or 0.0)
+        if time_us <= 0:
+            continue
+        total += time_us
+        if name in unscoped or (name, str(kernel.get("shape") or "")) in shaped:
+            drawn += time_us
+    if total <= 0:
+        return None
+    return drawn / total
+
+
+def figure_kernel_note(share: float) -> str:
+    """The top-kernel caption: how much of the run the drawn kernels are."""
+    return f"Figure shows kernels taking {share * 100:.1f}% of the run time."
+
+
 def model_coverage_note(coverage: ModelCoverage) -> str:
     """The legend note: coverage, then the unmodeled kernels worth naming."""
     lines = [
@@ -1233,79 +1340,6 @@ def model_coverage_note(coverage: ModelCoverage) -> str:
             lines.append(f"Top unmodeled kernels: {shown}.")
     wrapped = [textwrap.fill(line, width=118, break_long_words=False) for line in lines]
     return "\n".join(wrapped)
-
-
-def modeled_position(point: RooflinePoint) -> tuple[float, float] | None:
-    """Arithmetic intensity and TFLOP/s of the projection, over the profile time.
-
-    ``None`` when this point has no measured FLOPs to leave from, or the
-    projection lands on the same place. ``--model-only`` points have no
-    ``modeled_flops``.
-    """
-    if (
-        point.cost_source != "profile"
-        or point.modeled_flops is None
-        or point.modeled_bytes is None
-        or point.modeled_flops <= 0
-        or point.modeled_bytes <= 0
-        or point.time_us <= 0
-    ):
-        return None
-    intensity = point.modeled_flops / point.modeled_bytes
-    rate = point.modeled_flops / (point.time_us * 1e-6) / 1e12
-
-    def close(a: float, b: float) -> bool:
-        return abs(a - b) <= 1e-6 * max(abs(a), abs(b), 1.0)
-
-    if close(intensity, point.arithmetic_intensity) and close(
-        rate, point.achieved_tflops
-    ):
-        return None
-    return intensity, rate
-
-
-def _draw_flop_arrows(
-    ax, points: list[RooflinePoint], colors: dict[int, str], series
-) -> bool:
-    """Arrow from each measured point to its projection, over the same time.
-
-    Returns whether any arrow was drawn. The destination is a smaller open
-    marker in the series shape.
-    """
-    series_by_label = {spec.label: spec for spec in series}
-    drew = False
-    for point in points:
-        pos = modeled_position(point)
-        if pos is None:
-            continue
-        drew = True
-        spec = series_by_label.get(point.series)
-        marker = spec.marker if spec else "o"
-        color = colors[point.concurrency]
-        ax.annotate(
-            "",
-            xy=pos,
-            xytext=(point.arithmetic_intensity, point.achieved_tflops),
-            arrowprops={
-                "arrowstyle": "->",
-                "color": color,
-                "lw": 1.0,
-                "shrinkA": 6,
-                "shrinkB": 4,
-            },
-            zorder=2,
-        )
-        ax.scatter(
-            [pos[0]],
-            [pos[1]],
-            marker=marker,
-            s=36,
-            facecolors="white",
-            edgecolors=color,
-            linewidths=1.2,
-            zorder=4,
-        )
-    return drew
 
 
 def plot_e2e_roofline(
@@ -1334,12 +1368,6 @@ def plot_e2e_roofline(
 
     intensities = [point.arithmetic_intensity for point in points]
     rates = [point.achieved_tflops for point in points]
-    for point in points:
-        modeled = modeled_position(point)
-        if modeled is None:
-            continue
-        intensities.append(modeled[0])
-        rates.append(modeled[1])
     if not intensities:
         intensities = [1.0]
         rates = [1.0]
@@ -1495,21 +1523,8 @@ def plot_e2e_roofline(
                 linewidths=1.6,
                 zorder=3,
             )
-    drew_flop_arrows = _draw_flop_arrows(ax, points, colors, series)
 
     handles, labels = ax.get_legend_handles_labels()
-    if drew_flop_arrows:
-        handles.append(
-            plt.Line2D(
-                [],
-                [],
-                color="0.2",
-                marker=">",
-                linestyle="-",
-                markersize=6,
-            )
-        )
-        labels.append("Measured FLOPs → modeled FLOPs")
     # The points are {prefill, decode} x {attention, whole model, end to end}.
     # Fill is the phase. The marker is the series.
     families: list[tuple[str, str]] = []
@@ -1522,6 +1537,9 @@ def plot_e2e_roofline(
             continue
         seen_families.add(family)
         families.append((family, spec.marker))
+    # End to end is the whole forward, so its key entry leads the markers,
+    # ahead of the per-kernel and per-category series. Stable otherwise.
+    families.sort(key=lambda item: item[0] != "End to end")
     point_family = {
         label: (
             "Attention"
@@ -1580,15 +1598,24 @@ def plot_e2e_roofline(
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     fig.tight_layout()
-    coverage = model_coverage(regimes, kernels) if kernels else None
-    if coverage is not None and legend is not None:
+    share = (
+        figure_kernel_time_share(points, series, kernels)
+        if kernels is not None
+        else None
+    )
+    if share is not None:
+        note = figure_kernel_note(share)
+    else:
+        coverage = model_coverage(regimes, kernels) if kernels else None
+        note = model_coverage_note(coverage) if coverage is not None else None
+    if note is not None and legend is not None:
         fig.canvas.draw()
         below = legend.get_window_extent(fig.canvas.get_renderer())
         below = below.transformed(fig.transFigure.inverted())
         fig.text(
             0.5,
             below.y0 - 0.012,
-            model_coverage_note(coverage),
+            note,
             ha="center",
             va="top",
             fontsize=8,
@@ -1628,8 +1655,7 @@ def build_parser() -> argparse.ArgumentParser:
             "when it has them, and from a roofline projection otherwise. Y is "
             "those FLOPs divided by kernel time from the same profile. Markers are "
             "one per category. --top-kernels replaces them with the "
-            "longest-running kernels and end to end. A series with both costs "
-            "draws an arrow from the measured FLOPs to the projection's. "
+            "longest-running kernels and end to end. "
             "--model-only uses the projection's roofline time instead, and "
             "reads no profile."
         ),
@@ -1695,8 +1721,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help=(
-            "Plot the N kernels with the most kernel time, plus end to end, "
-            "instead of one marker per category. "
+            "Plot the N kernels with the most kernel time and profile FLOPs, "
+            "plus end to end, instead of one marker per category. "
+            "A kernel with no FLOPs does not use one of the N slots. "
             f"{_DEFAULT_TOP_KERNELS} when N is omitted. Requires a profile."
         ),
     )
@@ -1806,17 +1833,10 @@ def main(argv: list[str] | None = None) -> int:
         ylabel=ylabel,
     )
     for point in points:
-        modeled = modeled_position(point)
-        modeled_text = (
-            f" modeled={modeled[1]:.2f} TFLOP/s at {modeled[0]:.2f} FLOP/byte"
-            if modeled is not None
-            else ""
-        )
         print(
             f"{point.series} phase={point.phase} concurrency={point.concurrency} "
             f"AI={point.arithmetic_intensity:.2f} FLOP/byte "
             f"{point.achieved_tflops:.2f} TFLOP/s source={point.cost_source}"
-            f"{modeled_text}"
         )
     print(f"Wrote {args.output}")
     return 0

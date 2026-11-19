@@ -19,10 +19,127 @@ from .perf_model import SDPA, Softmax
 from .utils import name2bpe, torch_dtype_map
 
 
-def sdpa_tile_time_us(perf_model, arch, gemm_time, bwd=False):
-    """Tile-model time in µs for an SDPA perf model, or None for other ops."""
-    if not isinstance(perf_model, SDPA) or arch is None:
+# Dense SDPA and flash attention. Sparse and linear attention are different
+# algorithms; Origami's tile GEMMs do not describe them.
+_NOT_STANDARD_ATTENTION = ("sparse", "linear", "gdn", "gated_delta", "mla", "indexer")
+
+
+def is_standard_attention(name: str) -> bool:
+    """True for SDPA and flash attention, false for sparse or linear attention."""
+    lowered = name.lower()
+    return not any(token in lowered for token in _NOT_STANDARD_ATTENTION)
+
+
+def _attention_rectangles(params: dict) -> list[tuple[int, int]]:
+    """``(N_Q, N_KV)`` rectangles this attention launch scores.
+
+    Paged inference stores the current chunk in ``N_KV`` and the attended key
+    length in ``c_sk`` / ``g_sk``. The tile model has to see the attended length.
+    """
+    rectangles = []
+    for query_key, key_key in (("c_sq", "c_sk"), ("g_sq", "g_sk")):
+        n_q = int(params.get(query_key) or 0)
+        n_kv = int(params.get(key_key) or 0)
+        if n_q > 0 and n_kv > 0:
+            rectangles.append((n_q, n_kv))
+    if rectangles:
+        return rectangles
+    n_q = int(params.get("N_Q") or 0)
+    n_kv = int(params.get("N_KV") or 0)
+    if n_q > 0 and n_kv > 0:
+        return [(n_q, n_kv)]
+    return []
+
+
+def _attention_dtype(params: dict) -> tuple[str | None, str | None]:
+    raw = params.get("dtype_Q")
+    if raw is None:
+        pair = params.get("dtype_A_B")
+        raw = pair[0] if isinstance(pair, (list, tuple)) and pair else pair
+    precision = params.get("simulation_dtype") or torch_dtype_map(raw)
+    return precision, None if raw is None else str(raw)
+
+
+def standard_attention_time_us(name, params, arch, nbytes, gemm_time=None, bwd=False):
+    """Origami tile-model time for one standard or flash attention launch.
+
+    ``None`` for sparse attention, linear attention, or a shape the tile model
+    cannot time. ``nbytes`` is that launch's bytes, split across the context
+    and generation rectangles by their area.
+    """
+    if arch is None or not isinstance(params, dict) or params.get("_no_perf"):
         return None
+    if not is_standard_attention(name):
+        return None
+    if bwd:
+        return None
+    rectangles = _attention_rectangles(params)
+    if not rectangles:
+        return None
+    precision, dtype_a_b = _attention_dtype(params)
+    if precision is None:
+        return None
+    heads = int(params.get("H_Q") or 0)
+    batch = int(params.get("B") or 1)
+    head_dim = int(params.get("d_h") or params.get("d_h_qk") or 0)
+    if heads <= 0 or batch <= 0 or head_dim <= 0:
+        return None
+    flash = bool(params.get("flash_impl")) or "flash" in name.lower()
+    areas = [n_q * n_kv for n_q, n_kv in rectangles]
+    total_area = sum(areas)
+    total = 0.0
+    for (n_q, n_kv), area in zip(rectangles, areas):
+        part_bytes = float(nbytes or 0.0) * area / total_area
+        part = sdpa_fwd_time_us(
+            arch,
+            precision,
+            dtype_a_b or precision,
+            part_bytes,
+            batch,
+            heads,
+            n_q,
+            n_kv,
+            head_dim,
+            fa=flash,
+            gemm_time=gemm_time,
+        )
+        if part is None:
+            return None
+        total += float(part)
+    return total
+
+
+def sdpa_tile_time_us(perf_model, arch, gemm_time, bwd=False):
+    """Tile-model time in µs for standard or flash attention, else None.
+
+    SDPA and flash perf models are timed. So is dense inference attention
+    (paged and varlen flash). Sparse and linear attention are not.
+    """
+    if arch is None:
+        return None
+    if not isinstance(perf_model, SDPA):
+        from .extensions.attention_perf_model_extensions import InferenceAttention
+
+        if not isinstance(perf_model, InferenceAttention):
+            return None
+        if bwd:
+            return None
+        # DeepSeek-V4 paged decode is sparse even when the class name is not.
+        if any(
+            cls.__name__ == "_V4PagedDecodeBase" for cls in type(perf_model).mro()
+        ):
+            return None
+        try:
+            nbytes = perf_model.bytes()
+        except TypeError:
+            nbytes = perf_model.bytes(2)
+        return standard_attention_time_us(
+            type(perf_model).__name__,
+            perf_model.param_details,
+            arch,
+            nbytes,
+            gemm_time=gemm_time,
+        )
     params = perf_model.param_details
     dtype_A_B = params["dtype_A_B"][0]
     dtype = params.get("simulation_dtype")
@@ -114,13 +231,16 @@ def sdpa_fwd_time_us(
         return None
     qkt_time = num_waves * qkt_time
 
+    # Flash softmax stays in L1 when the arch names that bandwidth. Without
+    # it, the softmax term uses HBM; the tile GEMMs are still Origami's.
+    softmax_in_l1 = force_to_l1 and bool(arch.get("l1_bw_gbps"))
     softmax_time = num_waves * Softmax.get_time(
         arch,
         block_N_Q,
         block_N_KV,
         name2bpe(dtype_A_B),
         1,
-        force_to_l1=force_to_l1,
+        force_to_l1=softmax_in_l1,
         num_cus=1,
     )
     pv_time = tile_gemm_time(

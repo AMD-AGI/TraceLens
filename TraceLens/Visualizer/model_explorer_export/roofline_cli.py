@@ -140,6 +140,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a GPU arch JSON (same schema as --gpu-arch-name); takes precedence",
     )
     parser.add_argument(
+        "--enable-origami-gemm",
+        action="store_true",
+        default=False,
+        help=(
+            "Time GEMMs with Origami, and attention with TraceLens's SDPA tile "
+            "model using Origami for each tile GEMM, when a GPU arch is given."
+        ),
+    )
+    parser.add_argument(
         "--output-csv",
         type=Path,
         metavar="PATH",
@@ -235,6 +244,8 @@ def _op_row(op: RooflineOp) -> dict[str, object]:
         "roofline_bound": op.roofline_bound,
         "roofline_time_us": op.roofline_time_us,
         "total_roofline_time_us": op.total_roofline_time_us,
+        "origami_time_us": op.origami_time_us,
+        "total_origami_time_us": op.total_origami_time_us,
         "reason": op.reason,
     }
 
@@ -328,6 +339,7 @@ def run_projection(args):
         num_predicted_tokens=args.num_predicted_tokens,
         checkpoint=checkpoint,
         kv_cache_bpe=_KV_CACHE_BPE.get(getattr(args, "kv_cache_dtype", None)),
+        enable_origami_gemm=bool(getattr(args, "enable_origami_gemm", False)),
     )
     # Convolutional models: the graph draws one conv per stage (and the stem /
     # downsampling convs that lead those stages). Cost each live instance from a

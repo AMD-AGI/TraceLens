@@ -226,6 +226,60 @@ class TestSdpaTile:
         assert shapes == [(128, 256, 64, 1, 1), (128, 64, 256, 1, 1)]
         assert fwd > 4.0
 
+    def test_paged_flash_uses_the_attended_key_length(self):
+        shapes = []
+
+        def gemm_time(arch, M, N, K, B, dtype, force_to_l1, num_cus):
+            shapes.append((M, N, K))
+            return 1.0
+
+        params = {
+            "B": 1,
+            "H_Q": 6,
+            "N_Q": 100,
+            "N_KV": 100,
+            "d_h_qk": 64,
+            "c_sq": 100,
+            "c_sk": 400,
+            "flash_impl": True,
+            "dtype_Q": "c10::BFloat16",
+        }
+        arch = {**ARCH, "num_cus": 304, "gemm_units_per_cu": 4, "freq_mhz": 2100}
+        with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            timed = sdpa_tile.standard_attention_time_us(
+                "vllm_unified_attention_with_output",
+                params,
+                arch,
+                1024,
+                gemm_time=gemm_time,
+            )
+        assert timed > 2.0
+        # The current chunk is 100 keys. The annotation attended 400.
+        assert shapes[0] == (100, 400, 64)
+
+    def test_sparse_and_linear_attention_are_not_origami(self):
+        params = {
+            "B": 1,
+            "H_Q": 1,
+            "d_h_qk": 64,
+            "c_sq": 16,
+            "c_sk": 16,
+            "flash_impl": True,
+            "dtype_Q": "c10::BFloat16",
+        }
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "vllm_sparse_attn_decode", params, ARCH, 1024
+            )
+            is None
+        )
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "qwen_gdn_attention_core", params, ARCH, 1024
+            )
+            is None
+        )
+
 
 class _Attention(perf_model.SDPA):
     @staticmethod
