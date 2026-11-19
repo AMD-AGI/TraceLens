@@ -21,12 +21,11 @@ from .util import (
     _get_node_arg,
     _is_gpu_path,
     _is_kernel,
-    _normalize_name_for_comparison,
     _sort_by_ts,
 )
+from ..util import GRAPH_LAUNCH_NAMES, normalize_name_for_comparison
 
 _TRACELENS_DEBUG = os.environ.get("TRACELENS_DEBUG", "0") == "1"
-_GRAPH_LAUNCH_NAMES = ["hipGraphLaunch", "cudaGraphLaunch"]
 _KERNEL_DISPATCH_CATEGORIES = ("cuda_runtime", "cuda_driver")
 _DUR = TraceEventUtils.TraceKeys.Duration
 
@@ -355,7 +354,7 @@ class TraceDiff:
                         child_cat = child.get(_CATEGORY)
                         if (
                             child_cat in ("cpu_op", *_KERNEL_DISPATCH_CATEGORIES)
-                            and child.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+                            and child.get(_NAME) not in GRAPH_LAUNCH_NAMES
                         ):
                             break
                         current = child
@@ -387,11 +386,11 @@ class TraceDiff:
         """
         # Pre-compute names for cache key
         names1 = [
-            _normalize_name_for_comparison(self._get_op_name(item, 1), strip_details)
+            normalize_name_for_comparison(self._get_op_name(item, 1), strip_details)
             for item in items1
         ]
         names2 = [
-            _normalize_name_for_comparison(self._get_op_name(item, 2), strip_details)
+            normalize_name_for_comparison(self._get_op_name(item, 2), strip_details)
             for item in items2
         ]
 
@@ -479,7 +478,7 @@ class TraceDiff:
             """Return True if this node is a cuda_runtime node. Graph launch events are exempt."""
             if not node:
                 return False
-            if node.get(_NAME) in _GRAPH_LAUNCH_NAMES:
+            if node.get(_NAME) in GRAPH_LAUNCH_NAMES:
                 return False
             cat = node.get(_CATEGORY)
             return cat in _KERNEL_DISPATCH_CATEGORIES
@@ -521,7 +520,7 @@ class TraceDiff:
                 node = uid2node.get(current)
                 if not node or (
                     tree_obj.event_to_category(node) in _KERNEL_DISPATCH_CATEGORIES
-                    and node.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+                    and node.get(_NAME) not in GRAPH_LAUNCH_NAMES
                 ):
                     break
                 child_nodes = tree_obj.get_children_events(node)
@@ -529,7 +528,7 @@ class TraceDiff:
                 if cat == "cpu_op":
                     has_cr_child = any(
                         tree_obj.event_to_category(c) in _KERNEL_DISPATCH_CATEGORIES
-                        and c.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+                        and c.get(_NAME) not in GRAPH_LAUNCH_NAMES
                         for c in child_nodes
                     )
                     if has_cr_child:
@@ -575,10 +574,10 @@ class TraceDiff:
                     cat_i = node_i.get(_CATEGORY) if node_i else None
                     if (
                         cat_d in skip_cats
-                        and node_d.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+                        and node_d.get(_NAME) not in GRAPH_LAUNCH_NAMES
                     ) or (
                         cat_i in skip_cats
-                        and node_i.get(_NAME) not in _GRAPH_LAUNCH_NAMES
+                        and node_i.get(_NAME) not in GRAPH_LAUNCH_NAMES
                     ):
                         continue
                     name_d = _get_name_node(node_d)

@@ -7,7 +7,7 @@
 
 """
 TraceLens Agent - Multi-Kernel Issue Analysis
-Analyzes cross-cutting multi-kernel patterns: memcpy (D2H/H2D), NCCL blocking,
+Analyzes cross-cutting multi-kernel patterns: memcpy (D2H/H2D/D2D), NCCL blocking,
 and compute/communication overlap deficiency.
 
 Reads pre-computed multi_kernel_data.json from utils/orchestrator_prepare.py.
@@ -17,14 +17,23 @@ Outputs multi_kernel_metrics.json with severity assessments.
 import argparse
 import json
 import os
-import sys
-import argparse
 
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    load_manifest,
+    perf_report_csv_dir,
+    SystemFindings,
+    write_metrics_json,
+)
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
-from analysis_utils import perf_report_csv_dir, write_metrics_json
+# Constants
+MEMCPY_PCT_THRESHOLD = 5
+MEMCPY_COUNT_THRESHOLD = 10
+EXPOSED_COMM_PCT_THRESHOLD = 5
+OVERLAP_RATIO_THRESHOLD = 0.7
+_MIN_COMM_US = 100
 
 
 def classify_memcpy_severity(memcpy_summary, total_time_ms):
@@ -42,7 +51,7 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
 
     by_direction = memcpy_summary.get("by_direction", {})
 
-    for direction in ["D2H", "H2D"]:
+    for direction in ["D2H", "H2D", "D2D"]:
         dir_info = by_direction.get(direction, {})
         count = dir_info.get("count", 0)
         dir_time_ms = dir_info.get("total_time_us", 0) / 1000
@@ -51,7 +60,10 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
         if count == 0:
             continue
 
-        flagged = dir_pct > 5 or count > 10
+        # On-device copies are routine in a step, so only their time share flags.
+        flagged = dir_pct > MEMCPY_PCT_THRESHOLD or (
+            direction != "D2D" and count > MEMCPY_COUNT_THRESHOLD
+        )
 
         if flagged:
             overall_flagged = True
@@ -78,7 +90,7 @@ def classify_memcpy_severity(memcpy_summary, total_time_ms):
 def classify_nccl_blocking_severity(overlap_analysis):
     """Classify NCCL blocking compute as flagged (true/false).
 
-    Flagged when exposed communication exceeds 5% of total GPU time.
+    Flagged when exposed communication exceeds EXPOSED_COMM_PCT_THRESHOLD of total GPU time.
     """
     exposed_comm_pct = overlap_analysis.get("comm_percent_of_total", 0)
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
@@ -88,7 +100,7 @@ def classify_nccl_blocking_severity(overlap_analysis):
         return {"flagged": False, "details": "No communication events detected"}
 
     return {
-        "flagged": exposed_comm_pct > 5,
+        "flagged": exposed_comm_pct > EXPOSED_COMM_PCT_THRESHOLD,
         "exposed_comm_time_ms": round(exposed_comm_us / 1000, 3),
         "total_comm_time_ms": round(total_comm_us / 1000, 3),
         "exposed_percent_of_total": round(exposed_comm_pct, 2),
@@ -99,23 +111,23 @@ def classify_nccl_blocking_severity(overlap_analysis):
 def classify_overlap_severity(overlap_analysis):
     """Classify NCCL/compute overlap quality as flagged (true/false).
 
-    Flagged when overlap ratio is below 70%.
+    Flagged when overlap ratio is below OVERLAP_RATIO_THRESHOLD.
     """
     comm_overlap_ratio = overlap_analysis.get("comm_overlap_ratio")
     total_comm_us = overlap_analysis.get("total_comm_time_us", 0)
 
-    if comm_overlap_ratio is None or total_comm_us < 100:
+    if comm_overlap_ratio is None or total_comm_us < _MIN_COMM_US:
         return {
             "flagged": False,
             "details": "Insufficient communication data for overlap analysis",
         }
 
     return {
-        "flagged": comm_overlap_ratio < 0.7,
+        "flagged": comm_overlap_ratio < OVERLAP_RATIO_THRESHOLD,
         "overlap_ratio": round(comm_overlap_ratio, 4),
         "overlap_percent": round(comm_overlap_ratio * 100, 2),
-        "target_percent": 70,
-        "description": f"Compute/communication overlap: {comm_overlap_ratio:.1%} (target > 70%)",
+        "target_percent": round(OVERLAP_RATIO_THRESHOLD * 100),
+        "description": f"Compute/communication overlap: {comm_overlap_ratio:.1%} (target > {OVERLAP_RATIO_THRESHOLD:.0%})",
     }
 
 
@@ -224,26 +236,24 @@ def main():
             "memcpy_assessment": {"flagged": False},
             "nccl_blocking_assessment": {"flagged": False},
             "overlap_assessment": {"flagged": False},
-            "patterns_detected": [],
         }
         write_metrics_json(error_metrics, output_dir, "multi_kernel")
         return
 
-    with open(data_file, "r") as f:
+    with open(data_file) as f:
         mk_data = json.load(f)
 
-    print(f"  ✓ Loaded multi-kernel data")
+    print("  ✓ Loaded multi-kernel data")
 
     # Read GPU timeline for total time reference
     csv_dir = perf_report_csv_dir(output_dir)
     total_time_ms = 0
     try:
         gpu_timeline = pd.read_csv(f"{csv_dir}/gpu_timeline.csv")
-        for _, row in gpu_timeline.iterrows():
-            if row["type"] == "total_time":
-                total_time_ms = row["time ms"]
-                break
-    except Exception as e:
+        total_rows = gpu_timeline[gpu_timeline["type"] == "total_time"]
+        if not total_rows.empty:
+            total_time_ms = total_rows.iloc[0]["time ms"]
+    except (OSError, ValueError, KeyError) as e:
         print(f"  ⚠️  Could not read gpu_timeline.csv: {e}")
         # Fallback to overlap_analysis total time
         total_time_ms = (
@@ -274,50 +284,43 @@ def main():
         )
         if cross_validation["status"] == "PASS":
             print(
-                f"\n  ✓ Cross-validation: PASS (overlap metrics consistent with gpu_timeline.csv)"
+                "\n  ✓ Cross-validation: PASS (overlap metrics consistent with gpu_timeline.csv)"
             )
         else:
-            print(f"\n  ⚠️  Cross-validation: WARN")
+            print("\n  ⚠️  Cross-validation: WARN")
             for w in cross_validation.get("warnings", []):
                 print(f"    - {w}")
-    except Exception as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"\n  ⚠️  Cross-validation skipped: {e}")
 
-    # Build patterns_detected list (pattern name + severity only;
-    # recommendations are the sub-agent's responsibility)
-    patterns_detected = []
-
-    if memcpy_assessment["flagged"]:
-        for issue in memcpy_assessment.get("issues", []):
-            patterns_detected.append(
-                {
-                    "pattern": f"high_{issue['direction'].lower()}_memcpy",
-                    "description": issue["description"],
-                }
+    system_entries = [
+        SystemFindings.make(
+            f"{issue['direction']} Memory Copy Overhead",
+            issue["count"],
+            issue["time_ms"],
+            issue["percent_of_total"],
+        )
+        for issue in memcpy_assessment.get("issues", [])
+    ]
+    if nccl_blocking_assessment["flagged"] or overlap_assessment["flagged"]:
+        system_entries.append(
+            SystemFindings.make(
+                "Exposed Collective Communication",
+                nccl_blocking_assessment["exposed_comm_time_ms"],
+                nccl_blocking_assessment["exposed_percent_of_total"],
+                overlap_assessment.get("overlap_percent"),
+                nccl_blocking_assessment["total_comm_time_ms"],
             )
-
-    if nccl_blocking_assessment["flagged"]:
-        patterns_detected.append(
-            {
-                "pattern": "nccl_blocking_compute",
-                "description": nccl_blocking_assessment.get("description", ""),
-            }
         )
+    system_findings = SystemFindings.rank(system_entries)
 
-    if overlap_assessment["flagged"]:
-        patterns_detected.append(
-            {
-                "pattern": "poor_comm_compute_overlap",
-                "description": overlap_assessment.get("description", ""),
-            }
-        )
-
-    print(f"  Patterns detected: {len(patterns_detected)}")
-    for p in patterns_detected:
-        print(f"    - {p['pattern']}")
+    print(f"  System findings: {len(system_findings)}")
+    for finding in system_findings:
+        print(f"    - {finding['title']}")
 
     metrics = {
         "status": "SUCCESS",
+        NODE_COL: load_manifest(output_dir).get("focus_job"),
         "total_time_ms": round(total_time_ms, 3),
         "memcpy_summary": {
             "total_count": memcpy_summary.get("total_count", 0),
@@ -333,15 +336,15 @@ def main():
         "memcpy_assessment": memcpy_assessment,
         "nccl_blocking_assessment": nccl_blocking_assessment,
         "overlap_assessment": overlap_assessment,
-        "patterns_detected": patterns_detected,
+        "system_findings": system_findings,
         "cross_validation": cross_validation,
         "impact_estimates": [],
     }
 
     write_metrics_json(metrics, output_dir, "multi_kernel")
 
-    print(f"\n  ✓ Wrote multi_kernel_metrics.json")
-    print(f"  ✓ {len(patterns_detected)} patterns detected")
+    print("\n  ✓ Wrote multi_kernel_metrics.json")
+    print(f"  ✓ {len(system_findings)} system findings")
     print("=" * 80)
 
 

@@ -8,35 +8,66 @@
 
 Three validation levels, each at the boundary where issues are still fixable:
 
-Level 1 — validate_findings_file (Steps 6-7, within each sub-agent)
-    Structural check on a single findings file, including marker structure
-    via MarkerValidator (pairing, kind attributes, per-kind required attrs,
-    mandatory p_item). Sub-agent retries on failure.
+Level 1: validate_findings_file, run within each sub-agent on its own findings
+file. Structural check, including marker structure via MarkerValidator
+(pairing, kind attributes, per-kind required attrs, mandatory p_item). The
+sub-agent retries on failure.
 
-Level 2 — validate_subagent_outputs (Step 8, batch)
-    Cross-cutting checks that need all files: time sanity, coverage, priority.
+Level 2: validate_subagent_outputs, run once over all files. Cross-cutting
+checks: time sanity, coverage, priority.
 
-Level 3 — validate_report (Step 11.1, after report assembly)
-    Final analysis.md structure: headers, metrics table, placeholders,
-    and report-level marker structure via MarkerValidator (pairing, kind
-    attributes, mandatory top_ops).
+Level 3: validate_report, run after report assembly. Final analysis.md
+structure: headers, metrics table, placeholders, and report-level marker
+structure via MarkerValidator (pairing, kind attributes, mandatory top_ops).
 """
 
 import json
 import os
 import re
+from collections import Counter
+from dataclasses import fields
+from itertools import pairwise
 
-from .report_utils import load_manifest, _scan_findings_dir
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import SystemFindings
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionEstimate
+from TraceLens.Agent.Analysis.utils.report_utils import (
+    load_manifest,
+    scan_findings_dir,
+)
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
 # Constants
 
+TIER_COMPUTE = "compute"
+TIER_FUSION = "fusion"
+TIER_SYSTEM = "system"
+# multi_trace report vocabulary: the Executive Summary's all-nodes column and the
+# per-node percent column that replaces %E2E.
+EXEC_TOTAL_COL = "Total"
+PCT_OF_NODE_COL = "% of Node"
+_FUSION_ROW_KEYS = tuple(
+    f.name for f in fields(FusionEstimate) if f.name.startswith("rows")
+)
+
 _REQUIRED_FINDINGS_HEADERS = ["## Recommendations", "## Detailed Analysis"]
-_COMPUTE_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
-_SYSTEM_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
-# Optional icon / prefix before P<N> (e.g. kernel fusion `### 🟢 P1:`).
+_P_ITEM_LABELS = ["**Insight**", "**Action**", "**Impact**"]
+# Optional icon / prefix before P<N> (e.g. kernel fusion `### 🔴 P1:`).
 _P_ITEM_RE = re.compile(r"^### .*?P(\d+)\s*:", re.MULTILINE)
 _CANDIDATE_RE = re.compile(r"<!-- reasoning-candidate\s+tier=(\w+)\s+rank=(\d+)\s*-->")
+_FUSION_EMPTY_SENTENCE = "No kernel fusion opportunities detected."
 _DA_HEADING_RE = re.compile(r"^####\s+.*?P(\d+)\s*:", re.MULTILINE)
+_CARD_SPLIT_RE = re.compile(r"^(?=### )", re.MULTILINE)
+_H3_RE = re.compile(r"^### ", re.MULTILINE)
+_H2_RE = re.compile(r"^## ", re.MULTILINE)
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|[\s\-:|]+\|\s*$")
+_TOP_OPS_MARKER_RE = re.compile(
+    r"<!--\s*impact-begin([^>]*?\bkind=top_ops\b[^>]*?)-->(.*?)<!--\s*impact-end\s*-->",
+    re.DOTALL,
+)
+_BACKREF_RE = re.compile(r"\\(\d+)|\\g<([^>]*)>")
+_PRIORITY_ICONS = "🔴🟡🟢"
+PRIORITY_PREFIX_RE = re.compile(rf"^(?:[{_PRIORITY_ICONS}]\s*)?(?:P\d+:\s*)?")
+_SYSTEM_DATA_HEADER = ["Metric", "Value"]
 _NOT_QUANTIFIABLE_SENTINEL = re.compile(
     r"not quantifiable from trace data", re.IGNORECASE
 )
@@ -58,6 +89,10 @@ _COMPUTE_DATA_REQUIRED_COLS_STANDALONE = (
     "Efficiency",
     "Bound",
 )
+_COMPUTE_DATA_REQUIRED_COLS_BY_NODE = tuple(
+    PCT_OF_NODE_COL if col == "%E2E" else col
+    for col in _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+)
 # Mandatory columns for comparative-mode **Data:** tables (sub_agent_spec.md
 # § Operations Table Schema — Comparative).
 _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
@@ -72,9 +107,12 @@ _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE = (
     "FLOPS/Byte (T1)",
     "Bound (T1)",
 )
+
 _TIME_DISCREPANCY_THRESHOLD = 10  # percent
 _ROLLUP_IMPACT_TOL = 0.02  # ms; matches 2-decimal rounding in generate_priority_data
 _MARKER_NUMERIC_TOL = 0.005  # ms; half a ULP at 2-decimal marker rendering
+_TOTAL_TIME_TOL_MS = 0.01  # Total Time cells are rendered at 2 decimals
+_LEADING_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _KF_IMPACT_STANDALONE_RE = re.compile(
     r"impact_score:\s*[\d.]+\s*\(perf-model coverage \d+/\d+ kernels\)"
 )
@@ -110,6 +148,15 @@ _KNOWN_REPORT_PLACEHOLDERS = {
 # Level 1: per-file findings validation (called within each sub-agent)
 
 
+def _load_json(path, default):
+    """Parsed JSON at ``path``, or ``default`` when it is missing or unparseable."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
 def _metrics_json_for_findings(filepath):
     """Path to category_data/<stem>_metrics.json for a *_findings.md under category_findings/."""
     output_dir = os.path.dirname(os.path.dirname(filepath))
@@ -117,22 +164,24 @@ def _metrics_json_for_findings(filepath):
     return os.path.join(output_dir, "category_data", f"{stem}_metrics.json")
 
 
-def _category_findings_empty(filepath):
-    """True when metrics JSON exists and category_findings is an empty list (sub_agent_spec § empty)."""
-    mp = _metrics_json_for_findings(filepath)
+def _load_findings_metrics(filepath):
+    """Parsed metrics JSON for a *_findings.md, or {} when missing or unreadable."""
+    return _load_json(_metrics_json_for_findings(filepath), {})
+
+
+def _load_manifest_if_present(output_dir):
+    """The category manifest, or {} before prepare has written one."""
     try:
-        with open(mp) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-    cf = data.get("category_findings")
-    return isinstance(cf, list) and len(cf) == 0
+        return load_manifest(output_dir)
+    except FileNotFoundError:
+        return {}
 
 
 def validate_findings_file(filepath, tier, comparison_scope=None):
     """Validate a single findings file against the sub-agent spec contract.
 
     Checks:
+    - Fusion tier with no ``impact_estimates``: only the spec's no-opportunities sentence
     - Required ## headers present and in correct order
     - P-item labels match tier (all tiers: Insight/Action/Impact)
     - At least one reasoning-candidate block in Detailed Analysis
@@ -155,8 +204,18 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
     if not os.path.exists(filepath):
         return False, [f"File not found: {filepath}"]
 
-    with open(filepath, "r") as f:
+    with open(filepath) as f:
         content = f.read()
+
+    metrics = _load_findings_metrics(filepath)
+
+    # With no impact_estimates the spec's file is a heading and this one sentence.
+    if tier == TIER_FUSION and metrics and not metrics.get("impact_estimates"):
+        if _FUSION_EMPTY_SENTENCE in content:
+            return True, []
+        return False, [
+            f"Fusion findings with no impact_estimates must state: {_FUSION_EMPTY_SENTENCE}"
+        ]
 
     errors = []
 
@@ -167,14 +226,27 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
             errors.append(f"Missing required section: {h}")
         header_positions.append(pos)
 
-    if all(p >= 0 for p in header_positions):
-        if header_positions[0] > header_positions[1]:
-            errors.append("## Recommendations must appear before ## Detailed Analysis")
+    if all(p >= 0 for p in header_positions) and (
+        header_positions[0] > header_positions[1]
+    ):
+        errors.append("## Recommendations must appear before ## Detailed Analysis")
 
     rec_start = content.find("## Recommendations")
     da_start = content.find("## Detailed Analysis")
 
-    relaxed_empty = tier == "compute" and _category_findings_empty(filepath)
+    system_entries = None
+    if tier == TIER_SYSTEM:
+        if isinstance(metrics.get("system_findings"), list):
+            system_entries = metrics["system_findings"]
+        else:
+            errors.append(
+                f"system_findings is not a list in the metrics JSON "
+                f"(status={metrics.get('status')!r}); the analyzer script did not succeed"
+            )
+
+    relaxed_empty = (
+        tier == TIER_COMPUTE and metrics.get("category_findings") == []
+    ) or system_entries == []
 
     p_items = []
     if rec_start >= 0:
@@ -186,26 +258,38 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
         if not relaxed_empty:
             if not p_items:
                 errors.append("No ### P<N>: items found under ## Recommendations")
-            expected_labels = (
-                _COMPUTE_P_ITEM_LABELS if tier == "compute" else _SYSTEM_P_ITEM_LABELS
-            )
-            for label in expected_labels:
-                if label not in rec_section:
-                    errors.append(
-                        f"Missing label {label} in ## Recommendations "
-                        f"(required for {tier} tier)"
-                    )
+            if tier != TIER_SYSTEM:
+                for label in _P_ITEM_LABELS:
+                    if label not in rec_section:
+                        errors.append(
+                            f"Missing label {label} in ## Recommendations "
+                            f"(required for {tier} tier)"
+                        )
+
+        if system_entries is not None:
+            expected = [f"### {SystemFindings.card_title(e)}" for e in system_entries]
+            headings = [ln for ln in rec_section.splitlines() if ln.startswith("### ")]
+            if headings != expected:
+                errors.append(
+                    f"## Recommendations headings {headings} must be exactly "
+                    f"{expected}, one card per metrics system_findings entry"
+                )
+            for card in _CARD_SPLIT_RE.split(rec_section)[1:]:
+                errors.extend(
+                    f"Card {card.splitlines()[0]!r} is missing {label}"
+                    for label in _P_ITEM_LABELS
+                    if label not in card
+                )
 
     candidates = []
     if da_start >= 0:
         da_section = content[da_start:]
 
         candidates = _CANDIDATE_RE.findall(da_section)
-        if not relaxed_empty:
-            if not candidates:
-                errors.append(
-                    "No <!-- reasoning-candidate --> blocks in ## Detailed Analysis"
-                )
+        if not relaxed_empty and not candidates:
+            errors.append(
+                "No <!-- reasoning-candidate --> blocks in ## Detailed Analysis"
+            )
 
     if not relaxed_empty and p_items and candidates and len(p_items) != len(candidates):
         errors.append(
@@ -224,16 +308,30 @@ def validate_findings_file(filepath, tier, comparison_scope=None):
 
     # Compute tier only: shape + Args verbatim + Kernel Path verbatim, all
     # scoped to <!-- reasoning-candidate tier=compute --> blocks.
-    if tier == "compute":
+    standalone_cols = _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+    if tier in (TIER_COMPUTE, TIER_FUSION):
+        gpu_util = _load_manifest_if_present(
+            os.path.dirname(os.path.dirname(filepath))
+        ).get("gpu_utilization", {})
+        if "nodes" in gpu_util:
+            standalone_cols = _COMPUTE_DATA_REQUIRED_COLS_BY_NODE
+    if tier == TIER_COMPUTE:
         errors.extend(
-            _validate_compute_data_tables(content, filepath, comparison_scope)
+            _validate_compute_data_tables(
+                content, filepath, comparison_scope, standalone_cols
+            )
         )
 
-    # Marker structure (folded in from the former Level-4 validate_markers).
-    file_class = "category_findings" if tier == "compute" else "system_findings"
+    if tier == TIER_FUSION:
+        errors.extend(_validate_fusion_data_tables(content, standalone_cols))
+
+    if system_entries is not None:
+        errors.extend(_system_block_errors(content, system_entries))
+
+    # Marker structure validation.
     errors.extend(
         MarkerValidator.check_findings_file(
-            filepath, file_class, skip_p_item_required=relaxed_empty
+            filepath, skip_p_item_required=relaxed_empty
         )
     )
 
@@ -272,30 +370,30 @@ def _scan_args_cells(content):
 
 
 def _load_valid_args(*metrics_paths):
-    """Build set of operations[].args strings from one or more metrics JSONs."""
+    """Build set of Args strings from one or more metrics JSONs: operations[].args,
+    plus the rendered fusion rows' args (kernel_fusion_metrics.json
+    impact_estimates[].rows / rows_trace1 / rows_trace2)."""
     valid = set()
     for p in metrics_paths:
-        try:
-            with open(p) as f:
-                d = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
+        d = _load_json(p, {})
         valid.update(
             op["args"]
             for op in d.get("operations", [])
             if isinstance(op.get("args"), str)
+        )
+        valid.update(
+            row["args"]
+            for est in d.get("impact_estimates", [])
+            for key in _FUSION_ROW_KEYS
+            for row in est.get(key, [])
+            if isinstance(row.get("args"), str)
         )
     return valid
 
 
 def _load_compute_data_metrics(metrics_path):
     """Return (args_set, launcher_paths_set, kernel_names_set) from one metrics JSON; empty on read failure."""
-    try:
-        with open(metrics_path) as f:
-            d = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return set(), set(), set()
-    ops = d.get("operations", [])
+    ops = _load_json(metrics_path, {}).get("operations", [])
     args = {op["args"] for op in ops if isinstance(op.get("args"), str)}
     paths = {
         op["launcher_path"]
@@ -310,22 +408,26 @@ def _load_compute_data_metrics(metrics_path):
     return args, paths, kernel_names
 
 
-def _iter_compute_candidate_blocks(content):
-    """Yield (start, end) line-index range for each tier=compute candidate block."""
+def iter_candidate_blocks(content, tier):
+    """Yield (start, end, rank) for each candidate block of ``tier``: the line-index
+    range and the integer rank."""
     lines = content.splitlines()
     starts = [
-        (idx, _CANDIDATE_RE.search(line))
-        for idx, line in enumerate(lines)
-        if _CANDIDATE_RE.search(line)
+        (idx, m) for idx, line in enumerate(lines) if (m := _CANDIDATE_RE.search(line))
     ]
     for i, (idx, m) in enumerate(starts):
-        if "tier=compute" not in m.group(0):
+        if m.group(1) != tier:
             continue
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
-        yield idx, end
+        yield idx, end, int(m.group(2))
 
 
-def _find_data_table(lines, start, end):
+def _split_row(line):
+    """Stripped cells of a markdown table row, tolerating leading indentation."""
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def find_data_table(lines, start, end):
     """Locate the first markdown table after **Data:** in lines[start:end].
 
     Returns (header_line_1based, header_cols, row_iter) or None. row_iter
@@ -347,19 +449,24 @@ def _find_data_table(lines, start, end):
     )
     if header_idx is None or header_idx + 1 >= end:
         return None
-    header_cols = [c.strip() for c in lines[header_idx].strip().strip("|").split("|")]
+    header_cols = _split_row(lines[header_idx])
 
     def rows():
         for row_idx in range(header_idx + 2, end):
             row = lines[row_idx]
             if not row.strip().startswith("|"):
                 break
-            yield row_idx + 1, [c.strip() for c in row.strip().strip("|").split("|")]
+            yield row_idx + 1, _split_row(row)
 
     return header_idx + 1, header_cols, rows()
 
 
-def _validate_compute_data_tables(content, findings_path, comparison_scope=None):
+def _validate_compute_data_tables(
+    content,
+    findings_path,
+    comparison_scope=None,
+    standalone_cols=_COMPUTE_DATA_REQUIRED_COLS_STANDALONE,
+):
     """For each <!-- reasoning-candidate tier=compute --> block: shape check
     (Args column required for standalone; comparative schema for comparative),
     Args cells verbatim vs operations[].args, Kernel Path cells verbatim
@@ -371,17 +478,15 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
     cat_metrics_basename = os.path.basename(metrics_path)
     is_comparative = comparison_scope == "comparative"
     required_cols = (
-        _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE
-        if is_comparative
-        else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+        _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE if is_comparative else standalone_cols
     )
     valid_args, valid_paths, valid_kernel_names = _load_compute_data_metrics(
         metrics_path
     )
     lines = content.splitlines()
     errors = []
-    for start, end in _iter_compute_candidate_blocks(content):
-        table = _find_data_table(lines, start, end)
+    for start, end, _ in iter_candidate_blocks(content, TIER_COMPUTE):
+        table = find_data_table(lines, start, end)
         if table is None:
             errors.append(
                 f"compute-tier reasoning-candidate block at line {start + 1}: "
@@ -397,46 +502,121 @@ def _validate_compute_data_tables(content, findings_path, comparison_scope=None)
                 f"(sub_agent_spec.md § Operations Table Schema)"
             )
             continue
-        active_cols = (
-            _COMPUTE_DATA_REQUIRED_COLS_COMPARATIVE
-            if is_comparative
-            else _COMPUTE_DATA_REQUIRED_COLS_STANDALONE
-        )
         args_col = "Args (T1)" if is_comparative else "Args"
-        args_idx = active_cols.index(args_col)
-        kp_idx = active_cols.index("Kernel Path")
-        kn_idx = active_cols.index("Kernel Name")
+        args_idx = required_cols.index(args_col)
+        kp_idx = required_cols.index("Kernel Path")
+        kn_idx = required_cols.index("Kernel Name")
         for row_line, cells in row_iter:
-            if valid_args and args_idx < len(cells) and cells[args_idx]:
-                if cells[args_idx] not in valid_args:
-                    errors.append(
-                        f"Args cell on line {row_line} does not match "
-                        f"operations[].args in {cat_metrics_basename} "
-                        f"(paste verbatim, keep <br>): {cells[args_idx]}"
-                    )
-            if valid_paths and kp_idx < len(cells) and cells[kp_idx]:
-                if cells[kp_idx] not in valid_paths:
-                    errors.append(
-                        f"Kernel Path cell on line {row_line} does not match "
-                        f"operations[].launcher_path in {cat_metrics_basename} "
-                        f"(paste verbatim): {cells[kp_idx]}"
-                    )
+            if (
+                valid_args
+                and args_idx < len(cells)
+                and cells[args_idx]
+                and cells[args_idx] not in valid_args
+            ):
+                errors.append(
+                    f"Args cell on line {row_line} does not match "
+                    f"operations[].args in {cat_metrics_basename} "
+                    f"(paste verbatim, keep <br>): {cells[args_idx]}"
+                )
+            if (
+                valid_paths
+                and kp_idx < len(cells)
+                and cells[kp_idx]
+                and cells[kp_idx] not in valid_paths
+            ):
+                errors.append(
+                    f"Kernel Path cell on line {row_line} does not match "
+                    f"operations[].launcher_path in {cat_metrics_basename} "
+                    f"(paste verbatim): {cells[kp_idx]}"
+                )
             if (
                 valid_kernel_names
                 and kn_idx < len(cells)
                 and cells[kn_idx]
                 and cells[kn_idx] != "—"
+                and cells[kn_idx] not in valid_kernel_names
             ):
-                if cells[kn_idx] not in valid_kernel_names:
-                    errors.append(
-                        f"Kernel Name cell on line {row_line} does not match "
-                        f"operations[].kernel_name_trunc in {cat_metrics_basename} "
-                        f"(paste verbatim): {cells[kn_idx]}"
-                    )
+                errors.append(
+                    f"Kernel Name cell on line {row_line} does not match "
+                    f"operations[].kernel_name_trunc in {cat_metrics_basename} "
+                    f"(paste verbatim): {cells[kn_idx]}"
+                )
     return errors
 
 
-# Level 2: cross-cutting batch checks (called at Step 8)
+def _validate_fusion_data_tables(
+    content, standalone_cols=_COMPUTE_DATA_REQUIRED_COLS_STANDALONE
+):
+    """For each <!-- reasoning-candidate tier=fusion --> block: the first
+    **Data:** table must start with the canonical fusion columns, in order.
+    """
+    lines = content.splitlines()
+    required_cols = standalone_cols
+    errors = []
+    for start, end, _ in iter_candidate_blocks(content, TIER_FUSION):
+        table = find_data_table(lines, start, end)
+        if table is None:
+            errors.append(
+                f"fusion-tier reasoning-candidate block at line {start + 1}: "
+                f"no **Data:** table found"
+            )
+            continue
+        header_line, header_cols, _ = table
+        n_cols = len(required_cols)
+        if tuple(header_cols[:n_cols]) != required_cols:
+            errors.append(
+                f"fusion Data table at line {header_line}: header must start "
+                f"with the {n_cols} canonical columns in order "
+                f"{list(required_cols)}; got {header_cols}"
+            )
+    return errors
+
+
+def _system_block_errors(content, entries):
+    """The tier=system blocks of ``content`` against the system ``entries``: block
+    ranks equal entry ranks, and each block's ``####`` title and Data rows are
+    the entry's verbatim.
+    """
+    lines = content.splitlines()
+    blocks = list(iter_candidate_blocks(content, TIER_SYSTEM))
+    expected_ranks = [e["rank"] for e in entries]
+    errors = []
+    if [rank for _, _, rank in blocks] != expected_ranks:
+        errors.append(
+            f"tier=system block ranks {[rank for _, _, rank in blocks]} must be "
+            f"{expected_ranks}, one block per system_findings entry"
+        )
+    by_rank = {e["rank"]: e for e in entries}
+    for start, end, rank in blocks:
+        entry = by_rank.get(rank)
+        if entry is None:
+            continue
+        heading = next((ln for ln in lines[start:end] if ln.startswith("#### ")), "")
+        title = PRIORITY_PREFIX_RE.sub("", heading[5:].strip())
+        if title != entry["title"]:
+            errors.append(
+                f"system P{rank} block heading is {title!r}, expected {entry['title']!r}"
+            )
+        table = find_data_table(lines, start, end)
+        if table is None:
+            errors.append(f"system P{rank} block has no **Data:** table")
+            continue
+        _, header_cols, rows = table
+        if header_cols != _SYSTEM_DATA_HEADER:
+            errors.append(
+                f"system P{rank} Data header {header_cols} must be {_SYSTEM_DATA_HEADER}"
+            )
+        elif [cells for _, cells in rows] != [
+            SystemFindings.to_cells(m) for m in entry["members"]
+        ]:
+            errors.append(
+                f"system P{rank} Data rows must be the metrics members verbatim "
+                f"({[SystemFindings.to_cells(m) for m in entry['members']]})"
+            )
+    return errors
+
+
+# Level 2: cross-cutting batch checks (called at Step 9)
 
 
 def validate_subagent_outputs(output_dir):
@@ -501,13 +681,13 @@ def _check_coverage(output_dir, manifest):
     categories = manifest.get("categories", [])
     messages = []
 
-    found_system = set(_scan_findings_dir(output_dir, "system_findings").keys())
+    found_system = set(scan_findings_dir(output_dir, "system_findings").keys())
     expected_system = {c["name"] for c in categories if c.get("tier") == "system"}
     missing_system = expected_system - found_system
     if missing_system:
         messages.append(f"Missing system findings: {', '.join(missing_system)}")
 
-    found_compute = set(_scan_findings_dir(output_dir, "category_findings").keys())
+    found_compute = set(scan_findings_dir(output_dir, "category_findings").keys())
     expected_compute = {
         c["name"] for c in categories if c.get("tier") == "compute_kernel"
     }
@@ -521,24 +701,23 @@ def _check_coverage(output_dir, manifest):
 
 def _check_priority_consistency(output_dir, manifest):
     """Verify priority_data.json invariants: findings sort, rank contiguity,
-    and per-category rollup of priorities[].impact_score vs findings[] sum.
+    and per-(node, category) rollup of priorities[].impact_score vs findings[] sum.
 
-    Non-blocking: returns WARN on any violation (preserves Step 8 semantics
+    Non-blocking: returns WARN on any violation (preserves Step 9 semantics
     matching _check_time_sanity / _check_coverage). manifest is accepted for
-    call-site symmetry with the other Step 8 checks.
+    call-site symmetry with the other Step 9 checks.
     """
-    del manifest  # unused; kept for signature symmetry with sibling checks
     pd_path = os.path.join(output_dir, "priority_data.json")
     if not os.path.exists(pd_path):
         return {"status": "WARN", "messages": ["priority_data.json not found"]}
     try:
         with open(pd_path) as f:
-            pd = json.load(f)
+            priority_data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         return {"status": "WARN", "messages": [f"priority_data.json unreadable: {e}"]}
 
-    findings = pd.get("findings", []) or []
-    priorities = pd.get("priorities", []) or []
+    findings = priority_data.get("findings", []) or []
+    priorities = priority_data.get("priorities", []) or []
     messages = []
 
     scored = [
@@ -546,7 +725,7 @@ def _check_priority_consistency(output_dir, manifest):
         for i, f in enumerate(findings)
         if f.get("impact_score") is not None
     ]
-    for (i_a, s_a), (i_b, s_b) in zip(scored, scored[1:]):
+    for (i_a, s_a), (i_b, s_b) in pairwise(scored):
         if s_a < s_b:
             messages.append(
                 f"INV1: findings[] not sorted desc by impact_score at index "
@@ -572,19 +751,22 @@ def _check_priority_consistency(output_dir, manifest):
         if p.get("source") != "findings_rollup":
             continue
         cat = p.get("category")
+        node = p.get(NODE_COL)
         # Mirror generate_priority_data: the findings_rollup excludes
         # heuristic findings, so the consistency sum must too.
         expected = sum(
             f.get("impact_score", 0)
             for f in findings
             if f.get("category") == cat
+            and f.get(NODE_COL) == node
             and f.get("impact_score") is not None
             and f.get("estimate_method") != "heuristic"
         )
         actual = p.get("impact_score", 0) or 0
         if abs(actual - expected) > _ROLLUP_IMPACT_TOL:
+            where = f"node={node}, " if node is not None else ""
             messages.append(
-                f"INV7': priorities[category={cat}].impact_score={actual:.4f} "
+                f"INV7': priorities[{where}category={cat}].impact_score={actual:.4f} "
                 f"!= sum(findings[].impact_score)={expected:.4f}"
             )
 
@@ -592,7 +774,7 @@ def _check_priority_consistency(output_dir, manifest):
     return {"status": status, "messages": messages}
 
 
-# Level 3: final report validation (called at Step 11.1)
+# Level 3: final report validation (called at Step 12.1)
 
 
 def validate_report(output_dir, comparison_scope=None):
@@ -608,7 +790,7 @@ def validate_report(output_dir, comparison_scope=None):
       required attrs, mandatory kind=top_ops
 
     Findings files are validated separately by validate_findings_file
-    (Level 1, called within each sub-agent at Steps 6-7), which also
+    (Level 1, called within each sub-agent at Steps 7-8), which also
     enforces per-file marker structure.
 
     Args:
@@ -623,7 +805,7 @@ def validate_report(output_dir, comparison_scope=None):
     if not os.path.exists(report_path):
         return False, ["<file not found>"]
 
-    with open(report_path, "r") as f:
+    with open(report_path) as f:
         content = f.read()
 
     if len(content.strip()) < 100:
@@ -637,14 +819,8 @@ def validate_report(output_dir, comparison_scope=None):
         if f"## {h}" not in content
     )
 
-    exec_start = content.find("## Executive Summary")
-    if exec_start >= 0:
-        next_section = content.find("\n## ", exec_start + 1)
-        exec_block = (
-            content[exec_start:next_section]
-            if next_section > 0
-            else content[exec_start:]
-        )
+    exec_block = _report_section(content, "## Executive Summary")
+    if exec_block is not None:
         if "|" not in exec_block:
             missing.append("No metrics table found under ## Executive Summary")
         else:
@@ -659,6 +835,9 @@ def validate_report(output_dir, comparison_scope=None):
                     missing.append(
                         f"Placeholder value '{placeholder}' in Executive Summary table"
                     )
+            gpu_util = _load_manifest_if_present(output_dir).get("gpu_utilization", {})
+            if "nodes" in gpu_util:
+                missing.extend(_validate_exec_summary_nodes(exec_block, gpu_util))
 
     found = [
         p
@@ -684,6 +863,37 @@ def validate_report(output_dir, comparison_scope=None):
     return len(missing) == 0, missing
 
 
+def _validate_exec_summary_nodes(exec_block, gpu_util):
+    """multi_trace Executive Summary: the header is Metric, Total, then the nodes
+    in job order, and each Total Time cell matches the manifest."""
+    nodes = gpu_util["nodes"]
+    header = ["Metric", EXEC_TOTAL_COL, *nodes]
+    totals = [gpu_util["total_time_ms"], *(n["total_time_ms"] for n in nodes.values())]
+    rows = [
+        _split_row(ln) for ln in exec_block.splitlines() if ln.lstrip().startswith("|")
+    ]
+    errors = []
+    if rows[:1] != [header]:
+        errors.append(
+            f"Executive Summary header {rows[:1]} must be {header} "
+            f"(Total, then each node in job order)"
+        )
+    total_row = next((r for r in rows if r[0] == "Total Time"), None)
+    if total_row is None or len(total_row) != len(header):
+        errors.append(
+            f"Executive Summary needs a Total Time row with one cell per column {header}"
+        )
+        return errors
+    for column, cell, expected in zip(header[1:], total_row[1:], totals, strict=True):
+        found = _LEADING_NUMBER_RE.match(cell)
+        if not found or abs(float(found.group()) - expected) > _TOTAL_TIME_TOL_MS:
+            errors.append(
+                f"Executive Summary Total Time for {column} is {cell!r}, "
+                f"manifest has {expected} ms"
+            )
+    return errors
+
+
 def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scope=None):
     """Check scope-dependent formatting in the report.
 
@@ -698,14 +908,12 @@ def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scop
         comparison_scope: "standalone" or "comparative". When omitted,
             falls back to ``category_manifest.json``.
     """
-    kf_start = content.find("## Kernel Fusion Opportunities")
-    if kf_start < 0:
+    kf_section = _report_section(content, "## Kernel Fusion Opportunities")
+    if kf_section is None:
         return []
-    kf_next = content.find("\n## ", kf_start + 1)
-    kf_section = content[kf_start:kf_next] if kf_next > 0 else content[kf_start:]
 
     errors = []
-    for line_offset, line in enumerate(kf_section.splitlines()):
+    for line in kf_section.splitlines():
         if not line.strip().startswith("**Impact**"):
             continue
         impact_text = line.split("**Impact**")[-1].strip().lstrip(":").strip()
@@ -719,7 +927,7 @@ def _validate_report_comparison_scope_diffs(content, output_dir, comparison_scop
                     f"kernels)' but got: {impact_text}"
                 )
         else:
-            if re.search(r"\(perf-model coverage", impact_text):
+            if "(perf-model coverage" in impact_text:
                 errors.append(
                     f"Kernel Fusion Impact format error: comparative mode "
                     f"should not include perf-model coverage parenthetical "
@@ -737,7 +945,7 @@ def _validate_report_args_column(content, output_dir):
     """Level-3 check: every Args cell in analysis.md must match some
     operations[].args verbatim across all category metrics JSONs.
 
-    Catches LLM reformatting introduced by the Step 11 orchestrator when it
+    Catches LLM reformatting introduced by the Step 12 orchestrator when it
     pastes per-category Detailed Analysis tables into the final report.
     """
     cat_data_dir = os.path.join(output_dir, "category_data")
@@ -760,37 +968,60 @@ def _validate_report_args_column(content, output_dir):
     ]
 
 
+def _report_section(content, header):
+    """The ``header`` section of analysis.md, up to the next ``## ``, or None."""
+    sec_start = content.find(header)
+    if sec_start < 0:
+        return None
+    sec_end = content.find("\n## ", sec_start + 1)
+    return content[sec_start:] if sec_end < 0 else content[sec_start:sec_end]
+
+
 def _validate_report_priority_consistency(content, output_dir):
     """Cross-check analysis.md against priority_data.json.
 
     R1: Compute Kernel Optimizations P-item heading count == len(findings).
     R2: Each kind=p_item marker's category attr (in doc order) == findings[N-1].category.
     R3: Each marker's low/mid/high attrs match findings[N-1] impact_score_low / impact_score / impact_score_high.
-    R4: Top Operations marker rows == len(priorities).
+    R4: Each Top Operations table's rows == len(priorities), or the priorities of
+    its ``node=`` when the marker carries one.
+    R6: Each compute kind=p_item and detail_estimate marker's node attr ==
+    findings[N-1].node, and each fusion and system kind=p_item marker's node
+    attr == the manifest's focus_job (all absent outside multi_trace).
+    R7: The System-Level cards are exactly priority_data.json::system_findings,
+    in order, and each tier=system block carries its entry's title and Data rows.
 
-    Silently skips when priority_data.json is absent (Step 8 already warns).
+    Silently skips when priority_data.json is absent (Step 9 already warns).
     Numeric attrs are compared as 2-decimal strings to match the writer's
     rounding in generate_priority_data. Every compute-tier finding now carries
     a numeric impact_score (quantified or heuristic estimate), so p_item
     markers in this section must use numeric low/mid/high (never null).
     """
-    pd_path = os.path.join(output_dir, "priority_data.json")
-    if not os.path.exists(pd_path):
+    priority_data = _load_json(os.path.join(output_dir, "priority_data.json"), None)
+    if priority_data is None:
         return []
-    try:
-        with open(pd_path) as f:
-            pd = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return []
-    findings = pd.get("findings", []) or []
-    priorities = pd.get("priorities", []) or []
+    findings = priority_data.get("findings", []) or []
+    priorities = priority_data.get("priorities", []) or []
     errors = []
 
-    sec_start = content.find("## Compute Kernel Optimizations")
-    if sec_start < 0:
+    system_entries = priority_data.get("system_findings", []) or []
+    expected_cards = [SystemFindings.card_title(e) for e in system_entries]
+    system_section = _report_section(content, "## System-Level Optimizations") or ""
+    headings = [
+        ln[4:].lstrip(_PRIORITY_ICONS + " ")
+        for ln in system_section.splitlines()
+        if ln.startswith("### ")
+    ]
+    if headings != expected_cards:
+        errors.append(
+            f"R7: System-Level cards {headings} must be {expected_cards}, "
+            f"the priority_data.json::system_findings order"
+        )
+    errors.extend(f"R7: {e}" for e in _system_block_errors(content, system_entries))
+
+    section = _report_section(content, "## Compute Kernel Optimizations")
+    if section is None:
         return errors
-    sec_end = content.find("\n## ", sec_start + 1)
-    section = content[sec_start:] if sec_end < 0 else content[sec_start:sec_end]
 
     n_p = len(_P_ITEM_RE.findall(section))
     if n_p != len(findings):
@@ -799,13 +1030,7 @@ def _validate_report_priority_consistency(content, output_dir):
             f"priority_data.json has {len(findings)} findings"
         )
 
-    p_markers = []
-    for m in MarkerValidator.BEGIN_RE.finditer(section):
-        inner = m.group(1)
-        km = MarkerValidator.KIND_ATTR_RE.search(inner)
-        if not km or km.group(1) != "p_item":
-            continue
-        p_markers.append(dict(MarkerValidator.ATTR_RE.findall(inner)))
+    p_markers = [attrs for _, attrs in marker_attrs(section, "p_item")]
 
     for idx, attrs in enumerate(p_markers):
         if idx >= len(findings):
@@ -820,6 +1045,11 @@ def _validate_report_priority_consistency(content, output_dir):
             errors.append(
                 f"R2: P-item marker #{idx + 1} category={cat_attr!r} != "
                 f"findings[{idx}].category={f.get('category')!r}"
+            )
+        if attrs.get(NODE_COL) != f.get(NODE_COL):
+            errors.append(
+                f"R6: P-item marker #{idx + 1} node={attrs.get(NODE_COL)!r} != "
+                f"findings[{idx}].node={f.get(NODE_COL)!r}"
             )
         for attr_name, json_key in (
             ("low", "impact_score_low"),
@@ -843,24 +1073,47 @@ def _validate_report_priority_consistency(content, output_dir):
                         f"findings[{idx}].{json_key}={raw}"
                     )
 
-    top_match = re.search(
-        r"<!--\s*impact-begin[^>]*?\bkind=top_ops\b[^>]*?-->(.*?)<!--\s*impact-end\s*-->",
-        content,
-        re.DOTALL,
-    )
-    if top_match:
-        body = top_match.group(1)
+    lines = content.splitlines()
+    node_checks = [
+        (f"detail_estimate of P{rank}", attrs, findings[rank - 1].get(NODE_COL))
+        for start, end, rank in iter_candidate_blocks(content, TIER_COMPUTE)
+        if rank <= len(findings)
+        for _, attrs in marker_attrs("\n".join(lines[start:end]), "detail_estimate")
+    ]
+    focus_job = _load_manifest_if_present(output_dir).get("focus_job")
+    for label, header in (
+        ("fusion", "## Kernel Fusion Opportunities"),
+        ("system", "## System-Level Optimizations"),
+    ):
+        node_checks.extend(
+            (f"{label} P-item marker #{i + 1}", attrs, focus_job)
+            for i, (_, attrs) in enumerate(
+                marker_attrs(_report_section(content, header) or "", "p_item")
+            )
+        )
+    for label, attrs, expected in node_checks:
+        if attrs.get(NODE_COL) != expected:
+            errors.append(f"R6: {label} node={attrs.get(NODE_COL)!r} != {expected!r}")
+
+    for top_match in _TOP_OPS_MARKER_RE.finditer(content):
+        node = dict(MarkerValidator.ATTR_RE.findall(top_match.group(1))).get(NODE_COL)
+        expected = (
+            len(priorities)
+            if node is None
+            else sum(1 for p in priorities if p.get(NODE_COL) == node)
+        )
+        body = top_match.group(2)
         n_rows = sum(
             1
             for ln in body.splitlines()
-            if ln.lstrip().startswith("|")
-            and not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)
+            if ln.lstrip().startswith("|") and not _TABLE_SEPARATOR_RE.match(ln)
         )
         n_data_rows = max(0, n_rows - 1)
-        if n_data_rows != len(priorities):
+        if n_data_rows != expected:
+            scope = "" if node is None else f" for node {node!r}"
             errors.append(
                 f"R4: Top Operations table has {n_data_rows} data rows but "
-                f"priority_data.json::priorities has {len(priorities)} entries"
+                f"priority_data.json::priorities has {expected} entries{scope}"
             )
 
     return errors
@@ -880,8 +1133,8 @@ def _extract_detailed_analysis_subsection(content, subsection_header):
     if sub_start < 0:
         return None
     sub_text = da_text[sub_start + len(subsection_header) :]
-    next_h3 = re.search(r"^### ", sub_text, re.MULTILINE)
-    next_h2 = re.search(r"^## ", sub_text, re.MULTILINE)
+    next_h3 = _H3_RE.search(sub_text)
+    next_h2 = _H2_RE.search(sub_text)
     ends = [pos.start() for pos in [next_h3, next_h2] if pos is not None]
     end = min(ends) if ends else len(sub_text)
     return sub_text[:end]
@@ -894,12 +1147,16 @@ def _validate_report_reasoning_candidates(content):
     ``<!-- reasoning-candidate tier=<tier> -->`` markers must equal the number
     of ``#### P<N>:`` headings in the corresponding subsection. Missing markers
     break Hyperloom's ``parse_analysis_md()`` which uses them as block delimiters.
+    Each compute block must also keep its **Data:** table: ``analysis.json``
+    reads its kernels from that table alone. When Compute Kernel Insights is
+    present, every P-item of Compute Kernel Optimizations needs its own compute
+    block there, so a subsection that omits the blocks does not pass with no kernels.
     """
     errors = []
     checks = [
-        ("compute", "### Compute Kernel Insights"),
-        ("fusion", "### Kernel Fusion Insights"),
-        ("system", "### System-Level Insights"),
+        (TIER_COMPUTE, "### Compute Kernel Insights"),
+        (TIER_FUSION, "### Kernel Fusion Insights"),
+        (TIER_SYSTEM, "### System-Level Insights"),
     ]
     for tier, header in checks:
         subsection = _extract_detailed_analysis_subsection(content, header)
@@ -915,6 +1172,30 @@ def _validate_report_reasoning_candidates(content):
                 f"R5: {label} has {n_headings} #### P<N>: headings but "
                 f"{n_markers} reasoning-candidate tier={tier} markers"
             )
+    insights = _extract_detailed_analysis_subsection(
+        content, "### Compute Kernel Insights"
+    )
+    section = _report_section(content, "## Compute Kernel Optimizations")
+    if insights is not None and section is not None:
+        n_items = len(_P_ITEM_RE.findall(section))
+        n_blocks = sum(
+            1
+            for m in _CANDIDATE_RE.finditer(insights)
+            if m.group(1).lower() == TIER_COMPUTE
+        )
+        if n_blocks < n_items:
+            errors.append(
+                f"R5: Compute Kernel Optimizations has {n_items} P-item headings but "
+                f"Compute Kernel Insights has {n_blocks} reasoning-candidate tier=compute "
+                f"blocks; add one block per P-item, each with its **Data:** table"
+            )
+    lines = content.splitlines()
+    errors.extend(
+        f"R5: compute P{rank} at line {start + 1} has no **Data:** table; paste it "
+        f"verbatim from its category findings"
+        for start, end, rank in iter_candidate_blocks(content, TIER_COMPUTE)
+        if find_data_table(lines, start, end) is None
+    )
     return errors
 
 
@@ -929,89 +1210,169 @@ class MarkerValidator:
     END_RE = re.compile(r"<!--\s*impact-end\s*-->")
     KIND_ATTR_RE = re.compile(r"\bkind=(\w+)\b")
     ATTR_RE = re.compile(r"\b(\w+)=([^\s]+)")
+    OP_ROW_IMPACTS_RE = re.compile(r"impacts=(\S.*?)(?:\s+\w+=|\s*-->|\s*$)")
 
-    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops"}
+    # Report-level marker family
+    REPORT_BEGIN_RE = re.compile(r"<!--\s*report-begin\s+([^>]*?)-->", re.DOTALL)
+    REPORT_END_RE = re.compile(r"<!--\s*report-end\s*-->")
+    KNOWN_REPORT_KINDS = {"report_mode", "warning"}
+    REPORT_REQUIRED_ATTRS = {"report_mode": ("mode",), "warning": ()}
+    _WARNINGS_SECTION_RE = re.compile(r"^##\s+Warnings\b", re.MULTILINE)
+
+    KNOWN_KINDS = {"p_item", "detail_estimate", "top_ops", "op_row"}
     REQUIRED_ATTRS_BY_KIND = {
         "p_item": ("low", "mid", "high"),
-        "detail_estimate": ("low", "high"),
+        "detail_estimate": ("low", "mid", "high"),
+        "op_row": ("rank", "impacts"),
     }
-    # Compute findings files that do NOT need a p_item marker.
-    COMPUTE_NO_P_ITEM: set = set()
+
+    @classmethod
+    def _scan_family(
+        cls,
+        text,
+        rel,
+        *,
+        begin_re,
+        end_re,
+        known_kinds,
+        required_attrs,
+        pairing_label,
+        begin_label,
+        kind_noun,
+        extra_check=None,
+    ):
+        """Shared paired-marker scan for a `<verb>-begin`/`<verb>-end` family.
+
+        Checks pairing, presence of kind=, kind ∈ known_kinds, and per-kind
+        required attrs, reusing KIND_ATTR_RE / ATTR_RE on the inner blob. The
+        `*_label`/`kind_noun` args carry the family's error wording; families
+        stay separate so their pairing counts never cross. `extra_check(kind,
+        attrs)` returns an extra per-marker error string (sans `rel` prefix) or
+        None. Returns (errors, kind_counts).
+        """
+        errors = []
+        begins = begin_re.findall(text)
+        n_end = len(end_re.findall(text))
+        if len(begins) != n_end:
+            errors.append(
+                f"{rel}: {pairing_label} pairing mismatch "
+                f"({len(begins)} begin vs {n_end} end)"
+            )
+
+        kind_counts = Counter()
+        for inner in begins:
+            kind_m = cls.KIND_ATTR_RE.search(inner)
+            if not kind_m:
+                errors.append(
+                    f"{rel}: {begin_label} missing kind= attribute: {inner.strip()}"
+                )
+                continue
+            kind = kind_m.group(1)
+            kind_counts[kind] += 1
+            if kind not in known_kinds:
+                errors.append(f"{rel}: unknown {kind_noun}={kind}")
+                continue
+            attrs = dict(cls.ATTR_RE.findall(inner))
+            for required in required_attrs.get(kind, ()):
+                if required not in attrs:
+                    errors.append(
+                        f"{rel}: {kind_noun}={kind} missing required attr {required}"
+                    )
+            if extra_check is not None:
+                extra = extra_check(kind, attrs)
+                if extra:
+                    errors.append(f"{rel}: {extra}")
+        return errors, kind_counts
+
+    @staticmethod
+    def _impact_null_numeric_check(kind, attrs):
+        """Impact-family rule: low/mid/high must be all-null or all-numeric."""
+        nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
+        if nums:
+            null_ct = sum(1 for v in nums if v == "null")
+            if 0 < null_ct < len(nums):
+                return f"kind={kind} mixes null and numeric values in low/mid/high"
+        return None
 
     @classmethod
     def scan(cls, text, rel):
-        """Common per-file marker scan.
+        """Common per-file impact-marker scan.
 
         Checks marker pairing, presence of kind= attribute, kind ∈
         KNOWN_KINDS, per-kind required attrs, and no mixed null/numeric
         values in low/mid/high. Returns (errors, seen_kinds).
         """
-        errors = []
-        begins = cls.BEGIN_RE.findall(text)
-        n_end = len(cls.END_RE.findall(text))
-        if len(begins) != n_end:
-            errors.append(
-                f"{rel}: marker pairing mismatch ({len(begins)} begin vs {n_end} end)"
-            )
-
-        seen_kinds = set()
-        for inner in begins:
-            kind_m = cls.KIND_ATTR_RE.search(inner)
-            if not kind_m:
-                errors.append(
-                    f"{rel}: impact-begin missing kind= attribute: {inner.strip()}"
-                )
-                continue
-            kind = kind_m.group(1)
-            seen_kinds.add(kind)
-            if kind not in cls.KNOWN_KINDS:
-                errors.append(f"{rel}: unknown kind={kind}")
-                continue
-            attrs = dict(cls.ATTR_RE.findall(inner))
-            for required in cls.REQUIRED_ATTRS_BY_KIND.get(kind, ()):
-                if required not in attrs:
-                    errors.append(
-                        f"{rel}: kind={kind} missing required attr {required}"
-                    )
-            nums = [attrs.get(a) for a in ("low", "mid", "high") if a in attrs]
-            if nums:
-                null_ct = sum(1 for v in nums if v == "null")
-                if 0 < null_ct < len(nums):
-                    errors.append(
-                        f"{rel}: kind={kind} mixes null and numeric values "
-                        f"in low/mid/high"
-                    )
-
-        return errors, seen_kinds
+        errors, kind_counts = cls._scan_family(
+            text,
+            rel,
+            begin_re=cls.BEGIN_RE,
+            end_re=cls.END_RE,
+            known_kinds=cls.KNOWN_KINDS,
+            required_attrs=cls.REQUIRED_ATTRS_BY_KIND,
+            pairing_label="marker",
+            begin_label="impact-begin",
+            kind_noun="kind",
+            extra_check=cls._impact_null_numeric_check,
+        )
+        return errors, set(kind_counts)
 
     @classmethod
-    def check_findings_file(cls, path, file_class, *, skip_p_item_required=False):
+    def _markers_of_kind(cls, text, kind):
+        """Attribute blobs of the impact-begin markers in ``text`` whose first
+        kind= is ``kind``."""
+        return [
+            m.group(1)
+            for m in cls.BEGIN_RE.finditer(text)
+            if (km := cls.KIND_ATTR_RE.search(m.group(1))) and km.group(1) == kind
+        ]
+
+    @classmethod
+    def check_findings_file(cls, path, *, skip_p_item_required=False):
         """Marker checks for a sub-agent findings file.
 
-        file_class must be "category_findings" or "system_findings". Adds
-        the per-tier "p_item required" check on top of `scan`.
-        skip_p_item_required: when True (empty category_findings[] per metrics), omit kind=p_item requirement.
+        Adds the "p_item required" check on top of `scan`.
+        skip_p_item_required: when True (empty category_findings[] or system_findings[] per metrics), omit kind=p_item requirement.
         """
         rel = os.path.basename(path)
         with open(path) as f:
             text = f.read()
         errors, seen_kinds = cls.scan(text, rel)
-        if file_class == "category_findings" and rel not in cls.COMPUTE_NO_P_ITEM:
-            if not skip_p_item_required and "p_item" not in seen_kinds:
-                errors.append(f"{rel}: missing required kind=p_item")
-        if file_class == "system_findings" and "p_item" not in seen_kinds:
+        if not skip_p_item_required and "p_item" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=p_item")
         n_headings = len(_P_ITEM_RE.findall(text))
-        n_markers = sum(
-            1
-            for m in cls.BEGIN_RE.finditer(text)
-            if (km := cls.KIND_ATTR_RE.search(m.group(1))) and km.group(1) == "p_item"
-        )
+        n_markers = len(cls._markers_of_kind(text, "p_item"))
         if n_headings and n_markers and n_headings != n_markers:
             errors.append(
                 f"{rel}: {n_headings} ### P<N>: headings but {n_markers} kind=p_item markers"
             )
         errors.extend(cls._check_detail_estimate_per_candidate(text, rel))
+        errors.extend(cls._check_op_row_csv_count(text, rel))
+        return errors
+
+    @classmethod
+    def _check_op_row_csv_count(cls, text, rel):
+        """Each compute candidate's kind=op_row marker must carry one CSV
+        impact per data-table row (alignment is the reader's job, not this).
+        """
+        lines = text.splitlines()
+        errors = []
+        for start, end, _ in iter_candidate_blocks(text, TIER_COMPUTE):
+            table = find_data_table(lines, start, end)
+            if table is None:
+                continue
+            n_rows = sum(1 for _ in table[2])
+            block = "\n".join(lines[start:end])
+            for inner in cls._markers_of_kind(block, "op_row"):
+                im = cls.OP_ROW_IMPACTS_RE.search(inner)
+                impacts = im.group(1).strip() if im else ""
+                n_csv = (
+                    len([v for v in impacts.split(",") if v.strip()]) if impacts else 0
+                )
+                if n_csv != n_rows:
+                    errors.append(
+                        f"{rel}: kind=op_row has {n_csv} impacts but "
+                        f"the Data table has {n_rows} rows"
+                    )
         return errors
 
     @classmethod
@@ -1029,11 +1390,7 @@ class MarkerValidator:
                     candidates[i + 1].start() if i + 1 < len(candidates) else len(text)
                 )
             ]
-            has_marker = any(
-                (km := cls.KIND_ATTR_RE.search(m.group(1))) is not None
-                and km.group(1) == "detail_estimate"
-                for m in cls.BEGIN_RE.finditer(scope)
-            )
+            has_marker = bool(cls._markers_of_kind(scope, "detail_estimate"))
             if not (has_marker or bool(_NOT_QUANTIFIABLE_SENTINEL.search(scope))):
                 errors.append(
                     f"{rel}: reasoning-candidate rank={c.group(1)} missing "
@@ -1042,10 +1399,35 @@ class MarkerValidator:
         return errors
 
     @classmethod
+    def scan_report(cls, text, rel):
+        """Report-marker scan for the report-begin/report-end family.
+
+        Checks pairing (report-begin count == report-end count), kind=
+        present, kind ∈ KNOWN_REPORT_KINDS, and per-kind required attrs.
+        Reuses KIND_ATTR_RE / ATTR_RE on the inner blob without touching the
+        impact-family pairing math. Returns (errors, kind_counts) so callers
+        can enforce per-kind cardinality without re-scanning.
+        """
+        return cls._scan_family(
+            text,
+            rel,
+            begin_re=cls.REPORT_BEGIN_RE,
+            end_re=cls.REPORT_END_RE,
+            known_kinds=cls.KNOWN_REPORT_KINDS,
+            required_attrs=cls.REPORT_REQUIRED_ATTRS,
+            pairing_label="report-marker",
+            begin_label="report-begin",
+            kind_noun="report kind",
+        )
+
+    @classmethod
     def check_report(cls, path):
         """Marker checks for the assembled analysis.md.
 
-        Adds the report-only "top_ops required" check on top of `scan`.
+        Adds the report-only "top_ops required" check on top of `scan`, plus
+        the report-marker family: exactly one kind=report_mode, and no legacy
+        mid-document ## Warnings section (Option A: warning prose moves to top
+        kind=warning markers, so the two must not coexist).
         """
         rel = os.path.basename(path)
         with open(path) as f:
@@ -1053,4 +1435,306 @@ class MarkerValidator:
         errors, seen_kinds = cls.scan(text, rel)
         if "top_ops" not in seen_kinds:
             errors.append(f"{rel}: missing required kind=top_ops")
+
+        report_errors, report_counts = cls.scan_report(text, rel)
+        errors.extend(report_errors)
+        n_mode = report_counts["report_mode"]
+        if n_mode != 1:
+            errors.append(
+                f"{rel}: expected exactly one kind=report_mode marker, found {n_mode}"
+            )
+        if cls._WARNINGS_SECTION_RE.search(text):
+            errors.append(
+                f"{rel}: legacy mid-document ## Warnings section present; move the "
+                f"warning prose to top-of-report kind=warning markers"
+            )
         return errors
+
+
+# ===========================================================================
+# Semantic-analysis artifact validators
+#
+# The semantic-comparison path (skills/analysis-orchestrator/agents/) has three
+# LLM-authored JSON artifacts. Each validator does a schema check plus a
+# referential check against the context the agent was given, and returns
+# (passed, errors) so the orchestrator can use it as a retry gate before the
+# corresponding apply step rewrites semantic_block.
+# ===========================================================================
+
+
+def marker_attrs(text, kind):
+    """Yield (match, attrs) for each ``kind`` impact marker in ``text``."""
+    for m in MarkerValidator.BEGIN_RE.finditer(text):
+        attrs = dict(MarkerValidator.ATTR_RE.findall(m.group(1)))
+        if attrs.get("kind") == kind:
+            yield m, attrs
+
+
+def _load_json_for_validation(path):
+    """Load a JSON file for validation; return (doc, errors)."""
+    if not os.path.exists(path):
+        return None, [f"File not found: {path}"]
+    try:
+        with open(path) as f:
+            return json.load(f), []
+    except (json.JSONDecodeError, OSError) as e:
+        return None, [f"Could not parse {path}: {e}"]
+
+
+def _missing_backrefs(replacement, rx):
+    """Group references in a re.sub replacement that the pattern can't satisfy.
+
+    Catches the failure that ``re`` only raises at substitution time (a
+    backreference with no matching capture group), which ``stem_for`` silently
+    swallows at runtime. Returns the set of offending references.
+    """
+    bad = set()
+    for m in _BACKREF_RE.finditer(replacement):
+        num, name = m.group(1), m.group(2)
+        if num is not None:
+            if int(num) > rx.groups:
+                bad.add(num)
+        elif name is not None:
+            if name.isdigit():
+                if int(name) > rx.groups:
+                    bad.add(name)
+            elif name not in rx.groupindex:
+                bad.add(name)
+    return bad
+
+
+def validate_stem_rules(rules_path):
+    """Validate a kernel-stem-preprocessing ``stem_rules.json``.
+
+    Schema: ``{"rules": [...]}`` (or a bare list); each rule a dict with a
+    compilable ``pattern``, ``action`` in collapse/preserve/drop, a string
+    ``replacement`` and a non-empty ``note``. Referential: a ``collapse``
+    replacement may only reference capture groups the pattern defines, and
+    duplicate patterns are flagged (first match wins, so a later duplicate is
+    dead).
+
+    Returns:
+        (passed: bool, errors: list[str])
+    """
+    doc, errors = _load_json_for_validation(rules_path)
+    if errors:
+        return False, errors
+
+    rules = doc.get("rules") if isinstance(doc, dict) else doc
+    if not isinstance(rules, list):
+        return False, ["Top-level must be a list or an object with a 'rules' list."]
+
+    seen_patterns = {}
+    for i, r in enumerate(rules):
+        if not isinstance(r, dict):
+            errors.append(f"rule {i}: must be an object")
+            continue
+
+        action = r.get("action", "collapse")
+        if action not in ("collapse", "preserve", "drop"):
+            errors.append(
+                f"rule {i}: invalid action {action!r} (collapse/preserve/drop)"
+            )
+
+        pattern = r.get("pattern")
+        rx = None
+        if not isinstance(pattern, str) or pattern == "":
+            errors.append(f"rule {i}: 'pattern' must be a non-empty string")
+        else:
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                errors.append(f"rule {i}: bad regex {pattern!r}: {e}")
+            else:
+                if pattern in seen_patterns:
+                    errors.append(
+                        f"rule {i}: duplicate pattern {pattern!r} (rule "
+                        f"{seen_patterns[pattern]} matches first; this one is dead)"
+                    )
+                else:
+                    seen_patterns[pattern] = i
+
+        note = r.get("note")
+        if not isinstance(note, str) or not note.strip():
+            errors.append(f"rule {i}: 'note' is required (non-empty rationale)")
+
+        replacement = r.get("replacement", "")
+        if not isinstance(replacement, str):
+            errors.append(f"rule {i}: 'replacement' must be a string")
+        elif action == "collapse" and rx is not None:
+            bad = _missing_backrefs(replacement, rx)
+            if bad:
+                errors.append(
+                    f"rule {i}: replacement {replacement!r} references missing "
+                    f"group(s) {sorted(bad)} (pattern defines {rx.groups})"
+                )
+
+    return (not errors), errors
+
+
+def validate_kernel_unification_map(decisions_path, context_path):
+    """Validate id-referenced kernel-unification decisions against the context.
+
+    The agent emits ``{"pairs": [{"a": <id>, "b": <id>, "label": str}, ...],
+    "renames_a": [...], "renames_b": [...]}`` referencing the ``id`` fields that
+    ``kernel_unification.py prepare-context`` stamps onto each candidate. Schema:
+    pairs/renames are objects with non-empty string labels. Referential (against
+    ``kernel_unification_context.json``): every id exists in the matching
+    ``only_in_<name>`` list, no id is used twice, and a paired candidate's
+    ``perf_categories`` must intersect (never unify across perf categories).
+
+    Returns:
+        (passed: bool, errors: list[str])
+    """
+    decisions, errors = _load_json_for_validation(decisions_path)
+    if errors:
+        return False, errors
+    context, errors = _load_json_for_validation(context_path)
+    if errors:
+        return False, errors
+
+    name_a = context.get("name_a")
+    name_b = context.get("name_b")
+    ids_a = {
+        e["id"]: e
+        for e in context.get(f"only_in_{name_a}", [])
+        if isinstance(e, dict) and "id" in e
+    }
+    ids_b = {
+        e["id"]: e
+        for e in context.get(f"only_in_{name_b}", [])
+        if isinstance(e, dict) and "id" in e
+    }
+
+    errors = []
+    if not ids_a and not ids_b:
+        errors.append(
+            "context has no id-stamped candidates; regenerate with a "
+            "prepare-context that stamps ids"
+        )
+
+    pairs = decisions.get("pairs", [])
+    if not isinstance(pairs, list):
+        return False, errors + ["'pairs' must be a list"]
+
+    used_a, used_b = {}, {}
+    for i, p in enumerate(pairs):
+        if not isinstance(p, dict):
+            errors.append(f"pair {i}: must be an object")
+            continue
+        aid, bid, label = p.get("a"), p.get("b"), p.get("label")
+        if not isinstance(label, str) or not label.strip():
+            errors.append(f"pair {i}: 'label' must be a non-empty string")
+
+        ea = ids_a.get(aid)
+        eb = ids_b.get(bid)
+        if ea is None:
+            errors.append(f"pair {i}: 'a' id {aid!r} not in only_in_{name_a}")
+        elif aid in used_a:
+            errors.append(f"pair {i}: 'a' id {aid!r} reused (also pair {used_a[aid]})")
+        else:
+            used_a[aid] = i
+        if eb is None:
+            errors.append(f"pair {i}: 'b' id {bid!r} not in only_in_{name_b}")
+        elif bid in used_b:
+            errors.append(f"pair {i}: 'b' id {bid!r} reused (also pair {used_b[bid]})")
+        else:
+            used_b[bid] = i
+
+        if ea is not None and eb is not None:
+            pca = set(ea.get("perf_categories", []))
+            pcb = set(eb.get("perf_categories", []))
+            if pca and pcb and not (pca & pcb):
+                errors.append(
+                    f"pair {i}: perf_category mismatch {sorted(pca)} vs "
+                    f"{sorted(pcb)} (never unify across perf categories)"
+                )
+
+    for side, key, ids, nm in (
+        ("a", "renames_a", ids_a, name_a),
+        ("b", "renames_b", ids_b, name_b),
+    ):
+        entries = decisions.get(key, []) or []
+        if not isinstance(entries, list):
+            errors.append(f"'{key}' must be a list")
+            continue
+        for i, r in enumerate(entries):
+            if not isinstance(r, dict):
+                errors.append(f"{key}[{i}]: must be an object")
+                continue
+            rid = r.get("id", r.get(side))
+            if rid not in ids:
+                errors.append(f"{key}[{i}]: id {rid!r} not in only_in_{nm}")
+            lbl = r.get("label")
+            if not isinstance(lbl, str) or not lbl.strip():
+                errors.append(f"{key}[{i}]: 'label' must be a non-empty string")
+
+    return (not errors), errors
+
+
+def validate_kernel_coherence_decisions(decisions_path, context_path):
+    """Validate a kernel-coherence ``kernel_coherence_decisions.json``.
+
+    Schema: ``context_renames`` / ``fallback_remap_a`` / ``fallback_remap_b`` /
+    ``fallback_remap_regex_a`` / ``fallback_remap_regex_b`` are string->string
+    maps with non-empty values; ``notes`` optional string. Referential (against
+    ``kernel_coherence_context.json``): ``context_renames`` keys are
+    ``context_catalog`` ids, ``fallback_remap_*`` keys are symbols from the
+    matching ``one_sided_in_*`` list, and every ``fallback_remap_regex_*`` key
+    compiles as a regex.
+
+    Returns:
+        (passed: bool, errors: list[str])
+    """
+    decisions, errors = _load_json_for_validation(decisions_path)
+    if errors:
+        return False, errors
+    context, errors = _load_json_for_validation(context_path)
+    if errors:
+        return False, errors
+
+    errors = []
+    catalog_ids = {
+        e.get("id") for e in context.get("context_catalog", []) if isinstance(e, dict)
+    }
+    one_sided = {
+        "a": set(context.get("one_sided_in_a", [])),
+        "b": set(context.get("one_sided_in_b", [])),
+    }
+
+    def _check_str_map(obj, key):
+        if not isinstance(obj, dict):
+            errors.append(f"'{key}' must be an object")
+            return {}
+        for k, v in obj.items():
+            if not isinstance(v, str) or not v.strip():
+                errors.append(f"{key}[{k!r}]: value must be a non-empty string")
+        return obj
+
+    renames = _check_str_map(
+        decisions.get("context_renames", {}) or {}, "context_renames"
+    )
+    for k in renames:
+        if k not in catalog_ids:
+            errors.append(f"context_renames: id {k!r} not in context_catalog")
+
+    for side in ("a", "b"):
+        key = f"fallback_remap_{side}"
+        fr = _check_str_map(decisions.get(key, {}) or {}, key)
+        for k in fr:
+            if k not in one_sided[side]:
+                errors.append(f"{key}: symbol {k!r} not in one_sided_in_{side}")
+
+        rkey = f"fallback_remap_regex_{side}"
+        rr = _check_str_map(decisions.get(rkey, {}) or {}, rkey)
+        for k in rr:
+            try:
+                re.compile(k)
+            except re.error as e:
+                errors.append(f"{rkey}: bad regex {k!r}: {e}")
+
+    notes = decisions.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        errors.append("'notes' must be a string")
+
+    return (not errors), errors

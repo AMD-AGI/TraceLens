@@ -9,7 +9,7 @@
 Shared utilities for category-specific analysis scripts.
 
 This module provides common functions for:
-- Loading category data (CSV, metadata JSON)
+- Loading category data (CSV, category manifest)
 - Calculating time metrics
 - Calculating efficiency metrics
 - Building operation metrics for JSON output
@@ -22,12 +22,14 @@ import os
 import re
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
+from TraceLens.NcclAnalyser.nccl_analyser import list_to_tuple
 from TraceLens.PerfModel.utils import torch_dtype_map
+from TraceLens.Reporting.aggregate_perf_reports import ALL_NODES, NODE_COL
 
 TARGET_HIGH = 100.0
 TARGET_LOW = 75.0
@@ -86,7 +88,58 @@ _CALL_CHAIN_SKIP = frozenset(
     }
 )
 
-_KERNEL_NAME_TRUNC_LEN = 75
+KERNEL_NAME_TRUNC_LEN = 75
+# What ast.literal_eval raises on malformed or hostile input.
+LITERAL_EVAL_ERRORS = (
+    ValueError,
+    TypeError,
+    SyntaxError,
+    MemoryError,
+    RecursionError,
+)
+# Roofline efficiency (%) above which a value is flagged as a measurement anomaly.
+_ANOMALY_EFFICIENCY_PCT = 110
+# Kernel time variance is reported for ops with more than _VARIANCE_MIN_COUNT calls
+# and at least _VARIANCE_MIN_E2E_FRAC of E2E time; a cov above the threshold is high
+# variance.
+_VARIANCE_MIN_COUNT = 10
+_VARIANCE_MIN_E2E_FRAC = 0.05
+_HIGH_VARIANCE_COV = 1.0
+# Placeholder divisor (not a hardware peak) when max_achievable_tflops has no matrix_bf16.
+_DEFAULT_MATRIX_MAF_TFLOPS = 1
+# GPU idle share (%) above which idle time is flagged as high.
+IDLE_PCT_THRESHOLD = 15
+
+PERF_ARG_COLS = ("Input Dims", "Input type", "Input Strides", "Concrete Inputs")
+PERF_THREAD_COLS = ("process_name", "process_label", "thread_name")
+PEAK_MEM_BW_KEY = "peak_mem_bw_tbs"
+HIGH_CONFIDENCE_OP_KEYS = "high_confidence_op_keys"
+
+NO_VALUE = "—"  # Table cell for a value the perf report does not provide
+NOT_FOUND = "Not found"  # Entry point the trace did not record
+
+# System findings: title -> (metric, unit) rows in card order. Key order breaks
+# rank ties.
+_MEMCPY_ROWS = (("Copy Count", "count"), ("Copy Time", "ms"), ("Copy %", "%"))
+SYSTEM_FINDING_ROWS = {
+    "High GPU Idle Time": (("Idle Time", "ms"), ("Idle %", "%")),
+    "Exposed Collective Communication": (
+        ("Exposed Communication Time", "ms"),
+        ("Exposed Communication %", "%"),
+        ("Compute/Comm Overlap %", "%"),
+        ("Total Communication Time", "ms"),
+    ),
+    "D2H Memory Copy Overhead": _MEMCPY_ROWS,
+    "H2D Memory Copy Overhead": _MEMCPY_ROWS,
+    "D2D Memory Copy Overhead": _MEMCPY_ROWS,
+}
+_SYSTEM_METRIC_UNITS = {m: u for rows in SYSTEM_FINDING_ROWS.values() for m, u in rows}
+# unit -> (cast, cell format, cell regex)
+_SYSTEM_UNITS = {
+    "ms": (float, "{} ms", re.compile(r"(\d+(?:\.\d+)?) ms")),
+    "%": (float, "{}%", re.compile(r"(\d+(?:\.\d+)?)%")),
+    "count": (int, "{}", re.compile(r"(\d+)")),
+}
 
 
 def _eff_bucket(pct):
@@ -100,49 +153,92 @@ def _eff_bucket(pct):
     return f"{_EFF_BUCKET_BOUNDARIES[1]}-100"
 
 
-def perf_report_csv_dir(output_dir: str) -> str:
-    """
-    Directory containing perf-report CSV exports for the primary (Trace 1) trace.
-
-    When ``category_data/category_manifest.json`` exists and ``comparison_scope``
-    is ``comparative``, returns ``<output_dir>/perf_report_trace1_csvs``.
-    Otherwise returns ``<output_dir>/perf_report_csvs`` (standalone or missing manifest).
-    """
+def load_manifest(output_dir: str) -> dict:
+    """Load and return the category manifest JSON from output_dir."""
     manifest_path = os.path.join(output_dir, "category_data", "category_manifest.json")
-    if os.path.isfile(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            scope = json.load(f).get("comparison_scope", "standalone")
-        if scope == "comparative":
-            return os.path.join(output_dir, "perf_report_trace1_csvs")
-    return os.path.join(output_dir, "perf_report_csvs")
+    with open(manifest_path) as f:
+        return json.load(f)
 
 
-def load_category_data(output_dir: str, category: str) -> Tuple[pd.DataFrame, dict]:
+def perf_report_csv_dir(output_dir: str) -> str:
+    """The perf-report CSV dir of the trace fusion and system analysis read: the
+    manifest's ``focus_csv_dir`` under ``output_dir``, or ``<output_dir>/perf_report_csvs``
+    before prepare.
     """
-    Load CSV operations data and metadata JSON for a category.
+    try:
+        return os.path.join(output_dir, load_manifest(output_dir)["focus_csv_dir"])
+    except FileNotFoundError:
+        return os.path.join(output_dir, "perf_report_csvs")
+
+
+def focus_job_utilization(manifest: dict) -> dict:
+    """The manifest's ``gpu_utilization``; on multi_trace runs, the focus node's entry."""
+    gpu_util = manifest.get("gpu_utilization", {})
+    if manifest.get("focus_job"):
+        return gpu_util["nodes"][manifest["focus_job"]]
+    return gpu_util
+
+
+def gpu_utilization_from_timeline(gpu_timeline: pd.DataFrame) -> dict:
+    """Build the same gpu_utilization dict used in category_manifest from gpu_timeline.csv rows.
+
+    A combine_by_node gpu_timeline has one block per node and a final ``all`` block:
+    the top level is ``all`` and ``nodes`` holds each node's metrics in job order.
+    """
+    if NODE_COL in gpu_timeline.columns:
+        blocks = {
+            node: gpu_utilization_from_timeline(block.drop(columns=NODE_COL))
+            for node, block in gpu_timeline.groupby(NODE_COL, sort=False)
+        }
+        if ALL_NODES not in blocks:
+            raise ValueError(f"gpu_timeline.csv has no {ALL_NODES!r} block.")
+        return {**blocks.pop(ALL_NODES), "nodes": blocks}
+    gpu_data = {}
+    for _, row in gpu_timeline.iterrows():
+        gpu_data[row["type"]] = {"time_ms": row["time ms"], "percent": row["percent"]}
+    return {
+        "total_time_ms": gpu_data.get("total_time", {}).get("time_ms", 0),
+        "computation_time_percent": gpu_data.get("computation_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_comm_time_percent": gpu_data.get("exposed_comm_time", {}).get(
+            "percent", 0
+        ),
+        "exposed_memcpy_time_percent": gpu_data.get("exposed_memcpy_time", {}).get(
+            "percent", 0
+        ),
+        "idle_time_percent": gpu_data.get("idle_time", {}).get("percent", 0),
+    }
+
+
+def load_category_data(output_dir: str, category: str) -> tuple[pd.DataFrame, dict]:
+    """
+    Load CSV operations data and the manifest's platform specs for a category.
 
     Args:
         output_dir: Base output directory path
         category: Category name (e.g., 'gemm', 'sdpa_fwd', 'elementwise')
 
     Returns:
-        Tuple of (operations DataFrame, metadata dict)
+        Tuple of (operations DataFrame, metadata dict with the platform specs,
+        ``gpu_utilization`` and ``output_dir``)
 
     Raises:
         FileNotFoundError: If required files don't exist
     """
     csv_path = f"{output_dir}/category_data/{category}_ops.csv"
-    metadata_path = f"{output_dir}/metadata/{category}_metadata.json"
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Category CSV not found: {csv_path}")
 
     ops_df = pd.read_csv(csv_path)
+    manifest = load_manifest(output_dir)
 
-    with open(metadata_path, "r") as f:
-        metadata = json.load(f)
-
-    return ops_df, metadata
+    return ops_df, {
+        **manifest["platform_specs"],
+        "gpu_utilization": manifest["gpu_utilization"],
+        "output_dir": output_dir,
+    }
 
 
 def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
@@ -154,7 +250,9 @@ def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
         metadata: Metadata dict with gpu_utilization info
 
     Returns:
-        Dict with total_time_ms, percent_of_compute, operation_count
+        Dict with total_time_ms, percent_of_compute, operation_count.
+        ``percent_of_compute`` is relative to ``gpu_utilization.total_time_ms``,
+        taken as 1 ms when the metadata has none.
     """
     if "Kernel Time (µs)_sum" in ops_df.columns:
         total_time_us = ops_df["Kernel Time (µs)_sum"].sum()
@@ -180,7 +278,7 @@ def calculate_time_metrics(ops_df: pd.DataFrame, metadata: dict) -> dict:
 
 def validate_efficiency(
     achieved: float, peak: float, metric_name: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Validate efficiency calculation and flag anomalies.
 
@@ -210,13 +308,13 @@ def validate_efficiency(
 
     efficiency = (achieved / peak) * 100
 
-    if efficiency > 110:
+    if efficiency > _ANOMALY_EFFICIENCY_PCT:
         return {
             "value": round(efficiency, 2),
             "warning": f"[ANOMALY] {metric_name} exceeds peak by {efficiency-100:.1f}% - verify measurement or peak spec",
             "is_anomaly": True,
         }
-    elif efficiency > 100:
+    if efficiency > 100:
         return {
             "value": round(efficiency, 2),
             "warning": f"[WARNING] {metric_name} slightly exceeds peak ({efficiency:.1f}%) - may be within measurement error",
@@ -227,11 +325,11 @@ def validate_efficiency(
 
 
 def calculate_efficiency_with_validation(
-    achieved_tflops: Optional[float],
-    achieved_tbps: Optional[float],
+    achieved_tflops: float | None,
+    achieved_tbps: float | None,
     peak_maf: float,
-    peak_hbm_bw: float,
-) -> Dict[str, Any]:
+    peak_mem_bw: float,
+) -> dict[str, Any]:
     """
     Calculate both compute and memory efficiency with validation.
 
@@ -239,7 +337,7 @@ def calculate_efficiency_with_validation(
         achieved_tflops: Achieved TFLOPS
         achieved_tbps: Achieved TB/s
         peak_maf: Peak MAF in TFLOPS
-        peak_hbm_bw: Peak HBM bandwidth in TB/s
+        peak_mem_bw: Peak memory bandwidth in TB/s
 
     Returns:
         Dict with efficiency values and any warnings
@@ -248,7 +346,7 @@ def calculate_efficiency_with_validation(
         achieved_tflops, peak_maf, "Compute efficiency"
     )
 
-    memory_result = validate_efficiency(achieved_tbps, peak_hbm_bw, "Memory bandwidth")
+    memory_result = validate_efficiency(achieved_tbps, peak_mem_bw, "Memory bandwidth")
 
     warnings = []
     if compute_result["warning"]:
@@ -265,11 +363,13 @@ def calculate_efficiency_with_validation(
     }
 
 
-def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> float:
+def resolve_peak_maf(
+    row, max_achievable_tflops: dict, fallback_maf: float | None
+) -> float | None:
     """Resolve the correct peak MAF for an operation using Compute Spec.
 
     Uses the Compute Spec column to look up the precision-aware peak from
-    max_achievable_tflops. Falls back to matrix_bf16 if Compute Spec is
+    max_achievable_tflops. Returns ``fallback_maf`` if Compute Spec is
     missing or unknown.
     """
     compute_spec = row.get("Compute Spec", "")
@@ -282,7 +382,7 @@ def _resolve_peak_maf(row, max_achievable_tflops: dict, fallback_maf: float) -> 
     return fallback_maf
 
 
-def comparative_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
+def comparative_efficiency(result: dict[str, Any], row: pd.Series) -> None:
     """
     When comparative columns support it, set ``efficiency_percent`` to
     ``100 * t2 / t1`` (trace2 vs trace1 kernel time), clamped by trace1 roofline
@@ -297,7 +397,7 @@ def comparative_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
     if t1_us <= 0:
         return
 
-    comp_pct: Optional[float] = None
+    comp_pct: float | None = None
     delta = row.get(_COMPARATIVE_DELTA_COL)
     if delta is not None and not pd.isna(delta):
         comp_pct = 100.0 * (t1_us + float(delta)) / t1_us
@@ -312,7 +412,7 @@ def comparative_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
         return
 
     roofline_pct = row.get("Pct Roofline_mean")
-    roofline_floor: Optional[float] = None
+    roofline_floor: float | None = None
     if roofline_pct is not None and not pd.isna(roofline_pct):
         roofline_floor = float(roofline_pct)
 
@@ -333,36 +433,36 @@ def comparative_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
         result["warning"] = None
 
 
-def standalone_efficiency(result: Dict[str, Any], row: pd.Series) -> None:
+def standalone_efficiency(result: dict[str, Any], row: pd.Series) -> None:
     """
     Set ``efficiency_percent`` from ``Pct Roofline_mean`` (roofline utilization %)
-    and roofline anomaly flags when above 110%.
+    and roofline anomaly flags when above ``_ANOMALY_EFFICIENCY_PCT``.
     """
     pct = row.get("Pct Roofline_mean")
     if pct is None or pd.isna(pct):
         return
     result["efficiency_percent"] = round(float(pct), 2)
-    if result["efficiency_percent"] > 110:
+    if result["efficiency_percent"] > _ANOMALY_EFFICIENCY_PCT:
         result["warning"] = (
-            f"[ANOMALY] Pct Roofline exceeds 110% ({result['efficiency_percent']:.1f}%) - verify measurement"
+            f"[ANOMALY] Pct Roofline exceeds {_ANOMALY_EFFICIENCY_PCT}% ({result['efficiency_percent']:.1f}%) - verify measurement"
         )
         result["is_anomaly"] = True
 
 
 def calculate_efficiency(
     row: pd.Series,
-    peak_hbm_bw: float,
-    peak_maf_or_maf_dict,
+    peak_mem_bw: float,
+    max_achievable_tflops: dict,
     comparison_scope: str = "standalone",
-) -> Dict[str, Optional[float]]:
+) -> dict[str, float | None]:
     """
     Extract efficiency metrics for an operation from pre-computed CSV columns.
 
     Args:
         row: DataFrame row with operation metrics
-        peak_hbm_bw: Peak HBM bandwidth in TB/s
-        peak_maf_or_maf_dict: Either a float or a dict (max_achievable_tflops)
-            for resolving the precision-aware peak
+        peak_mem_bw: Peak memory bandwidth in TB/s
+        max_achievable_tflops: Per-precision peak TFLOPS dict, for resolving the
+            precision-aware peak
         comparison_scope:
             ``standalone`` uses roofline efficiency
             ``comparative`` uses comparative efficiency
@@ -378,7 +478,7 @@ def calculate_efficiency(
         "flops_per_byte": None,
         "compute_spec": None,
         "resolved_peak_maf": None,
-        "resolved_peak_hbm_bw": None,
+        "resolved_peak_mem_bw": None,
         "warning": None,
         "is_anomaly": False,
     }
@@ -400,13 +500,11 @@ def calculate_efficiency(
     if tb_s is not None:
         result["tb_s_achieved"] = round(tb_s, 2)
 
-    if isinstance(peak_maf_or_maf_dict, dict):
-        fallback_maf = peak_maf_or_maf_dict.get("matrix_bf16", 1)
-        peak_maf = _resolve_peak_maf(row, peak_maf_or_maf_dict, fallback_maf)
-    else:
-        peak_maf = peak_maf_or_maf_dict
+    peak_maf = resolve_peak_maf(
+        row, max_achievable_tflops, get_matrix_maf_tflops(max_achievable_tflops)
+    )
     result["resolved_peak_maf"] = round(peak_maf, 2) if peak_maf else None
-    result["resolved_peak_hbm_bw"] = round(peak_hbm_bw, 2) if peak_hbm_bw else None
+    result["resolved_peak_mem_bw"] = round(peak_mem_bw, 2) if peak_mem_bw else None
 
     roofline_bound = row.get("Roofline Bound")
     if isinstance(roofline_bound, str):
@@ -423,45 +521,41 @@ def calculate_efficiency(
     return result
 
 
-def _load_fusion_map(output_dir: str) -> Dict[str, str]:
-    """Load high-confidence GPU kernel name -> fusion candidate name mapping."""
+def _load_fusion_op_keys(output_dir: str) -> set[tuple]:
+    """Load the perf-row keys of the ops covered by high-confidence fusion candidates."""
     if not output_dir:
-        return {}
+        return set()
     path = os.path.join(output_dir, "category_data", "kernel_fusion_metrics.json")
     if not os.path.exists(path):
-        return {}
+        return set()
     try:
-        with open(path, "r") as f:
-            return json.load(f).get("high_confidence_kernel_map", {})
-    except (json.JSONDecodeError, KeyError):
-        return {}
+        with open(path) as f:
+            metrics = json.load(f)
+    except json.JSONDecodeError:
+        return set()
+    return {
+        (metrics.get(NODE_COL), *key)
+        for key in metrics.get(HIGH_CONFIDENCE_OP_KEYS, [])
+    }
 
 
-def _match_fusion_op(kd_str: str, fusion_map: Dict[str, str]) -> Optional[str]:
-    """Match kernel_details_summary against fusion kernel map with prefix fallback."""
-    for kn in re.findall(r"'name':\s*'([^']+)'", kd_str):
-        if kn in fusion_map:
-            return fusion_map[kn]
-        for fk, bn in fusion_map.items():
-            if fk.startswith(kn) or kn.startswith(fk):
-                return bn
-    return None
-
-
-def _parse_call_stack(call_stack_full: str) -> List[str]:
-    """Parse call_stack_full"""
+def _literal_list(call_stack_full: str) -> list:
+    """The list literal in call_stack_full; empty when absent, malformed or not a list."""
     if not call_stack_full or call_stack_full == "nan":
         return []
     try:
         stack = ast.literal_eval(str(call_stack_full))
-    except Exception:
+    except LITERAL_EVAL_ERRORS:
         return []
-    if not isinstance(stack, list):
-        return []
-    return [f for f in stack if isinstance(f, str)]
+    return stack if isinstance(stack, list) else []
 
 
-def _extract_module_chain(call_stack_full: str) -> List[str]:
+def _parse_call_stack(call_stack_full: str) -> list[str]:
+    """Parse call_stack_full"""
+    return [f for f in _literal_list(call_stack_full) if isinstance(f, str)]
+
+
+def _extract_module_chain(call_stack_full: str) -> list[str]:
     """Extract nn.Module names from call_stack_full."""
     return [
         f.removeprefix("nn.Module: ")
@@ -470,7 +564,7 @@ def _extract_module_chain(call_stack_full: str) -> List[str]:
     ]
 
 
-def _extract_call_chain(call_stack_full: str) -> List[str]:
+def _extract_call_chain(call_stack_full: str) -> list[str]:
     """Return meaningful frames from call_stack_full, filtering torch dispatch internals."""
     return [
         f
@@ -480,50 +574,58 @@ def _extract_call_chain(call_stack_full: str) -> List[str]:
     ]
 
 
-def _extract_kernel_names(call_stack_full: str) -> tuple:
+def truncate_kernel_name(name: str) -> str:
+    """Clip ``name`` to ``KERNEL_NAME_TRUNC_LEN`` chars, marking the cut with ``...``."""
+    if len(name) > KERNEL_NAME_TRUNC_LEN:
+        return name[:KERNEL_NAME_TRUNC_LEN] + "..."
+    return name
+
+
+def format_kernel_names(kernels: list[str]) -> tuple:
+    """Render kernel names for a table cell.
+
+    Returns ``(full, trunc)``: a lone kernel is its bare name; several are
+    ``Kernel 1: ...<br>Kernel 2: ...``. ``trunc`` clips each individual name to
+    ``KERNEL_NAME_TRUNC_LEN`` chars.
+    """
+    if len(kernels) == 1:
+        return kernels[0], truncate_kernel_name(kernels[0])
+
+    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
+    trunc = "<br>".join(
+        f"Kernel {i+1}: {truncate_kernel_name(k)}" for i, k in enumerate(kernels)
+    )
+    return full, trunc
+
+
+def kernel_name_list(call_stack_full: str) -> list[str]:
     """Extract GPU kernel name(s) from call_stack_full.
 
     Single kernel (flat list): last element is the kernel.
     Multi-kernel (sublists): last element of each sublist is a kernel.
-
-    Returns ``(kernel_name, kernel_name_trunc)`` where the truncated form
-    clips each individual kernel name to ``_KERNEL_NAME_TRUNC_LEN`` chars.
     """
-    if not call_stack_full or call_stack_full == "nan":
-        return "", ""
-    try:
-        stack = ast.literal_eval(str(call_stack_full))
-    except Exception:
-        return "", ""
-    if not isinstance(stack, list) or not stack:
-        return "", ""
+    stack = _literal_list(call_stack_full)
+    if not stack:
+        return []
 
     sublists = [f for f in stack if isinstance(f, list)]
 
     if not sublists:
         # Flat list — last element is the kernel
         k = stack[-1] if isinstance(stack[-1], str) else ""
-        kernels = [k] if k else []
-    else:
-        # Multi-kernel — last element of each sublist is a kernel
-        kernels = [sub[-1] for sub in sublists if sub and isinstance(sub[-1], str)]
+        return [k] if k else []
+    # Multi-kernel — last element of each sublist is a kernel
+    return [sub[-1] for sub in sublists if sub and isinstance(sub[-1], str)]
 
-    if not kernels:
-        return "", ""
 
-    def _trunc(name: str) -> str:
-        return (
-            name[:_KERNEL_NAME_TRUNC_LEN] + "..."
-            if len(name) > _KERNEL_NAME_TRUNC_LEN
-            else name
-        )
+def _extract_kernel_names(call_stack_full: str) -> tuple:
+    """Render the kernel name(s) of call_stack_full for a table cell.
 
-    if len(kernels) == 1:
-        return kernels[0], _trunc(kernels[0])
-
-    full = "<br>".join(f"Kernel {i+1}: {k}" for i, k in enumerate(kernels))
-    trunc = "<br>".join(f"Kernel {i+1}: {_trunc(k)}" for i, k in enumerate(kernels))
-    return full, trunc
+    Returns ``(kernel_name, kernel_name_trunc)`` where the truncated form
+    clips each individual kernel name to ``KERNEL_NAME_TRUNC_LEN`` chars.
+    """
+    kernels = kernel_name_list(call_stack_full)
+    return format_kernel_names(kernels) if kernels else ("", "")
 
 
 def build_operation_metrics(
@@ -531,7 +633,7 @@ def build_operation_metrics(
     metadata: dict,
     category_config: dict,
     comparison_scope: str = "standalone",
-) -> List[dict]:
+) -> list[dict]:
     """Build operation metric dicts for JSON output.
 
     Args:
@@ -540,10 +642,11 @@ def build_operation_metrics(
         category_config: Optional extra_fields / operation_classifier
         comparison_scope: ``"standalone"`` or ``"comparative"``
     """
-    peak_hbm_bw = metadata.get("peak_hbm_bw_tbs", 1)
-    maf = metadata.get("max_achievable_tflops", metadata.get("peak_bf16_maf_tflops", 1))
-    fusion_map = _load_fusion_map(metadata.get("output_dir", ""))
-    e2e_ms_total = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+    peak_mem_bw = metadata[PEAK_MEM_BW_KEY]
+    maf = metadata["max_achievable_tflops"]
+    fusion_op_keys = _load_fusion_op_keys(metadata.get("output_dir", ""))
+    gpu_util = metadata.get("gpu_utilization", {})
+    e2e_ms_total = gpu_util.get("total_time_ms", 0)
 
     # Calculate category total for % of category (kept for analyzer screening)
     total_time_ms = 0
@@ -570,7 +673,7 @@ def build_operation_metrics(
         )
 
         efficiency = calculate_efficiency(
-            row, peak_hbm_bw, maf, comparison_scope=comparison_scope
+            row, peak_mem_bw, maf, comparison_scope=comparison_scope
         )
 
         op_metric = {
@@ -581,6 +684,11 @@ def build_operation_metrics(
             "percent_of_total": percent_of_total,
             "efficiency": efficiency,
         }
+        if NODE_COL in row:
+            op_metric[NODE_COL] = row[NODE_COL]
+            op_metric["percent_of_node"] = round(
+                time_ms / gpu_util["nodes"][row[NODE_COL]]["total_time_ms"] * 100, 2
+            )
 
         # Add efficiency warning if present (for anomaly detection)
         if efficiency.get("warning"):
@@ -593,10 +701,7 @@ def build_operation_metrics(
                 op_metric[field] = row[field]
 
         # Pre-rendered Args column (shape + dtype, with empty/Scalar slots dropped)
-        args_str = format_args(
-            row.get("Input Dims") if "Input Dims" in row else None,
-            row.get("Input type") if "Input type" in row else None,
-        )
+        args_str = format_args(row.get("Input Dims"), row.get("Input type"))
         if args_str:
             op_metric["args"] = args_str
 
@@ -612,10 +717,9 @@ def build_operation_metrics(
             if delta_us is not None and not pd.isna(delta_us):
                 op_metric["difference_ms"] = round(float(delta_us) / 1000, 3)
 
-        # Kernel time variance detection (require 10+ samples, >= 5% of E2E)
-        e2e_ms = e2e_ms_total
-        e2e_frac = time_ms / e2e_ms if e2e_ms > 0 else 1.0
-        if count > 10 and e2e_frac >= 0.05:
+        # Without an E2E total every op qualifies
+        e2e_frac = time_ms / e2e_ms_total if e2e_ms_total > 0 else 1.0
+        if count > _VARIANCE_MIN_COUNT and e2e_frac >= _VARIANCE_MIN_E2E_FRAC:
             std_val = row.get("Kernel Time (µs)_std")
             mean_val = row.get("Kernel Time (µs)_mean")
             if (
@@ -627,7 +731,7 @@ def build_operation_metrics(
             ):
                 cov = round(float(std_val) / float(mean_val), 3)
                 op_metric["cov"] = cov
-                op_metric["high_variance"] = cov > 1.0
+                op_metric["high_variance"] = cov > _HIGH_VARIANCE_COV
 
         # Apply operation classifier if provided
         classifier = category_config.get("operation_classifier")
@@ -635,18 +739,23 @@ def build_operation_metrics(
             op_metric["classification"] = classifier(op_name, row)
 
         kd_str = row.get("kernel_details_summary", "")
-        if pd.isna(kd_str):
-            kd_str = ""
-        else:
-            kd_str = str(kd_str)
+        kd_str = "" if pd.isna(kd_str) else str(kd_str)
 
         op_metric["library"] = classify_kernel_library(op_name, kd_str)
 
-        if fusion_map and kd_str:
-            matched = _match_fusion_op(kd_str, fusion_map)
-            if matched:
-                op_metric["fusion_flagged"] = True
-                op_metric["fusion_candidate_name"] = matched
+        if (
+            fusion_op_keys
+            and (row.get(NODE_COL), *row_perf_key(row, with_thread=True))
+            in fusion_op_keys
+        ):
+            op_metric["fusion_flagged"] = True
+
+        # After fusion_flagged is set: the ladder reads it to skip fused rows.
+        score = _row_impact_score(op_metric, e2e_ms_total, comparison_scope)
+        op_metric["impact_score"] = round(score["impact_score"], 2) if score else None
+        op_metric["impact_estimate_method"] = (
+            score["impact_estimate_method"] if score else None
+        )
 
         cs_raw = row.get("call_stack_full")
         cs_str = "" if cs_raw is None or pd.isna(cs_raw) else str(cs_raw)
@@ -654,13 +763,13 @@ def build_operation_metrics(
         launcher = row.get("entry_point", "")
         module_chain = _extract_module_chain(cs_str)
 
-        if not launcher or launcher == "Not found":
+        if not launcher or launcher == NOT_FOUND:
             if module_chain:
                 launcher = " > ".join(module_chain[:3])
             elif op_metric.get("library"):
                 launcher = f"{op_metric['library']} (vendor)"
             else:
-                launcher = "Not found"
+                launcher = NOT_FOUND
 
         op_metric["launcher_path"] = launcher
         op_metric["kernel_name"], op_metric["kernel_name_trunc"] = (
@@ -681,13 +790,51 @@ def build_operation_metrics(
     return operations
 
 
+def _row_impact_score(
+    op: dict, baseline_ms: float, comparison_scope: str
+) -> dict | None:
+    """Per-op impact ladder: the single owner of which estimate method applies.
+
+    Returns ``{"impact_score", "impact_estimate_method"}`` (unrounded mid + method)
+    or ``None`` when no method applies. The ``min_impact_score`` noise floor and the
+    low/high band spread are envelope concerns of the caller, not the ladder: a row
+    may legitimately carry a sub-floor score. The mid is unrounded so callers derive
+    the band from it exactly (``low``/``high`` are fixed ratios of the mid).
+    """
+    if op.get("fusion_flagged"):
+        return None
+    time_ms = op.get("time_ms", 0)
+    if time_ms <= 0:
+        return None
+
+    eff = op.get("efficiency", {})
+    eff_pct = eff.get("efficiency_percent")
+    if eff_pct is not None and not eff.get("is_anomaly") and baseline_ms > 0:
+        gap_mid = (TARGET_MID / TARGET_HIGH) * max(0, 1 - eff_pct / TARGET_HIGH)
+        return {
+            "impact_score": gap_mid * time_ms / baseline_ms * 100,
+            "impact_estimate_method": "quantified",
+        }
+
+    if comparison_scope == "standalone":
+        pct = op.get("percent_of_total")
+        if pct is None or pct <= 0:
+            return None
+        return {
+            "impact_score": pct * HEURISTIC_FRACTION_MID,
+            "impact_estimate_method": "heuristic",
+        }
+
+    return None
+
+
 def compute_impact_estimates(
-    operations: List[dict],
+    operations: list[dict],
     category: str,
     min_impact_score: float = 0.01,
     baseline_ms: float = 0,
     comparison_scope: str = "standalone",
-) -> List[dict]:
+) -> list[dict]:
     """
     Compute per-op impact estimates via an estimator ladder.
 
@@ -726,32 +873,27 @@ def compute_impact_estimates(
     if not baseline_ok:
         print(
             f"[analysis_utils.compute_impact_estimates] baseline_ms="
-            f"{baseline_ms!r} is invalid; skipping impact_score computation"
+            f"{baseline_ms!r} is invalid; skipping impact_score computation "
             f"for category={category!r}",
             file=sys.stderr,
         )
 
     estimates = []
     for op in operations:
-        if op.get("fusion_flagged"):
+        score = _row_impact_score(
+            op, baseline_ms if baseline_ok else 0, comparison_scope
+        )
+        if score is None:
             continue
-        time_ms = op.get("time_ms", 0)
-        if time_ms <= 0:
-            continue
-        eff = op.get("efficiency", {})
-        eff_pct = eff.get("efficiency_percent")
-
-        if eff_pct is not None and not eff.get("is_anomaly") and baseline_ok:
-            gap_high = max(0, 1 - eff_pct / TARGET_HIGH)
-            gap_low = (TARGET_LOW / TARGET_HIGH) * gap_high
-            gap_mid = (TARGET_MID / TARGET_HIGH) * gap_high
-
-            impact_score_high = gap_high * time_ms / baseline_ms * 100
-            impact_score_low = gap_low * time_ms / baseline_ms * 100
-            impact_score_mid = gap_mid * time_ms / baseline_ms * 100
-
+        impact_score_mid = score["impact_score"]
+        time_ms = op["time_ms"]
+        node = node_field(op.get(NODE_COL))
+        if score["impact_estimate_method"] == "quantified":
+            impact_score_high = impact_score_mid * (TARGET_HIGH / TARGET_MID)
+            impact_score_low = impact_score_mid * (TARGET_LOW / TARGET_MID)
             if impact_score_high < min_impact_score:
                 continue
+            eff = op.get("efficiency", {})
             estimates.append(
                 {
                     "operation": op.get("name", "Unknown"),
@@ -761,28 +903,22 @@ def compute_impact_estimates(
                     "impact_score": round(impact_score_mid, 2),
                     "impact_score_low": round(impact_score_low, 2),
                     "impact_score_high": round(impact_score_high, 2),
-                    "efficiency_pct": round(eff_pct, 2),
+                    "efficiency_pct": round(eff.get("efficiency_percent"), 2),
                     "bound_type": eff.get("bound_type"),
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
+                    **node,
                 }
             )
-        # Heuristic fallback, NOT the default path: reached only when the
-        # quantified branch above did not apply -- i.e. the op has no perf model
-        # (efficiency_percent is None), its efficiency is anomalous, or baseline_ms
-        # was non-positive. Standalone only; comparative efficiency is a t2/t1
-        # ratio, not a roofline gap.
-        elif comparison_scope == "standalone":
-            pct = op.get("percent_of_total")
-            if pct is None or pct <= 0:
-                continue
+        else:
+            pct = op["percent_of_total"]
             estimates.append(
                 {
                     "operation": op.get("name", "Unknown"),
                     "category": category,
                     "type": "unmodeled_significant",
                     "estimate_method": "heuristic",
-                    "impact_score": round(pct * HEURISTIC_FRACTION_MID, 2),
+                    "impact_score": round(impact_score_mid, 2),
                     "impact_score_low": round(pct * HEURISTIC_FRACTION_LOW, 2),
                     "impact_score_high": round(pct * HEURISTIC_FRACTION_HIGH, 2),
                     "efficiency_pct": None,
@@ -790,17 +926,19 @@ def compute_impact_estimates(
                     "library": op.get("library"),
                     "time_ms": round(time_ms, 3),
                     "percent_of_total": pct,
+                    **node,
                 }
             )
     return sorted(estimates, key=lambda x: x["impact_score"], reverse=True)
 
 
 def build_category_findings(
-    estimates: List[dict], comparison_scope: str = "standalone"
-) -> List[dict]:
+    estimates: list[dict], comparison_scope: str = "standalone"
+) -> list[dict]:
     """Group one category's per-op impact estimates into P-item findings.
 
-    Quantified estimates (``estimate_method != "heuristic"``) group by
+    Groups are per node (the ``node`` of multi-trace estimates). Quantified
+    estimates (``estimate_method != "heuristic"``) group by
     ``(bound_type, library, eff_bucket)`` in standalone, or ``(bound_type,
     library)`` in comparative (``efficiency_pct`` is a trace-time ratio there).
     Heuristic estimates group by op-name (so a kernel fragmented across
@@ -827,19 +965,20 @@ def build_category_findings(
         bound = e.get("bound_type") or "unknown"
         lib = e.get("library") or "Unknown"
         bucket = _eff_bucket(e.get("efficiency_pct")) if use_eff_bucket else "all"
-        g = groups[(bound, lib, bucket)]
+        g = groups[(e.get(NODE_COL), bound, lib, bucket)]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
         g["impact_score_high"] += e.get("impact_score_high", 0)
 
     findings = []
-    for (bound, lib, bucket), g in groups.items():
+    for (node, bound, lib, bucket), g in groups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": bound,
+                **node_field(node),
                 "library": lib,
                 "eff_bucket": bucket,
                 "estimate_method": "quantified",
@@ -866,7 +1005,7 @@ def build_category_findings(
         }
     )
     for e in heuristic:
-        g = hgroups[e.get("operation", "Unknown")]
+        g = hgroups[(e.get(NODE_COL), e.get("operation", "Unknown"))]
         g["members"].append(e)
         g["impact_score"] += e.get("impact_score", 0)
         g["impact_score_low"] += e.get("impact_score_low", 0)
@@ -875,12 +1014,13 @@ def build_category_findings(
         if g["library"] is None:
             g["library"] = e.get("library")
 
-    for g in hgroups.values():
+    for (node, _), g in hgroups.items():
         if g["impact_score"] < MIN_PITEM_IMPACT_SCORE:
             continue
         findings.append(
             {
                 "bound_type": "unmodeled",
+                **node_field(node),
                 "library": g["library"] or "Unknown",
                 "eff_bucket": "unknown",
                 "estimate_method": "heuristic",
@@ -903,42 +1043,26 @@ def build_category_findings(
     return findings
 
 
-def parse_first_shape(dims_str):
-    """Extract first input tensor shape as a hashable tuple from an Input Dims string."""
-    if dims_str is None or (isinstance(dims_str, float) and pd.isna(dims_str)):
-        return None
-    try:
-        parsed = ast.literal_eval(str(dims_str))
-        return (
-            tuple(parsed[0])
-            if parsed and isinstance(parsed[0], (list, tuple))
-            else None
-        )
-    except Exception:
-        return None
-
-
-def format_args(input_dims_str, input_type_str) -> Optional[str]:
-    """Render "(d1,d2,...) dtype<br>..." from Input Dims + Input type strings.
+def arg_pairs(input_dims_str, input_type_str) -> list:
+    """``("(d1,d2,...)", dtype)`` per input from Input Dims + Input type strings.
 
     Drops empty/Scalar placeholder slots, normalizes dtypes via torch_dtype_map
-    (unmapped tokens fall through). Args are joined with <br> so each entry
-    renders on its own line inside a markdown table cell, keeping the column
-    narrow even for many-input ops. Returns None on missing or unparseable input.
+    (unmapped tokens fall through). Empty on missing or unparseable input.
     """
     if pd.isna(input_dims_str) or pd.isna(input_type_str):
-        return None
+        return []
     try:
         pairs = list(
             zip(
                 ast.literal_eval(str(input_dims_str)),
                 ast.literal_eval(str(input_type_str)),
+                strict=False,
             )
         )
-    except Exception:
-        return None
+    except LITERAL_EVAL_ERRORS:
+        return []
 
-    parts = []
+    args = []
     for dim, dtype in pairs:
         shape = tuple(dim) if isinstance(dim, (list, tuple)) else ()
         kind = (torch_dtype_map(str(dtype)) or str(dtype)) if dtype else ""
@@ -946,24 +1070,134 @@ def format_args(input_dims_str, input_type_str) -> Optional[str]:
             continue
         # Trailing comma keeps tuple syntax for 1-element shapes ((128,) not (128))
         body = ",".join(map(str, shape)) + ("," if len(shape) == 1 else "")
-        parts.append(f"({body}) {kind}".rstrip())
-    return "<br>".join(parts) or None
+        args.append((f"({body})", kind))
+    return args
 
 
-def shape_aware_lookup(table, kname, input_dims=None):
-    """Look up perf metrics by (kernel_name, shape), fall back to any entry for that name.
+def format_args(input_dims_str, input_type_str) -> str | None:
+    """Render "(d1,d2,...) dtype<br>..." from Input Dims + Input type strings.
 
-    Uses prefix matching as fallback when exact key misses, since trace kernel
-    names can be longer than the truncated names stored in perf CSV lookups.
+    Args are joined with <br> so each entry renders on its own line inside a
+    markdown table cell, keeping the column narrow even for many-input ops.
+    Returns None on missing or unparseable input.
     """
-    shapes = table.get(kname, {})
-    if not shapes:
-        for csv_name in table:
-            if kname.startswith(csv_name) or csv_name.startswith(kname):
-                shapes = table[csv_name]
-                break
-    shape_key = parse_first_shape(input_dims) if input_dims else None
-    return shapes.get(shape_key) or next(iter(shapes.values()), {})
+    return (
+        "<br>".join(
+            f"{shape} {kind}".rstrip()
+            for shape, kind in arg_pairs(input_dims_str, input_type_str)
+        )
+        or None
+    )
+
+
+def perf_row_key(name, *args) -> tuple:
+    """Key of one unified_perf_summary.csv row: op name + its arg (and thread) columns.
+
+    Each part is normalized to the CSV's string form (``str`` of the tuple-ified
+    value; missing -> ``""``), so a raw trace event's args and a CSV cell yield
+    the same key.
+    """
+    return tuple(
+        (
+            ""
+            if a is None or (isinstance(a, float) and pd.isna(a))
+            else str(list_to_tuple(a))
+        )
+        for a in (name, *args)
+    )
+
+
+def row_perf_key(row, with_thread: bool) -> tuple:
+    """``perf_row_key`` of a unified_perf_summary.csv row; see ``load_perf_rows``."""
+    cols = PERF_ARG_COLS + PERF_THREAD_COLS if with_thread else PERF_ARG_COLS
+    return perf_row_key(row.get("name", "Unknown"), *(row.get(c) for c in cols))
+
+
+def node_field(node) -> dict:
+    """``{"node": node}`` when a node is set, else ``{}``."""
+    return {NODE_COL: node} if node is not None else {}
+
+
+class SystemFindings:
+    """Fixed-schema system findings: ``{title, members: [{metric, value, unit}]}``."""
+
+    @staticmethod
+    def make(title: str, *values) -> dict:
+        """A finding: ``values`` in the title's row order, cast per unit, None kept."""
+        rows = SYSTEM_FINDING_ROWS[title]
+        if len(values) != len(rows):
+            raise ValueError(f"{title!r} takes {len(rows)} values, got {len(values)}")
+        return {
+            "title": title,
+            "members": [
+                {
+                    "metric": metric,
+                    "value": None if value is None else _SYSTEM_UNITS[unit][0](value),
+                    "unit": unit,
+                }
+                for (metric, unit), value in zip(rows, values, strict=True)
+            ],
+        }
+
+    @staticmethod
+    def card_title(entry: dict) -> str:
+        """``P<rank>: <title>`` of a ranked finding, the heading text of its card."""
+        return f"P{entry['rank']}: {entry['title']}"
+
+    @staticmethod
+    def rank(entries: list[dict]) -> list[dict]:
+        """Number findings from 1 by descending share, the first ``%`` row of each;
+        ties keep ``SYSTEM_FINDING_ROWS`` order.
+        """
+        titles = list(SYSTEM_FINDING_ROWS)
+
+        def sort_key(entry):
+            share = next(m["value"] for m in entry["members"] if m["unit"] == "%")
+            return -share, titles.index(entry["title"])
+
+        return [
+            {"rank": rank, "title": entry["title"], "members": entry["members"]}
+            for rank, entry in enumerate(sorted(entries, key=sort_key), start=1)
+        ]
+
+    @staticmethod
+    def to_cells(row: dict) -> list[str]:
+        """``[metric, value cell]`` of a member row; a null value is ``NO_VALUE``."""
+        if row["value"] is None:
+            return [row["metric"], NO_VALUE]
+        return [row["metric"], _SYSTEM_UNITS[row["unit"]][1].format(row["value"])]
+
+    @staticmethod
+    def from_cells(cells: list[str]) -> dict | None:
+        """Inverse of ``to_cells``. None when the row is not a contract metric;
+        a value cell that does not read back as its metric's unit becomes null.
+        """
+        if len(cells) != 2 or cells[0] not in _SYSTEM_METRIC_UNITS:
+            return None
+        metric, unit = cells[0], _SYSTEM_METRIC_UNITS[cells[0]]
+        cast, _, cell_re = _SYSTEM_UNITS[unit]
+        match = cell_re.fullmatch(cells[1])
+        value = cast(match.group(1)) if match else None
+        return {"metric": metric, "value": value, "unit": unit}
+
+
+def load_perf_rows(csv_path: str, with_thread: bool = True) -> dict[tuple, pd.Series]:
+    """unified_perf_summary.csv rows keyed by ``perf_row_key`` (first row wins).
+
+    The key is name, the args, then the thread columns; ``with_thread=False`` drops
+    the thread for a trace whose events carry no thread (diff_stats), so rows that
+    differ only by thread collapse onto the first one.
+    """
+    rows: dict[tuple, pd.Series] = {}
+    for _, row in pd.read_csv(csv_path).iterrows():
+        rows.setdefault(row_perf_key(row, with_thread), row)
+    return rows
+
+
+def perf_float(perf, col) -> float | None:
+    """A numeric cell of a perf-summary row; None if the row or the cell is missing."""
+    val = perf.get(col) if perf is not None else None
+    return None if val is None or pd.isna(val) else float(val)
 
 
 def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
@@ -986,19 +1220,16 @@ def write_metrics_json(metrics: dict, output_dir: str, category: str) -> str:
     return output_path
 
 
-def get_peak_specs(metadata: dict) -> dict:
-    """Extract peak MAF and HBM bandwidth from metadata dict.
+def get_matrix_maf_tflops(maf: dict) -> float:
+    """Peak bf16 matrix TFLOPS of a max_achievable_tflops dict; a placeholder when absent."""
+    return maf.get("matrix_bf16", _DEFAULT_MATRIX_MAF_TFLOPS)
 
-    Handles both the dict-style max_achievable_tflops and the legacy
-    scalar peak_bf16_maf_tflops formats.
-    """
+
+def get_peak_specs(metadata: dict) -> dict:
+    """Extract peak MAF and memory bandwidth from metadata dict."""
     return {
-        "peak_maf_tflops": (
-            metadata.get("max_achievable_tflops", {}).get("matrix_bf16")
-            if isinstance(metadata.get("max_achievable_tflops"), dict)
-            else metadata.get("peak_bf16_maf_tflops")
-        ),
-        "peak_hbm_bw_tbs": metadata.get("peak_hbm_bw_tbs"),
+        "peak_maf_tflops": get_matrix_maf_tflops(metadata["max_achievable_tflops"]),
+        "peak_mem_bw_tbs": metadata[PEAK_MEM_BW_KEY],
     }
 
 
@@ -1009,7 +1240,6 @@ def run_category_analysis(
     extract_fn,
     pre_process_fn=None,
     no_data_check_fn=None,
-    compute_impact=True,
     comparison_scope: str = "standalone",
 ):
     """Generic runner for category analysis scripts.
@@ -1024,7 +1254,6 @@ def run_category_analysis(
         no_data_check_fn: Optional callable(output_dir, category, comparison_scope) -> dict or None.
             If it returns a dict, that dict is written as metrics and the runner
             exits early (used for categories that may not be present, e.g. MoE).
-        compute_impact: Whether to compute kernel-tuning impact estimates
         comparison_scope: ``standalone`` (roofline efficiency) or ``comparative``
             (TraceDiff-style ``100 * t2 / t1`` in ``operations[].efficiency``).
     """
@@ -1062,16 +1291,13 @@ def run_category_analysis(
     )
     category_specific = extract_fn(ops_df, metadata)
 
-    if compute_impact:
-        baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
-        impact_estimates = compute_impact_estimates(
-            operations,
-            category,
-            baseline_ms=baseline_ms,
-            comparison_scope=comparison_scope,
-        )
-    else:
-        impact_estimates = []
+    baseline_ms = metadata.get("gpu_utilization", {}).get("total_time_ms", 0)
+    impact_estimates = compute_impact_estimates(
+        operations,
+        category,
+        baseline_ms=baseline_ms,
+        comparison_scope=comparison_scope,
+    )
 
     category_findings = build_category_findings(
         impact_estimates, comparison_scope=comparison_scope

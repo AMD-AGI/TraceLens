@@ -11,27 +11,42 @@ Performance models for pseudo-op extensions.
 from math import prod
 
 from TraceLens.PerfModel.perf_model import BinaryElementwise
-from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
+from TraceLens.PerfModel.utils import (
+    dense_counted_tensor,
+    name2bpe,
+    torch_dtype_map,
+)
+from TraceLens.TraceUtils.utils.annotation_utils import add_logical_batch_size
 
-DTYPE_TO_BYTES = {
-    "Float8_e4m3fn": 1,
-    "Float8_e4m3fnuz": 1,
-    "Float8_e5m2": 1,
-    "Float8_e5m2fnuz": 1,
-    "FP8": 1,
-    "FP4": 0.5,
-    "BFloat16": 2,
-    "Float16": 2,
-    "Half": 2,
-    "Float32": 4,
-    "Float": 4,
-    "c10::BFloat16": 2,
-    "c10::Float8_e4m3fn": 1,
-    "c10::Float8_e4m3fnuz": 1,
-    "c10::Float4_e2m1fn_x2": 0.5,
-    "c10::Half": 2,
-    "c10::Float": 4,
-}
+
+def _weight_bpe_on_unpacked_k(dtype):
+    """Bytes per logical weight element when K has been unpacked.
+
+    ``name2bpe`` counts one traced ``Float4_e2m1fn_x2`` element: one byte,
+    two values. These models multiply by the unpacked K, so the logical
+    width is half of that.
+    """
+    bpe = name2bpe(dtype)
+    if bpe is None:
+        return None
+    key = str(dtype).strip().lower().split("::")[-1]
+    if key == "float4_e2m1fn_x2":
+        return bpe / 2
+    return bpe
+
+
+def _wider_compute_precision(input_dtype, weight_dtype):
+    """
+    Compute precision of a GEMM whose activations and weights differ in width.
+
+    A narrow-weight kernel such as Triton's bf16 x mxfp4 matmul_ogs upcasts the
+    weights and multiplies at the activation width, so its roof is the wider
+    dtype's matrix peak, not the weight dtype's. Falls back to the weight
+    dtype when the wider spelling has no simulation equivalent.
+    """
+    known = [d for d in (input_dtype, weight_dtype) if name2bpe(d) is not None]
+    wider = torch_dtype_map(max(known, key=name2bpe)) if known else None
+    return wider or torch_dtype_map(weight_dtype)
 
 
 # ==============================================================================
@@ -50,10 +65,9 @@ class FusedMoE:
     category = "MoE_fused"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
 
     @staticmethod
     def flops_func(num_tokens, hidden_dim, inter_dim, topk, gated):
@@ -155,8 +169,8 @@ class moe_aiter_fused_1stage(FusedMoE):
     TO DO: Expand support for other AITER MoE kernels.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -224,13 +238,13 @@ class moe_aiter_fused_1stage(FusedMoE):
     def bytes(self):
         """Calculate bytes moved using the static bytes_func."""
 
-        input_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["input_dtype"], 2
-        )  # Default to 2
-        weight_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["weight_dtype"], 1
-        )  # Default to 1 (FP8)
-        output_bpe = input_bpe  # Output typically same as input
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = input_bpe
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -269,8 +283,8 @@ class moe_aiter_fused_blockscale(FusedMoE):
     Used by SGLang and other frameworks that call AITER's fused MoE directly (without a vLLM wrapper).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
-        super().__init__(event, arch, python_path)
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -349,9 +363,15 @@ class moe_aiter_fused_blockscale(FusedMoE):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 1)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
-        output_bpe = DTYPE_TO_BYTES.get(self.param_details["output_dtype"], 2)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 1
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -568,7 +588,7 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
     LIMITATION: Perf. model assumes that the inter_dim is equal to the hidden_dim. (Not available in Trace)
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -660,13 +680,12 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
         input_dtype = self.param_details["input_dtype"]
         weight_dtype = self.param_details["weight_dtype"]
 
-        if input_dtype not in DTYPE_TO_BYTES:
+        input_bpe = name2bpe(input_dtype)
+        weight_bpe = _weight_bpe_on_unpacked_k(weight_dtype)
+        if input_bpe is None:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in DTYPE_TO_BYTES:
+        if weight_bpe is None:
             raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
-
-        input_bpe = DTYPE_TO_BYTES[input_dtype]
-        weight_bpe = DTYPE_TO_BYTES[weight_dtype]
         output_bpe = input_bpe  # Output same dtype as input
 
         return self.bytes_func(
@@ -692,7 +711,9 @@ class moe_triton_unfused_up(UnfusedMoE_Up):
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
         dtype = self.param_details.get("weight_dtype")
-        return torch_dtype_map(dtype) if dtype else None
+        if not dtype:
+            return None
+        return _wider_compute_precision(self.param_details.get("input_dtype"), dtype)
 
     def get_maf_type(self):
         """Return the MAF type for this operation (matrix for MoE)."""
@@ -709,7 +730,7 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
     LIMITATION: Perf. model assumes that the inter_dim is equal to the hidden_dim. (Not available in Trace)
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -792,13 +813,12 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
         input_dtype = self.param_details["input_dtype"]
         weight_dtype = self.param_details["weight_dtype"]
 
-        if input_dtype not in DTYPE_TO_BYTES:
+        input_bpe = name2bpe(input_dtype)
+        weight_bpe = _weight_bpe_on_unpacked_k(weight_dtype)
+        if input_bpe is None:
             raise ValueError(f"Unknown input dtype '{input_dtype}'")
-        if weight_dtype not in DTYPE_TO_BYTES:
+        if weight_bpe is None:
             raise ValueError(f"Unknown weight dtype '{weight_dtype}'")
-
-        input_bpe = DTYPE_TO_BYTES[input_dtype]
-        weight_bpe = DTYPE_TO_BYTES[weight_dtype]
         output_bpe = input_bpe  # Output same dtype as input
 
         return self.bytes_func(
@@ -823,7 +843,9 @@ class moe_triton_unfused_down(UnfusedMoE_Down):
     def get_compute_precision(self):
         """Return the compute precision for this operation."""
         dtype = self.param_details.get("weight_dtype")
-        return torch_dtype_map(dtype) if dtype else None
+        if not dtype:
+            return None
+        return _wider_compute_precision(self.param_details.get("input_dtype"), dtype)
 
     def get_maf_type(self):
         """Return the MAF type for this operation (matrix for MoE)."""
@@ -836,10 +858,9 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
     Handles aiter::moe_cktile2stages_gemm1_ck launches (CK-tile 2-stage GEMM1).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -898,15 +919,15 @@ class moe_aiter_unfused_up(UnfusedMoE_Up):
     def bytes(self):
         """Calculate bytes moved using the static bytes_func."""
 
-        input_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["input_dtype"], 2
-        )  # Default to 2
-        weight_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["weight_dtype"], 1
-        )  # Default to 1 (FP8)
-        output_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["output_dtype"], 2
-        )  # Output typically same as input
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -944,10 +965,9 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
     Handles aiter::moe_cktile2stages_gemm2_ck launches (CK-tile 2-stage GEMM2).
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1003,15 +1023,15 @@ class moe_aiter_unfused_down(UnfusedMoE_Down):
     def bytes(self):
         """Calculate bytes moved using the static bytes_func."""
 
-        input_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["input_dtype"], 2
-        )  # Default to 2
-        weight_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["weight_dtype"], 1
-        )  # Default to 1 (FP8)
-        output_bpe = DTYPE_TO_BYTES.get(
-            self.param_details["output_dtype"], 2
-        )  # Output typically same as input
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         return self.bytes_func(
             self.param_details["num_tokens"],
@@ -1051,10 +1071,9 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
     allowing direct extraction of hidden_dim and inter_dim from weight shapes.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1116,8 +1135,12 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1146,6 +1169,123 @@ class moe_aiter_ck_stage1(UnfusedMoE_Up):
         return "matrix"
 
 
+class moe_opus_stage1_a8w4(UnfusedMoE_Up):
+    """HBM bytes of the routed FP8 tokens, the active FP4 experts, and their scales; the padded sort buffers are not read."""
+
+    def __init__(self, event, arch=None, python_path=None):
+        self.event = event
+        self.arch = arch
+        self.python_path = python_path
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        offset = 0
+        if (
+            dims
+            and dims[0]
+            and len(dims[0]) == 1
+            and len(dims) > 1
+            and dims[1]
+            and len(dims[1]) == 2
+        ):
+            offset = 1
+        try:
+            activation = dims[offset]
+            weight = dims[offset + 1]
+            out = dims[offset + 8]
+            num_tokens, hidden_packed = activation
+            num_experts, n_packed, k_packed = weight
+            if n_packed % 2 or "float4" not in str(types[offset + 1]).lower():
+                raise ValueError
+            inter_dim = n_packed // 2
+            hidden_dim = k_packed * 2
+            topk = out[1]
+        except (IndexError, TypeError, ValueError):
+            return {"_no_perf": True}
+        return add_logical_batch_size(
+            {
+                "num_tokens": num_tokens,
+                "hidden_dim": hidden_dim,
+                "inter_dim": inter_dim,
+                "num_experts": num_experts,
+                "topk": topk,
+                "gated": True,
+                "input_dtype": types[offset] if len(types) > offset else "",
+                "weight_dtype": types[offset + 1],
+                "output_dtype": types[offset + 8] if len(types) > offset + 8 else "",
+                "a_scale_shape": tuple(dims[offset + 2]) if dims[offset + 2] else (),
+                "w_scale_shape": tuple(dims[offset + 3]) if dims[offset + 3] else (),
+                "out_scale_shape": (
+                    tuple(dims[offset + 9])
+                    if len(dims) > offset + 9 and dims[offset + 9]
+                    else ()
+                ),
+                "scale_dtype": types[offset + 2] if len(types) > offset + 2 else "",
+            },
+            event,
+        )
+
+    def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return self.flops_func(
+            self.param_details["num_tokens"],
+            self.param_details["hidden_dim"],
+            self.param_details["inter_dim"],
+            self.param_details["topk"],
+            True,
+        )
+
+    def bytes(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        output_bpe = name2bpe(self.param_details["output_dtype"])
+        scale_bpe = name2bpe(self.param_details["scale_dtype"])
+        if None in {input_bpe, weight_bpe, output_bpe, scale_bpe}:
+            return None
+        total = self.bytes_func(
+            self.param_details["num_tokens"],
+            self.param_details["hidden_dim"],
+            self.param_details["inter_dim"],
+            self.param_details["num_experts"],
+            self.param_details["topk"],
+            True,
+            input_bpe,
+            weight_bpe,
+            output_bpe,
+        )
+        if total is None:
+            return None
+        M = self.param_details["num_tokens"]
+        topk = self.param_details["topk"]
+        E = self.param_details["num_experts"]
+        a_scale = self.param_details["a_scale_shape"]
+        w_scale = self.param_details["w_scale_shape"]
+        out_scale = self.param_details["out_scale_shape"]
+        if a_scale:
+            total += M * a_scale[-1] * scale_bpe
+        if w_scale and E:
+            active = E * (1 - ((E - topk) / E) ** M)
+            total += active * (prod(w_scale) / E) * scale_bpe
+        if out_scale:
+            total += M * topk * out_scale[-1] * scale_bpe
+        return total
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return "matrix"
+
+
 class moe_aiter_ck_stage2(UnfusedMoE_Down):
     """
     Performance model for AITER CK-based unfused MoE stage2 (down projection).
@@ -1155,10 +1295,9 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
     at different arg positions: inter_states[0], w1[1], w2[2], ..., out[6].
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1212,8 +1351,12 @@ class moe_aiter_ck_stage2(UnfusedMoE_Down):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1304,10 +1447,9 @@ class moe_flydsl_stage1(UnfusedMoE_Up):
     inherited from the parent aiter::fused_moe_ op.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1324,8 +1466,12 @@ class moe_flydsl_stage1(UnfusedMoE_Up):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1367,10 +1513,9 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
     inherited from the parent aiter::fused_moe_ op.
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1386,8 +1531,12 @@ class moe_flydsl_stage2(UnfusedMoE_Down):
         )
 
     def bytes(self):
-        input_bpe = DTYPE_TO_BYTES.get(self.param_details["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(self.param_details["weight_dtype"], 1)
+        input_bpe = name2bpe(self.param_details["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        weight_bpe = _weight_bpe_on_unpacked_k(self.param_details["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
         output_bpe = input_bpe
 
         return self.bytes_func(
@@ -1454,10 +1603,9 @@ class moe_triton_invoke_grouped_gemm:
     category = "MoE_unfused"
     bwd_category = None
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1510,9 +1658,16 @@ class moe_triton_invoke_grouped_gemm:
 
     def bytes(self):
         p = self.param_details
-        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
-        weight_bpe = DTYPE_TO_BYTES.get(p["weight_dtype"], 1)
-        output_bpe = DTYPE_TO_BYTES.get(p["output_dtype"], 2)
+        input_bpe = name2bpe(p["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
+        # K is the traced weight dimension, already K_packed for Float4.
+        weight_bpe = name2bpe(p["weight_dtype"])
+        if weight_bpe is None:
+            weight_bpe = 1
+        output_bpe = name2bpe(p["output_dtype"])
+        if output_bpe is None:
+            output_bpe = 2
 
         if None in {input_bpe, weight_bpe, output_bpe}:
             return None
@@ -1573,7 +1728,7 @@ class moe_gptq_awq_up(UnfusedMoE_Up):
         MoE GEMM gated  - True for up projection (SwiGLU)
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -1612,7 +1767,9 @@ class moe_gptq_awq_up(UnfusedMoE_Up):
 
     def bytes(self):
         p = self.param_details
-        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
+        input_bpe = name2bpe(p["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
         return self.bytes_func(
             p["num_tokens"],
             p["hidden_dim"],
@@ -1661,7 +1818,7 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
         MoE GEMM gated  - False for down projection
     """
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.param_details = self.get_param_details(event)
 
@@ -1696,7 +1853,9 @@ class moe_gptq_awq_down(UnfusedMoE_Down):
 
     def bytes(self):
         p = self.param_details
-        input_bpe = DTYPE_TO_BYTES.get(p["input_dtype"], 2)
+        input_bpe = name2bpe(p["input_dtype"])
+        if input_bpe is None:
+            input_bpe = 2
         return self.bytes_func(
             p["num_tokens"],
             p["hidden_dim"],
@@ -1817,10 +1976,9 @@ class BiasedGroupedTopk:
     bwd_category = None
     sheet_category = "MoE_aux"
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1887,10 +2045,9 @@ class MoeSortScatterGather:
     bwd_category = None
     sheet_category = "MoE_aux"
 
-    def __init__(self, event, arch=None, python_path=None):
+    def __init__(self, event, arch=None):
         self.event = event
         self.arch = arch
-        self.python_path = python_path
         self.param_details = self.get_param_details(event)
 
     @staticmethod
@@ -1935,3 +2092,199 @@ class MoeSortScatterGather:
 
     def get_maf_type(self):
         return "vector"
+
+
+def _next_pow2(n):
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
+def _moe_sort_block_size(sorted_len, max_blocks, pairs, topk):
+    """Invert ``sorted_ids = pairs + num_experts * block_size - topk``."""
+    for block in (16, 32, 64, 128, 256):
+        if (sorted_len + block - 1) // block != max_blocks:
+            continue
+        expert_slots = sorted_len - pairs + topk
+        if expert_slots > 0 and expert_slots % block == 0:
+            return block, expert_slots // block
+    return None, None
+
+
+def _compact_sort_ops(p2):
+    """Integer ops in the compact P x P ranking tile."""
+    return 9 * p2 * p2 + 5 * p2
+
+
+def _distributed_sort_ops(pairs, p2, num_experts):
+    """Integer ops in the distributed sort used when P > 64."""
+    p_chunk = 64
+    e_ceil = -(-num_experts // p_chunk) * p_chunk
+    n_chunks = e_ceil // p_chunk
+
+    def chunk_ops():
+        return 2 * p2 * p_chunk + p_chunk
+
+    per_chunk_cta = chunk_ops() * (1 + n_chunks) + 2 * p_chunk * p_chunk
+    per_pair = 4 * p2 + n_chunks * chunk_ops()
+    return n_chunks * per_chunk_cta + pairs * per_pair
+
+
+class SglangMoeSortingSmall(MoeSortScatterGather):
+    """HBM bytes of the routed pairs and the compiled pad stores; the unused tail of sorted_ids is not written."""
+
+    @staticmethod
+    def get_param_details(event):
+        details = MoeSortScatterGather.get_param_details(event)
+        dims = event.get("args", {}).get("Input Dims") or []
+        if len(dims) >= 5 and dims[0] and dims[2] and dims[4]:
+            rows, topk = dims[0]
+            pairs = rows * topk
+            block, num_experts = _moe_sort_block_size(
+                dims[2][0], dims[4][0], pairs, topk
+            )
+            details.update(
+                {
+                    "rows": rows,
+                    "topk": topk,
+                    "pairs": pairs,
+                    "block_size": block,
+                    "num_experts": num_experts,
+                    "compact": bool(block and pairs <= 64 and pairs <= 2 * block),
+                }
+            )
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        pairs = self.param_details.get("pairs")
+        block = self.param_details.get("block_size")
+        num_experts = self.param_details.get("num_experts")
+        if not pairs or not block or not num_experts:
+            return None
+        p2 = _next_pow2(pairs)
+        if self.param_details.get("compact"):
+            return _compact_sort_ops(p2)
+        return _distributed_sort_ops(pairs, p2, num_experts)
+
+    def bytes(self):
+        if not dense_counted_tensor(self.event, (0, 1)):
+            return None
+        pairs = self.param_details.get("pairs")
+        block = self.param_details.get("block_size")
+        if not pairs or not block:
+            return None
+        p2 = _next_pow2(pairs)
+        pad = _next_pow2(pairs * block)
+        # ids and weights, int32 and fp32.
+        pair_bytes = pairs * 4 + pairs * 4
+        pad_bytes = pad * 4 + pad * 4
+        expert_bytes = 2 * p2 * 4
+        num_valid_bytes = 8
+        dims = self.event.get("args", {}).get("Input Dims") or []
+        types = self.event.get("args", {}).get("Input type") or []
+        moe_bytes = 0
+        if len(dims) > 6 and dims[6] and prod(dims[6]) > 0:
+            bpe = name2bpe(types[6]) if len(types) > 6 else None
+            if bpe is None:
+                return None
+            moe_bytes = prod(dims[6]) * bpe
+        return pair_bytes + pad_bytes + expert_bytes + num_valid_bytes + moe_bytes
+
+    def get_compute_precision(self):
+        return None
+
+
+class moe_sorting_opus_fwd(MoeSortScatterGather):
+    """Linear integer work over routed pairs and block-padded slots; HBM is those slots, moe_buf, and workspace."""
+
+    @staticmethod
+    def get_param_details(event):
+        details = MoeSortScatterGather.get_param_details(event)
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        concrete = args.get("Concrete Inputs") or []
+        if not dims or not dims[0] or len(dims[0]) < 2:
+            return add_logical_batch_size(details, event)
+        try:
+            rows, topk = dims[0]
+        except (TypeError, ValueError):
+            return add_logical_batch_size(details, event)
+        if not rows or not topk:
+            return add_logical_batch_size(details, event)
+        pairs = rows * topk
+        block, num_experts = None, None
+        sorted_len = dims[2][0] if len(dims) > 2 and dims[2] else None
+        if sorted_len and len(dims) > 4 and dims[4]:
+            block, num_experts = _moe_sort_block_size(
+                sorted_len, dims[4][0], pairs, topk
+            )
+        if (not block or not num_experts) and len(concrete) > 8:
+            try:
+                num_experts = int(concrete[7])
+                block = int(concrete[8])
+            except (TypeError, ValueError):
+                block, num_experts = None, None
+        written = None
+        if block and sorted_len:
+            # Empty experts are not stored. pairs * block bounds the padded slots.
+            written = min(sorted_len, pairs * block)
+        details.update(
+            {
+                "rows": rows,
+                "topk": topk,
+                "pairs": pairs,
+                "block_size": block,
+                "num_experts": num_experts,
+                "written": written,
+            }
+        )
+        return add_logical_batch_size(details, event)
+
+    def flops(self):
+        pairs = self.param_details.get("pairs")
+        experts = self.param_details.get("num_experts")
+        written = self.param_details.get("written")
+        if not pairs or not experts or not written:
+            return None
+        dims = self.event.get("args", {}).get("Input Dims") or []
+        moe_elems = (
+            prod(dims[6]) if len(dims) > 6 and dims[6] and prod(dims[6]) > 0 else 0
+        )
+        return 2 * pairs + experts + 2 * written + moe_elems
+
+    def bytes(self):
+        if not dense_counted_tensor(self.event, (0, 1)):
+            return None
+        pairs = self.param_details.get("pairs")
+        written = self.param_details.get("written")
+        block = self.param_details.get("block_size")
+        if not pairs or not written or not block:
+            return None
+        dims = self.event.get("args", {}).get("Input Dims") or []
+        types = self.event.get("args", {}).get("Input type") or []
+        moe_bytes = _optional_tensor_bytes(dims, types, 6)
+        workspace_bytes = _optional_tensor_bytes(dims, types, 11)
+        if moe_bytes is None or workspace_bytes is None:
+            return None
+        return (
+            pairs * 8
+            + written * 8
+            + ((written + block - 1) // block) * 4
+            + 8
+            + moe_bytes
+            + workspace_bytes
+        )
+
+    def get_compute_precision(self):
+        return None
+
+
+def _optional_tensor_bytes(dims, types, index):
+    if len(dims) <= index or not dims[index] or prod(dims[index]) <= 0:
+        return 0
+    if index >= len(types):
+        return None
+    bpe = name2bpe(types[index])
+    if bpe is None:
+        return None
+    return prod(dims[index]) * bpe

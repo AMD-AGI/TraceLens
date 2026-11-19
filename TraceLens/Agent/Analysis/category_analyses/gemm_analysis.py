@@ -11,26 +11,24 @@ Computes metrics for GEMM operations and outputs JSON for subagent processing.
 """
 
 import argparse
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from analysis_utils import (
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
     get_peak_specs,
     run_category_analysis,
 )
 
-
-def detect_quantized_gemm(op_name: str) -> bool:
-    """Check if GEMM operation is quantized."""
-    quantized_markers = ["w8a8", "int8", "fp8", "w4a16", "w4a4", "fp4", "mxfp4"]
-    return any(marker in op_name.lower() for marker in quantized_markers)
+# Constants
+QUANTIZED_COMPUTE_SPECS = frozenset({"matrix_fp8", "matrix_fp4", "matrix_int8"})
 
 
-def classify_gemm_operation(op_name: str, row) -> dict:
+def detect_quantized_gemm(compute_spec: str) -> bool:
+    """Check if a GEMM's Compute Spec is a quantized precision."""
+    return compute_spec in QUANTIZED_COMPUTE_SPECS
+
+
+def classify_gemm_operation(_op_name: str, row) -> dict:
     """Classify GEMM operation type."""
-    is_quantized = detect_quantized_gemm(op_name)
+    is_quantized = detect_quantized_gemm(row["Compute Spec"])
     return {
         "is_quantized": is_quantized,
         "gemm_type": "quantized" if is_quantized else "regular",
@@ -39,13 +37,10 @@ def classify_gemm_operation(op_name: str, row) -> dict:
 
 def extract_category_specific(ops_df, metadata) -> dict:
     """Extract GEMM-specific aggregate metrics."""
-    quantized_count = sum(
-        1 for name in ops_df["name"] if detect_quantized_gemm(str(name))
-    )
+    quantized_count = ops_df["Compute Spec"].isin(QUANTIZED_COMPUTE_SPECS).sum()
 
     missing_perf_model = 0
     if "TFLOPS/s_mean" in ops_df.columns:
-
         missing_perf_model = ops_df["TFLOPS/s_mean"].isna().sum()
 
     return {
@@ -59,6 +54,11 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze GEMM operations")
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument(
+        "--category",
+        required=True,
+        help="Manifest category name; selects <category>_ops.csv",
+    )
+    parser.add_argument(
         "--comparison_scope",
         choices=("standalone", "comparative"),
         default="standalone",
@@ -70,7 +70,7 @@ def main():
     args = parser.parse_args()
 
     run_category_analysis(
-        category="gemm",
+        category=args.category,
         output_dir=args.output_dir,
         config={
             "extra_fields": ["Input Dims", "Input type", "has_perf_model"],

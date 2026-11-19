@@ -13,7 +13,7 @@ See LICENSE for license information.
 In distributed deep learning, analyzing the performance of collective
 communication operations is crucial for diagnosing and optimizing performance at
 scale. `NcclAnalyser` is a Python SDK that parses and analyzes NVIDIA Collective
-Communications Library (NCCL) and ROCm Collective Communications Library (RCCL)
+Communications Library (NCCL) and [ROCm Collective Communications Library (RCCL)](https://rocm.docs.amd.com/projects/rccl/en/latest/index.html)
 kernel events from PyTorch trace files (JSON). It computes key metrics like
 communication latency, message sizes, algorithm bandwidth, bus bandwidth, and
 synchronization metrics (for example skew in start and end times), providing
@@ -41,7 +41,9 @@ collective-communication report from the command line instead, see
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
 - Per-rank PyTorch profiler traces from a distributed run (one trace per rank).
 
 ## Quick start
@@ -52,6 +54,8 @@ More features are demonstrated in the
 notebook.
 
 ### Quick summary of implicit-sync collectives
+
+The following example initializes `NcclAnalyser` with per-rank trace files and generates a summarized dataframe for all implicit-sync collective operations.
 
 ```python
 from TraceLens import NcclAnalyser
@@ -80,6 +84,8 @@ The summarized dataframe:
 - For synchronization delay, computes metrics like skew in start times, which shows the wait time. This is based on the difference between the earliest and latest arrival across the ranks for a given collective.
 
 ### Example summarized dataframe
+
+The following table shows example output from `build_df_summary_nccl_implicit_sync_cat`, with one row per unique combination of collective type, message size, and data type.
 
 | Collective name | In msg size (MB) | dtype | comm latency (µs)_mean | count | Total latency (ms) | algo bw (GB/s)_mean | bus bw (GB/s)_mean | skew in start time (µs)_mean |
 |-----------------|------------------|-------|------------------------|-------|--------------------|---------------------|--------------------|------------------------------|

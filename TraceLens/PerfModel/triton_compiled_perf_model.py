@@ -32,43 +32,10 @@ import os
 import re
 from math import prod
 
-logger = logging.getLogger(__name__)
+from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem
+from .utils import name2bpe, torch_dtype_map
 
-# ---------------------------------------------------------------------------
-# FLOPs per element for ATen ops that commonly appear in fused Triton kernels.
-# Counts arithmetic operations; memory-only ops are 0.
-# ---------------------------------------------------------------------------
-_FLOPS_PER_ELEM: dict[str, int] = {
-    "aten.add": 1,
-    "aten.sub": 1,
-    "aten.mul": 1,
-    "aten.div": 1,
-    "aten.pow": 2,
-    "aten.sqrt": 2,
-    "aten.rsqrt": 2,
-    "aten.exp": 4,
-    "aten.log": 4,
-    "aten.sigmoid": 4,
-    "aten.tanh": 4,
-    "aten.relu": 1,
-    "aten.silu": 4,
-    "aten.gelu": 8,
-    "aten.mean": 1,
-    "aten.sum": 1,
-    "aten.var": 2,
-    "aten.abs": 1,
-    "aten.neg": 1,
-    "aten.reciprocal": 2,
-    "aten.ne": 1,
-    "aten.eq": 1,
-    "aten.lt": 1,
-    "aten.gt": 1,
-    # memory-only
-    "aten._to_copy": 0,
-    "aten.copy_": 0,
-    "aten.clone": 0,
-    "aten.embedding": 0,
-}
+logger = logging.getLogger(__name__)
 
 _PTR_DTYPE_BYTES: dict[str, int] = {
     "*bf16": 2,
@@ -80,17 +47,6 @@ _PTR_DTYPE_BYTES: dict[str, int] = {
     "*u8": 1,
     "*i32": 4,
     "*i64": 8,
-}
-
-_C10_DTYPE_BYTES: dict[str, int] = {
-    "c10::BFloat16": 2,
-    "c10::Half": 2,
-    "c10::Float": 4,
-    "c10::Double": 8,
-    "c10::Byte": 1,
-    "c10::Char": 1,
-    "c10::Int": 4,
-    "c10::Long": 8,
 }
 
 # ---------------------------------------------------------------------------
@@ -135,7 +91,7 @@ def _parse_kernel_name(name: str) -> list[str]:
     n = len(tokens)
 
     if not _ALL_KNOWN_OPS:
-        return [f"aten.{t}" for t in tokens if f"aten.{t}" in _FLOPS_PER_ELEM]
+        return [f"aten.{t}" for t in tokens if t in OP_FLOPS_PER_ELEM]
 
     # dp[i] = list of (op_name, prev_index) for valid segmentations ending
     # at token i.  dp[0] = True is the base case (empty prefix).
@@ -206,7 +162,7 @@ def _meta_from_trace_args(event: dict) -> dict | None:
     for dims, dt in zip(input_dims, input_type):
         if dt == "Scalar" or not dims:
             continue
-        bpe = _C10_DTYPE_BYTES.get(dt, 0)
+        bpe = name2bpe(dt) or 0
         ptr_bytes.append(bpe)
         ptr_shapes.append(dims)
         if dtype is None and bpe > 0:
@@ -368,7 +324,7 @@ class TritonCompiledPerfModel:
     TraceLens silently skips the kernel (same behaviour as unmodelled ATen ops).
     """
 
-    def __init__(self, event, arch=None, python_path=None, **kwargs):
+    def __init__(self, event, arch=None, **kwargs):
         self.name = event["name"]
         self._meta = _meta_from_trace_args(event)  # V2: trace args
         if self._meta is None:
@@ -387,7 +343,7 @@ class TritonCompiledPerfModel:
         if self._meta is None:
             raise NotImplementedError(f"No Inductor artifacts found for {self.name}")
         total = self._meta["xnumel"] * self._meta["rnumel"]
-        fpe = sum(_FLOPS_PER_ELEM.get(op, 0) for op in self._meta["aten_ops"])
+        fpe = sum(op_flops_per_elem(op) for op in self._meta["aten_ops"])
         return float(fpe * total)
 
     def bytes(self) -> float:
@@ -417,9 +373,13 @@ class TritonCompiledPerfModel:
         return "vector" if self._meta is not None else None
 
     def get_compute_precision(self):
+        # The two metadata paths disagree on vocabulary: kernel-signature
+        # parsing yields Triton pointer names ("bf16") while Input type
+        # parsing yields c10 names with the namespace stripped ("bfloat16").
+        # Normalise so the compute spec matches the arch spec keys either way.
         if self._meta is None:
             return None
-        return self._meta.get("dtype")
+        return torch_dtype_map(self._meta.get("dtype"))
 
     def flops_bwd(self) -> float:
         raise NotImplementedError

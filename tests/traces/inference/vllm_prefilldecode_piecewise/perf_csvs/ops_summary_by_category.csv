@@ -6,4 +6,4 @@ RMSNorm,nn.Module: GraphModule,49,"['aiter::rms_norm', 'nn.Module: GraphModule_0
 triton,nn.Module: GraphModule,48,"['triton_poi_fused_0', 'nn.Module: GraphModule_0', 'nn.Module: GptOssForCausalLM_0']",2.0454619140625,1.3104718497748373,99.72267125628657
 GEMM,nn.Module: LogitsProcessor,1,"['aten::mm', 'nn.Module: LogitsProcessor_0']",0.34663671875,0.2220807236239318,99.9447519799105
 elementwise,NA,12,['aten::copy_'],0.082595703125,0.052916821923463475,99.99766880183397
-other,NA,1,['aten::index'],0.003638671875,0.002331198166034015,100.0
+IndexedCopy,NA,1,['aten::index'],0.003638671875,0.002331198166034015,100.0

@@ -8,9 +8,9 @@
 
 Public API:
 
-- ``generate_perf_plot`` -- single horizontal stacked bar showing the run's
-  compute-time breakdown by kernel category (manifest-only, no savings, no
-  error bars).
+- ``generate_perf_plot`` -- horizontal stacked bar (one per node under
+  ``combine_by_node``) showing the run's compute-time breakdown by kernel
+  category (manifest-only, no savings, no error bars).
 - ``generate_and_embed_plot`` -- end-to-end pipeline (priority_data -> plot
   -> embed).
 """
@@ -20,8 +20,6 @@ import os
 import re
 
 import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from TraceLens.Agent.Analysis.utils.report_utils import (
@@ -29,11 +27,17 @@ from TraceLens.Agent.Analysis.utils.report_utils import (
     load_manifest,
 )
 
+# Render without a display, even on hosts that have one.
+matplotlib.use("Agg")
+
 __all__ = [
     "generate_perf_plot",
     "generate_and_embed_plot",
     "embed_plot_in_report",
 ]
+
+# Constants
+PLOT_BASE64_FILE = "perf_improvement_base64.txt"
 
 _CAT_PALETTE = [
     "#e74c3c",
@@ -56,14 +60,17 @@ def generate_perf_plot(
     output_filename: str = "perf_improvement.png",
     write_base64: bool = True,
 ) -> bool:
-    """Render a single horizontal stacked bar showing the run's compute-time
-    breakdown by kernel category.
+    """Render a horizontal stacked bar showing the run's compute-time breakdown
+    by kernel category: one bar on a single trace, one per node under
+    ``combine_by_node``.
 
     Reads ``<output_dir>/category_data/category_manifest.json`` directly --
     purely descriptive of the run, no savings, no error bars, no throughput
     cone. Compute-tier categories are stacked left-to-right by descending
     ``gpu_kernel_time_ms``; any remaining E2E time (baseline_ms minus the sum
-    of compute kernels) is appended as a "Non-computing" gray segment.
+    of compute kernels) is appended as a "Non-computing" gray segment. Per-node
+    bars follow job order, each against that node's total time, with the same
+    color for a category on every node.
 
     Args:
         output_dir: Directory containing ``category_data/category_manifest.json``.
@@ -80,75 +87,101 @@ def generate_perf_plot(
         print("category_manifest.json not found - skipping plot")
         return False
 
-    baseline_ms = float(manifest.get("gpu_utilization", {}).get("total_time_ms", 0))
+    gpu_utilization = manifest.get("gpu_utilization", {})
+    baseline_ms = float(gpu_utilization.get("total_time_ms", 0))
     if baseline_ms <= 0:
         print("Invalid baseline_ms in manifest - skipping plot")
         return False
 
-    segments = []
-    kernel_sum = 0.0
-    for cat in manifest.get("categories", []):
-        if cat.get("tier") != "compute_kernel":
-            continue
-        gt = float(cat.get("gpu_kernel_time_ms", 0) or 0)
-        if gt <= 0:
-            continue
-        segments.append({"name": cat["name"], "time_ms": gt})
-        kernel_sum += gt
+    categories = [
+        cat
+        for cat in manifest.get("categories", [])
+        if cat.get("tier") == "compute_kernel"
+        and float(cat.get("gpu_kernel_time_ms", 0) or 0) > 0
+    ]
+    categories.sort(key=lambda c: float(c["gpu_kernel_time_ms"]), reverse=True)
+    colors = {
+        cat["name"]: _CAT_PALETTE[i % len(_CAT_PALETTE)]
+        for i, cat in enumerate(categories)
+    }
 
-    segments.sort(key=lambda s: s["time_ms"], reverse=True)
+    # Per bar: (axis title, total ms, ms per category); one bar per node if present.
+    nodes = gpu_utilization.get("nodes")
+    if nodes:
+        bars = []
+        for node, util in nodes.items():
+            node_ms = float(util["total_time_ms"])
+            cat_ms = {
+                cat["name"]: cat.get("nodes", {})
+                .get(node, {})
+                .get("gpu_kernel_time_ms", 0)
+                for cat in categories
+            }
+            bars.append((f"{node} ({node_ms:.2f} ms)", node_ms, cat_ms))
+    else:
+        bars = [
+            (
+                title,
+                baseline_ms,
+                {c["name"]: c["gpu_kernel_time_ms"] for c in categories},
+            )
+        ]
 
-    rest_ms = max(0.0, baseline_ms - kernel_sum)
-    if rest_ms > 0:
-        segments.append({"name": _REST_KEY, "time_ms": rest_ms})
+    fig, axes = plt.subplots(len(bars), 1, figsize=(12, 3.0 * len(bars)), squeeze=False)
+    if nodes:
+        # Above the figure edge; savefig's bbox_inches="tight" keeps it in the PNG.
+        fig.suptitle(title, y=1.0, va="bottom", fontsize=12, fontweight="bold")
 
-    if not segments:
-        print("No compute-kernel segments to plot - skipping plot")
-        return False
+    for ax, (axis_title, total_ms, cat_ms) in zip(axes[:, 0], bars, strict=True):
+        segments = [
+            {"name": name, "time_ms": float(ms)}
+            for name, ms in cat_ms.items()
+            if ms > 0
+        ]
+        segments.sort(key=lambda s: s["time_ms"], reverse=True)
+        rest_ms = max(0.0, total_ms - sum(s["time_ms"] for s in segments))
+        if rest_ms > 0:
+            segments.append({"name": _REST_KEY, "time_ms": rest_ms})
 
-    fig, ax = plt.subplots(figsize=(12, 3.0))
+        cumulative = 0.0
+        for seg in segments:
+            width = seg["time_ms"]
+            pct = width / total_ms * 100
+            if seg["name"] == _REST_KEY:
+                color = _REST_COLOR
+                display_name = "Non-computing"
+            else:
+                color = colors[seg["name"]]
+                raw = seg["name"]
+                display_name = raw[0].upper() + raw[1:] if raw else raw
+            legend_label = f"{display_name} \u2014 {width:.1f} ms ({pct:.1f}%)"
+            ax.barh(
+                [0],
+                [width],
+                left=[cumulative],
+                color=color,
+                edgecolor="white",
+                linewidth=0.9,
+                alpha=0.95,
+                label=legend_label,
+            )
+            cumulative += width
 
-    cumulative = 0.0
-    color_idx = 0
-    for seg in segments:
-        width = seg["time_ms"]
-        pct = width / baseline_ms * 100
-        if seg["name"] == _REST_KEY:
-            color = _REST_COLOR
-            display_name = "Non-computing"
-        else:
-            color = _CAT_PALETTE[color_idx % len(_CAT_PALETTE)]
-            color_idx += 1
-            raw = seg["name"]
-            display_name = raw[0].upper() + raw[1:] if raw else raw
-        legend_label = f"{display_name} \u2014 {width:.1f} ms ({pct:.1f}%)"
-        ax.barh(
-            [0],
-            [width],
-            left=[cumulative],
-            color=color,
-            edgecolor="white",
-            linewidth=0.9,
-            alpha=0.95,
-            label=legend_label,
+        ax.set_xlim(0, total_ms)
+        ax.set_ylim(-0.6, 0.6)
+        ax.set_yticks([])
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.set_xlabel("GPU time (ms)", fontsize=10)
+        ax.set_title(axis_title, fontsize=12, fontweight="bold", pad=10)
+
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.4),
+            ncol=min(len(segments), 4),
+            frameon=False,
+            fontsize=9,
         )
-        cumulative += width
-
-    ax.set_xlim(0, baseline_ms)
-    ax.set_ylim(-0.6, 0.6)
-    ax.set_yticks([])
-    for side in ("top", "right", "left"):
-        ax.spines[side].set_visible(False)
-    ax.set_xlabel("GPU time (ms)", fontsize=10)
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
-
-    ax.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.4),
-        ncol=min(len(segments), 4),
-        frameon=False,
-        fontsize=9,
-    )
 
     plt.tight_layout()
 
@@ -160,7 +193,7 @@ def generate_perf_plot(
     if write_base64:
         with open(out_path, "rb") as f:
             b64_str = base64.b64encode(f.read()).decode("ascii")
-        b64_path = os.path.join(output_dir, "perf_improvement_base64.txt")
+        b64_path = os.path.join(output_dir, PLOT_BASE64_FILE)
         with open(b64_path, "w") as f:
             f.write(b64_str)
         print(f"Base64 written to {b64_path}")
@@ -189,17 +222,17 @@ def embed_plot_in_report(
         True if the plot was embedded, False otherwise
     """
     report_path = os.path.join(output_dir, report_filename)
-    b64_path = os.path.join(output_dir, "perf_improvement_base64.txt")
+    b64_path = os.path.join(output_dir, PLOT_BASE64_FILE)
 
     if not os.path.exists(report_path):
         print(f"Report file not found at {report_path} - skipping embed")
         return False
 
-    with open(report_path, "r") as f:
+    with open(report_path) as f:
         report = f.read()
 
     if os.path.exists(b64_path):
-        with open(b64_path, "r") as f:
+        with open(b64_path) as f:
             b64_str = f.read().strip()
         img_tag = f"![Performance Improvement](data:image/png;base64,{b64_str})"
         embedded = True
@@ -237,7 +270,7 @@ def generate_and_embed_plot(output_dir: str, title: str) -> dict:
     try:
         generate_priority_data(output_dir)
         results["plot_data"] = True
-    except Exception as e:
+    except Exception as e:  # the plot reads the manifest, not priority_data
         print(f"priority_data generation failed: {e}")
 
     results["plot"] = generate_perf_plot(output_dir, title)

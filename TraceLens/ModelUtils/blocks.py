@@ -1,0 +1,209 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Datatypes for code-derived architecture blocks."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from TraceLens.ModelUtils.ast_analyze import ClassStructure
+
+
+@dataclass
+class LayerVariant:
+    """One distinct decoder-layer template and how many layers use it."""
+
+    label: str
+    count: int
+    attention_label: str
+    attention_class: str | None = None
+    ffn_label: str = "FFN"
+    ffn_class: str | None = None
+    ffn_attr: str | None = None
+    # 0-based decoder-layer indices that use this template, in ascending order.
+    # Feeds the fact sheet's "(layers 0-30, 44)" range annotation.
+    layer_indices: list[int] = field(default_factory=list)
+    # Per-component pre-built subtrees for variants whose divergence is *nested* — the
+    # decoder layer's top-level submodule classes are identical across variants but a
+    # deeper submodule (a per-layer ``compressor``/``gate``) differs. Keyed by the
+    # component attr name (``"self_attn"``/``"mlp"``); the value is a
+    # ``(title, BlockNode)`` tree already carrying that variant's nested class overrides.
+    # ``Any`` avoids a blocks->block_tree import cycle. When empty (the common case) the
+    # variant renders via the normal top-level class resolution.
+    component_trees: dict[str, Any] = field(default_factory=dict)
+    # Decoder-layer component attrs the LIVE module for this variant does not have, so
+    # the renderer skips them outright. A forward that picks between two components
+    # (``block_sparse_moe`` when it exists, else ``mlp``) parses as both arms, but each
+    # live layer was built with exactly one; drawing the other is drawing a module that
+    # is not there. Distinct from ``component_trees`` — an absent component has no tree
+    # to render, and "no tree" otherwise means "no override, draw the default".
+    omitted_components: frozenset[str] = frozenset()
+
+
+@dataclass
+class RepeatedGroup:
+    """A node in the reconstructed repeated-``ModuleList`` nesting tree.
+
+    Unlike :class:`LayerVariant` (sub-variants of the ONE uniform decoder stack a
+    transformer has), this models an arbitrary NON-uniform nesting: a CNN's stages,
+    each a ``ModuleList`` of a different depth and channel width. The tree is rebuilt
+    from the flat :class:`TraceLens.ModelUtils.meta_trace.MetaModuleGroup` list by
+    dotted-path containment; see ``extract._build_nested_groups``.
+
+    A numeric index segment in a child path is collapsed to ``*`` (``stages.2.layers``
+    -> ``stages.*.layers``) so the per-stage ``layers`` lists fold into ONE logical
+    child whose ``per_index_counts`` records each parent position's own length
+    (ConvNeXt: ``[3, 3, 27, 3]``). ``per_index_counts`` is ``None`` for a uniform
+    child (every parent position repeats the child the same number of times).
+    """
+
+    path: str  # live dotted path, index segments collapsed to "*" (e.g. "stages.*.layers")
+    count: int  # len(ModuleList); for a collapsed child, the modal per-position length
+    element_class: str
+    label: str
+    children: list["RepeatedGroup"] = field(default_factory=list)
+    # One structural signature per element (from MetaModuleGroup.signatures), for
+    # in-group sub-variant bucketing with collections.Counter.
+    signatures: tuple[str, ...] = ()
+    # Per-parent-position child lengths when they diverge (ConvNeXt [3,3,27,3]);
+    # None when every parent position repeats this child uniformly.
+    per_index_counts: list[int] | None = None
+    # Class of every element at one position, in forward order. A single distinct
+    # class is an N× repeat (``element_class``). More than one is a pipeline that
+    # leads the repeated body — ConvNeXt's downsample is LayerNorm then Conv2d —
+    # and must be emitted element by element, not as N× the first class. Empty
+    # when the walk only recorded ``element_class``; those groups stay uniform.
+    element_classes: tuple[str, ...] = ()
+    # One structural descriptor per element (dotted path, class), from the live
+    # module. The first element is the representative the graph expands; later
+    # elements say which attrs exist only on that first element (a ResNet
+    # projection shortcut) and which stage-level modules are not repeated
+    # (Swin's patch merging).
+    descriptors: tuple[tuple[tuple[str, str], ...], ...] = ()
+
+
+@dataclass
+class BlockComponent:
+    """One submodule inside a decoder layer, ordered for export."""
+
+    attr_name: str
+    class_name: str
+    role: str  # attention, moe, ffn, norm, router, embedding, head, positional, other
+    label: str
+    forward_order: int | None = None
+    details: list[str] = field(default_factory=list)
+    # Set when the config implies the module but no modeling source declares it, so the
+    # diagram can show it without passing it off as something read from code.
+    inferred_from_config: bool = False
+
+
+def ordered_components(components: list[BlockComponent]) -> list[BlockComponent]:
+    """Sort components by forward order."""
+    return sorted(
+        components,
+        key=lambda comp: (
+            comp.forward_order is None,
+            comp.forward_order if comp.forward_order is not None else 999,
+            comp.attr_name,
+        ),
+    )
+
+
+def input_source_label(component: BlockComponent) -> str:
+    """Return the AST-derived diagram label for an upstream module."""
+    return component.label
+
+
+def input_sources_from_forward_sequence(
+    components: list[BlockComponent],
+    forward_sequence: list[str],
+) -> dict[str, str]:
+    """Map compute module attr names to the immediate forward predecessor from AST."""
+    attr_to_component = {comp.attr_name: comp for comp in components}
+    attr_to_order = {comp.attr_name: comp.forward_order for comp in components}
+    order_to_forward_index: dict[int, int] = {}
+    for index, attr in enumerate(forward_sequence):
+        forward_order = attr_to_order.get(attr)
+        if forward_order is not None:
+            order_to_forward_index[forward_order] = index
+
+    sources: dict[str, str] = {}
+    for comp in components:
+        if comp.role == "norm" or comp.forward_order is None:
+            continue
+        forward_index = order_to_forward_index.get(comp.forward_order)
+        if forward_index is None or forward_index == 0:
+            continue
+        upstream = attr_to_component.get(forward_sequence[forward_index - 1])
+        if upstream is None:
+            continue
+        sources[comp.attr_name] = input_source_label(upstream)
+    return sources
+
+
+def upstream_input_sources(components: list[BlockComponent]) -> dict[str, str]:
+    """Map compute module attr names to the nearest upstream operator in forward order."""
+    ordered = ordered_components(components)
+    sources: dict[str, str] = {}
+    for comp in ordered:
+        if comp.role == "norm" or comp.forward_order is None:
+            continue
+        upstream_candidates = [
+            candidate
+            for candidate in ordered
+            if candidate.forward_order is not None
+            and candidate.forward_order < comp.forward_order
+        ]
+        if not upstream_candidates:
+            continue
+        upstream = max(
+            upstream_candidates, key=lambda candidate: candidate.forward_order
+        )
+        sources[comp.attr_name] = input_source_label(upstream)
+    return sources
+
+
+@dataclass
+class CodeAnalysis:
+    """Architecture facts extracted from Python AST inspection."""
+
+    decoder_class: str | None = None
+    attention_class: str | None = None
+    model_class: str | None = None
+    stack_model_class: str | None = None
+    causal_lm_class: str | None = None
+    block_components: list[BlockComponent] = field(default_factory=list)
+    stack_pre: list[BlockComponent] = field(default_factory=list)
+    stack_tail: list[BlockComponent] = field(default_factory=list)
+    forward_sequence: list[str] = field(default_factory=list)
+    norm_placement: str | None = None
+    norm_type: str | None = None
+    attention_type: str | None = None
+    decoder_type: str | None = None
+    ffn_type: str | None = None
+    custom_blocks: list[str] = field(default_factory=list)
+    layer_repeat_lines: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    source_files: list[str] = field(default_factory=list)
+    class_registry: dict[str, ClassStructure] = field(default_factory=dict)
+    external_imports: dict[str, str] = field(default_factory=dict)
+    positional_helpers: list[str] = field(default_factory=list)
+    #: Whether this file binds a platform-detection flag (``_is_npu =
+    #: is_npu()``) that a branch reads -- i.e. whether which accelerator is
+    #: being modeled actually affects this graph, and so is worth stating on
+    #: the fact sheet.
+    device_sensitive: bool = False
+
+    def has_block_graph(self) -> bool:
+        return bool(
+            self.block_components
+            or self.forward_sequence
+            or self.stack_pre
+            or self.stack_tail
+        )

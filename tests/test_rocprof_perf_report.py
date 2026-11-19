@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os, tempfile, pandas as pd, pytest, importlib, sys
+import os, tempfile, gzip, shutil, pandas as pd, pytest, importlib, sys
 from TraceLens.Reporting.generate_perf_report_rocprof import (
     generate_perf_report_rocprof,
 )
@@ -281,6 +281,34 @@ class TestGeneratePerfReport:
             # Verify topk worked
             if len(dfs["kernel_details"]) > 0:
                 assert len(dfs["kernel_details"]) <= 50
+
+
+def _copy_decompressed(src_gz, dst):
+    with gzip.open(src_gz, "rb") as fin, open(dst, "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+    return str(dst)
+
+
+def test_generate_default_output_path_for_results_json(tmp_path):
+    """No output_xlsx_path/output_csvs_dir given + filename ends with
+    '_results.json' -> auto-derive via string replace."""
+    profile_json_path = _copy_decompressed(
+        ROCprof_FILE, tmp_path / "trace_results.json"
+    )
+    expected_xlsx = profile_json_path.replace("_results.json", "_perf_report.xlsx")
+    dfs = generate_perf_report_rocprof(profile_json_path=profile_json_path)
+    assert os.path.exists(expected_xlsx)
+    assert isinstance(dfs, dict)
+
+
+def test_generate_default_output_path_for_generic_json(tmp_path):
+    """No output_xlsx_path/output_csvs_dir given + filename doesn't end with
+    '_results.json' -> auto-derive via rsplit on '.json'."""
+    profile_json_path = _copy_decompressed(ROCprof_FILE, tmp_path / "trace.json")
+    expected_xlsx = profile_json_path.rsplit(".json", 1)[0] + "_perf_report.xlsx"
+    dfs = generate_perf_report_rocprof(profile_json_path=profile_json_path)
+    assert os.path.exists(expected_xlsx)
+    assert isinstance(dfs, dict)
 
 
 if __name__ == "__main__":

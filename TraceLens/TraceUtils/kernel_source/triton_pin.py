@@ -1,0 +1,293 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Resolve a Triton ``.py`` kernel from the trace's ``kernel_file``.
+
+Native ``.cu``/``.hip`` kernels are found by symbol lookup (:mod:`.resolver`);
+Triton kernels normally come straight from the trace, which records the
+launcher's ``kernel_file``. This module turns that into an editable source
+location:
+
+1. parse the launcher form (``a.py:12:foo`` / ``a.py(12): foo`` / ``a.py#L12``)
+   down to a bare ``.py`` path;
+2. reject generated Triton (inductor cache / ``/tmp``) as non-patchable;
+3. pin the exact ``@triton.jit`` def line via AST (no import of the kernel).
+
+The AST step is a pure refinement: a resolved file is still returned when the
+def line cannot be pinned.
+
+Fallback: some traces (older PyTorch/Kineto) carry no ``kernel_file`` at all. In
+that case, when we know the kernel's symbol name, we search the framework ``.py``
+sources for a matching ``@triton.jit`` def using a cached index (see
+:func:`index.build_triton_index`). This is best-effort and less precise than the
+``kernel_file`` path, but it recovers a source location that would otherwise be
+lost.
+"""
+
+from __future__ import annotations
+
+import ast
+import os
+import re
+from collections.abc import Sequence
+from pathlib import Path
+
+from . import index
+from .editable import is_editable_source
+
+# Shared Triton-def detector lives in ``index`` (a leaf module) so both the
+# index scanner and this module use one definition without an import cycle.
+from .index import _is_triton_kernel_def
+from .datatypes import ResolveResult, SourceLocation
+
+__all__ = ["resolve_triton_source", "triton_def_line"]
+
+# Launcher-path forms a trace ``kernel_file`` may carry instead of a bare path:
+# ``<path>(<line>): <func>``, ``<path>:<line>:<func>``, or ``<path>#L<line>``.
+_LAUNCHER_PATH_RE = re.compile(
+    r"^(?P<path>.+?\.py)"
+    r"(?:\((?P<pline>\d+)\)|[:#]L?(?P<cline>\d+))"
+    r"(?::?\s*(?P<func>[A-Za-z_]\w*))?\s*$"
+)
+
+
+def _parse_launcher_form(raw: str) -> tuple[str, int | None, str]:
+    """Split a trace ``kernel_file`` into ``(py_path, line, func)``.
+
+    Handles the plain-path case (no line/func) and the launcher forms
+    ``a.py(12): foo`` / ``a.py:12:foo`` / ``a.py#L12``. Non-``.py`` inputs are
+    returned unchanged with no line/func.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", None, ""
+    match = _LAUNCHER_PATH_RE.match(text)
+    if match:
+        line_str = match.group("pline") or match.group("cline")
+        return (
+            match.group("path").strip(),
+            int(line_str) if line_str else None,
+            match.group("func") or "",
+        )
+    return text, None, ""
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Reduce a device kernel symbol to a bare identifier core for matching.
+
+    Triton device symbols often wrap the ``@triton.jit`` function name with a
+    leading ``triton_``/``_`` prefix and a trailing autotune/hash suffix
+    (e.g. ``_fwd_kernel_0d1d2``). Strip those so a fuzzy match against the def
+    name has a chance.
+    """
+    core = re.sub(r"[^0-9A-Za-z_].*$", "", str(symbol or "").strip())
+    core = re.sub(r"_+\d[\dA-Za-z]*$", "", core)  # drop trailing autotune/hash suffix
+    return core.strip("_").lower()
+
+
+def triton_def_line(
+    py_path: str,
+    *,
+    func: str = "",
+    symbol: str = "",
+    require_name_match: bool = False,
+) -> int | None:
+    """Find a Triton kernel's ``def`` line in a ``.py`` via AST (no import).
+
+    Matching precedence: (1) exact ``func`` name; (2) a ``@triton.jit`` def whose
+    name matches the normalized device ``symbol`` (exact then substring); (3) the
+    sole ``@triton.jit`` def in the file when unambiguous. Returns ``None`` when
+    the file is unreadable/unparseable or no confident match is found.
+
+    ``require_name_match`` skips step (3). A file that happens to contain one
+    ``@triton.jit`` def must not claim an unrelated symbol.
+    """
+    try:
+        tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+
+    jit_defs: dict[str, int] = {}
+    all_defs: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            all_defs.setdefault(node.name, node.lineno)
+            if _is_triton_kernel_def(node):
+                jit_defs.setdefault(node.name, node.lineno)
+
+    if func and func in all_defs:
+        return all_defs[func]
+
+    core = _normalize_symbol(symbol)
+    if core:
+        for name, line in jit_defs.items():
+            if name.lower() == core:
+                return line
+        for name, line in jit_defs.items():
+            low = name.lower()
+            if core in low or low in core:
+                return line
+
+    if not require_name_match and len(jit_defs) == 1:
+        return next(iter(jit_defs.values()))
+    return None
+
+
+def _triton_jit_defs(py_path: str) -> dict[str, int]:
+    """Map every ``@triton.jit``/``@gluon.jit`` def name to its line in a ``.py``.
+
+    A single AST parse (no import) using the shared :func:`_is_triton_kernel_def`
+    detector (``@gluon.jit`` matches because the attribute name is ``jit``).
+    Empty when the file is unreadable/unparseable or defines no Triton kernel --
+    the signal that a launcher ``.py`` is a native dispatcher, not editable Triton.
+    """
+    try:
+        tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return {}
+    defs: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _is_triton_kernel_def(node):
+                defs.setdefault(node.name, node.lineno)
+    return defs
+
+
+def _resolve_triton_by_symbol(
+    symbol: str,
+    search_paths: Sequence[str | Path] | None = None,
+    *,
+    exact: bool = False,
+) -> SourceLocation | None:
+    """Find a Triton ``.py`` def by symbol name via the cached ``.py`` index.
+
+    The stage-2 fallback for traces with no ``kernel_file``: normalize the device
+    symbol, look it up against the indexed ``@triton.jit`` def names (exact match
+    preferred, else substring), and pick the shortest editable path. Returns
+    ``None`` when nothing matches confidently.
+
+    ``exact`` drops the substring tier entirely: only a rank-0 exact
+    normalized-name match counts. This keeps the lookup a definite answer rather
+    than a guess, so it is safe to run on a native ``unresolved`` miss where a
+    mangled symbol could otherwise substring-match an unrelated ``.py`` def.
+    """
+    core = _normalize_symbol(symbol)
+    if not core:
+        return None
+
+    roots = search_paths if search_paths is not None else index.discover_python_paths()
+    idx = index.load_or_build_triton(roots)
+
+    # Rank candidates: exact normalized-name match (rank 0) beats substring
+    # (rank 1); within a rank, the shortest path wins (mirrors the native ranker).
+    best: tuple[int, int, str, int | None] | None = None
+    for name, records in idx.symbol_index.items():
+        low = name.lower()
+        # Rank 0 compares normalized identities on both sides: a Triton def name
+        # keeps its leading ``_`` in the index, while ``core`` had it stripped, so
+        # a raw ``low == core`` would miss genuine ``_..._kernel`` defs.
+        if _normalize_symbol(name) == core:
+            rank = 0
+        elif not exact and (core in low or low in core):
+            rank = 1
+        else:
+            continue
+        for rec in records:
+            file_path = str(rec.get("file", ""))
+            if not is_editable_source(file_path):
+                continue
+            line_val = rec.get("line")
+            line_no = line_val if isinstance(line_val, int) and line_val > 0 else None
+            cand = (rank, len(file_path), file_path, line_no)
+            if best is None or cand[:2] < best[:2]:
+                best = cand
+
+    if best is None:
+        return None
+    return SourceLocation(source_file=best[2], line=best[3])
+
+
+def resolve_triton_source(
+    kernel_file: str,
+    *,
+    symbol: str = "",
+    search_paths: Sequence[str | Path] | None = None,
+    exact: bool = False,
+) -> ResolveResult:
+    """Resolve a trace ``kernel_file`` to an editable Triton ``.py`` + def line.
+
+    Args:
+        kernel_file: The ``kernel_file`` string from the trace (may be a bare
+            path or a launcher form like ``a.py:12:foo``). May be empty when the
+            trace didn't record it.
+        symbol: Optional device kernel symbol, used to pin the exact def line and,
+            when ``kernel_file`` is empty, to drive the ``.py`` search fallback.
+        search_paths: Optional roots for the fallback ``.py`` search; defaults to
+            the discovered framework package roots.
+        exact: When the empty-``kernel_file`` symbol fallback runs, require an
+            exact normalized-name match (drop the substring tier).
+
+    Returns:
+        A :class:`~.datatypes.ResolveResult`. ``method`` is ``"triton_ast"`` (path +
+        pinned line), ``"trace_kernel_file"`` (path only), ``"triton_symbol_index"``
+        (found via the ``.py`` fallback), ``"gate_non_patchable"`` (generated
+        Triton), or ``"unresolved"`` (empty/unusable input with no fallback hit).
+    """
+    path, line, func = _parse_launcher_form(kernel_file)
+
+    def _symbol_fallback(reason: str) -> ResolveResult:
+        # No usable launcher source. If we know the symbol, search the framework
+        # ``.py`` sources for a matching kernel; else report unresolved.
+        location = (
+            _resolve_triton_by_symbol(symbol, search_paths, exact=exact)
+            if symbol
+            else None
+        )
+        if location is not None:
+            return ResolveResult(
+                location=location, patchable=True, method="triton_symbol_index"
+            )
+        return ResolveResult(None, patchable=False, method="unresolved", reason=reason)
+
+    if not path:
+        return _symbol_fallback("empty kernel_file")
+
+    # Inductor-generated / ``/tmp`` Triton has no durable source to rewrite, but
+    # the cache path itself is still known and worth reporting for audit. Gate
+    # this on the launcher actually looking like a generated ``.py``: a
+    # non-``.py`` sentinel (e.g. ``"AITER (vendor)"``) carries no source at all,
+    # so it drives the symbol-name fallback like an absent launcher.
+    if not is_editable_source(path):
+        if not path.lower().endswith(".py"):
+            return _symbol_fallback("non-path launcher sentinel")
+        return ResolveResult(
+            SourceLocation(source_file=path, line=line),
+            patchable=False,
+            kind="triton_inductor_generated",
+            reason="generated/non-editable Triton source",
+            method="gate_non_patchable",
+        )
+    ast_line: int | None = None
+    if path.lower().endswith(".py") and os.path.isfile(path):
+        if not _triton_jit_defs(path):
+            # An editable launcher ``.py`` with zero ``@triton.jit``/``@gluon.jit``
+            # defs is a native dispatcher (e.g. a CK/Tensile GEMM behind a
+            # ``triton``-named wrapper), not editable Triton. Signal unresolved so
+            # the caller can fall back to native classification.
+            return ResolveResult(
+                None,
+                patchable=False,
+                method="unresolved",
+                reason="launcher .py defines no triton jit kernel",
+            )
+        ast_line = triton_def_line(path, func=func, symbol=symbol)
+    def_line = ast_line if ast_line is not None else line
+    method = "triton_ast" if ast_line is not None else "trace_kernel_file"
+    return ResolveResult(
+        location=SourceLocation(source_file=path, line=def_line),
+        patchable=True,
+        method=method,
+    )

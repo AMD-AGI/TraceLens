@@ -39,11 +39,13 @@ import sys
 import pandas as pd
 import pytest
 
-from TraceLens.TraceUtils import match_inference_trace_blocks as match
-from TraceLens.TraceUtils.annotation_utils import ITERATION_PATTERNS
-from TraceLens.TraceUtils.split_inference_trace_annotation import (
-    extract_and_save,
-    preprocess_trace,
+from TraceLens.TraceUtils.inference_trace_match import main as match
+from TraceLens.TraceUtils.utils.annotation_utils import ITERATION_PATTERNS
+from TraceLens.TraceUtils.split_trace import (
+    ExtractContext,
+    TraceData,
+    EventIndex,
+    extract_and_save_split,
 )
 
 DECODE_ONLY = match.PHASE_DECODE_ONLY
@@ -156,8 +158,8 @@ def make_trace(root_names, pid=1, cpu_tid=10, gpu_tid=99):
 # The pipeline, run once. Discovery mirrors load_trace(); windowing and
 # selection mirror main(). Nothing below mutates these.
 A_TRACE, B_TRACE = make_trace(TRACE_A_NAMES), make_trace(TRACE_B_NAMES)
-A_ROOTS = match.find_iteration_roots_by_priority(A_TRACE["traceEvents"])
-B_ROOTS = match.find_iteration_roots_by_priority(B_TRACE["traceEvents"])
+A_ROOTS = match.find_known_annotations(A_TRACE["traceEvents"])
+B_ROOTS = match.find_known_annotations(B_TRACE["traceEvents"])
 A_BLOCKS, B_BLOCKS = match.find_blocks(A_ROOTS), match.find_blocks(B_ROOTS)
 A_WINDOWS = match.window_blocks(A_BLOCKS, NUM_STEPS)
 B_WINDOWS = match.window_blocks(B_BLOCKS, NUM_STEPS)
@@ -458,23 +460,28 @@ def test_extraction_of_a_matched_block(tmp_path):
     ``--no-extract`` is the path ``extract_and_save`` actually writes.
     """
     events = A_TRACE["traceEvents"]
-    gpu_map, flow_map, meta = preprocess_trace(events)
+    ti = EventIndex(events)
     block = A_WINDOWS[1]
     label = "decode_only_best_A1_B1_A"
 
-    summary = extract_and_save(
+    summary = extract_and_save_split(
         [block.roots],
-        events,
-        A_TRACE,
-        str(tmp_path),
-        "trace_a",
+        ExtractContext(
+            TraceData(
+                events,
+                A_TRACE,
+                ti.gpu_corr_map,
+                ti.flow_corr_map,
+                ti.meta_events,
+            ),
+            output_dir=str(tmp_path),
+            base_name="trace_a",
+        ),
         "annotation_iteration",
         0,
         1,
-        gpu_map,
-        flow_map,
-        meta,
         output_label=label,
+        llm_inference=True,
     )
     assert len(summary) == 1
     written = summary[0]["output_path"]
@@ -515,7 +522,7 @@ def trace_paths(tmp_path_factory):
 
 
 def run_main(monkeypatch, *argv):
-    monkeypatch.setattr(sys, "argv", ["match_inference_trace_blocks.py", *argv])
+    monkeypatch.setattr(sys, "argv", ["main.py", *argv])
     match.main()
 
 

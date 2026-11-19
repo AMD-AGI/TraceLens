@@ -70,6 +70,7 @@ from TraceLens.PerfModel.extensions.perf_model_extensions import (
     gemm_afp4wfp4,
     mhc_fused_post_pre_gemm_sqrsum,
     mhc_post,
+    sglang_hc_combine_split,
     mhc_pre_big_fuse_rmsnorm,
     mhc_pre_gemm_sqrsum,
     mixed_sample_outer_exponential,
@@ -85,6 +86,7 @@ from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
 from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     RMSNorm,
     aiter_add_rmsnorm,
+    aiter_fused_qk_rmsnorm,
     aiter_rmsnorm,
     aiter_rmsnorm2d_fwd_with_dynamicquant_ck,
     aiter_rmsnorm_quant,
@@ -94,6 +96,8 @@ from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     vllm_rocm_aiter_triton_add_rmsnorm_pad,
 )
 from TraceLens.PerfModel import kernel_name_parser, perf_model
+from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
+from TraceLens.PerfModel.op_projections import op_work, origami_gemm_op_projection
 from tests.fixtures.perfmodel import (
     _ARCH,
     _GDN,
@@ -132,6 +136,10 @@ from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
     pseudo_v4_paged_decode_csa,
     pseudo_v4_paged_decode_hca,
     pseudo_v4_paged_decode_swa,
+    sgl_kernel_fast_topk_transform_fused,
+    sgl_kernel_deepseek_v4_topk_transform_512,
+    sgl_kernel_fast_topk,
+    fused_k_norm_rope_q_flashmla,
     vllm_unified_mla_attention_with_output,
 )
 from TraceLens.PerfModel.kernel_name_parser import parse_rocm_gemm
@@ -146,9 +154,10 @@ from TraceLens.PerfModel.utils import (
     add_simulation_time_columns,
     name2bpe,
     parse_bool,
-    simulation_dtype_map,
+    scalar_type_bpe,
     torch_dtype_map,
 )
+from TraceLens.PerfModel import origami_helper, sdpa_tile
 from TraceLens.TreePerf import tree_perf
 
 _GDN_ANNOTATION = (
@@ -184,6 +193,20 @@ class TestPseudoOpsPerfUtils:
         assert mappings["vllm::gdn_attention_core"] is gdn_attention_core
         assert mappings["aiter::gemm_a8w8_blockscale_ck"] is gemm_a8w8_blockscale
         assert mappings["_C_custom_ar::all_reduce"] is custom_ar_all_reduce
+        assert (
+            mappings["sglang_profiler::topk__post_process_topk_ids"]
+            is sglang_fused_append_shared_experts
+        )
+        assert (
+            mappings["sgl_kernel::fast_topk_transform_fused"]
+            is sgl_kernel_fast_topk_transform_fused
+        )
+        assert (
+            mappings["sgl_kernel::deepseek_v4_topk_transform_512"]
+            is sgl_kernel_deepseek_v4_topk_transform_512
+        )
+        assert mappings["sgl_kernel::fast_topk"] is sgl_kernel_fast_topk
+        assert mappings["fused_k_norm_rope_q_flashmla"] is fused_k_norm_rope_q_flashmla
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -193,6 +216,16 @@ class TestPseudoOpsPerfUtils:
             category_only["aiter::fused_dynamic_mxfp4_quant_moe_sort_hip"] == "MoE_aux"
         )
         assert category_only["aiter::indexer_score_topk"] == "InferenceAttention"
+        assert (
+            category_only[
+                "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)"
+            ]
+            == "InferenceAttention"
+        )
+        assert (
+            category_only["sglang_profiler::topk_topk_transform_paged_v2"]
+            == "InferenceAttention"
+        )
 
 
 class TestPackageExports:
@@ -393,12 +426,1770 @@ class TestPerfModelExtensions:
         assert model.flops() == 2 * 128 * 512 * 256
         assert model.bytes() > 0
 
+    def test_deepseek_v4_preshuffle_gemm_uses_output_shape(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [
+                    [8, 7168],
+                    [128, 114688],
+                    [8, 56],
+                    [16, 56],
+                    [8, 2048],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                ],
+            },
+            "kernel_details": [
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_preshuffle_kernel_GROUP_K_128"
+                        "_GROUP_N_128_BLOCK_SIZE_M_16_BLOCK_SIZE_N_16"
+                        "_BLOCK_SIZE_K_128_GROUP_SIZE_M_1_NUM_KSPLIT_8"
+                        "_SPLITK_BLOCK_SIZE_896_EVEN_K_1_GRID_MN_128"
+                        "_cache_modifier_CG"
+                    )
+                },
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_reduce_kernel_BLOCK_SIZE_M_32"
+                        "_BLOCK_SIZE_N_32_ACTUAL_KSPLIT_8_MAX_KSPLIT_8"
+                        "_ADD_BIAS_0_activation_NONE_use_activation_0"
+                    )
+                },
+            ],
+        }
+        model = pext.gemm_a8w8_blockscale_preshuffle(event)
+        assert (model.M, model.N, model.K) == (8, 2048, 7168)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.get_compute_precision() == "fp8"
+        assert model.get_maf_type() == "matrix"
+        # 16x16 tiles, 8-way split-K, plus the fp32 reduce of 8 partials.
+        assert model.flops() == 472_170_496
+        assert model.bytes() == (
+            8 * 7168
+            + 2048 * 7168
+            + 8 * 2048 * 2
+            + 8 * 56 * 4
+            + 16 * 56 * 4
+            + 2 * 8 * 8 * 2048 * 4
+        )
+
+    def test_deepseek_v4_bounded_mx_quant_uses_captured_buffers(self):
+        dims = [
+            [8, 7168],
+            [12384, 224],
+            [8, 7168],
+            [12369],
+            [2],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [12369],
+        ]
+        types = [
+            "c10::Float8_e4m3fn",
+            "c10::Float8_e8m0fnu",
+            "c10::BFloat16",
+            "int",
+            "int",
+            "Scalar",
+            "Scalar",
+            "Scalar",
+            "Scalar",
+            "Scalar",
+            "float",
+        ]
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": dims,
+                "Input type": types,
+                "Input Strides": [[], [], [7168, 1]],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "8",
+                    "32",
+                    "56",
+                    "385",
+                    "32",
+                    "",
+                ],
+            },
+        }
+        model = pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(event)
+        # The quant touches the captured 8 activation rows, not row_bound 56.
+        # 3 fp32 FLOPs per element: abs, max, scale multiply.
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.param_details["row_bound"] == 56
+        assert model.param_details["data_rows"] == 8
+        assert model.get_compute_precision() == "fp32"
+        assert model.get_maf_type() == "vector"
+        assert model.flops() == 3 * 8 * 7168
+        # Scales and sorted-id/weight reads scale with the device-side
+        # num_valid, which the event does not carry, so they are omitted.
+        assert model.bytes() == 8 * 7168 * 2 + 8 * 7168
+
+    def test_deepseek_v4_opus_bmm_uses_fp8_matrix_spec(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [
+                    [8, 2, 4096],
+                    [2, 1024, 4096],
+                    [8, 2, 1024],
+                    [8, 2, 32],
+                    [2, 8, 32],
+                    [],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "unsigned char",
+                    "unsigned char",
+                    "Scalar",
+                    "Scalar",
+                ],
+            },
+        }
+        model = pext.opus_bmm_a8w8_mxscale_raw(event)
+        assert (model.B, model.M, model.N, model.K) == (8, 2, 1024, 4096)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.get_compute_precision() == "fp8"
+        # No kernel name; M pads to the 16-row MFMA tile the hardware runs.
+        assert model.flops() == 2 * 2 * 16 * 1024 * 4096 + 2 * 16 * 1024 * 32
+        assert model.bytes() == (
+            8 * 2 * 4096 + 2 * 1024 * 4096 + 8 * 2 * 1024 * 2 + 8 * 2 * 32 + 2 * 8 * 32
+        )
+
+        tiled = dict(event)
+        tiled["kernel_details"] = [
+            {
+                "name": "_Z38gemm_a8w8_mxscale_flatmm_splitk_kernelI50opus_gemm_"
+                "a8w8_mxscale_flatmm_splitk_traits_gfx950ILi256EN4opus3seqIJLi16"
+                "ELi32ELi512EEEENS1_5tupleIJDB8_S5_ffhEEENS2_IJLi16ELi16ELi4EEEE"
+                "NS2_IJLi1ELi128ELi128EEEELi2EEDF16bLb0ELb1ELb0EEv35opus_gemm_"
+                "scale_splitk_kargs_gfx950"
+            }
+        ]
+        tiled_model = pext.opus_bmm_a8w8_mxscale_raw(tiled)
+        assert tiled_model.param_details["tile"] == {"bm": 16, "bn": 32, "bk": 512}
+        # 8 real rows run as a full 16-row tile; N and K already fill their tiles.
+        assert tiled_model.flops() == 2 * 2 * 16 * 1024 * 4096 + 2 * 16 * 1024 * 32
+        assert tiled_model.bytes() == model.bytes()
+
+    def test_deepseek_v4_mx128_bmm_counts_logical_gemm(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [1, 16, 4096],
+                    [16, 1024, 4096],
+                    [1, 16, 32],
+                    [16, 8, 32],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "unsigned char",
+                    "unsigned char",
+                    "ScalarType",
+                ],
+                "Concrete Inputs": ["", "", "", "", "15"],
+            },
+        }
+        model = pext.batched_gemm_a8w8_mxscale_bpreshuffle(event)
+        assert (model.B, model.M, model.N, model.K) == (16, 1, 1024, 4096)
+        assert model.get_compute_precision() == "fp8"
+        assert model.param_details["output_shape"] == (1, 16, 1024)
+        # Logical GEMM only: kernel tile padding is not part of the op.
+        assert model.flops() == 16 * 2 * 1 * 1024 * 4096
+        assert model.bytes() == (
+            16 * (4096 + 1024 * 4096 + 1024 * 2) + 16 * 32 + 16 * 8 * 32
+        )
+
+        named = dict(event)
+        named["kernel_details"] = [
+            {"name": "batched_gemm_a8w8_mx128_t32x256x128_mw1_nw4_nb2_sk1_cm1_cn1_mbn"}
+        ]
+        named_model = pext.batched_gemm_a8w8_mxscale_bpreshuffle(named)
+        assert named_model.flops() == model.flops()
+        assert named_model.bytes() == model.bytes()
+
+        strided = dict(event)
+        strided["args"] = dict(
+            event["args"],
+            **{"Input Strides": [[131072, 8192, 1], [], [], [], []]},
+        )
+        assert pext.batched_gemm_a8w8_mxscale_bpreshuffle(strided).bytes() is None
+        unknown = dict(event)
+        unknown["args"] = dict(
+            event["args"],
+            **{"Input type": ["opaque"] + event["args"]["Input type"][1:]},
+        )
+        assert pext.batched_gemm_a8w8_mxscale_bpreshuffle(unknown).bytes() is None
+
+        assert (
+            get_pseudo_op_mappings()["aiter::batched_gemm_a8w8_mxscale_bpreshuffle"]
+            is pext.batched_gemm_a8w8_mxscale_bpreshuffle
+        )
+
+    def test_deepseek_v4_mxfp8_asm_gemm_counts_splitk_partials(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [512, 16384],
+                    [7168, 16384],
+                    [512, 512],
+                    [7168, 512],
+                    [4, 512, 7168],
+                    [],
+                    [],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e8m0fnu",
+                    "c10::Float8_e8m0fnu",
+                    "c10::BFloat16",
+                    "",
+                    "Scalar",
+                    "Scalar",
+                ],
+                "Input Strides": [
+                    [16384, 1],
+                    [16384, 1],
+                    [512, 1],
+                    [512, 1],
+                    [3670016, 7168, 1],
+                    [],
+                    [],
+                    [],
+                ],
+                "Concrete Inputs": ["", "", "", "", "", "", "0", "4"],
+            },
+        }
+        model = pext.mxfp8_mxfp8_gemm_asm(event)
+        assert (model.M, model.N, model.K) == (512, 7168, 16384)
+        assert model.param_details["split_k"] == 4
+        assert model.get_compute_precision() == "fp8"
+        assert model.flops() == 2 * 512 * 7168 * 16384
+        assert model.bytes() == (
+            512 * 16384 + 7168 * 16384 + 4 * 512 * 7168 * 2 + 512 * 512 + 7168 * 512
+        )
+
+        named = dict(event)
+        named["kernel_details"] = [
+            {"name": "aiter::f8gemm_bf16_mxfp8fp8_BpreShuffle_256x256_4x2_ps"}
+        ]
+        named_model = pext.mxfp8_mxfp8_gemm_asm(named)
+        assert named_model.flops() == model.flops()
+        assert named_model.bytes() == model.bytes()
+
+        odd = dict(named)
+        odd["args"] = dict(event["args"], **{"Input Strides": []})
+        odd["args"]["Input Dims"] = [
+            [8, 1536],
+            [8192, 1536],
+            [8, 48],
+            [8192, 48],
+            [8, 8192],
+            [],
+            [],
+            [],
+        ]
+        odd["args"]["Concrete Inputs"] = ["", "", "", "", "", "", "0", "1"]
+        odd_model = pext.mxfp8_mxfp8_gemm_asm(odd)
+        # Short M is the op's M; the kernel's 256-row tile is not counted.
+        assert odd_model.flops() == 2 * 8 * 8192 * 1536
+
+        strided = dict(event)
+        strided["args"] = dict(
+            event["args"],
+            **{"Input Strides": [[32768, 1]] + event["args"]["Input Strides"][1:]},
+        )
+        assert pext.mxfp8_mxfp8_gemm_asm(strided).bytes() is None
+        unknown = dict(event)
+        unknown["args"] = dict(
+            event["args"],
+            **{"Input type": ["opaque"] + event["args"]["Input type"][1:]},
+        )
+        assert pext.mxfp8_mxfp8_gemm_asm(unknown).bytes() is None
+
+        assert (
+            get_pseudo_op_mappings()["aiter::_mxfp8_mxfp8_gemm_asm"]
+            is pext.mxfp8_mxfp8_gemm_asm
+        )
+
+    def test_deepseek_v4_mla_decode_uses_page_indices(self):
+        num_kv = 67072
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 16, 512],
+                    [8, 16, 64],
+                    [197068, 1, 1, 512],
+                    [197068, 1, 1, 64],
+                    [9],
+                    [9],
+                    [num_kv],
+                    [9],
+                    [16],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [8, 16, 16, 512],
+                    [8, 16, 16, 1],
+                    [8, 16, 512],
+                    [8],
+                    [],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                    "Scalar",
+                ],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "1",
+                    "0.",
+                    "0",
+                    "16",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "1",
+                    "",
+                ],
+            },
+        }
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["kv_mode"] is None
+        assert model.param_details["kv_capacity"] == num_kv
+        assert model.param_details["g_sqsk"] == num_kv
+        assert model.param_details["num_kv"] == num_kv
+        assert model.get_compute_precision() == "fp8"
+        assert model.get_maf_type() == "matrix"
+        assert model.flops() == 4 * 16 * 512 * num_kv
+        assert model.bytes() == (
+            8 * 16 * 512
+            + 8 * 16 * 64 * 2
+            + num_kv * 512
+            + num_kv * 64 * 2
+            + num_kv * 4
+            + 9 * 4 * 3
+            + 16 * 4
+            + 8 * 16 * 16 * 512 * 4
+            + 8 * 16 * 16 * 4
+            + 8 * 4
+        )
+
+    @staticmethod
+    def _mla_v4_capacity_event(capacity, annotation=None):
+        # DSv4-Pro TP8 decode: 8 captured rows, 16 heads, 16 KV splits.
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 16, 512],
+                    [8, 16, 64],
+                    [197068, 1, 1, 512],
+                    [197068, 1, 1, 64],
+                    [9],
+                    [9],
+                    [capacity],
+                    [9],
+                    [16],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [8, 16, 16, 512],
+                    [8, 16, 16, 1],
+                    [8, 16, 512],
+                    [8],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                ],
+                "Concrete Inputs": [""] * 9 + ["1", "0.", "0", "16"],
+            },
+        }
+        if annotation is not None:
+            event["annotation"] = annotation
+        return event
+
+    @staticmethod
+    def _decode_annotation(requests, ctx):
+        total = requests * ctx
+        return (
+            "execute_{0}_context_0(sq0sk0sqsq0sqsk0)_generation_{0}"
+            "(sq{0}sk{1}sqsq{0}sqsk{1})".format(requests, total)
+        )
+
+    def test_mla_decode_v4_hca_kv_from_annotation(self):
+        # Capacity 8 * (1M / 128 + 128 + 64): only the 32K live range is read.
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        model = aext.mla_decode_v4_asm(event)
+        p = model.param_details
+        assert p["kv_mode"] == "hca"
+        assert p["kv_capacity"] == 67072
+        assert p["num_kv"] == 8 * (128 + 32768 // 128)
+        assert p["g_sqsk"] == p["N_KV"] == p["num_kv"]
+        assert p["logical_batch_size"] == 8
+        num_kv = p["num_kv"]
+        assert model.flops() == 4 * 16 * 512 * num_kv
+        assert model.bytes() == (
+            8 * 16 * 512
+            + 8 * 16 * 64 * 2
+            + num_kv * (512 + 64 * 2 + 4)
+            + 9 * 4 * 3
+            + 16 * 4
+            + 8 * 16 * 16 * 512 * 4
+            + 8 * 16 * 16 * 4
+        )
+
+    def test_mla_decode_v4_logical_batch_below_capture(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(5, 32768))
+        p = aext.mla_decode_v4_asm(event).param_details
+        assert p["num_kv"] == 5 * (128 + 32768 // 128)
+
+    def test_mla_decode_v4_csa_capped_by_index_topk(self):
+        capacity = 8 * (1024 + 128)
+        long_ctx = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 32768))
+        ).param_details
+        assert long_ctx["kv_mode"] == "csa"
+        assert long_ctx["num_kv"] == capacity
+        short_ctx = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 1000))
+        ).param_details
+        assert short_ctx["num_kv"] == 8 * (128 + 250)
+
+    def test_mla_decode_v4_window_and_topk_overrides(self):
+        capacity = 8 * (512 + 128)
+        event = self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 1000))
+        default = aext.mla_decode_v4_asm(event).param_details
+        assert default["kv_mode"] == "csa"
+        assert default["num_kv"] == 8 * (128 + 250)
+        event["args"]["v4_window"] = 64
+        event["args"]["v4_index_topk"] = 256
+        overridden = aext.mla_decode_v4_asm(event).param_details
+        assert overridden["kv_mode"] == "hca"
+        assert overridden["num_kv"] == 8 * (64 + 8)
+
+    def test_mla_decode_v4_swa_window_only(self):
+        capacity = 8 * (128 + 64)
+        full = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 1000))
+        ).param_details
+        assert full["kv_mode"] == "swa"
+        assert full["num_kv"] == 8 * 128
+        short = aext.mla_decode_v4_asm(
+            self._mla_v4_capacity_event(capacity, self._decode_annotation(8, 50))
+        ).param_details
+        assert short["num_kv"] == 8 * 50
+
+    def test_mla_decode_v4_annotation_without_kv_keeps_capacity(self):
+        for annotation in (
+            "decode[bs=8 tok=8 d=8]",
+            "step[MIXED bs=2 c=1 g=1 c_sq=5 c_sk=8 c_sqsq=25 c_sqsk=40 "
+            "g_sq=0 g_sk=0 g_sqsq=0 g_sqsk=0]",
+        ):
+            p = aext.mla_decode_v4_asm(
+                self._mla_v4_capacity_event(67072, annotation)
+            ).param_details
+            assert p["kv_mode"] is None
+            assert p["num_kv"] == 67072
+
+    def test_mla_decode_v4_rejects_paged_kv(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        event["args"]["Input Dims"][2] = [98534, 2, 1, 512]
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["_no_perf"] is True
+        assert model.bytes() is None
+
+    def test_mla_decode_v4_buffers_before_scalars(self):
+        legacy = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        current = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        args = current["args"]
+        for key in ("Input Dims", "Input type"):
+            args[key] = args[key][:9] + args[key][13:17] + args[key][9:13]
+        args["Concrete Inputs"] = [""] * 13 + ["1", "0.", "0", "16"]
+        old = aext.mla_decode_v4_asm(legacy)
+        new = aext.mla_decode_v4_asm(current)
+        assert old.param_details["buffer_base"] == 13
+        assert new.param_details["buffer_base"] == 9
+        assert new.param_details["num_kv_splits"] == 16
+        assert new.flops() == old.flops()
+        assert new.bytes() == old.bytes()
+
+    def test_mla_decode_v4_unknown_layout_is_no_perf(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        event["args"]["Input Dims"] = event["args"]["Input Dims"][:13]
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["_no_perf"] is True
+        assert model.flops() is None
+        assert model.bytes() is None
+
+    @staticmethod
+    def _mqa_logits_event(annotation, rows=4, q_per_block=1):
+        # Traced aiter::_fwd_sched_raw layout; the cache and logits are capacities.
+        return {
+            "args": {
+                "Input Dims": [
+                    [1],
+                    [rows, 64, 64],
+                    [rows, 64, 4],
+                    [84664, 64, 64],
+                    [84664, 64, 4],
+                    [rows, 4096],
+                    [rows, 64],
+                    [0],
+                    [rows],
+                    [3168, 8],
+                    [rows, 262144],
+                ]
+                + [[]] * 7,
+                "Input type": [
+                    "c10::BFloat16",
+                    "unsigned char",
+                    "unsigned char",
+                    "unsigned char",
+                    "unsigned char",
+                    "int",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                ]
+                + ["Scalar"] * 7,
+                "Concrete Inputs": [""] * 11
+                + [str(rows), "3072", "0.011", "64", "262144", str(q_per_block), "64"],
+            },
+            "annotation": annotation,
+        }
+
+    def test_mqa_logits_mxfp4_decode_keys_from_annotation(self):
+        model = aext.pa_mqa_logits_mxfp4(
+            self._mqa_logits_event(self._decode_annotation(3, 32768))
+        )
+        keys = 3 * 32768 // 4
+        assert model.param_details["keys"] == keys
+        assert model.flops() == keys * 64 * (2 * 128 + 2)
+        assert model.bytes() == 3 * 64 * (64 + 4 + 2) + keys * (64 + 4 + 4 + 4 / 64)
+        assert model.get_compute_precision() == "fp4"
+        assert model.get_maf_type() == "matrix"
+
+    def test_mqa_logits_mxfp4_prefill_scores_causal_pairs(self):
+        annotation = (
+            "execute_1_context_1(sq8sk8sqsq64sqsk64)_generation_0(sq0sk0sqsq0sqsk0)"
+        )
+        model = aext.pa_mqa_logits_mxfp4(
+            self._mqa_logits_event(annotation, rows=16, q_per_block=4)
+        )
+        assert model.param_details["rows"] == 8
+        keys = (64 - (64 - 8) // 2) // 4
+        assert model.param_details["keys"] == keys
+        # Four rows per CTA share each KV tile; every row stores its own logits.
+        assert model.bytes() == 8 * 64 * (64 + 4 + 2) + keys * (
+            (64 + 4 + 4 / 64) / 4 + 4
+        )
+
+    def test_mqa_logits_mxfp4_unknown_dtype_bytes(self):
+        logits = self._mqa_logits_event(self._decode_annotation(3, 1000))
+        logits["args"]["Input type"][6] = "c10::Unknown"
+        assert aext.pa_mqa_logits_mxfp4(logits).bytes() is None
+
+    def test_mqa_logits_mxfp4_no_perf_without_annotation(self):
+        model = aext.pa_mqa_logits_mxfp4(self._mqa_logits_event("NA"))
+        assert model.flops() is None
+        assert model.bytes() is None
+        assert model.get_compute_precision() is None
+        assert model.get_maf_type() is None
+
+    def test_mla_bytes_reject_broadcast_stride(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 16, 512],
+                    [8, 16, 64],
+                    [4, 1, 1, 512],
+                    [4, 1, 1, 64],
+                    [9],
+                    [9],
+                    [4],
+                    [9],
+                    [16],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [8, 16, 16, 512],
+                    [8, 16, 16, 1],
+                    [8, 16, 512],
+                    [8],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                ],
+                "Concrete Inputs": ["1", "0", "16", "1"],
+                "Input Strides": [
+                    [0, 512, 1],
+                    [1024, 64, 1],
+                    [512, 512, 512, 1],
+                    [64, 64, 64, 1],
+                    [1],
+                    [1],
+                    [1],
+                    [1],
+                    [1],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [131072, 8192, 512, 1],
+                    [256, 16, 1, 1],
+                    [8192, 512, 1],
+                    [1],
+                ],
+            },
+        }
+        assert aext.mla_decode_v4_asm(event).bytes() is None
+
+    def test_stage2_launch_receives_mla_shapes(self):
+        from TraceLens.Trace2Tree.extensions.mla_v4_stage2_shapes import (
+            copy_mla_v4_stage2_shapes,
+        )
+
+        dims = [[8, 16, 512]]
+        events = {
+            1: {
+                "UID": 1,
+                "name": "aiter/mla.py(1595): mla_decode_fwd_v4_nm",
+                "cat": "python_function",
+                "children": [2, 3],
+                "args": {},
+            },
+            2: {
+                "UID": 2,
+                "name": "aiter::mla_decode_v4_asm",
+                "cat": "cpu_op",
+                "parent": 1,
+                "children": [],
+                "args": {"Input Dims": dims, "Input type": ["c10::Float8_e4m3fn"]},
+            },
+            3: {
+                "UID": 3,
+                "name": "hipModuleLaunchKernel",
+                "cat": "cuda_runtime",
+                "parent": 1,
+                "children": [4],
+                "args": {},
+            },
+            4: {
+                "UID": 4,
+                "name": "_fwd_kernel_stage2_asm",
+                "cat": "kernel",
+                "parent": 3,
+                "children": [],
+                "args": {},
+            },
+        }
+
+        class _Tree:
+            def __init__(self):
+                self.events_by_uid = events
+                self.name2event_uids = {
+                    "_fwd_kernel_stage2_asm": [4],
+                }
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid[uid]
+
+            def get_parent_event(self, event):
+                parent = event.get("parent")
+                if parent is None:
+                    return None
+                return self.events_by_uid[parent]
+
+        copy_mla_v4_stage2_shapes(_Tree())
+        assert events[3]["args"]["Input Dims"] == dims
+        assert events[3]["args"]["Input type"] == ["c10::Float8_e4m3fn"]
+
+    def test_deepseek_v4_topk_gating_uses_score_dtype(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [[8, 6], [8, 6], [8, 384], [384], [], [], []],
+                "Input type": [
+                    "float",
+                    "int",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "Scalar",
+                    "Scalar",
+                    "",
+                ],
+            },
+        }
+        model = pext.topk_gating_fwd(event)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.get_compute_precision() == "fp32"
+        assert model.get_maf_type() == "vector"
+        # sqrtsoftplus (23) + bias + 12-comparator network + warp max + renorm.
+        assert model.flops() == 8 * (24 * 384 + 64 * 12 + 6 * 6 + 13)
+        assert model.bytes() == (8 * 384 * 2 + 384 * 2 + 8 * 6 * 4 + 8 * 6 * 4)
+
+    def test_deepseek_v4_moe_small_sort_selects_float_precision(self):
+        event = {
+            "annotation": "step[DECODE bs=5 g_sq=5 g_sqsq=5 g_sqsk=25 g_sk=5]",
+            "args": {
+                "Input Dims": [
+                    [8, 7],
+                    [8, 7],
+                    [12369],
+                    [12369],
+                    [387],
+                    [2],
+                    [0, 0],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+            },
+        }
+        model = moe_ext.SglangMoeSortingSmall(event)
+        assert model.param_details["logical_batch_size"] == 5
+        assert model.param_details["compact"] is True
+        assert model.param_details["block_size"] == 32
+        assert model.get_compute_precision() is None
+        assert model.flops() == 9 * 64 * 64 + 5 * 64
+        assert model.bytes() == (56 * 4 + 56 * 4 + 2048 * 4 + 2048 * 4 + 2 * 64 * 4 + 8)
+
+    def test_glm53_moe_small_sort_uses_sglang_sort(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [12, 9],
+                    [12, 9],
+                    [4211],
+                    [4211],
+                    [264],
+                    [2],
+                    [12, 6144],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+                "Input Strides": [
+                    [9, 1],
+                    [9, 1],
+                    [1],
+                    [1],
+                    [1],
+                    [1],
+                    [6144, 1],
+                ],
+            }
+        }
+        model = moe_ext.SglangMoeSortingSmall(event)
+        assert model.param_details["block_size"] == 16
+        assert model.param_details["num_experts"] == 257
+        assert model.param_details["compact"] is False
+        assert model.flops() == moe_ext._distributed_sort_ops(108, 128, 257)
+        assert model.bytes() == 165736
+        assert (
+            get_pseudo_op_mappings()[
+                "sglang_profiler::moe_sorting_small__run_small_sort"
+            ]
+            is moe_ext.SglangMoeSortingSmall
+        )
+
+    def test_preshuffle_without_tile_counts_logical_gemm(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 7168],
+                    [128, 114688],
+                    [8, 56],
+                    [16, 56],
+                    [8, 2048],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                ],
+            },
+        }
+        model = pext.gemm_a8w8_blockscale_preshuffle(event)
+        assert model.param_details["tile"] is None
+        # No tile; M pads 8->16 (MFMA). block_k is 128, so one scale per 128-wide K block.
+        assert model.flops() == 2 * 16 * 2048 * 7168 + 16 * 2048 * 56
+        assert model.bytes() == (
+            8 * 7168 + 2048 * 7168 + 8 * 2048 * 2 + 8 * 56 * 4 + 16 * 56 * 4
+        )
+
+    def test_mla_single_split_writes_bf16_output(self):
+        num_kv = 4
+        event = {
+            "args": {
+                "Input Dims": [
+                    [2, 2, 512],
+                    [2, 2, 64],
+                    [10, 1, 1, 512],
+                    [10, 1, 1, 64],
+                    [3],
+                    [3],
+                    [num_kv],
+                    [3],
+                    [2],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [2, 2, 4, 512],
+                    [2, 2, 4, 1],
+                    [2, 2, 512],
+                    [2],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "float",
+                    "c10::BFloat16",
+                    "int",
+                ],
+                "Concrete Inputs": ["1", "0", "1"],
+            },
+        }
+        model = aext.mla_decode_v4_asm(event)
+        assert model.param_details["num_kv_splits"] == 1
+        assert model.flops() == 4 * 2 * 512 * num_kv
+        assert model.bytes() == (
+            2 * 2 * 512
+            + 2 * 2 * 64 * 2
+            + num_kv * 512
+            + num_kv * 64 * 2
+            + num_kv * 4
+            + 3 * 4 * 3
+            + 2 * 4
+            + 2 * 2 * 512 * 2
+        )
+
+    def test_topk_gating_sigmoid_and_softmax(self):
+        dims = [[8, 6], [8, 6], [8, 384], [384], [], [], []]
+        types = [
+            "float",
+            "int",
+            "c10::BFloat16",
+            "c10::BFloat16",
+            "Scalar",
+            "Scalar",
+            "",
+        ]
+        sigmoid = pext.topk_gating_fwd(
+            {
+                "args": {
+                    "Input Dims": dims,
+                    "Input type": types,
+                    "Concrete Inputs": ["", "", "", "", "true", "", "sigmoid"],
+                },
+            }
+        )
+        assert sigmoid.param_details["score_func"] == "sigmoid"
+        assert sigmoid.flops() == 8 * (15 * 384 + 64 * 12 + 6 * 6 + 13)
+        softmax = pext.topk_gating_fwd(
+            {
+                "args": {
+                    "Input Dims": dims,
+                    "Input type": types,
+                    "Concrete Inputs": ["", "", "", "", "true", "", "softmax"],
+                },
+            }
+        )
+        assert softmax.param_details["need_renorm"] is False
+        assert softmax.flops() == 8 * (13 * 384 + 64 * 12 + 6 * 6 + 6)
+
+    def test_moe_sort_distributed_path(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [16, 8],
+                    [16, 8],
+                    [376],
+                    [376],
+                    [12],
+                    [2],
+                    [0, 0],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+            },
+        }
+        model = moe_ext.SglangMoeSortingSmall(event)
+        assert model.param_details["compact"] is False
+        assert model.param_details["pairs"] == 128
+        chunk = 2 * 128 * 64 + 64
+        assert model.flops() == (chunk * 2 + 2 * 64 * 64) + 128 * (4 * 128 + chunk)
+        assert model.bytes() == (
+            128 * 4 + 128 * 4 + 4096 * 4 + 4096 * 4 + 2 * 128 * 4 + 8
+        )
+
+    def test_bounded_mx_quant_rejects_short_scalar_list(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [8, 7168],
+                    [12384, 224],
+                    [8, 7168],
+                    [12369],
+                    [2],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e8m0fnu",
+                    "c10::BFloat16",
+                    "int",
+                    "int",
+                ],
+                "Input Strides": [[], [], [7168, 1]],
+                "Concrete Inputs": ["8", "32"],
+            },
+        }
+        model = pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(event)
+        assert model.param_details["bounded"] is False
+        assert model.flops() is None
+        assert model.bytes() is None
+
+    def test_vllm_top_ops_models(self):
+        from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
+            vllm_all_reduce,
+        )
+        from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
+            moe_opus_stage1_a8w4,
+            moe_sorting_opus_fwd,
+        )
+        from TraceLens.PerfModel.torch_op_mapping import CATEGORY_ONLY_OP_MAPPING
+
+        reduce_event = {
+            "args": {
+                "Input Dims": [[1, 7168], []],
+                "Input type": ["c10::BFloat16", ""],
+            }
+        }
+        model = vllm_all_reduce(reduce_event)
+        assert model.flops() == 0
+        assert model.bytes() == 2 * 7168 * 2
+        gapped = {
+            "args": {
+                "Input Dims": [[1, 7168], []],
+                "Input type": ["c10::BFloat16", ""],
+                "Input Strides": [[1, 2], []],
+            }
+        }
+        assert vllm_all_reduce(gapped).bytes() is None
+
+        gemm = {
+            "args": {
+                "Input Dims": [[1, 7168], [2048, 7168], [1, 56], [16, 56], [], []],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "float",
+                    "Scalar",
+                    "",
+                ],
+                "Concrete Inputs": ["", "", "", "", "15", ""],
+            },
+            "kernel_details": [
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_preshuffle_kernel_GROUP_K_128_"
+                        "GROUP_N_128_BLOCK_SIZE_M_8_BLOCK_SIZE_N_16_BLOCK_SIZE_K_128_"
+                        "GROUP_SIZE_M_1_NUM_KSPLIT_4_SPLITK_BLOCK_SIZE_1792"
+                    )
+                },
+                {
+                    "name": (
+                        "_gemm_a8w8_blockscale_reduce_kernel_BLOCK_SIZE_M_32_"
+                        "BLOCK_SIZE_N_32_ACTUAL_KSPLIT_4_MAX_KSPLIT_4"
+                    )
+                },
+            ],
+        }
+        preshuffle = pext.gemm_a8w8_blockscale_bpreshuffle(gemm)
+        assert preshuffle.N == 2048
+        assert preshuffle.flops() == 236052480
+        assert preshuffle.bytes() == 14760672
+        assert preshuffle.get_compute_precision() == "fp8"
+        assert preshuffle.get_maf_type() == "matrix"
+        no_tile = {
+            "args": gemm["args"],
+        }
+        logical = pext.gemm_a8w8_blockscale_bpreshuffle(no_tile)
+        assert logical.param_details["tile"] is None
+        # No tile; M pads 1->16 to the MFMA tile the hardware runs.
+        assert logical.flops() == 2 * 16 * 2048 * 7168 + 16 * 2048 * (7168 // 128)
+        assert logical.bytes() == 14760672 - 2 * 4 * 1 * 2048 * 4
+        # MX128 kernel names carry a tile and split-K. Those are the kernel's,
+        # so the op is costed from its shapes, the same as with no kernel name.
+        for kernel_name in (
+            "gemm_a8w8_mx128_t16x1024x128_mw1_nw4_nb2_sk1_cm1_cn1",
+            "gemm_a8w8_mx128_t16x256x128_mw1_nw4_nb2_sk2_cm1_cn1",
+            "gemm_a8w8_mx128_compute_t128x256x128_mw2_nw2_nb4_sk2_cm4_cn2_fsk",
+        ):
+            mx128_model = pext.gemm_a8w8_blockscale_bpreshuffle(
+                {"args": gemm["args"], "kernel_details": [{"name": kernel_name}]}
+            )
+            assert mx128_model.param_details["tile"] is None
+            assert mx128_model.flops() == logical.flops()
+            assert mx128_model.bytes() == logical.bytes()
+        assert (
+            pext.gemm_a8w8_blockscale_bpreshuffle(
+                {"args": {"Input Dims": [[1, 8], [], [], []], "Input type": []}}
+            ).flops()
+            is None
+        )
+
+        stage = {
+            "args": {
+                "Input Dims": [
+                    [1],
+                    [1, 7168],
+                    [384, 768, 3584],
+                    [12288, 224],
+                    [294912, 224],
+                    [],
+                    [12288],
+                    [384],
+                    [2],
+                    [1, 6, 384],
+                    [12288, 16],
+                ],
+                "Input type": [
+                    "float",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float4_e2m1fn_x2",
+                    "c10::Float8_e8m0fnu",
+                    "c10::Float8_e8m0fnu",
+                    "",
+                    "int",
+                    "int",
+                    "int",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e8m0fnu",
+                ],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "6",
+                    "32",
+                ],
+            }
+        }
+        stage1 = moe_opus_stage1_a8w4(stage)
+        assert stage1.flops() == 2 * 1 * 7168 * 384 * 6 * 2
+        assert stage1.bytes() == 17557056
+        assert stage1.get_compute_precision() == "fp4"
+        assert stage1.get_maf_type() == "matrix"
+        assert (
+            moe_opus_stage1_a8w4(
+                {"args": {"Input Dims": [[1, 8]], "Input type": ["float"]}}
+            ).flops()
+            is None
+        )
+
+        router = {
+            "args": {
+                "Input Dims": [
+                    [1, 6],
+                    [1, 6],
+                    [1, 6],
+                    [1, 384],
+                    [],
+                    [],
+                    [384],
+                    [1],
+                    [],
+                    [1],
+                ],
+                "Input type": [
+                    "float",
+                    "int",
+                    "int",
+                    "float",
+                    "Scalar",
+                    "Scalar",
+                    "float",
+                    "int",
+                    "",
+                    "bool",
+                ],
+                "Concrete Inputs": ["", "", "", "", "True", "2.5"],
+            }
+        }
+        routed = pext.topk_softplus_sqrt(router)
+        assert routed.flops() == 10033
+        assert routed.bytes() == 3145
+        assert routed.get_compute_precision() == "fp32"
+        assert routed.get_maf_type() == "vector"
+        hashed = {
+            "args": {
+                "Input Dims": [
+                    [1, 6],
+                    [1, 6],
+                    [1, 6],
+                    [1, 384],
+                    [],
+                    [],
+                    [],
+                    [1],
+                    [129280, 6],
+                    [1],
+                ],
+                "Input type": router["args"]["Input type"],
+                "Concrete Inputs": ["", "", "", "", "True", "2.5"],
+            }
+        }
+        hash_model = pext.topk_softplus_sqrt(hashed)
+        assert hash_model.param_details["use_hash"] is True
+        assert hash_model.flops() == 8845
+        assert hash_model.bytes() == 1637
+        assert pext.topk_softplus_sqrt({"args": {"Input Dims": []}}).flops() is None
+
+        sort_decode = {
+            "args": {
+                "Input Dims": [[1, 6], [1, 6], [12288], [12288], [384], [2], [1, 7168]],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+                "Concrete Inputs": ["", "", "", "", "", "", "", "384", "32"],
+            }
+        }
+        sorter = moe_sorting_opus_fwd(sort_decode)
+        assert sorter.param_details["written"] == 6 * 32
+        assert sorter.flops() == 2 * 6 + 384 + 2 * (6 * 32) + 7168
+        assert sorter.bytes() == 6 * 8 + (6 * 32) * 8 + 6 * 4 + 8 + 7168 * 2
+        assert sorter.get_compute_precision() is None
+        assert sorter.get_maf_type() == "vector"
+        prefill = {
+            "args": {
+                "Input Dims": [
+                    [1754, 6],
+                    [1754, 6],
+                    [35136],
+                    [35136],
+                    [549],
+                    [2],
+                    [0, 0],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "384",
+                    "64",
+                    "",
+                    "",
+                    "",
+                    "0",
+                ],
+            }
+        }
+        prefill_sort = moe_sorting_opus_fwd(prefill)
+        pairs = 1754 * 6
+        written = 35136
+        assert prefill_sort.param_details["block_size"] == 64
+        assert prefill_sort.param_details["written"] == written
+        assert prefill_sort.flops() == 2 * pairs + 384 + 2 * written
+        assert prefill_sort.bytes() == pairs * 8 + written * 8 + 549 * 4 + 8
+        glm_prefill = {
+            "args": {
+                "Input Dims": [
+                    [1113, 9],
+                    [1113, 9],
+                    [26456],
+                    [26456],
+                    [414],
+                    [2],
+                    [1113, 6144],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [289120],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                    "Scalar",
+                    "Scalar",
+                    "",
+                    "",
+                    "unsigned char",
+                ],
+                "Concrete Inputs": [
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "257",
+                    "64",
+                    "",
+                    "",
+                    "",
+                    "0",
+                ],
+            }
+        }
+        glm_sort = moe_sorting_opus_fwd(glm_prefill)
+        glm_pairs = 1113 * 9
+        glm_written = 26456
+        assert glm_sort.param_details["written"] == glm_written
+        assert glm_sort.flops() == 2 * glm_pairs + 257 + 2 * glm_written + 1113 * 6144
+        assert glm_sort.bytes() == (
+            glm_pairs * 8 + glm_written * 8 + 414 * 4 + 8 + 1113 * 6144 * 2 + 289120
+        )
+        assert (
+            moe_sorting_opus_fwd(
+                {
+                    "args": {
+                        "Input Dims": [[3, 6], [3, 6], [10], [10], [3], [2], [0, 0]],
+                        "Input type": [
+                            "int",
+                            "float",
+                            "int",
+                            "float",
+                            "int",
+                            "int",
+                            "c10::BFloat16",
+                        ],
+                        "Concrete Inputs": ["3"],
+                    }
+                }
+            ).flops()
+            is None
+        )
+
+        sparse_event = {
+            "annotation": self._decode_annotation(1, 8192),
+            "args": {
+                "Input Dims": [[1, 16, 512], [1, 32, 16]],
+                "Input type": ["c10::BFloat16", "float"],
+                "v4_block_k": 32,
+                "v4_mode": "csa",
+            },
+        }
+        sparse = aext.vllm_sparse_attn_decode(sparse_event)
+        # 8K context: 128 window rows + min(8192 // 4, 1024) CSA rows.
+        attended = 128 + 1024
+        assert sparse.param_details["attended_kv"] == attended
+        assert sparse.flops() == 16 * 4 * 1 * attended * 512
+        assert sparse.bytes() == (
+            2 * 1 * 16 * 512 * 2
+            + 1 * attended * (576 + 4)
+            + 2 * 1 * 32 * 16 * (2 + 512) * 4
+        )
+        assert sparse.get_compute_precision() == "bf16"
+        assert sparse.get_maf_type() == "matrix"
+        for drop in ("annotation", "v4_mode"):
+            event = {
+                "annotation": sparse_event["annotation"],
+                "args": dict(sparse_event["args"]),
+            }
+            if drop == "annotation":
+                del event["annotation"]
+            else:
+                event["args"]["v4_mode"] = None
+            assert aext.vllm_sparse_attn_decode(event).flops() is None
+        assert (
+            aext.vllm_sparse_attn_decode(
+                {"args": {"Input Dims": [[1, 16, 512]], "v4_block_k": 32}}
+            ).flops()
+            is None
+        )
+
+        mappings = get_pseudo_op_mappings()
+        assert mappings["vllm::all_reduce"] is vllm_all_reduce
+        assert (
+            mappings["aiter::gemm_a8w8_blockscale_bpreshuffle"]
+            is pext.gemm_a8w8_blockscale_bpreshuffle
+        )
+        assert mappings["aiter::_opus_moe_stage1_a8w4_fwd_raw"] is moe_opus_stage1_a8w4
+        assert mappings["_moe_C::topk_softplus_sqrt"] is pext.topk_softplus_sqrt
+        assert mappings["aiter::moe_sorting_opus_fwd"] is moe_sorting_opus_fwd
+        assert (
+            mappings["pseudo_vllm_sparse_attn_decode"] is aext.vllm_sparse_attn_decode
+        )
+        categories = get_pseudo_op_category_only_mappings()
+        assert categories["_C::top_k_per_row_decode"] == "InferenceAttention"
+        assert "aiter::moe_sorting_opus_fwd" not in CATEGORY_ONLY_OP_MAPPING
+        assert "aiter::moe_sorting_opus_fwd" not in categories
+
+    def test_vllm_sparse_decode_has_one_owner(self):
+        from copy import deepcopy
+
+        from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
+        from TraceLens.Trace2Tree.extensions.vllm_sparse_decode_pseudo_ops import (
+            create_pseudo_ops_vllm_sparse_decode,
+        )
+        from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
+
+        def ev(ts, dur, cat, name, pid=100, tid=100, args=None):
+            event = {
+                "ph": "X",
+                "ts": ts,
+                "dur": dur,
+                "cat": cat,
+                "name": name,
+                "pid": pid,
+                "tid": tid,
+            }
+            if args is not None:
+                event["args"] = args
+            return event
+
+        def ac2g(corr, ts, phase):
+            marker = {
+                "ph": phase,
+                "id": corr,
+                "pid": 0,
+                "tid": 7,
+                "ts": ts,
+                "cat": "ac2g",
+                "name": "ac2g",
+            }
+            if phase == "f":
+                marker["bp"] = "e"
+            return marker
+
+        events = [
+            ev(
+                1000,
+                800,
+                "python_function",
+                "vllm/models/deepseek_v4/amd/rocm.py(736): forward_mqa",
+            ),
+            ev(
+                1010,
+                5,
+                "cpu_op",
+                "aten::slice",
+                args={
+                    "Input Dims": [[1, 16, 512], [], [], [], []],
+                    "Input type": [
+                        "c10::BFloat16",
+                        "Scalar",
+                        "Scalar",
+                        "Scalar",
+                        "Scalar",
+                    ],
+                },
+            ),
+            ev(
+                1050,
+                700,
+                "python_function",
+                "vllm/models/deepseek_v4/amd/rocm.py(817): _forward_decode",
+            ),
+            ev(
+                1060,
+                5,
+                "cpu_op",
+                "aten::empty_like",
+                args={
+                    "Input Dims": [[1, 32, 16], [], [], [], [], []],
+                    "Input type": ["float", "", "", "", "Scalar", ""],
+                },
+            ),
+            ev(
+                1100,
+                200,
+                "python_function",
+                "vllm/v1/attention/ops/rocm_aiter_mla_sparse.py(3065): _rocm_sparse_attn_decode_triton",
+            ),
+            ev(
+                1110,
+                10,
+                "cuda_runtime",
+                "hipModuleLaunchKernel",
+                args={"correlation": 1},
+            ),
+            ev(
+                5000,
+                30,
+                "kernel",
+                "_sparse_attn_decode_gfx950_partial_kernel.kd",
+                pid=0,
+                tid=7,
+                args={"correlation": 1, "stream": 7},
+            ),
+            ac2g(1, 5000, "s"),
+            ac2g(1, 5030, "f"),
+            ev(
+                1200,
+                10,
+                "cuda_runtime",
+                "hipModuleLaunchKernel",
+                args={"correlation": 2},
+            ),
+            ev(
+                5100,
+                30,
+                "kernel",
+                "_sparse_attn_decode_reduce_kernel.kd",
+                pid=0,
+                tid=7,
+                args={"correlation": 2, "stream": 7},
+            ),
+            ac2g(2, 5100, "s"),
+            ac2g(2, 5130, "f"),
+        ]
+        tree = TraceToTree(deepcopy(events), prune_nongpu_paths=False)
+        tree.build_tree(add_python_func=True)
+        create_pseudo_ops_vllm_sparse_decode(tree)
+        parents = [
+            evt
+            for evt in tree.events
+            if evt.get("name") == "pseudo_vllm_sparse_attn_decode"
+        ]
+        assert len(parents) == 1
+        parent = parents[0]
+        assert parent["args"]["Input Dims"] == [[1, 16, 512], [1, 32, 16]]
+        # _forward_decode without the CSA top-k build: HCA or SWA-only.
+        assert parent["args"]["v4_mode"] is None
+        kernel_uids = []
+        for evt in tree.events:
+            if evt.get("cat") == "kernel" and "sparse_attn_decode" in evt.get(
+                "name", ""
+            ):
+                kernel_uids.append(evt["UID"])
+        assert sorted(parent["gpu_events"]) == sorted(kernel_uids)
+        assert len(parent["gpu_events"]) == len(set(parent["gpu_events"])) == 2
+        analyzer = TreePerfAnalyzer(tree, add_python_func=True, rebuild_tree=False)
+        collected = analyzer.collect_unified_perf_events()
+        owners = [
+            evt
+            for evt in collected
+            if any(
+                "sparse_attn_decode" in tree.get_UID2event(uid).get("name", "")
+                for uid in evt.get("gpu_events") or []
+            )
+        ]
+        assert len(owners) == 1
+        assert owners[0]["name"] == "pseudo_vllm_sparse_attn_decode"
+        owned = 0
+        for uid in owners[0]["gpu_events"]:
+            owned += tree.get_UID2event(uid)["dur"]
+        assert owned == 60
+
+    def test_vllm_sparse_attn_decode_partial_layouts(self):
+        def model(partial, block_k=32, annotation=self._decode_annotation(2, 1000)):
+            return aext.vllm_sparse_attn_decode(
+                {
+                    "annotation": annotation,
+                    "args": {
+                        "Input Dims": [[2, 16, 512], partial],
+                        "Input type": ["c10::BFloat16", "float"],
+                        "v4_block_k": block_k,
+                        "v4_mode": "csa",
+                    },
+                }
+            )
+
+        heads_first = model([2, 16, 8]).param_details
+        assert heads_first["num_splits"] == 8
+        assert heads_first["attended_kv"] == 128 + 250
+        assert heads_first["g_sqsk"] == 2 * (128 + 250)
+        # A captured batch of 2 rows with one live request reads one KV range.
+        padded = model([2, 16, 8], annotation=self._decode_annotation(1, 50))
+        assert padded.param_details["attended_kv"] == 50 + 12
+        assert padded.param_details["g_sqsk"] == 50 + 12
+        for partial, block_k in (
+            ([3, 8, 16], 32),
+            ([2, 8, 4], 32),
+            ([2, 8, 16], 0),
+        ):
+            assert model(partial, block_k).param_details.get("_no_perf") is True
+
+    @staticmethod
+    def _list_tree():
+        class _Tree:
+            def __init__(self):
+                self.events = []
+                self.events_by_uid = {}
+                self.name2event_uids = {}
+                self.seq_num2event_uids_map = {}
+
+            def add(self, name, cat, parent=None, args=None):
+                uid = len(self.events)
+                evt = {"UID": uid, "name": name, "cat": cat, "children": []}
+                if args is not None:
+                    evt["args"] = args
+                if parent is not None:
+                    evt["parent"] = parent
+                    self.events_by_uid[parent]["children"].append(uid)
+                self.events.append(evt)
+                self.events_by_uid[uid] = evt
+                self.name2event_uids.setdefault(name, []).append(uid)
+                return uid
+
+            def get_UID2event(self, uid):
+                return self.events_by_uid.get(uid)
+
+            def get_parent_event(self, event):
+                parent = event.get("parent")
+                return None if parent is None else self.events_by_uid[parent]
+
+        return _Tree()
+
+    def test_vllm_sparse_decode_skips_unowned_and_wrapped_kernels(self):
+        from TraceLens.Trace2Tree.extensions import vllm_sparse_decode_pseudo_ops as v
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+            apply_pseudo_op_extensions,
+        )
+
+        tree = self._list_tree()
+        partial = v.PARTIAL_KERNEL + ".kd"
+        reduce = v.REDUCE_KERNEL + ".kd"
+        tree.add("unrelated_kernel", "kernel")
+        orphan_launch = tree.add("hipModuleLaunchKernel", "cuda_runtime")
+        tree.add(partial, "kernel", orphan_launch)
+
+        layer = tree.add("DeepseekV4DecoderLayer", "python_function")
+        decode = tree.add("rocm.py(1524): " + v.DECODE_FN, "python_function", layer)
+        tree.add("rocm.py(1550): " + v.CSA_TOPK_FN, "python_function", decode)
+        owner = tree.add(v.TRITON_FN, "python_function", decode)
+        tree.add(
+            "aten::empty",
+            "cpu_op",
+            owner,
+            {
+                "Input Dims": [[2, 16, 512], [3, 32, 16]],
+                "Input type": ["c10::BFloat16", "float"],
+            },
+        )
+        launch = tree.add("hipModuleLaunchKernel", "cuda_runtime", owner)
+        tree.add(partial, "kernel", launch)
+        tree.add(reduce, "kernel", launch)
+
+        wrapped_owner = tree.add(v.TRITON_FN, "python_function")
+        wrapped = tree.add(v.PSEUDO_NAME, "cpu_op", wrapped_owner, {})
+        tree.add(partial, "kernel", wrapped)
+
+        apply_pseudo_op_extensions(tree, verbose=True)
+        pseudo = [e for e in tree.events if e["name"] == v.PSEUDO_NAME]
+        assert len(pseudo) == 2
+        injected = pseudo[-1]
+        # No partial matches the 2-token query before the decoder-layer boundary.
+        assert injected["args"]["Input Dims"] is None
+        assert injected["parent"] == owner
+        assert injected["args"]["v4_mode"] == "csa"
+        assert tree.events_by_uid[launch]["parent"] == injected["UID"]
+        assert len(injected["gpu_events"]) == 2
+
+        v.create_pseudo_ops_vllm_sparse_decode(tree)
+        assert len([e for e in tree.events if e["name"] == v.PSEUDO_NAME]) == 2
+
+        layer_only = tree.add(v.LAYER_FN, "python_function")
+        bare_owner = tree.add(v.TRITON_FN, "python_function", layer_only)
+        assert v._is_csa_decode(tree, tree.events_by_uid[bare_owner]) is False
+
+    def test_mla_v4_stage2_skips_without_single_donor(self):
+        from TraceLens.Trace2Tree.extensions import mla_v4_stage2_shapes as s
+        from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
+            apply_pseudo_op_extensions,
+        )
+
+        tree = self._list_tree()
+        tree.add(s._STAGE2_KERNEL, "cpu_op")
+        tree.add(s._STAGE2_KERNEL, "kernel")
+        no_parent_py = tree.add("hipModuleLaunchKernel", "cuda_runtime")
+        tree.add(s._STAGE2_KERNEL, "kernel", no_parent_py)
+
+        py = tree.add("aiter/mla.py(1): " + s._PARENT_PY, "python_function")
+        tree.events_by_uid[py]["children"].append(999)
+        dims = {"Input Dims": [[8, 16, 512]]}
+        tree.add(s._DONOR_OP, "cpu_op", py, dims)
+        tree.add(s._DONOR_OP, "cpu_op", py, dims)
+        two_donors = tree.add("hipModuleLaunchKernel", "cuda_runtime", py)
+        tree.add(s._STAGE2_KERNEL, "kernel", two_donors)
+
+        apply_pseudo_op_extensions(tree, verbose=True)
+        for uid in (no_parent_py, two_donors):
+            assert "args" not in tree.events_by_uid[uid]
+
+    def test_deepseek_v4_model_mappings(self):
+        mappings = get_pseudo_op_mappings()
+        assert (
+            mappings[
+                "sglang_profiler::gemm_a8w8_blockscale_gemm_a8w8_blockscale_preshuffle"
+            ]
+            is pext.gemm_a8w8_blockscale_preshuffle
+        )
+        assert (
+            mappings["aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded"]
+            is pext.fused_dynamic_mx_quant_moe_sort_hip_bounded
+        )
+        assert (
+            mappings["aiter::_opus_bmm_a8w8_mxscale_raw"]
+            is pext.opus_bmm_a8w8_mxscale_raw
+        )
+        assert mappings["aiter::topk_gating_fwd"] is pext.topk_gating_fwd
+        assert (
+            mappings["sglang_profiler::moe_sorting_small__run_small_sort"]
+            is moe_ext.SglangMoeSortingSmall
+        )
+
     @pytest.mark.parametrize(
         "model_cls,flops_per_elem",
         [
-            (aiter_silu_and_mul, 5),
-            (aiter_gelu_and_mul, 8),
-            (aiter_gelu_tanh_and_mul, 10),
+            (aiter_silu_and_mul, 15),
+            (aiter_gelu_and_mul, 13),
+            (aiter_gelu_tanh_and_mul, 17),
         ],
     )
     def test_gated_activation_extensions(self, model_cls, flops_per_elem):
@@ -519,14 +2310,21 @@ class TestUtilsCoverage:
             ("double", 8),
             ("c10::float8_e5m2", 1),
             ("c10::float4_e2m1fn_x2", 1),
+            ("fp4", 0.5),
             (None, None),
         ],
     )
     def test_name2bpe_extended(self, name, bpe):
         assert name2bpe(name) == bpe
 
+    @pytest.mark.parametrize("name", ["", "   ", "c10::"])
+    def test_name2bpe_blank_is_not_a_dtype(self, name):
+        assert name2bpe(name) is None
+
+    def test_scalar_type_bpe_rejects_a_missing_ordinal(self):
+        assert scalar_type_bpe(None) is None
+
     def test_dtype_maps_extended(self):
-        assert simulation_dtype_map("fp64") == "double"
         assert torch_dtype_map("c10::float8_e4m3fn") == "fp8"
         assert torch_dtype_map("mxfp4") == "fp4"
 
@@ -571,83 +2369,38 @@ class TestGemmBaseCoverage:
         model = perf_model.aten_mm(event)
         assert model.param_details["transpose"] == (True, False)
 
-    def test_get_simulation_time_without_origami(self):
+    def test_origami_time_without_arch(self):
         model = perf_model.aten_mm(_gemm_event("aten::mm", (4, 8), (8, 16)))
-        assert model.get_simulation_time() is None
-
-    def test_gemm_simulator_path_invalid(self, monkeypatch):
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", "/nonexistent/sim.py")
-        with pytest.raises(ValueError, match="does not exist"):
-            perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-
-    def test_gemm_simulator_success(self, monkeypatch, tmp_path):
-        sim_dir = tmp_path / "simdir"
-        sim_dir.mkdir()
-        sim = sim_dir / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=42.5\n", stderr="")
-            t, cmd = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16", num_cus=64, force_to_l1=True
-            )
-        assert t == 42.5
-        assert "run_gemm.py" in cmd
-
-    def test_gemm_simulator_failure(self, monkeypatch, tmp_path):
-        sim_dir = tmp_path / "simdir"
-        sim_dir.mkdir()
-        sim = sim_dir / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="", stderr="fail")
-            with pytest.raises(AssertionError):
-                perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
+        assert origami_gemm_op_projection(op_work(model), None) is None
 
     def test_origami_simulation_mocked(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         mock_origami = MagicMock()
         mock_origami.data_type_t.BFloat16 = "bf16_dtype"
         mock_helper_cls = MagicMock()
-        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=64)
+        mock_helper_cls.get_hardware.return_value = MagicMock(N_CU=304)
         mock_helper_cls.return_value.get_simulation_time.return_value = 99.0
         with patch.dict(sys.modules, {"origami": mock_origami}):
-            with patch(
-                "TraceLens.PerfModel.origami_helper.OrigamiHelper", mock_helper_cls
-            ):
-                t, cmd = perf_model.GEMM.get_simulation_time_func(
-                    _ARCH,
-                    4,
-                    8,
-                    16,
-                    1,
-                    "bf16",
-                    enable_origami=True,
-                    force_to_l1=True,
-                    num_cus=64,
+            with patch.object(origami_helper, "OrigamiHelper", mock_helper_cls):
+                t = origami_helper.gemm_time_us(
+                    _ARCH, 4, 8, 16, 1, "bf16", force_to_l1=True, num_cus=64
                 )
         assert t == 99.0
-        assert "Origami" in cmd
         mock_helper_cls.assert_called_once()
+        assert mock_helper_cls.call_args.args[4] == "bf16_dtype"
+        assert mock_helper_cls.call_args.kwargs["num_cus"] == 64
+        assert mock_helper_cls.get_hardware.return_value.N_CU == 304
 
-    def test_origami_unsupported_dtype(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        mock_origami = MagicMock()
-        with patch.dict(sys.modules, {"origami": mock_origami}):
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "unknown_dtype", enable_origami=True
-            )
+    def test_origami_unsupported_dtype(self):
+        with pytest.warns(RuntimeWarning, match="Unsupported dtype"):
+            t = origami_helper.gemm_time_us(_ARCH, 4, 8, 16, 1, "unknown_dtype")
         assert t is None
 
-    def test_origami_import_error(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        perf_model.GEMM._origami_import_error_printed = False
+    def test_origami_import_error(self, monkeypatch, capsys):
+        monkeypatch.setattr(origami_helper, "_import_error_printed", False)
         with patch.dict(sys.modules, {"origami": None}):
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16", enable_origami=True
-            )
-        assert t is None
+            assert origami_helper.gemm_time_us(_ARCH, 4, 8, 16, 1, "bf16") is None
+            assert origami_helper.gemm_time_us(_ARCH, 4, 8, 16, 1, "bf16") is None
+        assert capsys.readouterr().err.count("could not be imported") == 1
 
 
 class TestGemmVariantsCoverage:
@@ -699,6 +2452,16 @@ class TestGemmVariantsCoverage:
         model = perf_model.aten_scaled_mm(event)
         assert model.param_details["bias"] is True
         assert model.bytes() > 0
+
+    def test_aten_scaled_mm_mxfp4_writes_a_two_byte_result(self):
+        event = {
+            "args": {
+                "Input Dims": [[4, 8], [8, 16]],
+                "Input type": ["c10::Float4_e2m1fn_x2", "c10::Float4_e2m1fn_x2"],
+            }
+        }
+        model = perf_model.aten_scaled_mm(event)
+        assert model.bytes() == 4 * 8 * 1 + 8 * 16 * 1 + 4 * 16 * 2
 
     def test_aten_baddbmm(self):
         event = {
@@ -841,7 +2604,7 @@ class TestConvCoverage:
 
 class TestSoftmaxAndSdpaCoverage:
     def test_softmax_static_methods(self):
-        assert perf_model.Softmax.flops(4, 8) == 4 * 3 * 8
+        assert perf_model.Softmax.flops(4, 8) == 4 * 12 * 8
         assert perf_model.Softmax.bytes(4, 8, 2) == 128
         assert perf_model.Softmax.flops_bwd(4, 8) == 2 * perf_model.Softmax.flops(4, 8)
         t = perf_model.Softmax.get_time(_ARCH, 4, 8, 2, force_to_l1=True)
@@ -949,28 +2712,158 @@ class TestSoftmaxAndSdpaCoverage:
 
 
 class TestElementwiseReduceCoverage:
-    def test_aten_unary_elementwise(self):
+    @pytest.mark.parametrize(
+        "name,flops_per_elem",
+        [
+            ("aten::copy_", 0),
+            ("aten::neg", 1),
+            ("aten::clamp_min_", 1),
+            ("aten::rsqrt", 4),
+            ("aten::sqrt_", 4),
+            ("aten::reciprocal", 4),
+            ("aten::exp", 8),
+            ("aten::tanh_", 8),
+            ("aten::sigmoid", 14),
+            ("aten::silu", 14),
+        ],
+    )
+    def test_aten_unary_elementwise_reads_the_op_table(self, name, flops_per_elem):
         event = {
+            "name": name,
             "args": {
                 "Input Dims": [(4, 256), (4, 256)],
                 "Input type": ["c10::BFloat16", "c10::BFloat16"],
                 "Input Strides": [(256, 1), (256, 1)],
+            },
+        }
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == flops_per_elem * 4 * 256
+        assert model.bytes() == 2 * 4 * 256 * 2
+
+    @pytest.mark.parametrize(
+        "exponent,flops_per_elem",
+        [("2", 1), ("3", 2), ("0.5", 4), ("-1", 4), ("2.5", 17), ("", 17)],
+    )
+    def test_aten_pow_prices_its_exponent(self, exponent, flops_per_elem):
+        event = {
+            "name": "aten::pow",
+            "args": {
+                "Input Dims": [(4, 256), []],
+                "Input type": ["float", "Scalar"],
+                "Input Strides": [(256, 1), []],
+                "Concrete Inputs": ["", exponent],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::pow"](event)
+        assert model.flops() == flops_per_elem * 4 * 256
+
+    @pytest.mark.parametrize("approximate,flops_per_elem", [("none", 12), ("tanh", 16)])
+    def test_aten_gelu_prices_its_approximation(self, approximate, flops_per_elem):
+        event = {
+            "name": "aten::gelu",
+            "args": {
+                "Input Dims": [(4, 256), []],
+                "Input type": ["c10::BFloat16", "Scalar"],
+                "Input Strides": [(256, 1), []],
+                "Concrete Inputs": ["", approximate],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::gelu"](event)
+        assert model.flops() == flops_per_elem * 4 * 256
+
+    def test_clone_is_left_to_its_copy(self):
+        # aten::clone allocates and calls aten::copy_. Modeling the parent
+        # stops the unified walk on clone and lists the same kernel twice
+        # on the UnaryElementwise sheet.
+        assert "aten::clone" not in op_to_perf_model_class_map
+
+    def test_to_casts_between_the_recorded_scalar_types(self):
+        event = {
+            "name": "aten::to",
+            "args": {
+                "Input Dims": [[4], [], [], [], []],
+                "Input type": ["long int", "Scalar", "Scalar", "Scalar", ""],
+                "Input Strides": [[1], [], [], [], []],
+                "Concrete Inputs": ["", "3", "False", "False", ""],
+            },
+        }
+        model = perf_model.aten_to(event)
+        assert model.flops() == 0
+        assert model.bytes() == 4 * (8 + 4)
+        copied = {
+            "name": "aten::_to_copy",
+            "args": {
+                "Input Dims": [[4, 128], [], [], [], [], [], []],
+                "Input type": ["int", "Scalar", "", "", "", "Scalar", ""],
+                "Input Strides": [[128, 1], [], [], [], [], [], []],
+                "Concrete Inputs": ["", "4", "", "", "", "False", ""],
+            },
+        }
+        cast = perf_model.aten_to(copied)
+        assert cast.flops() == 0
+        assert cast.bytes() == 4 * 128 * (4 + 8)
+        same_device = {
+            "name": "aten::to",
+            "args": {
+                "Input Dims": [[4, 128], [], [], [], []],
+                "Input type": ["int", "Scalar", "Scalar", "Scalar", ""],
+                "Input Strides": [[128, 1], [], [], [], []],
+                "Concrete Inputs": ["", "", "False", "False", ""],
+            },
+        }
+        moved = perf_model.aten_to(same_device)
+        assert moved.bytes() == 2 * 4 * 128 * 4
+        assert op_to_perf_model_class_map["aten::to"] is perf_model.aten_to
+        assert op_to_perf_model_class_map["aten::_to_copy"] is perf_model.aten_to
+
+    def test_pad_writes_the_widened_buffer(self):
+        event = {
+            "args": {
+                "Input Dims": [[4, 8194], [], [], []],
+                "Input type": ["int", "ScalarList", "", "Scalar"],
+                "Input Strides": [[8194, 1], [], [], []],
+                "Concrete Inputs": ["", "[0, 62]", "", "-1."],
             }
         }
-        model = perf_model.aten_unary_elementwise(event)
-        assert model.flops() == 4 * 256
-        assert model.bytes() > 0
+        model = perf_model.aten_pad(event)
+        assert model.flops() == 0
+        assert model.param_details["output_shape"] == (4, 8256)
+        assert model.bytes() == (4 * 8194 + 4 * 8256) * 4
+        assert op_to_perf_model_class_map["aten::pad"] is perf_model.aten_pad
 
-    def test_aten_binary_elementwise(self):
+    @pytest.mark.parametrize(
+        "name,flops_per_elem",
+        [
+            ("aten::add_", 1),
+            ("aten::sub", 1),
+            ("aten::div", 4),
+            ("aten::sigmoid_backward", 3),
+        ],
+    )
+    def test_aten_binary_elementwise(self, name, flops_per_elem):
         event = {
+            "name": name,
             "args": {
                 "Input Dims": [(4, 256), (256,), (4, 256)],
                 "Input type": ["c10::BFloat16"] * 3,
                 "Input Strides": [(256, 1), (1,), (256, 1)],
-            }
+            },
         }
-        model = perf_model.aten_binary_elementwise(event)
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == flops_per_elem * 4 * 256
+
+    def test_comparison_writes_a_bool(self):
+        event = {
+            "name": "aten::lt",
+            "args": {
+                "Input Dims": [(4, 256), (4, 256)],
+                "Input type": ["c10::BFloat16"] * 2,
+                "Input Strides": [(256, 1), (256, 1)],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::lt"](event)
         assert model.flops() == 4 * 256
+        assert model.bytes() == 4 * 256 * (2 + 2 + 1)
 
     def test_binary_broadcast_error(self):
         with pytest.raises(ValueError):
@@ -985,7 +2878,7 @@ class TestElementwiseReduceCoverage:
             }
         }
         model = perf_model.liger_silu_mul_function(event)
-        assert model.flops() == 4 * 256
+        assert model.flops() == (14 + 1) * 4 * 256
 
     def test_aten_reduce_sum(self):
         event = {
@@ -1011,6 +2904,28 @@ class TestElementwiseReduceCoverage:
         }
         model = perf_model.aten_reduce(event)
         assert model.param_details["num_output_elems"] == 4 * 256
+
+    @pytest.mark.parametrize(
+        "name,flops_per_elem",
+        [
+            ("aten::sum", 1),
+            ("aten::amax", 1),
+            ("aten::linalg_norm", 2),
+            ("aten::var", 4),
+            ("aten::logsumexp", 11),
+        ],
+    )
+    def test_aten_reduce_prices_each_input_element(self, name, flops_per_elem):
+        event = {
+            "name": name,
+            "args": {
+                "Input Dims": [(4, 256)],
+                "Input type": ["c10::BFloat16"],
+                "Concrete Inputs": ["", 1, False],
+            },
+        }
+        model = perf_model.aten_reduce(event)
+        assert model.flops() == flops_per_elem * 4 * 256
 
 
 class TestNormalizationCoverage:
@@ -1159,7 +3074,7 @@ class TestMiscPerfModelCoverage:
             }
         }
         model = perf_model.cross_entropy_fwd(event)
-        assert model.flops() == 5 * 4 * 32000
+        assert model.flops() == 18 * 4 * 32000
 
     def test_jax_gemm_and_conv(self):
         jax_gemm_event = {
@@ -1252,19 +3167,16 @@ class TestPerfModelExtensionsCoverage:
         assert model.flops() == 2 * 128 * 512 * 256
 
     def test_gemm_afp4wfp4(self):
+        # M=64, N=256, K=256: packed X and W, E8M0 scales, BF16 output.
         event = {
             "args": {
-                "Input Dims": [[64, 128], [256, 64], [64, 4], [256, 4]],
-                "Input type": [
-                    "c10::BFloat16",
-                    "c10::Float4_e2m1fn_x2",
-                    "c10::Float",
-                    "c10::Float",
-                ],
+                "Input Dims": [[64, 128], [256, 128], [64, 8], [256, 8]],
+                "Input type": ["unsigned char"] * 4,
             }
         }
         model = gemm_afp4wfp4(event)
-        assert model.bytes() > 0
+        x, w, out, scales = 64 * 128, 256 * 128, 64 * 256 * 2, (64 + 256) * 8
+        assert model.bytes() == x + w + out + scales
 
     def test_mxfp4_quant_variants(self):
         base_event = {
@@ -1349,6 +3261,42 @@ class TestPerfModelExtensionsCoverage:
         )
         assert topk.flops() > 0
 
+    def test_sglang_hc_combine_split(self):
+        # Decode shape from the Qwen3.8 trace: M=32, C=2560, n=4.
+        event = {
+            "args": {
+                "Input Dims": [(32, 2560), (32, 10240), (32, 10240), (4, 10240), ()],
+                "Input type": ["c10::BFloat16"] * 4 + ["Scalar"],
+                "Input Strides": [(2560, 1), (10240, 1), (10240, 1), (10240, 1), ()],
+            }
+        }
+        model = sglang_hc_combine_split(event)
+        assert model.flops() == 2 * 32 * 4 * 2560 * 5
+        assert model.bytes() == (
+            32 * 2560 * 2 + 3 * 32 * 10240 * 2 + 4 * 10240 * 2 + 2 * 32 * 8 * 4 * 4
+        )
+        assert model.get_compute_precision() == "bf16"
+        assert model.get_maf_type() == "vector"
+        assert model.category == "mHC"
+
+        gapped = {
+            "args": {
+                "Input Dims": event["args"]["Input Dims"],
+                "Input type": event["args"]["Input type"],
+                "Input Strides": [(2560, 1), (20480, 1), (10240, 1), (10240, 1), ()],
+            }
+        }
+        assert sglang_hc_combine_split(gapped).flops() == model.flops()
+        assert sglang_hc_combine_split(gapped).bytes() is None
+        assert (
+            sglang_hc_combine_split({"args": {"Input Dims": [(32, 2560)]}}).flops()
+            is None
+        )
+        assert (
+            get_pseudo_op_mappings()["sglang_profiler::hc_combine_hc_combine_split"]
+            is sglang_hc_combine_split
+        )
+
     def test_misc_extension_ops(self):
         rope = aiter_rope_cached_positions_2c_fwd_impl(
             {
@@ -1422,6 +3370,32 @@ class TestMoeExtensionsCoverage:
         model = cls(_moe_unfused_event(kernel_name=kernel))
         assert model.flops() > 0
         assert model.get_maf_type() == "matrix"
+
+    @pytest.mark.parametrize("cls", [moe_triton_unfused_up, moe_triton_unfused_down])
+    @pytest.mark.parametrize(
+        "input_type,kernel,expected",
+        [
+            ("c10::BFloat16", "_matmul_ogs_NNT_bf16xbf16xmxfp4_128x128x128x1", "bf16"),
+            ("c10::BFloat16", "moe_fp8_gemm_kernel", "bf16"),
+            (
+                "c10::Float8_e4m3fn",
+                "_matmul_ogs_NNT_bf16xfp8xmxfp4_16x128x256x1",
+                "fp8",
+            ),
+            ("Float8_e5m2", "moe_fp8_gemm_kernel", "fp8"),
+        ],
+    )
+    def test_moe_triton_unfused_roofs_at_activation_width(
+        self, cls, input_type, kernel, expected
+    ):
+        event = _moe_unfused_event(kernel_name=kernel)
+        event["args"]["Input type"][0] = input_type
+        assert cls(event).get_compute_precision() == expected
+
+    @pytest.mark.parametrize("cls", [moe_triton_unfused_up, moe_triton_unfused_down])
+    def test_moe_triton_unfused_no_precision_without_weight_dtype(self, cls):
+        event = _moe_unfused_event(kernel_name="moe_gemm_kernel")
+        assert cls(event).get_compute_precision() is None
 
     def test_moe_aiter_unfused(self):
         up_event = {
@@ -1574,6 +3548,66 @@ class TestRmsNormExtensionsCoverage:
         }
         model = aiter_rmsnorm(event)
         assert model.flops() > 0
+
+    def test_aiter_fused_qk_rmsnorm(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    (12, 2048),
+                    (2048,),
+                    (),
+                    (12, 512),
+                    (512,),
+                    (),
+                    (12, 2048),
+                    (12, 512),
+                ],
+                "Input type": ["c10::BFloat16"] * 8,
+                "Input Strides": [
+                    (2624, 1),
+                    (1,),
+                    (),
+                    (2624, 1),
+                    (1,),
+                    (),
+                    (2048, 1),
+                    (512, 1),
+                ],
+            }
+        }
+        model = aiter_fused_qk_rmsnorm(event)
+        assert model.num_channels == 2048
+        assert model.k_num_channels == 512
+        assert model.k_shape == (12, 512)
+        assert model.k_num_elems == 12 * 512
+        q_only = aiter_rmsnorm(
+            {
+                "args": {
+                    "Input Dims": [(12, 2048), (12, 2048), (2048,), ()],
+                    "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                    "Input Strides": [(2048, 1), (2048, 1), (1,), ()],
+                }
+            }
+        )
+        k_only = aiter_rmsnorm(
+            {
+                "args": {
+                    "Input Dims": [(12, 512), (12, 512), (512,), ()],
+                    "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                    "Input Strides": [(512, 1), (512, 1), (1,), ()],
+                }
+            }
+        )
+        assert model.flops() == q_only.flops() + k_only.flops()
+        assert model.bytes() == q_only.bytes() + k_only.bytes()
+        assert model.flops() == perf_model.RMSNorm.flops_func(
+            12 * 2048, 2048, True
+        ) + perf_model.RMSNorm.flops_func(12 * 512, 512, True)
+        assert model.bytes() == 128000
+        assert (
+            get_pseudo_op_mappings()["aiter::_fused_qk_rmsnorm_kernel"]
+            is aiter_fused_qk_rmsnorm
+        )
 
     def test_aiter_rmsnorm2d_dynamicquant(self):
         event = {
@@ -1761,6 +3795,96 @@ class TestAttentionExtensionsCoverage:
         model = pa_decode_gluon(event)
         assert model.flops() > 0
 
+    def test_sgl_kernel_fast_topk_transform_fused(self):
+        def event(annotation, rows=8, max_len=1048640):
+            return {
+                "annotation": annotation,
+                "args": {
+                    "Input Dims": [(rows, max_len), (rows,), (rows, 2048)],
+                    "Input type": ["float", "int", "int"],
+                },
+            }
+
+        decode = sgl_kernel_fast_topk_transform_fused(
+            event(
+                "execute_8_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_8(sq8sk815046sqsq8sqsk815046)"
+            )
+        )
+        assert decode.flops() == 815046
+        assert decode.bytes() == 815046 * 4 + 8 * (2048 + 2048) * 4
+        assert decode.get_compute_precision() == "fp32"
+
+        short = sgl_kernel_fast_topk_transform_fused(
+            event(
+                "execute_2_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_2(sq2sk1000sqsq2sqsk1000)",
+                rows=2,
+            )
+        )
+        assert short.bytes() == 1000 * 4 + 2 * (500 + 2048) * 4
+
+        prefill = sgl_kernel_fast_topk_transform_fused(
+            event(
+                "execute_4_context_1(sq4sk10sqsq16sqsk40)"
+                "_generation_0(sq0sk0sqsq0sqsk0)",
+                rows=4,
+            )
+        )
+        assert prefill.flops() == 7 + 8 + 9 + 10
+
+        no_annotation = sgl_kernel_fast_topk_transform_fused(event("NA"))
+        assert no_annotation.flops() is None
+        assert no_annotation.bytes() is None
+
+    def test_mla_tilelang_sparse_fwd_topk_sliding_window(self):
+        event = {
+            "annotation": (
+                "execute_11_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_11(sq11sk1749268sqsq11sqsk1749268)"
+            ),
+            "args": {
+                "Input Dims": [[12, 8, 576], [2991488, 1, 576], [12, 1, 2048]],
+                "Input type": ["c10::Float8_e4m3fn", "c10::Float8_e4m3fn", "int"],
+            },
+        }
+        model = mla_tilelang_sparse_fwd(event)
+        assert model.param_details["sliding_window"] == 2048
+        assert model.param_details["d_h_v"] == 512
+        capped = 11 * 2048
+        assert model._cap_gen_kv(model.param_details["g_sk"]) == capped
+        assert model._cap_gen_kv(model.param_details["g_sqsk"]) == capped
+        bytes_mib = model.bytes() / (1024**2)
+        assert bytes_mib < 1815
+        assert 20 <= bytes_mib <= 30
+        duration_s = 21.81e-6
+        tb_per_s = model.bytes() / duration_s / 1e12
+        assert tb_per_s < 7.4
+        assert 0.5 <= tb_per_s <= 2.0
+
+    def test_mla_tilelang_sparse_fwd_missing_indices_no_perf(self):
+        base = {
+            "annotation": (
+                "execute_11_context_0(sq0sk0sqsq0sqsk0)"
+                "_generation_11(sq11sk1749268sqsq11sqsk1749268)"
+            ),
+        }
+        for dims in (
+            [[12, 8, 576], [2991488, 1, 576]],
+            [[12, 8, 576], [2991488, 1, 576], []],
+            [[12, 8, 576], [2991488, 1, 576], [12, 1, 0]],
+        ):
+            event = {
+                **base,
+                "args": {
+                    "Input Dims": dims,
+                    "Input type": ["c10::Float8_e4m3fn", "c10::Float8_e4m3fn", "int"],
+                },
+            }
+            model = mla_tilelang_sparse_fwd(event)
+            assert model.param_details.get("_no_perf")
+            assert model.flops() is None
+
     def test_inference_attention_no_perf(self):
         model = InferenceAttention({"annotation": "bad", "args": {}})
         assert model.flops() is None
@@ -1900,17 +4024,15 @@ class TestSdpaExtendedCoverage:
         assert model.bytes() > 0
 
     def test_sdpa_simulation_time_func(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         with patch.object(
-            perf_model.GEMM,
-            "get_simulation_time_func",
-            return_value=(1.0, "cmd"),
+            origami_helper,
+            "gemm_time_us",
+            return_value=1.0,
         ):
             with patch.object(perf_model.Softmax, "get_time", return_value=0.5):
-                t = perf_model.SDPA.get_simulation_time_func(
+                t = sdpa_tile.sdpa_fwd_time_us(
                     self._ARCH,
                     "bf16",
-                    None,
                     "c10::BFloat16",
                     1024,
                     2,
@@ -1919,19 +4041,16 @@ class TestSdpaExtendedCoverage:
                     128,
                     64,
                     fa=True,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
         assert t > 0
 
     def test_sdpa_simulation_time_func_qkt_none(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
-        ):
+        with patch.object(origami_helper, "gemm_time_us", return_value=None):
             assert (
-                perf_model.SDPA.get_simulation_time_func(
+                sdpa_tile.sdpa_fwd_time_us(
                     self._ARCH,
                     "bf16",
-                    None,
                     "c10::BFloat16",
                     1024,
                     1,
@@ -1939,11 +4058,12 @@ class TestSdpaExtendedCoverage:
                     64,
                     64,
                     32,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
                 is None
             )
 
-    def test_sdpa_get_simulation_time_on_model(self):
+    def test_sdpa_tile_time_on_model(self):
         event = _sdpa_event(
             perf_model.flash_attention,
             [2, 64, 8, 64],
@@ -1953,25 +4073,22 @@ class TestSdpaExtendedCoverage:
             strides=[[32768, 512, 64, 1]] * 3,
         )
         model = perf_model.flash_attention(event, arch=self._ARCH)
-        with patch.object(
-            perf_model.SDPA,
-            "get_simulation_time_func",
-            return_value=42.0,
-        ):
-            assert model.get_simulation_time() == 42.0
+        gemm_time = lambda *a, **k: 1.0
+        with patch.object(sdpa_tile, "sdpa_fwd_time_us", return_value=42.0) as fwd:
+            assert sdpa_tile.sdpa_tile_time_us(model, self._ARCH, gemm_time) == 42.0
+        assert fwd.call_args.args[9] is True
+        assert fwd.call_args.kwargs["gemm_time"] is gemm_time
 
     def test_sdpa_bwd_simulation_time_func(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
         with patch.object(
-            perf_model.GEMM,
-            "get_simulation_time_func",
-            return_value=(2.0, "cmd"),
+            origami_helper,
+            "gemm_time_us",
+            return_value=2.0,
         ):
             with patch.object(perf_model.Softmax, "get_time", return_value=1.0):
-                t = perf_model.SDPA.get_simulation_time_bwd_func(
+                t = sdpa_tile.sdpa_bwd_time_us(
                     self._ARCH,
                     "bf16",
-                    None,
                     "c10::BFloat16",
                     2048,
                     2,
@@ -1979,6 +4096,7 @@ class TestSdpaExtendedCoverage:
                     128,
                     128,
                     64,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
         assert t > 0
 
@@ -1991,7 +4109,10 @@ class TestSdpaExtendedCoverage:
             },
         }
         model = perf_model.vllm_unified_attention_with_output(event)
-        assert model.get_simulation_time() is None or model.get_simulation_time() >= 0
+        assert (
+            sdpa_tile.sdpa_tile_time_us(model, None, origami_helper.gemm_time_us)
+            is None
+        )
 
 
 class TestConvBiasAndNormExtendedCoverage:
@@ -2070,35 +4191,7 @@ class TestGroupedGemmAndPrimusCoverage:
         assert model.flops() > 0
 
 
-class TestGemmSimulatorExtendedCoverage:
-    def test_gemm_simulator_missing_inputs(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(_ARCH, None, 8, 16, 1, "bf16")
-
-    def test_gemm_simulator_cache_hit(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=10.0\n", stderr="")
-            t1, _ = perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-            t2, _ = perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-        assert t1 == t2 == 10.0
-        run.assert_called_once()
-
-    def test_gemm_simulator_windows_requires_python(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        with patch("TraceLens.PerfModel.perf_model.os.name", "nt"):
-            with pytest.raises(AssertionError, match="Windows"):
-                perf_model.GEMM.get_simulation_time_func(
-                    _ARCH, 4, 8, 16, 1, "bf16", python_path=None
-                )
+class TestGemmExtendedCoverage:
 
     def test_jax_gemm_mixed_dtype_warns(self):
         event = {
@@ -2231,6 +4324,34 @@ class TestCustomCollectivesPerfModels:
         assert model.flops() > 0
         assert model.bytes() > 0
 
+    def test_glm_fused_allreduce_rmsnorm_uses_python_layout(self):
+        sglang = {
+            "args": {
+                "Input Dims": [(12, 6144), (12, 6144), (6144,)],
+                "Input type": ["c10::BFloat16"] * 3,
+                "Input Strides": [(6144, 1), (6144, 1), (1,)],
+            }
+        }
+        vllm = {
+            "args": {
+                "Input Dims": [(4, 6144), (4, 6144), (6144,), ()],
+                "Input type": ["c10::BFloat16"] * 3 + ["Scalar"],
+                "Input Strides": [(6144, 1), (6144, 1), (1,), ()],
+            }
+        }
+        sglang_model = aiter_fused_allreduce_rmsnorm_(sglang)
+        vllm_model = aiter_fused_allreduce_rmsnorm_(vllm)
+        assert sglang_model.num_elems == 12 * 6144
+        assert sglang_model.flops() == 12 * 6144 + perf_model.RMSNorm.flops_func(
+            12 * 6144, 6144, True
+        )
+        assert vllm_model.num_elems == 4 * 6144
+        mappings = get_pseudo_op_mappings()
+        assert (
+            mappings["vllm::rocm_aiter_fused_allreduce_rmsnorm"]
+            is aiter_fused_allreduce_rmsnorm_
+        )
+
     def test_custom_ar_all_reduce(self):
         model = custom_ar_all_reduce(_allreduce_event())
         assert model.flops() == 0
@@ -2288,18 +4409,17 @@ class TestCustomCollectivesPerfModels:
 class TestTreePerfInitKwargs:
     def test_perf_model_init_kwargs_without_optional_params(self):
         class SimpleModel:
-            def __init__(self, event, arch=None, python_path=None):
+            def __init__(self, event, arch=None):
                 self.event = event
 
         kwargs = tree_perf._perf_model_init_kwargs(
             SimpleModel,
             event={"name": "op"},
             arch={},
-            python_path=None,
-            enable_origami=True,
+            inductor_cache_dir="/tmp/cache",
         )
         assert kwargs["event"]["name"] == "op"
-        assert "enable_origami" not in kwargs
+        assert "inductor_cache_dir" not in kwargs
 
     def test_perf_model_init_kwargs_with_var_keyword(self):
         class FlexibleModel:
@@ -2310,20 +4430,15 @@ class TestTreePerfInitKwargs:
             FlexibleModel,
             event={"name": "op"},
             arch={},
-            python_path="path",
-            enable_origami=False,
             inductor_cache_dir="/tmp/cache",
         )
-        assert kwargs["enable_origami"] is False
         assert kwargs["inductor_cache_dir"] == "/tmp/cache"
 
     def test_perf_model_init_kwargs_broken_signature(self):
         class Broken:
             __init__ = 42
 
-        kwargs = tree_perf._perf_model_init_kwargs(
-            Broken, event={}, arch=None, python_path=None, enable_origami=True
-        )
+        kwargs = tree_perf._perf_model_init_kwargs(Broken, event={}, arch=None)
         assert kwargs["event"] == {}
 
 
@@ -2432,18 +4547,10 @@ class TestPerfModelExhaustiveSweep:
                     "get_compute_precision",
                     "get_maf_type",
                     "get_time",
-                    "get_simulation_time",
-                    "get_simulation_time_func",
                 ):
                     if hasattr(obj, meth):
                         try:
-                            fn = getattr(obj, meth)
-                            if meth == "get_simulation_time_func":
-                                fn(_ARCH, 4, 8, 16, 1, "bf16")
-                            elif meth == "get_simulation_time":
-                                fn()
-                            else:
-                                fn()
+                            getattr(obj, meth)()
                         except (
                             NotImplementedError,
                             TypeError,
@@ -2500,17 +4607,6 @@ class TestPerfModelRemaining:
         }
         model = perf_model.primus_turbo_grouped_gemm(event)
         assert model.flops() > 0
-
-    def test_gemm_simulator_invalid_arch(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(
-                {"freq_mhz": 2200}, None, 8, 16, 1, "bf16"
-            )
-        perf_model.GEMM.cache_gemm_results.clear()
 
 
 class _GroupedGemmNoBwdOverride(perf_model.GroupedGemm):
@@ -2658,14 +4754,13 @@ class TestPerfModelPhase11:
         assert perf_model.Softmax.bytes_bwd(4, 8, 2) > 0
 
         with patch.object(
-            perf_model.GEMM,
-            "get_simulation_time_func",
-            side_effect=[(1.0, "qkt"), (None, None)],
+            origami_helper,
+            "gemm_time_us",
+            side_effect=[1.0, None],
         ):
-            t = perf_model.SDPA.get_simulation_time_func(
+            t = sdpa_tile.sdpa_fwd_time_us(
                 _ARCH,
                 "fp16",
-                None,
                 "c10::Half",
                 1000,
                 1,
@@ -2674,6 +4769,7 @@ class TestPerfModelPhase11:
                 64,
                 32,
                 fa=True,
+                gemm_time=origami_helper.gemm_time_us,
             )
             assert t is None
 
@@ -3238,10 +5334,11 @@ class TestPerfModelPhase6:
             }
         }
         model = perf_model.aten__scaled_dot_product_flash_attention(event, arch=_ARCH)
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
-        ):
-            assert model.get_simulation_time() is None
+        with patch.object(origami_helper, "gemm_time_us", return_value=None):
+            assert (
+                sdpa_tile.sdpa_tile_time_us(model, _ARCH, origami_helper.gemm_time_us)
+                is None
+            )
 
     def test_flash_attention_backward_flops(self):
         model = perf_model.flash_attention_backward(_flash_bwd_event())
@@ -3466,10 +5563,11 @@ class TestPerfModelPhase9:
     def test_flash_attention_backward_simulation_none(self):
 
         model = perf_model.flash_attention_backward(_flash_bwd_event())
-        with patch.object(
-            perf_model.GEMM, "get_simulation_time_func", return_value=(None, None)
-        ):
-            assert model.get_simulation_time() is None
+        with patch.object(origami_helper, "gemm_time_us", return_value=None):
+            assert (
+                sdpa_tile.sdpa_tile_time_us(model, _ARCH, origami_helper.gemm_time_us)
+                is None
+            )
 
 
 class TestMoeExtensionsBoost:
@@ -3623,28 +5721,6 @@ class TestPerfModelExtensionsBoost:
 
 
 class TestPerfModelPush95:
-    def test_gemm_simulator_missing_required_inputs(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(
-                {"name": "mi300x"}, None, 8, 16, 1, "bf16"
-            )
-
-    def test_gemm_simulator_force_to_l1_and_scaled_cus(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        arch = dict(_ARCH)
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=3.3\n", stderr="")
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                arch, 4, 8, 16, 1, "bf16", num_cus=64, force_to_l1=True
-            )
-        assert t == 3.3
 
     def test_aten_scaled_mm_output_bpe_branches(self):
         for dtype in ("c10::Float8_e4m3fn", "c10::BFloat16"):
@@ -3946,22 +6022,6 @@ def test_moe_ck_and_gptq_extended():
     assert moe_ext.moe_gptq_awq_down(gptq).flops() > 0
 
 
-def test_gemm_simulator_clears_cache(monkeypatch, tmp_path):
-    perf_model.GEMM.cache_gemm_results.clear()
-    sim_dir = tmp_path / "simdir"
-    sim_dir.mkdir()
-    sim = sim_dir / "run_gemm.py"
-    sim.write_text("# stub\n")
-    monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-    with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-        run.return_value = MagicMock(stdout="Time=42.5\n", stderr="")
-        t, _ = perf_model.GEMM.get_simulation_time_func(
-            _ARCH, 4, 8, 16, 1, "bf16", num_cus=64, force_to_l1=True
-        )
-    assert t == 42.5
-    perf_model.GEMM.cache_gemm_results.clear()
-
-
 def test_untested_perf_extensions():
 
     blockscale = {
@@ -4145,63 +6205,13 @@ class TestMoeExtensionsSweep:
 
 
 class TestPerfModelPush95Coverage:
-    @pytest.mark.parametrize(
-        "missing,kwargs",
-        [
-            ("M", {"M": None, "N": 8, "K": 16, "B": 1, "dtype": "bf16"}),
-            ("N", {"M": 4, "N": None, "K": 16, "B": 1, "dtype": "bf16"}),
-            ("K", {"M": 4, "N": 8, "K": None, "B": 1, "dtype": "bf16"}),
-            ("dtype", {"M": 4, "N": 8, "K": 16, "B": 1, "dtype": None}),
-            ("arch['name']", {"M": 4, "N": 8, "K": 16, "B": 1, "dtype": "bf16"}),
-        ],
-    )
-    def test_gemm_simulator_missing_inputs(
-        self, monkeypatch, tmp_path, missing, kwargs
-    ):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        arch = dict(_ARCH) if "arch['name']" not in missing else {"freq_mhz": 2200}
-        with pytest.raises(AssertionError, match="Invalid inputs"):
-            perf_model.GEMM.get_simulation_time_func(arch, **kwargs)
-        perf_model.GEMM.cache_gemm_results.clear()
 
-    def test_gemm_simulator_subprocess_failure(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="", stderr="fail")
-            with pytest.raises(AssertionError, match="Failed to simulate"):
-                perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-        perf_model.GEMM.cache_gemm_results.clear()
-
-    def test_gemm_origami_unsupported_dtype(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        mock_origami = MagicMock()
-        mock_origami.data_type_t = MagicMock()
-        with patch.dict(sys.modules, {"origami": mock_origami}):
-            with patch("TraceLens.PerfModel.origami_helper.OrigamiHelper"):
-                with pytest.warns(RuntimeWarning, match="Unsupported dtype"):
-                    t, _ = perf_model.GEMM.get_simulation_time_func(
-                        _ARCH, 4, 8, 16, 1, "unknown_dtype", enable_origami=True
-                    )
-        assert t is None
-
-    def test_sdpa_simulation_via_subprocess_gemm(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-            run.return_value = MagicMock(stdout="Time=2.0\n", stderr="")
+    def test_sdpa_simulation_via_origami_gemm(self):
+        with patch.object(origami_helper, "gemm_time_us", return_value=2.0):
             with patch.object(perf_model.Softmax, "get_time", return_value=0.25):
-                t = perf_model.SDPA.get_simulation_time_func(
+                t = sdpa_tile.sdpa_fwd_time_us(
                     _ARCH,
                     "bf16",
-                    "/usr/bin/python3",
                     "c10::BFloat16",
                     1024,
                     2,
@@ -4210,9 +6220,9 @@ class TestPerfModelPush95Coverage:
                     128,
                     64,
                     fa=True,
+                    gemm_time=origami_helper.gemm_time_us,
                 )
         assert t > 0
-        perf_model.GEMM.cache_gemm_results.clear()
 
     @pytest.mark.parametrize(
         "cls,event",
@@ -4572,6 +6582,55 @@ class TestMoeExtensionsPush95Coverage:
             with pytest.raises(NotImplementedError):
                 model.bytes_bwd()
 
+    def test_unknown_dtypes_use_the_default_byte_widths(self):
+        # An unrecognized dtype keeps the previous default width: 2 bytes for
+        # an activation or output, 1 byte for a weight, and 1 byte for a
+        # block-scale activation. These fixtures already use those widths.
+        unfused_up = {
+            "args": {
+                "Input Dims": [[32, 4096], [8, 14336, 512], [32, 2, 7168]],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+        unfused_down = {
+            "args": {
+                "Input Dims": [[32, 2, 7168], [8, 4096, 896], [32, 4096]],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+        cases = [
+            (moe_ext.moe_aiter_fused_1stage, self.MOE_FUSED),
+            (moe_ext.moe_aiter_fused_blockscale, self.MOE_BLOCKSCALE),
+            (moe_ext.moe_aiter_unfused_up, unfused_up),
+            (moe_ext.moe_aiter_unfused_down, unfused_down),
+            (moe_ext.moe_aiter_ck_stage1, self.CK1),
+            (moe_ext.moe_aiter_ck_stage2, self.CK2),
+            (moe_ext.moe_flydsl_stage1, self.FLY),
+            (moe_ext.moe_flydsl_stage2, self.FLY),
+            (moe_ext.moe_triton_invoke_grouped_gemm, self.GROUPED),
+            (moe_ext.moe_gptq_awq_up, self.GPTQ),
+            (moe_ext.moe_gptq_awq_down, self.GPTQ),
+        ]
+        for cls, event in cases:
+            unknown = {
+                "args": {
+                    **event["args"],
+                    "Input type": ["not-a-dtype"] * len(event["args"]["Input type"]),
+                }
+            }
+            known_bytes = cls(event).bytes()
+            unknown_bytes = cls(unknown).bytes()
+            assert known_bytes > 0
+            assert unknown_bytes == known_bytes, cls.__name__
+
 
 class TestPerfModelFinalCoverage:
     @pytest.mark.parametrize(
@@ -4659,29 +6718,6 @@ class TestPerfModelFinalCoverage:
         model = cls(event)
         with pytest.warns(UserWarning):
             model.bytes()
-
-    def test_gemm_simulator_with_python_path(self, monkeypatch, tmp_path):
-        sim = tmp_path / "run_gemm.py"
-        sim.write_text("# stub\n")
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(sim))
-        perf_model.GEMM.cache_gemm_results.clear()
-        try:
-            with patch("TraceLens.PerfModel.perf_model.subprocess.run") as run:
-                run.return_value = MagicMock(stdout="Time=5.5\n", stderr="")
-                t, cmd = perf_model.GEMM.get_simulation_time_func(
-                    _ARCH,
-                    4,
-                    8,
-                    16,
-                    None,
-                    "bf16",
-                    python_path="/usr/bin/python3",
-                    num_cus=64,
-                )
-            assert t == 5.5
-            assert "/usr/bin/python3" in cmd
-        finally:
-            perf_model.GEMM.cache_gemm_results.clear()
 
     def test_aten_reduce_edge_cases(self):
         empty = perf_model.aten_reduce(
@@ -4972,6 +7008,105 @@ class TestMoeExtensionsFinal:
         )
         assert sort.bytes() > 0
 
+    def test_opus_sort_guards_return_none(self):
+        # Missing rows/topk shape -> no perf.
+        assert (
+            moe_ext.moe_sorting_opus_fwd({"args": {"Input Dims": [[]]}}).flops() is None
+        )
+        # dims[0] that cannot unpack to (rows, topk).
+        assert (
+            moe_ext.moe_sorting_opus_fwd({"args": {"Input Dims": [[1, 2, 3]]}}).flops()
+            is None
+        )
+        # Zero rows.
+        assert (
+            moe_ext.moe_sorting_opus_fwd({"args": {"Input Dims": [[0, 6]]}}).flops()
+            is None
+        )
+        # Non-int scalar list leaves block/num_experts unset.
+        bad_scalars = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1000], [1000], [40], [2], [0, 0]],
+                "Input type": ["int", "float", "int", "float", "int", "int", ""],
+                "Concrete Inputs": [""] * 7 + ["x", "y"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(bad_scalars).flops() is None
+        # Broadcast stride on the counted pairs -> bytes None.
+        broadcast = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1824], [1824], [57], [2], [0, 0]],
+                "Input type": ["int", "float", "int", "float", "int", "int", ""],
+                "Input Strides": [[0, 1], [7, 1], [], [], [], [], []],
+                "Concrete Inputs": [""] * 7 + ["385", "32"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(broadcast).bytes() is None
+        # Unreadable moe_buf dtype -> bytes None.
+        bad_moe = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1824], [1824], [57], [2], [8, 6144]],
+                "Input type": ["int", "float", "int", "float", "int", "int", "weird"],
+                "Concrete Inputs": [""] * 7 + ["385", "32"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(bad_moe).bytes() is None
+        # moe_buf present but its dtype is absent from the type list -> bytes None.
+        short_types = {
+            "args": {
+                "Input Dims": [[8, 7], [8, 7], [1824], [1824], [57], [2], [8, 6144]],
+                "Input type": ["int", "float", "int", "float", "int", "int"],
+                "Concrete Inputs": [""] * 7 + ["385", "32"],
+            }
+        }
+        assert moe_ext.moe_sorting_opus_fwd(short_types).bytes() is None
+
+    def test_bounded_mx_quant_guard_branches(self):
+        base_dims = [[8, 7168], [12384, 224], [8, 7168], [12369], [2]]
+        scalars = ["", "", "", "", "", "8", "32", "56", "385", "32", ""]
+        types = [
+            "c10::Float8_e4m3fn",
+            "c10::Float8_e8m0fnu",
+            "c10::BFloat16",
+            "int",
+            "int",
+        ]
+        # Bounded config valid, but the activation shape is empty -> no rows.
+        no_rows = {
+            "args": {
+                "Input Dims": [[8, 7168], [12384, 224], [], [12369], [2]],
+                "Input type": types,
+                "Input Strides": [[], [], []],
+                "Concrete Inputs": scalars,
+            }
+        }
+        model = pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(no_rows)
+        assert model.param_details["bounded"] is True
+        assert model.flops() is None
+        assert model.bytes() is None
+        # Broadcast stride on a counted operand -> bytes None.
+        non_dense = {
+            "args": {
+                "Input Dims": base_dims,
+                "Input type": types,
+                "Input Strides": [[0, 1], [224, 1], [7168, 1]],
+                "Concrete Inputs": scalars,
+            }
+        }
+        assert (
+            pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(non_dense).bytes() is None
+        )
+        # Unreadable output dtype -> bytes None.
+        bad_out = {
+            "args": {
+                "Input Dims": base_dims,
+                "Input type": ["weird"] + types[1:],
+                "Input Strides": [[7168, 1], [224, 1], [7168, 1]],
+                "Concrete Inputs": scalars,
+            }
+        }
+        assert pext.fused_dynamic_mx_quant_moe_sort_hip_bounded(bad_out).bytes() is None
+
 
 class TestPerfModelDeepCoverage2:
     def test_aten_conv_bwd_with_bias_grad(self):
@@ -5030,11 +7165,6 @@ class TestPerfModelDeepCoverage2:
         assert g.flops() > 0
         assert g.get_compute_precision() == "bf16"
 
-    def test_gemm_simulator_default_batch_and_invalid_path(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("GEMM_SIMULATOR_PATH", str(tmp_path / "missing.py"))
-        with pytest.raises(ValueError, match="does not exist"):
-            perf_model.GEMM.get_simulation_time_func(_ARCH, 4, 8, 16, 1, "bf16")
-
     def test_fused_rope_and_cross_entropy_precision(self):
         rope = perf_model.fused_rope_fwd(
             {
@@ -5054,3 +7184,192 @@ class TestPerfModelDeepCoverage2:
             }
         )
         assert ce.get_compute_precision() is not None
+
+
+def test_moe_sorting_opus_fwd_maps_and_models():
+    cls = get_pseudo_op_mappings()["aiter::moe_sorting_opus_fwd"]
+    # main maps this op to the dedicated subclass of MoeSortScatterGather.
+    assert cls is moe_ext.moe_sorting_opus_fwd
+    assert issubclass(cls, MoeSortScatterGather)
+    model = cls(
+        {
+            "args": {
+                "Input Dims": [
+                    [1113, 9],
+                    [1113, 9],
+                    [26456],
+                    [26456],
+                    [414],
+                    [2],
+                    [1113, 6144],
+                ],
+                "Input type": [
+                    "int",
+                    "float",
+                    "int",
+                    "float",
+                    "int",
+                    "int",
+                    "c10::BFloat16",
+                ],
+            }
+        }
+    )
+    pairs = 1113 * 9
+    written = 26456
+    experts = 257
+    moe_elems = 1113 * 6144
+    assert model.flops() == 2 * pairs + experts + 2 * written + moe_elems
+    assert model.bytes() == pairs * 8 + written * 8 + 414 * 4 + 8 + moe_elems * 2
+
+
+def test_fused_fp8_bmm_rope_cat_and_cache_mla():
+    name = (
+        "sglang_profiler::fused_bmm_rope_kv_cache_fused_fp8_bmm_rope_cat_and_cache_mla"
+    )
+    cls = get_pseudo_op_mappings()[name]
+    assert cls is pext.fused_fp8_bmm_rope_cat_and_cache_mla
+    model = cls(
+        {
+            "args": {
+                "Input Dims": [
+                    [8, 12, 192],
+                    [8, 512, 192],
+                    [],
+                    [12, 8, 64],
+                    [12, 1, 512],
+                    [12, 1, 64],
+                    [2991488, 1, 576],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                    "float",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::Float8_e4m3fn",
+                ],
+            }
+        }
+    )
+    bmm = 2 * 8 * 12 * 512 * 192
+    rope = 3 * (12 * 8 * 64 + 12 * 1 * 64)
+    assert model.flops() == bmm + rope
+    read_q = (8 * 12 * 192 + 12 * 8 * 64) * 2
+    read_w = 8 * 512 * 192 * 1
+    read_k = 12 * 1 * (512 + 64) * 2
+    write_q = 12 * 8 * (512 + 64) * 1
+    write_kv = 12 * 1 * (512 + 64) * 1
+    assert model.bytes() == read_q + read_w + read_k + write_q + write_kv
+
+
+class TestFlashDSv41PerfModels:
+    _ANN = (
+        "execute_8_context_0(sq0sk0sqsq0sqsk0)"
+        "_generation_8(sq8sk815046sqsq8sqsk815046)"
+    )
+
+    def test_deepseek_v4_topk_transform_512(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {
+                "Input Dims": [(8, 1048640), (8,), (8, 8194), (8, 512), (), ()],
+                "Input type": ["float", "int", "int", "int", "Scalar", ""],
+            },
+        }
+        model = sgl_kernel_deepseek_v4_topk_transform_512(event)
+        # Annotation sqsk compressed by CSA stride 4.
+        assert model.flops() == (815046 + 3) // 4
+        assert model.param_details["topk"] == 512
+        assert model.get_compute_precision() == "fp32"
+        assert model.bytes() > 0
+        assert model.get_maf_type() == "vector"
+        # DSV4-Pro topk comes from dst page-table width (1024), not the op name.
+        pro = sgl_kernel_deepseek_v4_topk_transform_512(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": [(8, 1048640), (8,), (8, 8194), (8, 1024), (), ()],
+                    "Input type": ["float", "int", "int", "int", "Scalar", ""],
+                },
+            }
+        )
+        assert pro.param_details["topk"] == 1024
+        assert pro.flops() == model.flops()
+        no_ann = sgl_kernel_deepseek_v4_topk_transform_512(
+            {"annotation": "NA", "args": event["args"]}
+        )
+        assert no_ann.flops() is None
+        assert no_ann.bytes() is None
+        unknown_dtype = sgl_kernel_deepseek_v4_topk_transform_512(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": event["args"]["Input Dims"],
+                    "Input type": ["not_a_dtype", "int", "int", "int"],
+                },
+            }
+        )
+        assert unknown_dtype.bytes() is None
+        with pytest.raises(NotImplementedError):
+            model.flops_bwd()
+        with pytest.raises(NotImplementedError):
+            model.bytes_bwd()
+
+    def test_sgl_kernel_fast_topk(self):
+        event = {
+            "annotation": self._ANN,
+            "args": {
+                "Input Dims": [(8, 131584), (8, 2048), (8,), ()],
+                "Input type": ["float", "int", "int", ""],
+            },
+        }
+        model = sgl_kernel_fast_topk(event)
+        assert model.flops() == (815046 + 3) // 4
+        assert model.bytes() > 0
+        assert model.get_maf_type() == "vector"
+        assert model.get_compute_precision() == "fp32"
+        no_ann = sgl_kernel_fast_topk({"annotation": "NA", "args": event["args"]})
+        assert no_ann.flops() is None
+        assert no_ann.bytes() is None
+        unknown_dtype = sgl_kernel_fast_topk(
+            {
+                "annotation": self._ANN,
+                "args": {
+                    "Input Dims": event["args"]["Input Dims"],
+                    "Input type": ["not_a_dtype", "int"],
+                },
+            }
+        )
+        assert unknown_dtype.bytes() is None
+        with pytest.raises(NotImplementedError):
+            model.flops_bwd()
+        with pytest.raises(NotImplementedError):
+            model.bytes_bwd()
+
+    def test_fused_k_norm_rope_q_flashmla(self):
+        rope = fused_k_norm_rope_q_flashmla(
+            {"annotation": self._ANN, "args": {"d_h": 512, "rope_dim": 64}}
+        )
+        assert rope.flops() > 0
+        assert rope.bytes() > 0
+        assert rope.get_compute_precision() == "bf16"
+        assert rope.get_maf_type() == "vector"
+        # Fallback to stamped num_tokens when annotation is not parseable.
+        stamped = fused_k_norm_rope_q_flashmla(
+            {"annotation": "NA", "args": {"num_tokens": 8, "d_h": 512, "rope_dim": 64}}
+        )
+        assert stamped.flops() > 0
+        assert stamped.bytes() > 0
+        # No tokens → _no_perf path.
+        empty = fused_k_norm_rope_q_flashmla({"annotation": "NA", "args": {}})
+        assert empty.flops() is None
+        assert empty.bytes() is None
+        assert empty.get_compute_precision() is None
+        # Outer except: non-int geometry stamps.
+        bad = fused_k_norm_rope_q_flashmla(
+            {"annotation": "NA", "args": {"num_tokens": "x", "d_h": "y"}}
+        )
+        assert bad.param_details.get("_no_perf")
+        assert bad.flops() is None

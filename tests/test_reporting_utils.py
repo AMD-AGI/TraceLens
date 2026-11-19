@@ -6,22 +6,22 @@
 
 """Unit tests for TraceLens.Reporting.reporting_utils helpers."""
 
-import json, os, pandas as pd, pytest, gzip, importlib, sys, subprocess, textwrap
+import io, json, os, pandas as pd, pytest, gzip, importlib, sys, subprocess, textwrap
 from unittest import mock
 from TraceLens.Reporting.reporting_utils import (
     _node_span_for_pg,
     _parse_pg_ranks,
+    _safe_sheet_name,
     add_gpu_arch_cli_args,
     add_node_span_columns,
     detect_gpus_per_node,
     export_data_df,
     request_install,
     resolve_gpu_arch,
+    write_report_outputs,
 )
-from TraceLens.Agent.Analysis.category_analyses import (
-    analysis_utils as au,
-    kernel_fusion_analysis as kfa,
-)
+from TraceLens.Agent.Analysis.category_analyses import analysis_utils as au
+from TraceLens.Agent.Analysis.utils.kernel_fusion import FusionCandidateBuilder
 from TraceLens.Reporting import (
     generate_multi_rank_collective_report_pytorch as coll_mod,
     generate_perf_report_pytorch_inference as inf_mod,
@@ -58,7 +58,6 @@ from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
     generate_perf_report_pytorch as gen_inf,
     generate_perf_report_pytorch as generate_inference_report,
     get_dfs_short_kernels as get_dfs_short_kernels_inference,
-    perf_report_sanity_check,
 )
 from TraceLens.Reporting.compare_perf_reports_pytorch import (
     generate_compare_perf_reports_pytorch,
@@ -72,7 +71,6 @@ from tests.fixtures.reporting import (
     _write_trace,
 )
 from tests.test_trace2tree import _mk_event
-from unittest.mock import patch
 from TraceLens.PerfModel import perf_model
 from TraceLens.PerfModel.extensions import (
     attention_perf_model_extensions as aext,
@@ -103,8 +101,9 @@ from tests.fixtures.agent import (
     _StubTree,
     _kernel_event,
     _write_minimal_orchestrator_csvs,
+    _write_resolved_config,
 )
-from tests.fixtures.perfmodel import _ARCH, _GDN_ANNOTATION
+from tests.fixtures.perfmodel import _GDN_ANNOTATION
 from TraceLens.Trace2Tree.extensions import pseudo_ops_registry as por
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from pathlib import Path
@@ -120,7 +119,10 @@ from TraceLens.Reporting.generate_perf_report_genesis import (
     _cleanup_work_dir,
     generate_perf_report_genesis,
 )
-from TraceLens.Reporting.pftrace_utils import ensure_trace_json
+from TraceLens.Reporting.pftrace_utils import (
+    derive_pftrace_output_path,
+    ensure_trace_json,
+)
 
 GPU_ONLY_TRACE = os.path.join(
     os.path.dirname(__file__),
@@ -474,61 +476,6 @@ class _MockShortKernelAnalyzer:
 
 
 # ---------------------------------------------------------------------------
-# perf_report_sanity_check (inference)
-# ---------------------------------------------------------------------------
-
-
-def test_sanity_check_include_nccl_busy_time():
-    events = [{"name": "ncclAllReduce", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["busy_time"], "time ms": [0.05]})
-    kl = pd.DataFrame({"total_direct_kernel_time_sum": [60.0]})
-    up = pd.DataFrame({"Kernel Time (µs)_sum": [60.0]})
-    result = perf_report_sanity_check(events, tl, kl, up, include_nccl=True)
-    assert result["kl_time_pass"]
-    assert result["total_gpu_events"] == 1
-
-
-def test_sanity_check_time_mismatch():
-    events = [{"name": "k", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [10.0]})
-    kl = pd.DataFrame({"total_direct_kernel_time_sum": [1.0]})
-    up = pd.DataFrame({"Kernel Time (µs)_sum": [1.0]})
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert not result["kl_time_pass"]
-    assert not result["up_time_pass"]
-
-
-def test_sanity_check_kernel_details_column():
-    events = [{"name": "k_a", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-    kl = pd.DataFrame(
-        {
-            "total_direct_kernel_time": [100.0],
-            "kernel_details": [[{"name": "k_a", "count": 1}]],
-        }
-    )
-    up = pd.DataFrame(
-        {
-            "Kernel Time (µs)": [100.0],
-            "kernel_details": [[{"name": "k_a", "count": 1}]],
-        }
-    )
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert result["kl_count_pass"]
-    assert result["up_count_pass"]
-
-
-def test_sanity_check_missing_kernel_details_column(capsys):
-    events = [{"name": "k", "cat": "kernel"}]
-    tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-    kl = pd.DataFrame({"total_direct_kernel_time_sum": [100.0]})
-    up = pd.DataFrame({"Kernel Time (µs)_sum": [100.0]})
-    result = perf_report_sanity_check(events, tl, kl, up)
-    assert not result["kl_count_pass"]
-    assert "WARNING" in capsys.readouterr().out
-
-
-# ---------------------------------------------------------------------------
 # classify_graph_capture_trace
 # ---------------------------------------------------------------------------
 
@@ -632,6 +579,32 @@ def test_pytorch_get_dfs_short_kernels_with_data():
     analyzer = _MockShortKernelAnalyzer()
     hist, grouped = get_dfs_short_kernels_pytorch(analyzer, topk=2)
     assert len(grouped) == 2
+
+
+@pytest.mark.parametrize(
+    "get_fn",
+    [get_dfs_short_kernels_pytorch, get_dfs_short_kernels_inference],
+    ids=["pytorch", "inference"],
+)
+def test_get_dfs_short_kernels_all_nan_groupby_cols(get_fn):
+    """MultiIndex columns must be flattened even when all short kernels have
+    NaN in the groupby columns, otherwise to_excel(index=False) raises.
+    """
+    kernels = pd.DataFrame(
+        {
+            "Kernel duration (µs)": [3.0, 5.0],
+            "Kernel name": ["k_a", "k_b"],
+            "Parent cpu_op": [pd.NA, pd.NA],
+            "Input dims": [pd.NA, pd.NA],
+            "Input strides": [pd.NA, pd.NA],
+            "Concrete Inputs": [pd.NA, pd.NA],
+        }
+    )
+    analyzer = _MockShortKernelAnalyzer(kernels=kernels)
+    _, grouped = get_fn(analyzer)
+    assert not isinstance(grouped.columns, pd.MultiIndex)
+    assert grouped.empty
+    grouped.to_excel(io.BytesIO(), index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1121,13 +1094,13 @@ def test_collective_report_main_cli(tmp_path):
 
 
 class TestAnalysisUtilsAndReporting:
-    def test_perf_report_csv_dir_comparative(self, tmp_path):
+    def test_perf_report_csv_dir_reads_manifest(self, tmp_path):
         cat_dir = tmp_path / "category_data"
         cat_dir.mkdir()
         (cat_dir / "category_manifest.json").write_text(
-            json.dumps({"comparison_scope": "comparative"})
+            json.dumps({"focus_csv_dir": "focus_csvs"})
         )
-        assert "perf_report_trace1_csvs" in au.perf_report_csv_dir(str(tmp_path))
+        assert au.perf_report_csv_dir(str(tmp_path)) == str(tmp_path / "focus_csvs")
 
     def test_resolve_gpu_arch_and_node_span(self):
         arch = ru.resolve_gpu_arch(
@@ -1432,14 +1405,6 @@ class TestReportingPhase6:
             include_unlinked_kernels=True,
             micro_idle_thresh_us=0,
         )
-        analyzer = TreePerfAnalyzer.from_file(trace)
-        sanity = perf_report_sanity_check(
-            analyzer.tree.events,
-            pd.read_csv(str(tmp_path / "out" / "gpu_timeline.csv")),
-            analyzer.get_df_kernel_launchers(),
-            analyzer.build_df_unified_perf_table(),
-        )
-        assert isinstance(sanity, dict)
 
     @pytest.mark.skipif(
         not os.path.isdir(os.path.join(INFERENCE_ROOT, "vllm_decode_full")),
@@ -2230,9 +2195,7 @@ class TestPush95Phase2:
                 return analyzer
 
         monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
+        monkeypatch.setattr(FusionCandidateBuilder, "standalone", lambda self: [])
 
         old_argv = sys.argv
         sys.argv = [
@@ -2254,71 +2217,6 @@ class TestPush95Phase2:
         )
         assert "memcpy_summary" in mk and "nccl_summary" in mk
 
-    def test_gemm_origami_import_error_path(self, monkeypatch):
-        monkeypatch.delenv("GEMM_SIMULATOR_PATH", raising=False)
-        perf_model.GEMM._origami_import_error_printed = False
-        import builtins
-
-        real_import = builtins.__import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "origami":
-                raise ImportError("no origami")
-            return real_import(name, *args, **kwargs)
-
-        with patch.object(builtins, "__import__", fake_import):
-            t, _ = perf_model.GEMM.get_simulation_time_func(
-                _ARCH, 4, 8, 16, 1, "bf16", enable_origami=True
-            )
-        assert t is None
-
-    def test_orchestrator_comparative_main(self, tmp_path, monkeypatch):
-
-        out = str(tmp_path)
-        _write_minimal_orchestrator_csvs(out, comparative=True)
-        k1 = _kernel_event(10, "Cijk_a")
-        k2 = _kernel_event(11, "ew_add")
-        module = {
-            "name": "nn.Module: MLP_0",
-            "_category": "aten",
-            "gpu_events": [10, 11],
-        }
-        tree = _StubTree([module], {10: k1, 11: k2})
-        analyzer = _StubAnalyzer(tree)
-
-        class _FakeTreePerfAnalyzer:
-            @classmethod
-            def from_file(cls, *args, **kwargs):
-                return analyzer
-
-        monkeypatch.setattr(op, "TreePerfAnalyzer", _FakeTreePerfAnalyzer)
-        monkeypatch.setattr(
-            op, "_extract_comparative_fusion_candidates", lambda *a, **k: []
-        )
-        monkeypatch.setattr(
-            op, "_extract_standalone_fusion_candidates", lambda *a, **k: []
-        )
-
-        old_argv = sys.argv
-        sys.argv = [
-            "orchestrator_prepare",
-            "--trace-path",
-            "/fake/trace.json",
-            "--platform",
-            "MI300X",
-            "--output-dir",
-            out,
-            "--comparison-scope",
-            "comparative",
-        ]
-        try:
-            op.main()
-        finally:
-            sys.argv = old_argv
-        assert os.path.isfile(
-            os.path.join(out, "metadata", "trace2_gpu_utilization.json")
-        )
-
     def test_analysis_utils_and_kernel_fusion(self, tmp_path):
 
         row = pd.Series(
@@ -2331,19 +2229,16 @@ class TestPush95Phase2:
             }
         )
         eff = au.calculate_efficiency(
-            row, peak_maf_or_maf_dict={"vector_fp32": 100.0}, peak_hbm_bw=5300
+            row, max_achievable_tflops={"vector_fp32": 100.0}, peak_mem_bw=5300
         )
         assert eff["bound_type"] == "memory"
 
         fusion_dir = tmp_path / "category_data"
         fusion_dir.mkdir()
         (fusion_dir / "kernel_fusion_metrics.json").write_text(
-            json.dumps({"high_confidence_kernel_map": {"gemm_a": "fused_a"}})
+            json.dumps({"high_confidence_op_keys": [["aten::mm", "x", "y"]]})
         )
-        assert au._load_fusion_map(str(tmp_path))["gemm_a"] == "fused_a"
-
-        ops = [{"kernel_names": ["a", "b"], "base_name": "Block", "instance_count": 2}]
-        assert len(kfa._filter_and_dedup(ops)) == 1
+        assert au._load_fusion_op_keys(str(tmp_path)) == {(None, "aten::mm", "x", "y")}
 
     def test_reporting_pftrace_and_collective(self, tmp_path):
 
@@ -2497,6 +2392,7 @@ class TestPush95Phase3:
         csv_dir.mkdir()
         pd.DataFrame(
             {
+                "name": ["aten::mm", "aten::add"],
                 "kernel_details_summary": [
                     "[{'name': 'Cijk_a'}]",
                     "[{'name': 'ew_add'}]",
@@ -2514,6 +2410,11 @@ class TestPush95Phase3:
             json.dumps(
                 {
                     "platform": "MI300X",
+                    "platform_specs": {
+                        "peak_mem_bw_tbs": 5.3,
+                        "max_achievable_tflops": {"matrix_bf16": 1000.0},
+                    },
+                    "focus_csv_dir": csv_dir.name,
                     "gpu_utilization": {"total_time_ms": 1000.0},
                 }
             )
@@ -2523,49 +2424,23 @@ class TestPush95Phase3:
                 [
                     {
                         "module_name": "nn.Module: Block",
-                        "kernels": [
-                            {
-                                "name": "Cijk_a",
-                                "type": "GEMM",
-                                "dur_us": 100,
-                                "data_in_mb": 10.0,
-                            },
-                            {
-                                "name": "ew_add",
-                                "type": "Elementwise Add",
-                                "dur_us": 20,
-                                "data_in_mb": 2.0,
-                            },
-                        ],
+                        "base_name": "Block",
+                        "parent_chain": [],
                         "instance_count": 1,
+                        "kernel_count": 2,
+                        "kernels": [
+                            {"name": "gemm_a", "type": "GEMM", "dur_us": 100},
+                            {"name": "ew_add", "type": "Add", "dur_us": 20},
+                        ],
+                        "total_kernel_time_us": 120.0,
+                        "kernel_type_signature": ["GEMM", "Add"],
+                        "kernel_type_summary": {"GEMM": 1, "Add": 1},
+                        "fusion_kind": "gemm_epilogue",
+                        "confidence": "medium",
                     }
                 ]
             )
         )
-        (cat_dir / "arch_config.json").write_text(
-            json.dumps(
-                {
-                    "peak_hbm_bw_tbs": 5.3,
-                    "max_achievable_tflops": {
-                        "matrix_bf16": 1000.0,
-                        "vector_fp32": 100.0,
-                    },
-                }
-            )
-        )
-
-        candidates, manifest, csv_path = kfa.load_fusion_data(str(tmp_path))
-        lookup = kfa.build_kernel_perf_lookup(csv_path)
-        estimates = kfa.compute_fusion_impact_estimates(
-            candidates,
-            lookup,
-            peak_bw_tbs=5.3,
-            peak_maf_tflops={"matrix_bf16": 1000.0, "vector_fp32": 100.0},
-            baseline_ms=1000.0,
-            is_comparative=False,
-        )
-        assert isinstance(estimates, list)
-
         mod = importlib.import_module(
             "TraceLens.Agent.Analysis.category_analyses.kernel_fusion_analysis"
         )
@@ -2676,6 +2551,7 @@ class TestPush95Phase4:
         out = str(tmp_path)
         csv_dir = os.path.join(out, "perf_report_csvs")
         os.makedirs(csv_dir)
+        _write_resolved_config(out)
         pd.DataFrame(
             {
                 "type": ["total_time", "computation_time", "idle_time"],
@@ -2748,11 +2624,11 @@ class TestPush95Phase4:
         t1_csv = os.path.join(out, "perf_report_trace1_csvs")
         pd.DataFrame(
             {
-                "name": ["Cijk_A", "ew_add"],
-                "source": ["trace1", "trace1"],
-                "lowest_common_ancestor_id": [100, 100],
-                "kernel_time": [5000.0, 3000.0],
-                "gpu_op_uid": [10, 11],
+                "name": ["gemm_a", "ew_add", "gemm_a"],
+                "source": ["trace1", "trace1", "trace2"],
+                "lowest_common_ancestor_id": [100, 100, 100],
+                "kernel_time": [5000.0, 3000.0, 5000.0],
+                "gpu_op_uid": [10, 11, None],
             }
         ).to_csv(os.path.join(t1_csv, "diff_stats.csv"), index=False)
 
@@ -3086,21 +2962,6 @@ class TestReportingFinalCoverage:
         )
         assert "gpu_timeline" in result
 
-    def test_sanity_check_kernel_details_summary_column(self):
-        events = [{"name": "k_a", "cat": "kernel"}]
-        tl = pd.DataFrame({"type": ["computation_time"], "time ms": [0.1]})
-        kl = pd.DataFrame(
-            {
-                "total_direct_kernel_time": [100.0],
-                "kernel_details_summary": [[{"name": "k_a", "count": 1}]],
-            }
-        )
-        up = pd.DataFrame(
-            {"Kernel Time (µs)": [100.0], "kernel_details_summary": [[{"name": "k_a"}]]}
-        )
-        result = perf_report_sanity_check(events, tl, kl, up)
-        assert result["kl_count_pass"]
-
     def test_pytorch_report_with_comparison(self, tmp_path):
         trace1 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 100)], "t1.json")
         trace2 = _write_trace(tmp_path, [("aten::mm", "gemm_kernel", 120)], "t2.json")
@@ -3165,3 +3026,194 @@ class TestReportingExtended:
             include_call_stack=True,
         )
         assert (tmp_path / "ext_out" / "gpu_timeline.csv").exists()
+
+
+###############################################################################
+# reporting_utils — _safe_sheet_name
+###############################################################################
+
+
+class TestSafeSheetName:
+    """Validate Excel sheet name deduplication and length limits."""
+
+    def test_no_collision(self):
+        used = set()
+        name = _safe_sheet_name("gpu_timeline", used)
+        assert name == "gpu_timeline"
+        assert "gpu_timeline" in used
+
+    def test_collision_adds_suffix(self):
+        used = {"gpu_timeline"}
+        name = _safe_sheet_name("gpu_timeline", used)
+        assert name == "gpu_timeline_1"
+        assert "gpu_timeline_1" in used
+
+    def test_multiple_collisions(self):
+        used = {"test_sheet", "test_sheet_1", "test_sheet_2"}
+        name = _safe_sheet_name("test_sheet", used)
+        assert name == "test_sheet_3"
+
+    def test_truncates_to_31_chars(self):
+        used = set()
+        long_name = "a" * 50
+        name = _safe_sheet_name(long_name, used)
+        assert len(name) <= 31
+
+    def test_truncation_with_collision(self):
+        long_name = "a" * 31
+        used = {long_name}
+        name = _safe_sheet_name(long_name, used)
+        assert len(name) <= 31
+        assert name != long_name
+        assert name.endswith("_1")
+
+
+###############################################################################
+# reporting_utils — write_report_outputs
+###############################################################################
+
+
+def _read_sheets(xlsx_path):
+    """Return {sheet_name: DataFrame} for an .xlsx file."""
+    return pd.read_excel(xlsx_path, sheet_name=None)
+
+
+class TestWriteReportOutputs:
+    def _dfs(self):
+        return {
+            "alpha": pd.DataFrame({"a": [1, 2], "b": [3, 4]}),
+            "beta": pd.DataFrame({"x": [5]}),
+        }
+
+    def test_csvs_only(self, tmp_path):
+        out = tmp_path / "csvs"
+        write_report_outputs(self._dfs(), csvs_dir=str(out))
+        assert (out / "alpha.csv").exists()
+        assert (out / "beta.csv").exists()
+        # No xlsx requested -> none written
+        assert not list(tmp_path.glob("*.xlsx"))
+        pd.testing.assert_frame_equal(
+            pd.read_csv(out / "alpha.csv"), self._dfs()["alpha"]
+        )
+
+    def test_xlsx_only(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        write_report_outputs(self._dfs(), xlsx_path=str(xlsx))
+        assert xlsx.exists()
+        assert not list(tmp_path.glob("*.csv"))
+        sheets = _read_sheets(xlsx)
+        assert set(sheets) == {"alpha", "beta"}
+
+    def test_both_outputs_written(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        csvs = tmp_path / "csvs"
+        write_report_outputs(self._dfs(), xlsx_path=str(xlsx), csvs_dir=str(csvs))
+        assert xlsx.exists()
+        assert (csvs / "alpha.csv").exists()
+        assert (csvs / "beta.csv").exists()
+
+    def test_neither_output_is_noop(self, tmp_path):
+        write_report_outputs(self._dfs())
+        assert not list(tmp_path.iterdir())
+
+    def test_long_sheet_names_truncated_and_deduped(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        dfs = {
+            "a" * 40: pd.DataFrame({"c": [1]}),
+            "a" * 45: pd.DataFrame({"c": [2]}),  # truncates to same 31 chars -> deduped
+        }
+        write_report_outputs(dfs, xlsx_path=str(xlsx))
+        names = list(_read_sheets(xlsx))
+        assert all(len(n) <= 31 for n in names)
+        assert len(names) == 2  # no collision -> both sheets present
+
+    def test_skip_empty_drops_empty_and_none(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        csvs = tmp_path / "csvs"
+        dfs = {
+            "keep": pd.DataFrame({"a": [1]}),
+            "empty": pd.DataFrame(),
+            "none": None,
+        }
+        write_report_outputs(
+            dfs, xlsx_path=str(xlsx), csvs_dir=str(csvs), skip_empty=True
+        )
+        assert set(_read_sheets(xlsx)) == {"keep"}
+        assert (csvs / "keep.csv").exists()
+        assert not (csvs / "empty.csv").exists()
+        assert not (csvs / "none.csv").exists()
+
+    def test_skip_empty_default_keeps_empty(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        dfs = {
+            "keep": pd.DataFrame({"a": [1]}),
+            "empty": pd.DataFrame({"a": []}),
+        }
+        write_report_outputs(dfs, xlsx_path=str(xlsx))
+        assert set(_read_sheets(xlsx)) == {"keep", "empty"}
+
+    def test_hide_columns_hides_and_keeps_data(self, tmp_path):
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+
+        xlsx = tmp_path / "report.xlsx"
+        df = pd.DataFrame({"keep": [1], "hide_me": [2], "also_keep": [3]})
+        write_report_outputs(
+            {"data": df}, xlsx_path=str(xlsx), hide_columns={"data": ["hide_me"]}
+        )
+        ws = load_workbook(xlsx)["data"]
+        hidden_col = get_column_letter(df.columns.get_loc("hide_me") + 1)  # "B"
+        assert ws.column_dimensions[hidden_col].hidden is True
+        # Non-hidden columns are not hidden, and the data is still present
+        keep_col = get_column_letter(df.columns.get_loc("keep") + 1)
+        assert ws.column_dimensions[keep_col].hidden is False
+        assert set(_read_sheets(xlsx)["data"].columns) == {
+            "keep",
+            "hide_me",
+            "also_keep",
+        }
+
+    def test_hide_columns_ignores_missing_column(self, tmp_path):
+        xlsx = tmp_path / "report.xlsx"
+        df = pd.DataFrame({"a": [1]})
+        # Should not raise even though "nonexistent" isn't a column
+        write_report_outputs(
+            {"data": df}, xlsx_path=str(xlsx), hide_columns={"data": ["nonexistent"]}
+        )
+        assert xlsx.exists()
+
+    def test_sheet_named_like_openpyxl_default(self, tmp_path):
+        # "sheet" collides case-insensitively with openpyxl's default "Sheet",
+        # so openpyxl renames it; the worksheet lookup must not rely on the
+        # requested name.  hide_columns exercises that lookup path.
+        xlsx = tmp_path / "report.xlsx"
+        df = pd.DataFrame({"a": [1], "b": [2]})
+        write_report_outputs(
+            {"sheet": df}, xlsx_path=str(xlsx), hide_columns={"sheet": ["b"]}
+        )
+        assert xlsx.exists()
+
+
+###############################################################################
+# pftrace_utils — derive_pftrace_output_path
+###############################################################################
+
+
+class TestDerivePftraceOutputPath:
+    def test_pftrace_suffix(self):
+        assert (
+            derive_pftrace_output_path("/tmp/trace.pftrace", "_activity_report.xlsx")
+            == "/tmp/trace_activity_report.xlsx"
+        )
+
+    def test_json_gz_suffix(self):
+        assert (
+            derive_pftrace_output_path("/tmp/trace.json.gz", "_hip_api_report.xlsx")
+            == "/tmp/trace_hip_api_report.xlsx"
+        )
+
+    def test_plain_json_suffix(self):
+        assert (
+            derive_pftrace_output_path("/tmp/trace.json", "_memory_copy_report.xlsx")
+            == "/tmp/trace_memory_copy_report.xlsx"
+        )
