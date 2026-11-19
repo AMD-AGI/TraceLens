@@ -12,12 +12,9 @@ dispatcher** (Triton, FlyDSL, TileLang, tvm-ffi / SGLang `load_jit`, aiter
 **without patching the inference server**.
 
 It is framework-agnostic: the same two files work under SGLang, vLLM, ATOM or
-any other torch workload. It is a drop-in, non-invasive replacement for the
-`examples/custom_workflows/inference_analysis/sglang_roofline_patches/` patch
-set (and the equivalent `vllm_patches` / `atom_roofline_patches` wiring): no
-`git apply` into the server source tree, because the tool activates itself
-through a `sitecustomize.py` shim that CPython auto-loads in every process on
-`PYTHONPATH`.
+any other torch workload, with no changes to the server source: the tool
+activates itself through a `sitecustomize.py` shim that CPython auto-loads in
+every process on `PYTHONPATH`.
 
 ## What problem it solves
 
@@ -239,22 +236,9 @@ It is a no-op unless tracing is enabled.
   no measurable startup cost and never drags torch into a process that avoids
   it.
 
-## How it maps onto the retired patches
-
-Everything that made the old approach require SGLang source edits was pure
-*wiring*. Each piece has a non-invasive equivalent here:
-
-| Old patch | What it did | Replacement in this tool |
-|-----------|-------------|--------------------------|
-| `server_args.patch`, `io_struct.patch`, `grpc_server.patch` | Added a `shape_discovery` flag and plumbed it through config / gRPC | `TRACELENS_SHAPE_DISCOVERY` env var |
-| `profiler_manager.patch`, `profile_utils.patch` | Called `enable()` / `disable()` around `torch_profiler.start()` / `.stop()` | `sitecustomize.py` hooks `torch.profiler.profile.start` / `.stop` |
-| `decode_cuda_graph_runner.patch`, `eagle_*_cuda_graph_runner.patch`, `multi_layer_*` | Enabled shape discovery around CUDA-graph capture | Not needed: the JIT hooks are always installed and gated by the profiler window, so a capture inside that window is traced |
-| `kernel_shape_profiler.patch` | Wrapped a registry of known SGLang / aiter / FlashInfer launcher functions | `generic_shape_profiler.py` hooks the JIT boundary instead, so all launches on the hooked paths are covered without a registry. `torch.ops.*` launchers (aiter, FlashInfer) already carry shapes natively and need no wrapping. |
-
 ## Docker usage (non-invasive)
 
-Instead of the `git apply` loop in `build_docker_sglang.sh`, copy the tool into
-the image and set the env vars. No server source is modified:
+Copy the tool into the image and set the env vars. No server source is modified:
 
 ```dockerfile
 FROM <sglang / vllm / atom base image>
@@ -265,10 +249,6 @@ ENV PYTHONPATH=/opt/generic_shape_profiler:${PYTHONPATH}
 # Leave unset to bake the tool in inert and switch it on per run.
 ENV TRACELENS_SHAPE_DISCOVERY=1
 ```
-
-The ROCm 7.2.4 HIP / roctracer overwrite step from `build_docker_sglang.sh`
-(needed on that base so kernels inside HIP-graph replay reach the trace) is
-orthogonal to shape annotation and should be kept if you target that base.
 
 ## Validated on
 
