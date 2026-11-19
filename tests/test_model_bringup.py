@@ -4,9 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import io
 import json
+import time
+import urllib.error
 
 import pytest
+import yaml
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Agent.ModelBringup.utils import bringup_gates
@@ -423,3 +427,107 @@ def test_excluded_and_skipped_ops(tmp_path):
     assert f"| op_a | excluded | {gate['problems'][0]} |" in text
     assert "| op_b | skipped | not launched |" in text
     assert "Publish with" not in text
+
+
+def _model_config(bringup, framework, envs):
+    profile = bringup / "profile"
+    profile.mkdir()
+    benchmark = {"framework": framework, "model": "org/Model-A", "envs": envs}
+    (profile / "benchmark.yaml").write_text(yaml.safe_dump({"benchmark": benchmark}))
+    args = [
+        "model-config",
+        "--bringup-dir",
+        str(bringup),
+        "--profile-dir",
+        str(profile),
+    ]
+    rc = bringup_gates.main(args)
+    return rc, json.loads((bringup / "cache" / "model_config.json").read_text())
+
+
+def test_model_config_resolves(tmp_path, monkeypatch):
+    paper = {"url": "https://example.com/paper.pdf", "title": None}
+    monkeypatch.setattr(bringup_gates, "_find_paper", lambda model_id: paper)
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    hf_config = {"model_type": "example_moe", "hidden_size": 64, "num_experts": 4}
+    (checkpoint / "config.json").write_text(json.dumps(hf_config))
+    envs = {
+        "tp": 8,
+        "CONC": 64,
+        "EXTRA_SGLANG_ARGS": "--dp 8 --enable-dp-attention",
+        "MODEL_PATH": str(checkpoint),
+    }
+    rc, out = _model_config(tmp_path, "sglang", envs)
+    assert rc == 0 and _gate(tmp_path, "model_config")["status"] == "pass"
+    assert out["model_id"] == "org/Model-A"
+    assert out["launch"] == {
+        "TP": 8,
+        "EXTRA_SGLANG_ARGS": "--dp 8 --enable-dp-attention",
+    }
+    assert out["config"].items() >= hf_config.items()
+    assert out["paper"] == paper
+
+
+def test_model_config_unresolved(tmp_path, monkeypatch):
+    def offline(checkpoint):
+        raise FileNotFoundError("no cached config")
+
+    monkeypatch.setattr(bringup_gates, "load_checkpoint_config", offline)
+    monkeypatch.setattr(bringup_gates, "_find_paper", lambda model_id: None)
+    rc, out = _model_config(tmp_path, "sglang", {"TP": 4})
+    assert rc == 1
+    assert out["config"] is None
+    assert out["launch"] == {"TP": 4}
+    assert _gate(tmp_path, "model_config") == {
+        "status": "fail",
+        "error": "no cached config",
+    }
+
+
+@pytest.mark.parametrize(
+    "base_card, expected",
+    [
+        (
+            "[report](https://example.com/fam.pdf) "
+            "[paper](https://arxiv.org/pdf/2402.00002.pdf)",
+            {
+                "url": "https://arxiv.org/abs/2402.00002",
+                "title": "Fam Technical Report",
+            },
+        ),
+        (
+            "[report](https://example.com/fam.pdf)",
+            {"url": "https://example.com/fam.pdf", "title": None},
+        ),
+    ],
+)
+def test_find_paper(monkeypatch, base_card, expected):
+    hub = "https://huggingface.co/"
+    pages = {
+        hub
+        + "org/Fam-1-Quant/raw/main/README.md": (
+            "---\nbase_model: org/Fam-1\n---\nhttps://arxiv.org/abs/2401.00001v2"
+        ),
+        hub + "api/papers/2401.00001": '{"title": "Other Method"}',
+        hub + "org/Fam-1/raw/main/README.md": base_card,
+        hub + "api/papers/2402.00002": '{"title": "Fam Technical Report"}',
+    }
+
+    def urlopen(url, timeout):
+        if url not in pages:
+            raise urllib.error.HTTPError(url, 404, "not found", {}, None)
+        return io.BytesIO(pages[url].encode())
+
+    monkeypatch.setattr(bringup_gates.urllib.request, "urlopen", urlopen)
+    assert bringup_gates._find_paper("org/Fam-1-Quant") == expected
+
+
+def test_find_paper_times_out(monkeypatch):
+    def urlopen(url, timeout):
+        time.sleep(0.5)
+        return io.BytesIO(b"[paper](https://example.com/fam.pdf)")
+
+    monkeypatch.setattr(bringup_gates.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(bringup_gates, "PAPER_BUDGET_S", 0.05)
+    assert bringup_gates._find_paper("org/Fam-1") is None

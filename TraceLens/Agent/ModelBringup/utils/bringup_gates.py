@@ -19,6 +19,9 @@ import functools
 import json
 import re
 import sys
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import yaml
@@ -43,6 +46,7 @@ from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
     DEVIATION_EXPLAINED,
     MATCH,
 )
+from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
 from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
     CustomCollective,
 )
@@ -81,6 +85,27 @@ DRAFT_FILES = {
 # Outcomes whose commit is merged in Step 7 and published as a PR.
 COMMITTED_OUTCOMES = ("modeled", "categorized")
 EFFECTIVE_CONFIG = "cache/bringup_config.yaml"
+MODEL_CONFIG = "cache/model_config.json"
+# Per-request socket timeout and thread join timeout of the paper lookup.
+PAPER_BUDGET_S = 10
+CARD_URL = "https://huggingface.co/{}/raw/main/README.md"
+PAPER_URL = "https://huggingface.co/api/papers/{}"
+ARXIV_ID = re.compile(
+    r"(?:arxiv\.org/(?:abs|pdf|html)|huggingface\.co/papers)/(\d{4}\.\d{4,5})"
+)
+PDF_LINK = re.compile(r"https?://(?!(?:www\.)?arxiv\.org/)[^\s<>()\"'\]]+\.pdf")
+# The card's base_model: the value, or the first entry of a list.
+BASE_MODEL = re.compile(r"^base_model:[\s-]*['\"]?([\w.-]+/[\w.-]+)", re.M)
+NAME_STEM = re.compile(r"[A-Za-z]+")
+LAUNCH_KEYS = ("TP", "EP_SIZE", "EP", "DP_ATTENTION")
+SUMMARY_GATES = (
+    "prepare",
+    "model_config",
+    "profile_health",
+    "analysis",
+    "report_health",
+    "coverage",
+)
 LEAK_KEYS = ("node", "platform", "docker_image")
 GFX_TARGET = re.compile(r"\bgfx\d+\w*", re.I)
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "skills/model-bringup/templates"
@@ -132,6 +157,92 @@ def prepare(args):
     for key, value in values.items():
         print(f"{key}={value}")
     return args.bringup.write_gate("prepare", bool(splits), **values)
+
+
+def model_config(args):
+    """Write the model config, launch settings and paper link for op agents."""
+    path = Path(args.profile_dir) / "benchmark.yaml"
+    try:
+        data = yaml.safe_load(path.read_text())
+    except FileNotFoundError:
+        raise BringupInputError(f"missing {path}") from None
+    except yaml.YAMLError as e:
+        raise BringupInputError(f"malformed {path}: {e}") from None
+    benchmark = data.get("benchmark") if isinstance(data, dict) else None
+    if not isinstance(benchmark, dict) or not benchmark.get("model"):
+        raise BringupInputError(f"{path} has no benchmark.model")
+    model_id = benchmark["model"]
+    envs = {str(k).upper(): v for k, v in (benchmark.get("envs") or {}).items()}
+    extra_args = f"EXTRA_{str(benchmark.get('framework')).upper()}_ARGS"
+    launch = {k: envs[k] for k in (*LAUNCH_KEYS, extra_args) if k in envs}
+    model_path = envs.get("MODEL_PATH")
+    checkpoint = model_path if model_path and Path(model_path).is_dir() else model_id
+    config = error = None
+    try:
+        config, _ = load_checkpoint_config(checkpoint)
+    except (OSError, ValueError) as e:
+        error = str(e)
+    # HF_HUB_OFFLINE only pins the config read; the card lookup is plain urllib.
+    paper = _find_paper(model_id)
+    out = args.bringup.root / MODEL_CONFIG
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "model_id": model_id,
+                "launch": launch,
+                "config": config,
+                "paper": paper,
+            },
+            indent=2,
+        )
+    )
+    return args.bringup.write_gate("model_config", error is None, error=error)
+
+
+def _find_paper(model_id):
+    """The model's paper link from its card, or None if absent or not found in time."""
+    result = []
+
+    def run():
+        try:
+            result.append(_paper_from_cards(model_id))
+        except (OSError, ValueError):
+            pass
+
+    # urllib's timeout does not cover name resolution, so bound the whole lookup.
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(PAPER_BUDGET_S)
+    return result[0] if result else None
+
+
+def _paper_from_cards(model_id):
+    """First arXiv link titled for the model, else first PDF link, on its card or its base_model's."""
+
+    def _get(url):
+        try:
+            with urllib.request.urlopen(url, timeout=PAPER_BUDGET_S) as response:
+                return response.read().decode()
+        except urllib.error.HTTPError:
+            return ""
+
+    for _ in range(2):  # the card, then its base_model's card
+        card = _get(CARD_URL.format(model_id))
+        stem = NAME_STEM.search(model_id.rsplit("/", 1)[-1]).group().lower()
+        for arxiv_id in dict.fromkeys(ARXIV_ID.findall(card)):
+            paper = json.loads(_get(PAPER_URL.format(arxiv_id)) or "{}")
+            title = paper.get("title") or ""
+            if stem in title.lower():
+                return {"url": f"https://arxiv.org/abs/{arxiv_id}", "title": title}
+        pdf = PDF_LINK.search(card)
+        if pdf:
+            return {"url": pdf.group(), "title": None}
+        base = BASE_MODEL.search(card)
+        if not base:
+            break
+        model_id = base.group(1)
+    return None
 
 
 def report_health(args):
@@ -332,7 +443,7 @@ def summary(args):
     if stop:
         lines += [f"**Stopped:** {stop} {args.reason or ''}".rstrip(), ""]
     lines += ["| Gate | Status |", "|---|---|"]
-    for name in ("prepare", "profile_health", "analysis", "report_health", "coverage"):
+    for name in SUMMARY_GATES:
         lines.append(f"| {name} | {bringup.gate_status(name)} |")
     rows = bringup.op_rows()
     lines += ["", "| Op | Outcome | Reason |", "|---|---|---|"]
@@ -539,6 +650,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     commands = {
         "prepare": (prepare, ("--profile-dir", "--platform")),
+        "model-config": (model_config, ("--profile-dir",)),
         "report-health": (report_health, ("--triage-dir",)),
         "gaps": (gaps, ("--unified-csv",)),
         "cases": (cases, ("--report-dir", "--out")),

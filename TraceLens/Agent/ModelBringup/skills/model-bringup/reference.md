@@ -146,10 +146,11 @@ Then launch one sub-agent:
 ## Step 2: Profile health
 
     <prefix> <bringup_gates> prepare --bringup-dir <bringup_dir> --profile-dir <profile_dir> --platform <platform>
+    <prefix> HF_HUB_OFFLINE=1 <bringup_gates> model-config --bringup-dir <bringup_dir> --profile-dir <profile_dir>
     <prefix> python3 -m TraceLens.Agent.Analysis.triage.runner --bench-dir <bench_dir> --out-dir <bringup_dir>/profile_check
     <prefix> <bringup_gates> report-health --phase profile --bringup-dir <bringup_dir> --triage-dir <bringup_dir>/profile_check [--accept <check> ...]
 
-Ignore the runner's exit code.
+Ignore the runner's exit code, and `model-config`'s exit 1 (the summary reports it). `model-config` exit 2 also stops with `PROFILE_HEALTH_INPUT_ERROR`.
 
 **Gate:** both gates exit 0. Exit 1 from either: retry Step 1. Exit 2: stop with `PROFILE_HEALTH_INPUT_ERROR`.
 

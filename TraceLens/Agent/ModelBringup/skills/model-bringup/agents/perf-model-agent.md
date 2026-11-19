@@ -30,6 +30,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 
 **Input files:**
 - `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
+- `<bringup_dir>/cache/model_config.json`
 - Authoring skill: `<pm_dir>/skills/perf-model-generate/SKILL.md`; read its `reference.md` sections as each step needs them
 - Validation skill: `<pm_dir>/skills/validate-perf-model/SKILL.md`; read its `reference.md` sections as each step needs them
 - Draft templates: `TraceLens/Agent/ModelBringup/skills/model-bringup/templates/perf_model_pr.md` and `perf_model_issue.md`; copy the body below the header comment
@@ -77,6 +78,8 @@ Build and validate the perf model for one op that has none, or only categorize i
 ### Step 1: Record
 
 Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`: `op category`, `Input Dims`, `Input type`, `Concrete Inputs`, the kernel names in `kernel_details_summary`, `entry_point` (the launcher) and `call_stack_full`. Find the op's source from `entry_point` and the call stack under `<framework_src>`.
+
+Read `model_config.json`: `launch` holds the run's TP, EP and DP settings verbatim (under AgentX the recipe overrides them); trace `Input Dims` are per rank and win; report a mismatch no setting explains in the draft, never patch it; `null` is unknown. `paper` links the model's paper or tech report; read its architecture section when the op's math depends on it (sparsity, compression, routing, cache layout); when it is `null`, find the paper yourself.
 
 ### Step 2: Decide
 

@@ -364,9 +364,10 @@ python3 -m TraceLens.Reporting.generate_perf_report_from_config \
 ```
 
 Re-check `has_perf_model`, `op category`, GFLOPS, Data Moved, and
-`param_details`. Using the model config and the parallelism strategy, confirm
-values such as topK, `num_experts`, and `hidden_size`. One trace is one
-example; do not hardcode a dtype, layout, or variant that the op can vary.
+`param_details`. Confirm values such as top-k, `num_experts` and `hidden_size`
+against the model config and launch settings when given; without them, name the
+values the trace alone could not confirm. One trace is one example; do not
+hardcode a dtype, layout, or variant that the op can vary.
 
 ---
 

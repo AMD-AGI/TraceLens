@@ -39,7 +39,8 @@ workflow index below names the section for every step.
 | A TraceLens checkout to edit, and a Python environment (or command prefix) that imports it | yes | — |
 | Depth: full model or categorize-only | no | full; categorize-only for a `(Synthetic Op)` name |
 | Output mode: integrate or extension-only | no | integrate |
-| Validate | no | yes: the validate-perf-model skill takes the Outputs below as its Inputs |
+| Validate with hardware counters | no | yes, with the validate-perf-model skill |
+| Model config and launch settings | no | none |
 
 ## Outputs
 
