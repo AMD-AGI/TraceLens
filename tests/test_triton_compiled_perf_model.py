@@ -72,9 +72,8 @@ def test_meta_from_trace_args_missing_fields():
 
 def test_flops_rmsnorm():
     model = TritonCompiledPerfModel(_RMSNORM_EVENT)
-    # add=1, mean=1, mul=1, pow=2, rsqrt=2 => 7 flops/elem
-    # 7 * 32768 * 2048 = 469,762,048
-    assert model.flops() == 7 * 32768 * 2048
+    # add=1, mean=1, mul=1, pow=1 (the square), rsqrt=4 => 8 flops/elem
+    assert model.flops() == 8 * 32768 * 2048
 
 
 def test_bytes_rmsnorm():
