@@ -2467,7 +2467,7 @@ class compact_a4_experts_synthetic:
             bpe = name2bpe(dtype)
             if bpe and shape:
                 total += prod(shape) * bpe
-        total += p["num_rows"] * p["hidden"] * 2  # bf16 expert output
+        total += p["num_rows"] * p["hidden"] * name2bpe(p["types"][0])
         return total
 
     def get_compute_precision(self):

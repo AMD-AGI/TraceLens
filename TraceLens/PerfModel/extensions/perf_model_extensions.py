@@ -2659,7 +2659,7 @@ class bf16_splitk_gemm_partials(GEMM):
     @staticmethod
     def get_param_details(event):
         dims = event["args"]["Input Dims"]
-        types = event["args"].get("Input type", []) or []
+        types = event["args"]["Input type"]
         a_shape, b_shape, out_shape = dims[0], dims[1], dims[2]
         M, K = a_shape[0], a_shape[1]
         N = b_shape[0]  # B is [N, K]
@@ -2671,11 +2671,7 @@ class bf16_splitk_gemm_partials(GEMM):
             "K": K,
             "bias": False,
             "split_k": split_k,
-            "dtype_A_B": (
-                types[0] if len(types) > 0 else "c10::bfloat16",
-                types[1] if len(types) > 1 else "c10::bfloat16",
-                types[2] if len(types) > 2 else "float",
-            ),
+            "dtype_A_B": (types[0], types[1], types[2]),
         }
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
