@@ -39,7 +39,7 @@ Generate a multi-sheet Excel report from a PyTorch (`torch.profiler`) trace.
 | `--short_kernel_study` | off | Add a short-kernel study; tune with `--short_kernel_threshold_us`, `--short_kernel_histogram_bins`, `--topk_short_kernels`. |
 | `--disable_coll_analysis` | on | Disable the collective-analysis section (enabled by default). |
 | `--include_unlinked_kernels` | off | Include kernels with no linked CPU op in the GPU-timeline analysis. |
-| `--micro_idle_thresh_us` | None | Threshold (µs) to classify an idle interval as micro-idle. |
+| `--micro_idle_thresh_us` | None | Threshold (µs) for `micro_idle_time` and `macro_idle_time`. `idle_time` stays the total. |
 | `--comparison_json_path` | None | Second trace to compare against; runs TraceDiff and adds speedup/delta/LCA columns plus a `diff_stats` sheet. |
 | `--enable-origami-gemm` | off | Add `Origami` GEMM times when a GPU arch is given. |
 | `--enable-origami-sdpa-tile` | off | Add `SDPA Tile Origami` attention times from TraceLens's tile model, with Origami timing each tile GEMM. |

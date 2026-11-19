@@ -295,6 +295,9 @@ class GPUEventAnalyser:
                 "exposed_comm_time": exposed_comm_time,
                 "exposed_memcpy_time": exposed_memcpy_time,
                 "busy_time": busy_time,
+                # Total stays under idle_time. The split rows are a breakdown
+                # of it, so readers that look up idle_time still see the gap.
+                "idle_time": micro_idle_time + macro_idle_time,
                 "micro_idle_time": micro_idle_time,
                 "macro_idle_time": macro_idle_time,
                 "total_time": total_time,

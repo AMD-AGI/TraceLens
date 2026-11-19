@@ -1176,8 +1176,8 @@ def main():
         "--micro_idle_thresh_us",
         type=int,
         default=None,
-        help="Threshold in microseconds to classify idle interval as micro idle in GPU timeline analysis. "
-        "Default is None and all idle times are included in one category.",
+        help="Threshold in microseconds. Also writes micro_idle_time and macro_idle_time; "
+        "idle_time stays the total. Default is None, and only idle_time is written.",
     )
     parser.add_argument(
         "--disable_coll_analysis",
