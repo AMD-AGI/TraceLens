@@ -823,7 +823,8 @@ class CONV:
             out_shape, x_shape, w_shape, False, bytes_per_element
         )
         # for bias we read the output gradient and write the bias gradient
-        bytes_bias_grad = prod(out_shape) + out_shape[1] if bias else 0
+        elems_bias_grad = prod(out_shape) + out_shape[1] if bias else 0
+        bytes_bias_grad = elems_bias_grad * bytes_per_element
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     def bytes_bwd(self, bytes_per_element):
@@ -970,8 +971,12 @@ class aten_conv_bwd(CONV):
         ndims = len(input_shape) - 2
         filter_shape = tuple(input_dims[2])
 
-        # Check if bias gradient is computed (from output_mask)
-        bias = len(input_dims) > 3 and input_dims[3] and len(input_dims[3]) > 0
+        # Check if bias gradient is computed (from output_mask).
+        # bias_sizes and output_mask are int/bool lists, so the profiler
+        # records them in Concrete Inputs and leaves Input Dims empty.
+        output_mask_arg = concrete_inputs[10] if len(concrete_inputs) > 10 else ""
+        output_mask = [x.strip() for x in output_mask_arg.strip("[]").split(",")]
+        bias = len(output_mask) == 3 and output_mask[2] == "True"
 
         stride_arg = concrete_inputs[4]
         stride = (
