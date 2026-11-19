@@ -788,78 +788,33 @@ def _has_profile_cost(kernel: dict[str, Any]) -> bool:
     return bool(kernel.get("flops")) and bool(kernel.get("bytes"))
 
 
-def _scaled_export(
-    flops: float,
-    nbytes: float,
-    instances: int,
-    launch_count: int,
-    per_launch: float | None,
-    *,
-    one_forward: bool,
-) -> tuple[float, float]:
-    """Export FLOPs and bytes for ``launch_count`` launches, or one forward.
-
-    The same scale applies to both, so arithmetic intensity stays the
-    projection's. No launches and not one forward is no work: a category whose
-    kernels were not in this phase does not contribute.
-    """
-    if flops <= 0 or nbytes <= 0:
-        return 0.0, 0.0
-    if one_forward:
-        return flops, nbytes
-    if launch_count <= 0:
-        return 0.0, 0.0
-    if instances:
-        scale = launch_count / instances
-    elif per_launch:
-        scale = per_launch * launch_count / flops
-    else:
-        scale = 1.0
-    return flops * scale, nbytes * scale
-
-
 def _category_work(
     kernels: list[dict[str, Any]],
-    flops: float,
-    nbytes: float,
     instances: int,
-    per_launch: float | None,
     *,
     one_forward: bool,
-    prefer_profile: bool = True,
 ) -> tuple[float, float, str]:
     """FLOPs and bytes from the PerfModel on the traced shapes.
 
     A kernel with no ``GFLOPS`` is left out. It is not filled from the static
-    projection, whose shapes are not this trace. ``prefer_profile`` false is
-    the model-only path, which has no traced rows.
+    projection, whose shapes are not this trace.
     """
     costed = [kernel for kernel in kernels if _has_profile_cost(kernel)]
-    if prefer_profile and not costed:
+    if not costed:
         # A traced category with no perf-model shape, or a category the
         # capture did not run. The static projection is a different graph.
         return 0.0, 0.0, "none"
-    if prefer_profile and costed:
-        total_flops = sum(float(kernel["flops"]) for kernel in costed)
-        total_bytes = sum(float(kernel["bytes"]) for kernel in costed)
-        if total_flops <= 0 or total_bytes <= 0:
-            return 0.0, 0.0, "none"
-        if not one_forward:
-            return total_flops, total_bytes, "profile"
-        _, launches = _measured_launches(costed)
-        if instances and launches:
-            scale = instances / launches
-            return total_flops * scale, total_bytes * scale, "profile"
-        return total_flops, total_bytes, "profile"
-    launch_count = 0
-    if kernels and not one_forward:
-        _, launch_count = _measured_launches(kernels)
-    exported = _scaled_export(
-        flops, nbytes, instances, launch_count, per_launch, one_forward=one_forward
-    )
-    if exported[0] <= 0:
+    total_flops = sum(float(kernel["flops"]) for kernel in costed)
+    total_bytes = sum(float(kernel["bytes"]) for kernel in costed)
+    if total_flops <= 0 or total_bytes <= 0:
         return 0.0, 0.0, "none"
-    return exported[0], exported[1], "export"
+    if not one_forward:
+        return total_flops, total_bytes, "profile"
+    _, launches = _measured_launches(costed)
+    if instances and launches:
+        scale = instances / launches
+        return total_flops * scale, total_bytes * scale, "profile"
+    return total_flops, total_bytes, "profile"
 
 
 def _series_work(
@@ -868,9 +823,8 @@ def _series_work(
     categories: tuple[str, ...] | None,
     *,
     one_forward: bool,
-    prefer_profile: bool = True,
 ) -> tuple[float, float, str]:
-    """FLOPs and bytes for a series, profile first and export as the fallback."""
+    """FLOPs and bytes for a series, from the kernels the PerfModel costed."""
     by_cat: dict[str, list[dict[str, Any]]] = {}
     for op in _bucket_ops(ops, categories):
         by_cat.setdefault(str(op.get("category")), []).append(op)
@@ -886,23 +840,17 @@ def _series_work(
     nbytes = 0.0
     sources: set[str] = set()
     for cat, rows in by_cat.items():
-        total_flops, total_bytes, instances, per_launch = _bucket_cost(
-            tuple(rows), None
-        )
+        _flops, _bytes, instances, _per_launch = _bucket_cost(tuple(rows), None)
         part_flops, part_bytes, source = _category_work(
             grouped[cat],
-            total_flops,
-            total_bytes,
             instances,
-            per_launch,
             one_forward=one_forward,
-            prefer_profile=prefer_profile,
         )
         flops += part_flops
         nbytes += part_bytes
         if source != "none":
             sources.add(source)
-    if prefer_profile and not one_forward:
+    if not one_forward:
         for kernel in extra:
             flops += float(kernel["flops"])
             nbytes += float(kernel["bytes"])
@@ -930,8 +878,6 @@ def _accounted_kernels(
         if not _has_profile_cost(kernel):
             continue
         cat = report_kernel_category(kernel["name"])
-        if categories is not None and cat not in categories:
-            continue
         if cat is None or cat in known or categories is None:
             kept.append(kernel)
     return kept

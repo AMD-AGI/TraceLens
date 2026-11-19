@@ -661,6 +661,8 @@ def test_launch_scaling_uses_the_mean_launch_not_the_costliest():
 def test_a_rollup_with_no_launch_count_keeps_the_per_launch_fallback():
     # Files written before the launch count was recorded have only the
     # per-launch cost of one row.
+    # 40 projected launches, 80 measured: two forwards, so the numerator doubles.
+    assert achieved_tflops(4.0e9, 40, 80, 20.0) == pytest.approx(400.0)
     assert achieved_tflops(4.0e9, 0, 40, 20.0, flops_per_launch=1.0e8) == (
         pytest.approx(200.0)
     )
@@ -769,6 +771,61 @@ def test_top_kernels_keep_one_marker_per_shape():
     assert by_label["aiter::gemm 4096×4096"].time_us == 90.0
     assert by_label["aiter::gemm 128×128"].flops == pytest.approx(1.0e9)
     assert by_label["aiter::gemm 128×128"].time_us == 20.0
+
+
+def test_a_shared_shape_prefix_keeps_the_full_shape_in_the_label():
+    # Both shapes start with the same numeric tensor, so the short prefix
+    # does not tell them apart and the label keeps the whole Input Dims.
+    left = _priced("gemm", 10.0, 1)
+    left["shape"] = "((8, 8), foo)"
+    right = _priced("gemm", 5.0, 1)
+    right["shape"] = "((8, 8), bar)"
+    series = top_kernel_series([left, right], 2)
+    assert {spec.label for spec in series} == {
+        "gemm ((8, 8), foo)",
+        "gemm ((8, 8), bar)",
+        "End to end",
+    }
+
+
+def test_a_top_kernel_without_flops_is_not_drawn():
+    from TraceLens.Visualizer.model_explorer_export.e2e_roofline import Series
+
+    bare = _kernel("plain_kernel", 20.0, 1)
+    series = (
+        Series("plain_kernel", "o", None, None, kernel_name="plain_kernel", kernel_shape=""),
+        Series("End to end", "D", None, None),
+    )
+    points, warnings = build_points(
+        [Regime("prefill", 1, (_op("GEMM", 1.0, 1.0),))],
+        [bare],
+        series=series,
+    )
+    assert any("no profile FLOPs" in warning for warning in warnings)
+    assert not any(point.series == "plain_kernel" for point in points)
+
+
+def test_cancelled_flops_leave_the_category_off_the_figure():
+    negative = _priced("aiter::gemm_a8w8", 10.0, 1, flops=-5.0, bytes_=1.0)
+    positive = _priced("aiter::gemm_a8w8", 10.0, 1, flops=5.0, bytes_=1.0)
+    points, _warnings = build_points(
+        [Regime("prefill", 1, (_op("GEMM", 1.0, 1.0),))],
+        [negative, positive],
+    )
+    assert not any(point.series == "GEMM" for point in points)
+
+
+def test_kernel_share_ignores_a_kernel_that_did_not_run():
+    kernel = _priced("gemm", 10.0, 1)
+    series = top_kernel_series([kernel], 1)
+    points, _warnings = build_points(
+        [Regime("prefill", 1, (_op("GEMM", 1.0, 1.0),))],
+        [kernel],
+        series=series,
+    )
+    idle = _kernel("idle", 0.0, 1)
+    assert figure_kernel_time_share(points, series, [kernel, idle]) == pytest.approx(1.0)
+    assert figure_kernel_time_share(points, series, [idle]) is None
 
 
 def test_top_kernel_point_uses_the_traced_flops():
@@ -1158,7 +1215,6 @@ def test_uncovered_plot_and_cli_paths(tmp_path, monkeypatch, capsys):
 
     with pytest.raises(ValueError, match="at least 1"):
         e2e.top_kernel_series([_kernel("a", 1.0, 1)], 0)
-    assert e2e._scaled_export(0.0, 1.0, 1, 1, None, one_forward=False) == (0.0, 0.0)
     with pytest.raises(ValueError, match="positive"):
         achieved_tflops(1.0, 1, 1, 0.0)
 
