@@ -6755,6 +6755,21 @@ class FP4GroupedMLPMXFunc(GroupedGemm):
             self.M, self.N // 2, self.K, self.G, self.bpe_in, self.bpe_out
         )
 
+    # Two-GEMM backward (gate_up + down). Overridden so category-level backward
+    # roll-ups -- which call the forward model's flops_bwd/bytes_bwd -- match
+    # FP4GroupedMLPMXFuncBackward instead of the one-GEMM GroupedGemm base.
+    def flops_bwd(self):
+        return self.flops_bwd_func(self.M, self.K, self.N) + self.flops_bwd_func(
+            self.M, self.N // 2, self.K
+        )
+
+    def bytes_bwd(self):
+        return self.bytes_bwd_func(
+            self.M, self.K, self.N, self.G, self.bpe_in, self.bpe_out
+        ) + self.bytes_bwd_func(
+            self.M, self.N // 2, self.K, self.G, self.bpe_in, self.bpe_out
+        )
+
     def get_compute_precision(self):
         return torch_dtype_map("mxfp4")
 
