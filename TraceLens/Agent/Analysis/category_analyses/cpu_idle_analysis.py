@@ -9,23 +9,31 @@
 CPU/Idle Time Analysis Script
 
 Reports GPU idle time percentage and utilization breakdown.
-Flags idle time exceeding 15% for the agent to investigate.
+Flags idle time above IDLE_PCT_THRESHOLD for the agent to investigate.
 
 Outputs cpu_idle_metrics.json with analysis results.
 """
 
 import argparse
 import os
-import sys
+from typing import Any
+
 import pandas as pd
-from typing import Dict, Any, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import (
+    IDLE_PCT_THRESHOLD,
+    SystemFindings,
+    load_manifest,
+    perf_report_csv_dir,
+    write_metrics_json,
+)
+from TraceLens.Reporting.aggregate_perf_reports import NODE_COL
 
-from analysis_utils import perf_report_csv_dir, write_metrics_json
+# Constants
+SHORT_KERNEL_US = 10
 
 
-def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
+def load_gpu_timeline(output_dir: str) -> dict[str, dict[str, float]]:
     """Load GPU timeline data from CSV."""
     csv_path = os.path.join(perf_report_csv_dir(output_dir), "gpu_timeline.csv")
 
@@ -41,7 +49,7 @@ def load_gpu_timeline(output_dir: str) -> Dict[str, float]:
     return timeline
 
 
-def load_ops_summary(output_dir: str) -> Optional[pd.DataFrame]:
+def load_ops_summary(output_dir: str) -> pd.DataFrame | None:
     """Load operations summary for kernel analysis."""
     csv_path = os.path.join(perf_report_csv_dir(output_dir), "ops_summary.csv")
 
@@ -51,7 +59,7 @@ def load_ops_summary(output_dir: str) -> Optional[pd.DataFrame]:
     return pd.read_csv(csv_path)
 
 
-def analyze_kernel_patterns(ops_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+def analyze_kernel_patterns(ops_df: pd.DataFrame | None) -> dict[str, Any]:
     """Analyze kernel patterns to identify overhead sources."""
     patterns = {
         "short_kernel_count": 0,
@@ -63,7 +71,6 @@ def analyze_kernel_patterns(ops_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     if ops_df is None or ops_df.empty:
         return patterns
 
-    # Count kernels and analyze times
     if "Kernel Time (µs)_sum" in ops_df.columns and "Count" in ops_df.columns:
         patterns["total_kernel_count"] = int(ops_df["Count"].sum())
 
@@ -71,14 +78,12 @@ def analyze_kernel_patterns(ops_df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         if patterns["total_kernel_count"] > 0:
             patterns["avg_kernel_time_us"] = total_time / patterns["total_kernel_count"]
 
-        # Count short kernels (< 10µs average)
         if "Kernel Time (µs)_mean" in ops_df.columns:
-            short_ops = ops_df[ops_df["Kernel Time (µs)_mean"] < 10]
+            short_ops = ops_df[ops_df["Kernel Time (µs)_mean"] < SHORT_KERNEL_US]
             patterns["short_kernel_count"] = (
                 int(short_ops["Count"].sum()) if not short_ops.empty else 0
             )
 
-    # Analyze by category
     if "op category" in ops_df.columns and "Count" in ops_df.columns:
         category_counts = ops_df.groupby("op category")["Count"].sum().to_dict()
         patterns["kernel_count_by_category"] = {
@@ -100,11 +105,9 @@ def main():
     print("=" * 80)
 
     try:
-        # Load data
         gpu_timeline = load_gpu_timeline(output_dir)
         ops_df = load_ops_summary(output_dir)
 
-        # Extract key metrics
         idle_time = gpu_timeline.get("idle_time", {})
         idle_percent = idle_time.get("percent", 0)
         idle_ms = idle_time.get("time_ms", 0)
@@ -114,34 +117,47 @@ def main():
         comm_percent = gpu_timeline.get("exposed_comm_time", {}).get("percent", 0)
         memcpy_percent = gpu_timeline.get("exposed_memcpy_time", {}).get("percent", 0)
 
-        print(f"\nGPU Utilization Breakdown:")
+        print("\nGPU Utilization Breakdown:")
         print(f"  Total Time: {total_time_ms:.2f} ms")
         print(f"  Computation: {computation_percent:.2f}%")
         print(f"  Communication: {comm_percent:.2f}%")
         print(f"  MemCpy: {memcpy_percent:.2f}%")
         print(f"  Idle: {idle_percent:.2f}%")
 
-        # Analyze kernel patterns
         kernel_patterns = analyze_kernel_patterns(ops_df)
-        print(f"\nKernel Analysis:")
+        print("\nKernel Analysis:")
         print(f"  Total Kernels: {kernel_patterns['total_kernel_count']}")
-        print(f"  Short Kernels (<10µs): {kernel_patterns['short_kernel_count']}")
+        print(
+            f"  Short Kernels (<{SHORT_KERNEL_US}µs): {kernel_patterns['short_kernel_count']}"
+        )
         print(f"  Avg Kernel Time: {kernel_patterns['avg_kernel_time_us']:.1f} µs")
 
-        idle_flagged = idle_percent > 15
-        print(f"\n  Idle Flagged: {idle_flagged} ({idle_percent:.1f}%)")
+        gpu_utilization = {
+            "total_time_ms": round(total_time_ms, 2),
+            "idle_time_ms": round(idle_ms, 2),
+            "idle_time_percent": round(idle_percent, 2),
+            "computation_percent": round(computation_percent, 2),
+            "communication_percent": round(comm_percent, 2),
+            "memcpy_percent": round(memcpy_percent, 2),
+        }
+        system_findings = SystemFindings.rank(
+            [
+                SystemFindings.make(
+                    "High GPU Idle Time",
+                    gpu_utilization["idle_time_ms"],
+                    gpu_utilization["idle_time_percent"],
+                )
+            ]
+            if idle_percent > IDLE_PCT_THRESHOLD
+            else []
+        )
+        print(f"\n  System findings: {len(system_findings)} (idle {idle_percent:.1f}%)")
 
         metrics = {
             "status": "OK",
-            "idle_flagged": idle_flagged,
-            "gpu_utilization": {
-                "total_time_ms": round(total_time_ms, 3),
-                "idle_time_ms": round(idle_ms, 3),
-                "idle_time_percent": round(idle_percent, 2),
-                "computation_percent": round(computation_percent, 2),
-                "communication_percent": round(comm_percent, 2),
-                "memcpy_percent": round(memcpy_percent, 2),
-            },
+            NODE_COL: load_manifest(output_dir).get("focus_job"),
+            "system_findings": system_findings,
+            "gpu_utilization": gpu_utilization,
             "kernel_analysis": kernel_patterns,
             "impact_estimates": [],
         }
@@ -152,7 +168,7 @@ def main():
         print("=" * 80)
 
     except Exception as e:
-        print(f"\n✗ Error: {str(e)}")
+        print(f"\n✗ Error: {e}")
 
         error_metrics = {"status": "ERROR", "error": str(e)}
         write_metrics_json(error_metrics, output_dir, "cpu_idle")

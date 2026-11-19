@@ -16,6 +16,8 @@ This topic explains how *model-level parameters* like batch size, sequence lengt
 
 ## From model dimensions to GEMM shapes
 
+The following sections trace how a linear layer's input tensor shape maps to GEMM parameters, contrasting the prefill and decode inference phases.
+
 ### Linear layers in LLMs
 
 Consider how linear layers in a large language model (LLM), such as the multi-layer perceptron (MLP) *up projection*, correspond to GEMM calls.
@@ -129,6 +131,8 @@ db = dY.sum(dim=0) # Gradient with respect to the bias   → resulting shape: [d
 ```
 
 ### GEMM shapes
+
+The following table shows the GEMM shape for each forward and backward operation.
 
 | Operation   | GEMM shape `(param: M, param: N, param: K)` | Description                          |
 |-------------|---------------------------------------------|--------------------------------------|
@@ -301,6 +305,8 @@ The enhanced analysis adds specific efficiency metrics for Tensile GEMM kernels,
 
 ### Key metrics
 
+The enhanced output includes the following dimension-efficiency columns.
+
 - `mt_m`, `mt_n`: Macro-tile dimensions extracted from the kernel name.
 - `num_tiles`: Total number of tiles after padding.
 - `tile_eff`: Tile quantization efficiency. Measures efficiency loss due to input matrix dimensions not being perfectly divisible by tile dimensions.
@@ -308,6 +314,8 @@ The enhanced analysis adds specific efficiency metrics for Tensile GEMM kernels,
 - `dim_eff`: Net dimension efficiency. The product of `tile_eff` and `wq_eff`, representing the combined efficiency impact of tiling and scheduling.
 
 ### Understanding the concepts
+
+The following subsections define tile quantization efficiency, wave quantization efficiency, and the combined dimension efficiency metric.
 
 #### Tile quantization efficiency (`tile_eff`)
 
@@ -457,6 +465,8 @@ dim_eff ≈ 0.935
 ```
 
 ### Important considerations
+
+Keep the following constraints in mind when interpreting dimension-efficiency results.
 
 - Scope: This analysis assumes standard tiled GEMMs. Techniques like Stream-K or Split-K are not yet modeled.
 - Relevance: These metrics are most useful for compute-bound GEMMs. Use FLOPS/Byte to determine whether a GEMM is compute- or memory-bound.

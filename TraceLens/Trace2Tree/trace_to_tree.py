@@ -11,7 +11,13 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from ..util import JaxProfileProcessor, TraceEventUtils
+from ..TraceUtils.utils.annotation_utils import IterationAnnotation
+from ..util import (
+    GRAPH_LAUNCH_NAMES,
+    TIMESTAMP_TOLERANCE_US,
+    JaxProfileProcessor,
+    TraceEventUtils,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,24 +160,19 @@ class BaseTraceToTree(ABC):
                 if self._is_nn_module_event(popped_event):
                     nn_module_stack.pop()
 
-            # Handle "event bleed": the event starts inside the stack top
-            # but ends after it.  If the overlap (stack[-1].t_end - event.ts)
-            # is < 1 us, this is a tiny timing overlap (e.g. hipLaunchKernel
-            # starting a few hundred ns before a sibling cpu_op finishes).
-            # Pop the sibling and attach the event under the same parent.
-            # Larger bleeds (>= 1 us) are discarded — these are typically
-            # python_function instrumentation artifacts (e.g. PyCapsule
-            # built-ins whose duration includes GPU sync time).
+            # Event bleed: the event starts inside the stack top but ends
+            # after it. Small bleeds (< tolerance) pop the sibling; larger
+            # ones discard the event.
+            bleed_tolerance_us = TIMESTAMP_TOLERANCE_US
             if stack and (
                 event[TraceEventUtils.TraceKeys.TimeEnd]
-                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
+                > stack[-1][TraceEventUtils.TraceKeys.TimeEnd] + bleed_tolerance_us
             ):
                 overlap_us = (
                     stack[-1][TraceEventUtils.TraceKeys.TimeEnd]
                     - event[TraceEventUtils.TraceKeys.TimeStamp]
                 )
-                overlap_tolerance_us = 1.0
-                if overlap_us < overlap_tolerance_us and len(stack) >= 2:
+                if overlap_us < bleed_tolerance_us and len(stack) >= 2:
                     popped_event = stack.pop()
                     if self.event_to_category(popped_event) == "cpu_op":
                         dict_pidtid2num_cpu_ops[stack_key] -= 1
@@ -650,6 +651,44 @@ class JaxTraceToTree(BaseTraceToTree):
                                             )
 
 
+def covering_user_annotation(event, annotation_events) -> str:
+    """The annotation whose span contains ``event``.
+
+    A replay sits inside several ranges. ``scheduler.run_batch`` starts
+    before the step and carries no sq/sk record, so the earliest range
+    leaves ``kv_mode`` unset and the MLA roofline prices the reserved index
+    buffer. The tightest range that parses as an iteration annotation is
+    the step this launch belongs to. A launch that ends on the annotation
+    boundary is still inside it.
+    """
+    start = event.get("ts")
+    if start is None:
+        return "NA"
+    end = start + (event.get("dur") or 0)
+    containing = []
+    for ann in annotation_events:
+        ann_start = ann.get("ts")
+        if ann_start is None:
+            continue
+        ann_end = ann_start + (ann.get("dur") or 0)
+        if ann_start <= start and end <= ann_end:
+            containing.append(ann)
+    if not containing:
+        return "NA"
+
+    parsed = []
+    with_sqsk = []
+    for ann in containing:
+        record = IterationAnnotation(str(ann.get("name") or ""))
+        if not record.matched:
+            continue
+        parsed.append(ann)
+        if record.has_sqsk:
+            with_sqsk.append(ann)
+    chosen = min(with_sqsk or parsed or containing, key=lambda ann: ann.get("dur") or 0)
+    return chosen.get("name") or "NA"
+
+
 class TraceToTree(BaseTraceToTree):
     """Chrome-trace (PyTorch) tree with CUDA runtime / driver linking and host stack."""
 
@@ -766,10 +805,9 @@ class TraceToTree(BaseTraceToTree):
         Name = TraceEventUtils.TraceKeys.Name
         events_by_uid = self.events_by_uid
         name2event_uids = self.name2event_uids
-        graph_launch_names = {"cudaGraphLaunch", "hipGraphLaunch"}
         for runtime_uid in self.runtime_event_uids:
             runtime_event = events_by_uid[runtime_uid]
-            if runtime_event["name"] in graph_launch_names:
+            if runtime_event["name"] in GRAPH_LAUNCH_NAMES:
                 corresponding_gpu_events = self._get_graph_gpu_events(runtime_event)
             else:
                 gpu_evt = self._find_corresponding_output_event(runtime_event)
@@ -833,24 +871,18 @@ class TraceToTree(BaseTraceToTree):
         return None
 
     def apply_annotation(self, name_filters=[]) -> None:
+        """Stamp each filtered op with the step annotation that contains it."""
         events = self.events
         annotation_events = [
             e for e in events if "user_annotation" in (e.get("cat") or "")
         ]
-        annotation_events.sort(key=lambda x: x.get("ts", 0))
         filtered_events = []
         for i in name_filters:
             filtered_events += [e for e in events if e.get("name", "").startswith(i)]
         for e in filtered_events:
-            annotation = "NA"
-            for ann in annotation_events:
-                if (
-                    ann["ts"] <= e["ts"]
-                    and (e["ts"] + e["dur"]) < ann["ts"] + ann["dur"]
-                ):
-                    annotation = ann.get("name")
-                    break
-            self.events[e[TraceEventUtils.TraceKeys.UID]]["annotation"] = annotation
+            self.events[e[TraceEventUtils.TraceKeys.UID]]["annotation"] = (
+                covering_user_annotation(e, annotation_events)
+            )
 
     def traverse_subtree_and_print(
         self,
@@ -1199,27 +1231,25 @@ class TraceToTree(BaseTraceToTree):
         # 1. Get the linking id from the input event
         # 2. Find the corresponding start and end ac2g events for the linking id
         # 3. Find the output event using the pid, tid, and linking id of the end ac2g event
+        # 4. Some runtimes (e.g. hipDrvLaunchKernelEx, hipMemsetAsync) emit only
+        #    the finish half of the ac2g flow, so fall back to an unambiguous
+        #    correlation-id match.
         link_id = input_event.get(TraceEventUtils.TraceKeys.Args, {}).get(
             self.linking_key
         )
         ac2g_start_event = self.ac2g_event_map["start"].get(link_id)
         ac2g_end_event = self.ac2g_event_map["end"].get(link_id)
 
-        if not ac2g_start_event:
+        if ac2g_start_event and ac2g_end_event:
+            pid = ac2g_end_event.get(TraceEventUtils.TraceKeys.PID)
+            tid = ac2g_end_event.get(TraceEventUtils.TraceKeys.TID)
+            end_link_id = ac2g_end_event.get("id")
+            return self.pid_tid_event_map.get((pid, tid, end_link_id))
+        else:
+            gpu_events = self.linking_id_to_gpu_events.get(link_id, [])
+            if len(gpu_events) == 1:
+                return gpu_events[0]
             return None
-
-        if not ac2g_end_event:
-            # print(f"Warning: start ac2g event found for {self.linking_key}={link_id} but no corresponding end ac2g event found.")
-            # print(f"Input event name: {input_event[TraceEventUtils.TraceKeys.Name]}")
-            # print(('-'*64))
-            return None
-
-        pid = ac2g_end_event.get(TraceEventUtils.TraceKeys.PID)
-        tid = ac2g_end_event.get(TraceEventUtils.TraceKeys.TID)
-        link_id = ac2g_end_event.get("id")
-
-        output_event = self.pid_tid_event_map.get((pid, tid, link_id))
-        return output_event
 
     def get_nn_module_children(self, nn_module_event: Dict[str, Any]):
         """

@@ -1,0 +1,250 @@
+###############################################################################
+# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""Command line entry point for TraceIndex."""
+
+import argparse
+import json
+from pathlib import Path
+from typing import List, Optional
+
+from TraceLens.TraceIndex.importer import (
+    append_trace,
+    build_traces,
+    import_handoff_jsonl,
+    report_dir_for_trace,
+)
+from TraceLens.TraceIndex.sqlite_store import SQLiteTraceIndexStore
+from TraceLens.TraceIndex.utils import collect_trace_paths
+
+DEFAULT_DB = Path("trace_index.sqlite")
+
+
+def print_json(payload: object) -> None:
+    print(json.dumps(payload, indent=2, default=str))
+
+
+def create_store(args: argparse.Namespace):
+    if args.backend != "sqlite":
+        raise ValueError("only the sqlite backend is currently implemented")
+    return SQLiteTraceIndexStore(args.db)
+
+
+def append_cmd(args: argparse.Namespace) -> int:
+    store = create_store(args)
+    try:
+        report_dir = args.report_dir
+        generated = report_dir is None
+        if generated:
+            report_dir = report_dir_for_trace(args.trace_path, args.report_root)
+        trace_id = append_trace(
+            store,
+            trace_path=args.trace_path,
+            report_dir=None if generated else report_dir,
+            root=args.root,
+            force=args.force,
+            enable_pseudo_ops=args.enable_pseudo_ops,
+            report_root=args.report_root,
+        )
+        print_json(
+            {
+                "backend": args.backend,
+                "db": args.db,
+                "trace_id": trace_id,
+                "trace_path": args.trace_path,
+                "report_dir": report_dir,
+                "generated_report": generated,
+            }
+        )
+        return 0
+    finally:
+        store.close()
+
+
+def build_cmd(args: argparse.Namespace) -> int:
+    trace_paths = collect_trace_paths(
+        args.traces_file, args.trace_path, args.trace_dirs
+    )
+    if not trace_paths:
+        raise SystemExit(
+            "build requires --traces-file, --trace-dir, and/or one or more "
+            "--trace-path values"
+        )
+    store = create_store(args)
+    try:
+        result = build_traces(
+            store,
+            trace_paths,
+            report_root=args.report_root,
+            root=args.root,
+            force=args.force,
+            enable_pseudo_ops=args.enable_pseudo_ops,
+        )
+        print_json(
+            {
+                "backend": args.backend,
+                "db": args.db,
+                "imported": result["imported"],
+                "failed": result["failed"],
+            }
+        )
+        return 1 if result["failed"] else 0
+    finally:
+        store.close()
+
+
+def import_handoff_cmd(args: argparse.Namespace) -> int:
+    store = create_store(args)
+    try:
+        result = import_handoff_jsonl(store, args.handoff, root=args.root)
+        print_json(
+            {
+                "backend": args.backend,
+                "db": args.db,
+                "imported": result["imported"],
+                "failed": result["failed"],
+            }
+        )
+        return 1 if result["failed"] else 0
+    finally:
+        store.close()
+
+
+def search_cmd(args: argparse.Namespace) -> int:
+    store = create_store(args)
+    try:
+        store.init_schema()
+        rows = [
+            hit._asdict()
+            for hit in store.search(" ".join(args.terms), limit=args.limit)
+        ]
+        print_json({"backend": args.backend, "rows": rows})
+        return 0
+    finally:
+        store.close()
+
+
+def sqlite_sql_cmd(args: argparse.Namespace) -> int:
+    store = create_store(args)
+    try:
+        store.init_schema()
+        rows = store.execute_read_query(args.sql, limit=args.limit)
+        print_json({"backend": args.backend, "rows": rows})
+        return 0
+    finally:
+        store.close()
+
+
+def add_generate_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--report-root",
+        type=Path,
+        default=None,
+        help="Directory for generated CSV reports (default: trace_index_reports/)",
+    )
+    parser.add_argument("--root", type=Path, default=None)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate CSV reports even if they already exist",
+    )
+    parser.add_argument("--enable-pseudo-ops", action="store_true")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Build and query a TraceIndex catalog of traces."
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["sqlite"],
+        default="sqlite",
+        help="TraceIndex storage backend",
+    )
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite DB path")
+    sub = parser.add_subparsers(dest="command")
+
+    append = sub.add_parser(
+        "append",
+        help="Append one trace to the catalog, optionally from an existing CSV report",
+    )
+    append.add_argument("--trace-path", type=Path, required=True)
+    append.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+        help="Existing TraceLens CSV report directory. If omitted, generate a training PyTorch report.",
+    )
+    add_generate_args(append)
+    append.set_defaults(func=append_cmd)
+
+    build = sub.add_parser(
+        "build",
+        help="Create or open the catalog and append a batch of traces",
+    )
+    build.add_argument(
+        "--traces-file",
+        type=Path,
+        default=None,
+        help="Text file with one trace path per line (# comments allowed)",
+    )
+    build.add_argument(
+        "--trace-path",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Trace path to include. Repeatable; can be combined with "
+            "--traces-file and --trace-dir"
+        ),
+    )
+    build.add_argument(
+        "--trace-dir",
+        dest="trace_dirs",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Directory to walk for trace files "
+            "(.json.gz, .json, .pftrace, .rpd, .xplane.pb). "
+            "Report CSV dirs are skipped. Repeatable; can be combined with "
+            "--traces-file and --trace-path"
+        ),
+    )
+    add_generate_args(build)
+    build.set_defaults(func=build_cmd)
+
+    handoff = sub.add_parser(
+        "import-handoff",
+        help="Import runner-produced tracelens_id and artifact paths from JSONL",
+    )
+    handoff.add_argument("--handoff", type=Path, required=True)
+    handoff.add_argument("--root", type=Path, default=None)
+    handoff.set_defaults(func=import_handoff_cmd)
+
+    search = sub.add_parser("search", help="Full-text search indexed traces")
+    search.add_argument("terms", nargs="+")
+    search.add_argument("--limit", type=int, default=50)
+    search.set_defaults(func=search_cmd)
+
+    sql = sub.add_parser("sqlite-sql", help="Run a read-only SQLite query")
+    sql.add_argument("sql")
+    sql.add_argument("--limit", type=int, default=500)
+    sql.set_defaults(func=sqlite_sql_cmd)
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.error("a command is required")
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

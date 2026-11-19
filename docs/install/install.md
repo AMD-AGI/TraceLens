@@ -53,17 +53,48 @@ pip install git+https://github.com/AMD-AGI/TraceLens.git
 ```
 
 This installs TraceLens and its dependencies and places the `TraceLens_*`
-command-line tools on your `PATH`.
+command-line tools on your `PATH`. JAX XPlane (`.pb`) parsing requires the
+optional [JAX extra](../how-to/generate-perf-report-jax.md#before-you-begin).
 
 ## Method 2: Install from source (development)
 
 Use an editable install when you want to modify TraceLens or run its test
-suite. The `[dev]` extra installs the development and test dependencies:
+suite. The `[dev]` extra installs the development and test dependencies, and
+`[jax]` supplies the converter used by the JAX tests:
 
 ```bash
 git clone https://github.com/AMD-AGI/TraceLens.git && cd TraceLens
-pip install -e .[dev]
+pip install -e '.[dev,jax]'
 python -m pytest tests/ -v
+```
+
+### Optional: Visualizer (Model Explorer export)
+
+Install the CPU-only LLM architecture visualizer and its `huggingface_hub`
+dependency with the `[Visualizer]` extra:
+
+```bash
+pip install -e ".[Visualizer]"
+```
+
+The extra installs the current CPU PyTorch wheel from the PyTorch CPU index.
+PyPI's `torch` package is the CUDA build, which this extra does not use.
+
+This installs the `TraceLens.ModelUtils` and `TraceLens.Visualizer.model_explorer_export` packages and adds these commands to your `PATH`:
+
+- `visualize_model_in_explorer` (alias: `TraceLens_visualize_model_in_explorer`), the Model Explorer export
+- `TraceLens_model_roofline_projection`, the trace-free roofline projection
+
+See `TraceLens/Visualizer/README.md` for the export CLI. The
+model visualizer agent that drives this command is
+`TraceLens/Agent/Visualizer/`; see
+[Visualize a model](../how-to/visualize-model.md).
+
+For development on the visualizer, combine extras:
+
+```bash
+pip install -e ".[Visualizer,dev]"
+python3 -m pytest tests/Visualizer/ tests/ModelUtils/
 ```
 
 ## Optional: `traceconv` for `.pftrace` input

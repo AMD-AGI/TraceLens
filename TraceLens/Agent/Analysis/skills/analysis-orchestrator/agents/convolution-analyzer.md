@@ -28,7 +28,6 @@ When invoked by the orchestrator, you will receive the following context:
 
 **Input files (pre-computed by orchestrator):**
 1. `<output_dir>/category_data/<cat>_ops.csv` - Filtered Convolution operations (includes `call_stack` column for architecture context)
-2. `<output_dir>/metadata/<cat>_metadata.json` - Hardware specs
 
 **Output file you must write:**
 - `<output_dir>/category_findings/<cat>_findings.md`
@@ -121,7 +120,7 @@ Vendor/library/framework-agnostic. Pick the row matching `category_findings[i].b
 |------------------|---------------------|------------|
 | Large kernels (5×5+) | >70% of peak TFLOPS | compute-bound |
 | Standard 3×3 | >70% of peak TFLOPS | compute-bound |
-| 1×1 (pointwise) | >60% of peak HBM BW | memory-bound |
+| 1×1 (pointwise) | >60% of peak memory BW | memory-bound |
 | Depthwise | >50% (low parallelism) | varies |
 
 **Transpose overhead bands:**

@@ -23,7 +23,9 @@ anything.
 
 ## Before you begin
 
-- TraceLens installed (see [Install TraceLens](../install/install.md)).
+Confirm you have the following before continuing.
+
+- [TraceLens installed](../install/install.md).
 - The shapes and dtypes of the ops you want to model (no trace required).
 
 ## Op coverage
@@ -99,6 +101,7 @@ decode, bf16, AMD Instinct™ MI300X) — all without a single trace.
 
 ## Related topics
 
+- [Project a model's roofline from its checkpoint alone](./generate-model-roofline-projection.md)
 - [Analyze traces with the TraceLens SDK](./sdk-analysis.md)
 - [GEMM analysis in TraceLens](../conceptual/gemm-analysis.md)
 - [Performance report columns](../reference/perf-report-columns.md)

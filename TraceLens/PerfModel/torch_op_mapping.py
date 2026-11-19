@@ -45,7 +45,6 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
     "FusedRoPEFuncBackward": "RoPE_bwd",
     "CrossEntropyFunctionBackward": "CrossEntropy_bwd",
     # MoE auxiliary ops.
-    "aiter::moe_sorting_opus_fwd": "MoE_aux",
     "aiter::moe_align_block_size": "MoE_aux",
     "_moe_C::moe_align_block_size": "MoE_aux",
     "aiter::fused_moe_->_fused_dynamic_mxfp4_quant_moe_sort_kernel (Synthetic Op)": "MoE_aux",
@@ -64,6 +63,15 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
 OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r"^triton"), "triton"),
     (re.compile(r"^record_param_comms"), "record_param_comms"),
+    # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
+    (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
+    (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
+    (
+        re.compile(
+            r".*->(fused_compress_attn|hca_compress_forward)_\w+ \(Synthetic Op\)"
+        ),
+        "InferenceAttention",
+    ),
 ]
 
 
@@ -213,7 +221,15 @@ op_to_perf_model_class_map = {
     "aiter::wrapper_fmha_v3_bwd": perf_model.aiter__fmha_v3_backward,
     "aiter::mha_fwd": perf_model.aiter__mha_fwd,
     "aiter::fmha_v3_fwd": perf_model.aiter__fmha_v3_fwd,
+    "aiter::fmha_v3_bwd": perf_model.aiter__fmha_v3_bwd,
     "aiter::mha_bwd": perf_model.aiter__mha_bwd,
+    # aiter varlen FlashAttention (Wan 2.x training, sglang/vLLM inference). Issue #650 / #290.
+    "aiter::fmha_v3_varlen_fwd": perf_model.aiter__fmha_v3_varlen_fwd,
+    "aiter::fmha_v3_varlen_bwd": perf_model.aiter__fmha_v3_varlen_bwd,
+    "aiter::wrapper_fmha_v3_varlen_fwd": perf_model.aiter__fmha_v3_varlen_forward,
+    "aiter::wrapper_fmha_v3_varlen_bwd": perf_model.aiter__fmha_v3_varlen_backward,
+    # aten dispatcher-level Flash-Attention forward (PyTorch SDPA flash backend). Issue #650.
+    "aten::_flash_attention_forward": perf_model.aten___flash_attention_forward,
     "flash_attn_3::fwd": perf_model.flash_attn_v3_forward,
     "vllm::unified_attention_with_output": perf_model.vllm_unified_attention_with_output,
     "EvoformerAttention": perf_model.evoformer_attention,
@@ -280,10 +296,20 @@ unary_elemwise_ops = [
     "aten::clamp_max",
     "aten::clamp_max_",
     "aten::sigmoid",
-    "aten::rsqrt",
     "aten::silu",
     "aten::neg",
-    "aten::pow",
+    "aten::abs",
+    "aten::exp",
+    "aten::exp_",
+    "aten::log",
+    "aten::tanh",
+    "aten::tanh_",
+    "aten::rsqrt",
+    "aten::rsqrt_",
+    "aten::sqrt",
+    "aten::sqrt_",
+    "aten::reciprocal",
+    "aten::reciprocal_",
 ]
 
 binary_elemwise_ops = [
@@ -293,6 +319,8 @@ binary_elemwise_ops = [
     "aten::mul_",
     "aten::add",
     "aten::add_",
+    "aten::sub",
+    "aten::sub_",
     "aten::sigmoid_backward",
     "aten::threshold_backward",
 ]
@@ -376,10 +404,26 @@ upsample_ops = [
     "aten::upsample_nearest3d",
 ]
 
+# Bilinear upsampling (F.interpolate mode='bilinear'); same trace layout /
+# bandwidth roofline as nearest, higher per-output arithmetic (4-tap blend).
+bilinear_upsample_ops = [
+    "aten::upsample_bilinear2d",
+]
+
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
+for op in ("aten::pow", "aten::pow_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_pow
+for op in ("aten::gelu", "aten::gelu_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_gelu
+for op in ("aten::to", "aten::_to_copy"):
+    op_to_perf_model_class_map[op] = perf_model.aten_to
+for op in ("aten::pad",):
+    op_to_perf_model_class_map[op] = perf_model.aten_pad
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
+for op in ("aten::eq", "aten::ne", "aten::lt", "aten::gt"):
+    op_to_perf_model_class_map[op] = perf_model.aten_comparison
 for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:
@@ -388,6 +432,31 @@ for op in replication_pad_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_replication_pad
 for op in upsample_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_upsample_nearest
+for op in bilinear_upsample_ops:
+    op_to_perf_model_class_map[op] = perf_model.aten_upsample_bilinear
+
+# Embedding lookup is a gather: zero FLOPs, bytes for the gathered rows
+# (read and write) plus the index vector. Bag offsets are extra index reads.
+# Backward scatter-adds also re-read the updated row.
+data_movement_ops = {
+    "aten::embedding": perf_model.aten_embedding,
+    "aten::embedding_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_dense_backward": perf_model.aten_embedding_dense_backward,
+    "aten::embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_forward_only": perf_model.aten_embedding_bag,
+    "aten::_embedding_bag_dense_backward": perf_model.aten_embedding_bag_dense_backward,
+    "aten::index_select": perf_model.aten_index_select,
+    "aten::index_select_backward": perf_model.aten_index_select_backward,
+    "aten::gather": perf_model.aten_gather,
+    # tensor[indices], and the write side of the same indexing.
+    "aten::index": perf_model.aten_index,
+    "aten::index_put": perf_model.aten_index_put,
+    "aten::index_put_": perf_model.aten_index_put,
+    "aten::_index_put_impl_": perf_model.aten_index_put,
+}
+for op_name, op_class in data_movement_ops.items():
+    op_to_perf_model_class_map[op_name] = op_class
 
 # ---------------------------------------------------------------------------
 # Pattern-based matchers for perf models with generated kernel names.
@@ -422,6 +491,25 @@ def _match_triton_compiled(name):
 
 
 register_perf_model_matcher(_match_triton_compiled)
+
+
+def _match_gsplat(name):
+    """Resolve gsplat 3DGS kernels by substring, for op names that embed
+    template/kernel signatures (e.g. the projection ``(Synthetic Op)`` child) and
+    can't be keyed exactly. Also covers suffixed variants of the
+    _RasterizeToPixels / _SphericalHarmonics autograd ops."""
+    from TraceLens.PerfModel.extensions import gsplat_perf_model_extensions as _g
+
+    if "gsplat::projection_ewa_3dgs_packed_fwd" in name:
+        return _g.gsplat_projection_ewa_packed
+    if name.startswith("_RasterizeToPixels"):
+        return _g.gsplat_rasterize_to_pixels
+    if name.startswith("_SphericalHarmonics"):
+        return _g.gsplat_spherical_harmonics
+    return None
+
+
+register_perf_model_matcher(_match_gsplat)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,

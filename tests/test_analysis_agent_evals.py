@@ -4,12 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the agent_evals/Analysis eval harness.
+"""Unit tests for the analysis-orchestrator eval harness.
 
 The eval harness grades agent-generated reports; these tests grade the graders.
 All target functions are pure (dict/df/csv in, score/tuple out) and exercised
-with small synthetic fixtures. The modules under ``agent_evals/Analysis`` are
-not importable via the ``TraceLens`` package path, so each is loaded by file
+with small synthetic fixtures. The modules under
+``TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals`` are not importable via the ``TraceLens`` package path, so each is loaded by file
 path with importlib. ``eval_utils`` is placed on ``sys.path`` first so
 run_post_processing's ``from aggregate_repeatability import ...`` resolves.
 """
@@ -25,7 +25,15 @@ import yaml
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-_ANALYSIS_DIR = os.path.join(REPO_ROOT, "agent_evals", "Analysis")
+_ANALYSIS_DIR = os.path.join(
+    REPO_ROOT,
+    "TraceLens",
+    "Agent",
+    "Analysis",
+    "skills",
+    "analysis-orchestrator",
+    "evals",
+)
 _EVAL_UTILS_DIR = os.path.join(_ANALYSIS_DIR, "eval_utils")
 _RULES_PATH = os.path.join(_EVAL_UTILS_DIR, "report_section_rules.yaml")
 
@@ -34,7 +42,7 @@ if _EVAL_UTILS_DIR not in sys.path:
 
 
 def _load_module(name, rel_path):
-    """Load a module from a file path under agent_evals/Analysis."""
+    """Load a module from a file path under the analysis-orchestrator evals dir."""
     path = os.path.join(_ANALYSIS_DIR, rel_path)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -71,12 +79,12 @@ def rules():
 # ---------------------------------------------------------------------------
 
 
-def test_classify_row_kernel_fusion_by_eval_index(rules):
+def test_classify_row_appendix_by_eval_index(rules):
     base, standalone, cause, fix = post.classify_row(
-        {"eval_index": "workflow_eval_13"}, rules
+        {"eval_index": "workflow_eval_12"}, rules
     )
-    assert base == "Kernel Fusion"
-    assert standalone == "Kernel Fusion Opportunities"
+    assert base == "Others"
+    assert standalone == "Appendix"
 
 
 def test_classify_row_reasoning_and_compute_by_eval_index(rules):
@@ -362,7 +370,7 @@ def _comparative_row(output_dir, diff_cell):
         f"| Computation | 80.0% | 70.0% | {diff_cell} |\n"
     )
     rows = workflow._check_exec_summary_comparative(str(output_dir), exec_section)
-    return next(r for r in rows if r["index"] == "workflow_eval_10_compute_pct")
+    return next(r for r in rows if r["index"] == "workflow_eval_9_compute_pct")
 
 
 def test_exec_summary_comparative_difference_arithmetic_pass(tmp_path):
@@ -384,7 +392,7 @@ def test_exec_summary_comparative_missing_difference_column_fails(tmp_path):
         "| Computation | 80.0% | 70.0% |\n"
     )
     rows = workflow._check_exec_summary_comparative(str(tmp_path), exec_section)
-    row = next(r for r in rows if r["index"] == "workflow_eval_10_compute_pct")
+    row = next(r for r in rows if r["index"] == "workflow_eval_9_compute_pct")
     assert row["result"] == "FAIL"
     assert "Difference column missing" in row["details"]
 
@@ -397,7 +405,7 @@ def test_exec_summary_comparative_row_not_found_fails(tmp_path):
     )
     rows = workflow._check_exec_summary_comparative(str(tmp_path), exec_section)
     # idle_pct row is absent from the table -> row-not-found FAIL.
-    idle = next(r for r in rows if r["index"] == "workflow_eval_10_idle_pct")
+    idle = next(r for r in rows if r["index"] == "workflow_eval_9_idle_pct")
     assert idle["result"] == "FAIL"
     assert "Row not found" in idle["details"]
 
@@ -842,19 +850,6 @@ def test_extract_section_returns_body_until_next_header():
     assert workflow._extract_section(content, "## Missing") is None
 
 
-def test_rebase_path_markers_and_passthrough():
-    assert (
-        workflow._rebase_path("/orig/run/category_data/x.json", "/new")
-        == "/new/category_data/x.json"
-    )
-    assert (
-        workflow._rebase_path("/orig/metadata/model_info.json", "/new")
-        == "/new/metadata/model_info.json"
-    )
-    # No known marker -> returned unchanged.
-    assert workflow._rebase_path("/somewhere/else.txt", "/new") == "/somewhere/else.txt"
-
-
 def test_marker_attrs_from_inner():
     attrs = workflow._marker_attrs_from_inner(
         "kind=p_item category=compute low=1 mid=2 high=3"
@@ -924,7 +919,7 @@ def test_check_report_template_all_headers_and_table(tmp_path):
     out = _write_report(tmp_path, text)
     rows = workflow._check_report_template(out)
     assert all(r["result"] == "PASS" for r in rows)
-    table_row = next(r for r in rows if r["index"] == "workflow_eval_9_metrics_table")
+    table_row = next(r for r in rows if r["index"] == "workflow_eval_8_metrics_table")
     assert table_row["result"] == "PASS"
 
 
@@ -932,9 +927,9 @@ def test_check_report_template_missing_header_and_table(tmp_path):
     out = _write_report(tmp_path, "## Executive Summary\nno table here\n")
     rows = workflow._check_report_template(out)
     by_index = {r["index"]: r for r in rows}
-    assert by_index["workflow_eval_9_compute"]["result"] == "FAIL"
-    assert by_index["workflow_eval_9_metrics_table"]["result"] == "FAIL"
-    assert by_index["workflow_eval_9_executive_summary"]["result"] == "PASS"
+    assert by_index["workflow_eval_8_compute"]["result"] == "FAIL"
+    assert by_index["workflow_eval_8_metrics_table"]["result"] == "FAIL"
+    assert by_index["workflow_eval_8_executive_summary"]["result"] == "PASS"
 
 
 def test_check_marker_top_ops_complete(tmp_path):
@@ -960,6 +955,21 @@ def test_check_marker_top_ops_row_missing_attrs(tmp_path):
     text = (
         "<!-- impact-begin kind=top_ops -->\n"
         "<!-- top-ops-row name=foo low=1 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_top_ops(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "high" in rows[0]["details"]
+
+
+def test_check_marker_top_ops_checks_every_block(tmp_path):
+    text = (
+        "<!-- impact-begin kind=top_ops node=n0 -->\n"
+        "<!-- top-ops-row name=foo low=1 high=3 -->\n"
+        "<!-- impact-end -->\n"
+        "<!-- impact-begin kind=top_ops node=n1 -->\n"
+        "<!-- top-ops-row name=bar low=1 -->\n"
         "<!-- impact-end -->\n"
     )
     out = _write_report(tmp_path, text)
@@ -1013,13 +1023,19 @@ def test_check_marker_detail_estimates_complete(tmp_path):
         "## Detailed Analysis\n"
         "### Compute Kernel Insights\n"
         "#### Kernel P1: First\n"
-        "<!-- impact-begin kind=detail_estimate low=1 high=5 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
+        "body\n"
+        "<!-- impact-end -->\n"
+        "### Kernel Fusion Insights\n"
+        "#### Fusion P1: First\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n"
         "<!-- impact-end -->\n"
     )
     out = _write_report(tmp_path, text)
     rows = workflow._check_marker_detail_estimates(out)
-    assert rows[0]["result"] == "PASS"
+    assert [r["result"] for r in rows] == ["PASS", "PASS"]
+    assert rows[1]["index"] == "marker_eval_3_fusion_P1"
 
 
 def test_check_marker_detail_estimates_sentinel_passes(tmp_path):
@@ -1086,6 +1102,88 @@ def test_check_marker_reasoning_candidates_no_subsections(tmp_path):
     rows = workflow._check_marker_reasoning_candidates(out)
     assert rows[0]["result"] == "PASS"
     assert "No Detailed Analysis" in rows[0]["details"]
+
+
+def _op_row_report(impacts):
+    return (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "| op_b | 2.0 |\n"
+        f"<!-- impact-begin kind=op_row rank=1 impacts={impacts} -->\n"
+        "<!-- impact-end -->\n"
+    )
+
+
+def test_check_marker_op_rows_complete(tmp_path):
+    out = _write_report(tmp_path, _op_row_report("3.2,1.1"))
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "PASS"
+
+
+def test_check_marker_op_rows_count_mismatch(tmp_path):
+    out = _write_report(tmp_path, _op_row_report("3.2"))
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "1 impacts" in rows[0]["details"] and "2 rows" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_missing_attr(tmp_path):
+    text = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "<!-- impact-begin kind=op_row rank=1 -->\n"
+        "<!-- impact-end -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "impacts" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_unpaired(tmp_path):
+    text = (
+        "<!-- reasoning-candidate tier=compute rank=1 -->\n"
+        "#### Kernel P1: First\n"
+        "**Data:**\n"
+        "| Operation | Time (ms) |\n"
+        "|-----------|-----------|\n"
+        "| op_a | 1.0 |\n"
+        "<!-- impact-begin kind=op_row rank=1 impacts=3.2 -->\n"
+    )
+    out = _write_report(tmp_path, text)
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "FAIL"
+    assert "Unpaired" in rows[0]["details"]
+
+
+def test_check_marker_op_rows_none_present(tmp_path):
+    out = _write_report(tmp_path, "## Executive Summary\nx\n")
+    rows = workflow._check_marker_op_rows(out)
+    assert rows[0]["result"] == "PASS"
+
+
+def test_check_marker_op_rows_no_analysis_md(tmp_path):
+    rows = workflow._check_marker_op_rows(str(tmp_path))
+    assert rows[0]["result"] == "FAIL"
+    assert "not found" in rows[0]["details"]
+
+
+def test_marker_not_found_shape():
+    rows = workflow._marker_not_found("marker_eval_x", "Some markers")
+    assert len(rows) == 1
+    assert rows[0]["index"] == "marker_eval_x"
+    assert rows[0]["issue_summary"] == "Some markers"
+    assert rows[0]["result"] == "FAIL"
+    assert rows[0]["details"] == "analysis.md not found"
+    assert rows[0]["category"] == "Marker Identification"
 
 
 # ---------------------------------------------------------------------------
@@ -1479,27 +1577,24 @@ def test_quality_csv_alignment_string_column_numpy_normalized(tmp_path):
 def _valid_output_dir(tmp_path, comparison_scope="standalone"):
     """Build a fully-populated analysis output_dir that passes most checks."""
     out = tmp_path / "out"
-    for d in ("metadata", "category_data", "system_findings", "category_findings"):
+    for d in ("cache", "category_data", "system_findings", "category_findings"):
         (out / d).mkdir(parents=True)
 
     manifest = {
         "gpu_utilization": {"idle_time_percent": 5},
-        "categories": [
-            {
-                "name": "gemm",
-                "tier": "compute_kernel",
-                "metadata_file": "category_data/gemm_metrics.json",
-                "tree_data_file": "category_data/gemm_tree.json",
-            }
-        ],
+        "platform_specs": {
+            "peak_mem_bw_tbs": 5.3,
+            "max_achievable_tflops": {"matrix_bf16": 1000.0},
+            "memory_gb": 192,
+        },
+        "categories": [{"name": "gemm", "tier": "compute_kernel"}],
     }
     (out / "category_data" / "category_manifest.json").write_text(json.dumps(manifest))
     (out / "category_data" / "gemm_metrics.json").write_text(
         json.dumps({"impact_estimates": []})
     )
-    (out / "category_data" / "gemm_tree.json").write_text("{}")
     (out / "category_findings" / "gemm_findings.md").write_text("# findings\n")
-    (out / "metadata" / "model_info.json").write_text(
+    (out / "cache" / "model_info.json").write_text(
         json.dumps(
             {
                 "model": "TestNet",
@@ -1542,7 +1637,7 @@ def _valid_output_dir(tmp_path, comparison_scope="standalone"):
         "### Compute Kernel Insights\n"
         "<!-- reasoning-candidate tier=compute rank=1 -->\n"
         "#### Kernel P1: Fix gemm\n"
-        "<!-- impact-begin kind=detail_estimate low=1 high=5 -->\n"
+        "<!-- impact-begin kind=detail_estimate low=1 mid=3 high=5 -->\n"
         "body\n<!-- impact-end -->\n"
         "## Appendix\n"
         "Model: TestNet dense 7B fp16\n"
@@ -1554,12 +1649,20 @@ def _valid_output_dir(tmp_path, comparison_scope="standalone"):
 def test_workflow_check_directories_and_metadata(tmp_path):
     out = _valid_output_dir(tmp_path)
     assert workflow._check_directories(out) == ("PASS", "")
-    assert workflow._check_metadata_files(out) == ("PASS", "")
-    assert workflow._check_tree_data_files(out) == ("PASS", "")
+    assert workflow._check_platform_specs(out) == ("PASS", "")
     assert workflow._check_model_info(out) == ("PASS", "")
     assert workflow._check_findings_exist(out) == ("PASS", "")
     assert workflow._check_findings_placement(out) == ("PASS", "")
     assert workflow._check_unified_perf_report(out, "standalone") == ("PASS", "")
+
+
+def test_workflow_check_platform_specs_missing_keys(tmp_path):
+    cat_dir = tmp_path / "category_data"
+    cat_dir.mkdir()
+    (cat_dir / "category_manifest.json").write_text('{"platform_specs": {}}')
+    result, details = workflow._check_platform_specs(str(tmp_path))
+    assert result == "FAIL"
+    assert "peak_mem_bw_tbs" in details
 
 
 def test_workflow_check_directories_missing(tmp_path):
@@ -1572,8 +1675,8 @@ def test_workflow_check_directories_missing(tmp_path):
 
 def test_workflow_check_model_info_missing_keys(tmp_path):
     out = tmp_path / "out"
-    (out / "metadata").mkdir(parents=True)
-    (out / "metadata" / "model_info.json").write_text(json.dumps({"model": "X"}))
+    (out / "cache").mkdir(parents=True)
+    (out / "cache" / "model_info.json").write_text(json.dumps({"model": "X"}))
     result, details = workflow._check_model_info(str(out))
     assert result == "FAIL"
     assert "Missing keys" in details
@@ -1595,7 +1698,6 @@ def test_workflow_run_standalone_end_to_end(tmp_path):
     assert "workflow_eval_1" in indices
     assert "marker_eval_1" in indices
     assert results.is_file()
-    # The eight registry evals should all pass on a valid tree.
     assert next(r for r in rows if r["index"] == "workflow_eval_1")["result"] == "PASS"
 
 
@@ -1619,7 +1721,7 @@ def test_workflow_check_issue_template(tmp_path):
     rows = workflow._check_issue_template(out)
     # Compute P1 has Insight/Action/Impact -> PASS.
     assert any(
-        r["index"] == "workflow_eval_11_compute_P1" and r["result"] == "PASS"
+        r["index"] == "workflow_eval_10_compute_P1" and r["result"] == "PASS"
         for r in rows
     )
 
@@ -1627,7 +1729,7 @@ def test_workflow_check_issue_template(tmp_path):
 def test_workflow_check_exec_summary_standalone(tmp_path):
     out = _valid_output_dir(tmp_path)
     rows = workflow._check_exec_summary(out, "standalone")
-    compute = next(r for r in rows if r["index"] == "workflow_eval_10_compute_pct")
+    compute = next(r for r in rows if r["index"] == "workflow_eval_9_compute_pct")
     assert compute["result"] == "PASS"
 
 
