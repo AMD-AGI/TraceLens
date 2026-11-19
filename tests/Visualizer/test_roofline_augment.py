@@ -35,6 +35,23 @@ def test_classify_kernel_uses_the_report_category():
     assert classify_kernel("primus_turbo::grouped_gemm") == "GroupedGEMM_fwd"
     # The module that launched a GEMM does not change the report's category.
     assert classify_kernel("aten::mm", ["Model", "Attention"]) == "GEMM"
+    # Tensile GEMMs are labeled by the trace's kernel-name categories.
+    assert classify_kernel("Cijk_Alik_Bljk_MT64x16x128") == "GEMM"
+    assert classify_kernel("nvjet_kernel") == "GEMM"
+    # The report matches this launch by its full synthetic name.
+    assert (
+        classify_kernel(
+            "hipGraphLaunch->_sparse_attn_decode_gfx950_partial_kernel.kd "
+            "(Synthetic Op)"
+        )
+        == "Attention"
+    )
+    assert (
+        classify_kernel(
+            "hipGraphLaunch->void at::native::elementwise_kernel (Synthetic Op)"
+        )
+        == "elementwise"
+    )
     # A device symbol the report does not name stays unclassified.
     assert (
         classify_kernel("_inkling_rel_attention_kernel.kd", ["Model", "Attention"])

@@ -468,15 +468,7 @@ class JaxTraceToTree(BaseTraceToTree):
             if event.get("cat") != "kernel":
                 continue
             name = event.get("name", "")
-            name_category = None
-
-            for (
-                category,
-                filters,
-            ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                if any(f in name for f in filters):
-                    name_category = category
-                    break
+            name_category = TraceEventUtils.JaxOpKeys.category_for_kernel_name(name)
 
             gpu_kernel_op_cat_not_found = name_category is None
             if name_category is not None:
@@ -486,14 +478,12 @@ class JaxTraceToTree(BaseTraceToTree):
             if args and "hlo_op" in args:
                 hlo_op = args.get("hlo_op")
                 if hlo_op and name_category not in self._FA_KERNEL_NAME_CATEGORIES:
-                    for (
-                        category,
-                        filters,
-                    ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                        if any(f in hlo_op for f in filters):
-                            event["gpu_kernel_op_cat"] = category
-                            gpu_kernel_op_cat_not_found = False
-                            break
+                    hlo_category = TraceEventUtils.JaxOpKeys.category_for_kernel_name(
+                        hlo_op
+                    )
+                    if hlo_category is not None:
+                        event["gpu_kernel_op_cat"] = hlo_category
+                        gpu_kernel_op_cat_not_found = False
 
             # if still not found, set to Uncategorized/XLA
             if gpu_kernel_op_cat_not_found:

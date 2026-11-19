@@ -17,8 +17,8 @@ This utility closes that gap *without* needing trace shapes. It runs TraceLens's
 model-explorer roofline (:func:`...roofline_cli.run_projection`), which derives
 op shapes from the model config, at one or more runtime regimes (decode/prefill,
 batch, context). It maps the dominant unmodeled kernel of each roofline category
-to the matching orchestrator finding by the category ``categorize_torch_op``
-gives that kernel, then:
+to the matching orchestrator finding by the category the perf report and
+the trace's kernel-name categories give that kernel, then:
 
 - writes ``cache/roofline_augmentation.json`` (the full record), and
 - merges an additive ``roofline`` block onto the matching
@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
+from TraceLens.util import TraceEventUtils
 
 # ``categorize_torch_op`` returns one of these when no rule matches. They are
 # not a roofline category.
@@ -67,22 +68,56 @@ _PROJECTION_CATEGORY = {
 }
 
 
-def classify_kernel(kernel_name: str | None, module_chain: Any = None) -> str | None:
-    """Category of a kernel, from the perf report's categorizer.
+_SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
 
-    The category is ``categorize_torch_op`` on the op name. Attention and MoE
-    report labels use the projection's names for those ops. Every other report
-    label is returned as the report wrote it. ``module_chain`` is accepted for
-    signature compatibility and unused. An unclassified name returns ``None``.
+
+def _device_kernel(name: str) -> str:
+    """GPU kernel inside a ``launcher->kernel (Synthetic Op)`` name."""
+    body = (
+        name[: -len(_SYNTHETIC_OP_SUFFIX)]
+        if name.endswith(_SYNTHETIC_OP_SUFFIX)
+        else name
+    )
+    arrow = body.rfind("->")
+    if arrow >= 0:
+        tail = body[arrow + 2 :].strip()
+        if tail:
+            return tail
+    return body
+
+
+def categorize_operation(name: str, kernel_name: str | None = None) -> str | None:
+    """Category the perf report and the trace's kernel walk assign.
+
+    ``categorize_torch_op`` is the report's op categorizer. It reads the op
+    name and, for an ``at::native`` kernel, ``kernel_details``. When that
+    returns no category, the kernel name is labeled with
+    ``JaxOpKeys.category_for_kernel_name``, the same match
+    ``TraceToTree._categorize_gpu_kernel_ops`` uses. That is what puts a
+    Tensile ``Cijk_`` kernel in GEMM. Attention and MoE report labels use the
+    projection's names for those ops. Every other label is returned as the
+    report wrote it.
     """
-    del module_chain
-    name = kernel_name or ""
-    if not name:
+    if not name and not kernel_name:
         return None
-    category = categorize_torch_op({"name": name})
+    op_name = name or kernel_name or ""
+    kernel = kernel_name if kernel_name is not None else _device_kernel(op_name)
+    category = categorize_torch_op(
+        {"name": op_name, "kernel_details": [{"name": kernel}]}
+    )
     if not category or category.lower() in _UNCLASSIFIED:
+        category = TraceEventUtils.JaxOpKeys.category_for_kernel_name(kernel)
+    if not category or str(category).lower() in _UNCLASSIFIED:
         return None
     return _PROJECTION_CATEGORY.get(category, category)
+
+
+def classify_kernel(kernel_name: str | None, module_chain: Any = None) -> str | None:
+    """Category of a kernel. ``module_chain`` is unused."""
+    del module_chain
+    if not kernel_name:
+        return None
+    return categorize_operation(kernel_name)
 
 
 def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, dict]:

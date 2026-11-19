@@ -241,32 +241,30 @@ def test_a_kernel_is_counted_by_its_computation_not_its_launcher():
         "prefill/vllm::qwen_gdn_attention_core->aiter::gemm_a8w8_blockscale_ck "
         "(Synthetic Op)"
     )
-    assert report_kernel_category(conv) == "CONV_fwd"
-    assert report_kernel_category(recurrent) == "Attention"
-    # The chunked kernels have no performance model. The launcher name must
-    # not lend them the recurrent update's category.
+    # The launcher name is not a category. ``conv_`` is the trace's Conv key.
+    assert report_kernel_category(conv) is None
+    assert report_kernel_category(recurrent) is None
+    assert report_kernel_category(post_conv) == "Conv"
     assert report_kernel_category(chunk_state) is None
     assert report_kernel_category(chunk_output) is None
     assert report_kernel_category(prepare) is None
-    assert report_kernel_category(post_conv) is None
     assert report_kernel_category(launched_gemm) == "GEMM"
-
-
-def test_a_fused_group_quant_kernel_joins_group_quant():
-    # The act-mul quant is the SwiGLU epilogue. The registry leaves the device
-    # name as other, which dropped its time and put GroupQuant above the roof.
     assert (
-        report_kernel_category("prefill/vllm::rocm_aiter_act_mul_and_fp8_group_quant")
-        == "GroupQuant"
+        report_kernel_category(
+            "decode/hipGraphLaunch->Cijk_Alik_Bljk_MT64x16x128 (Synthetic Op)"
+        )
+        == "GEMM"
     )
     assert (
         report_kernel_category(
-            "decode/hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_kernel"
-            "IDF16b (Synthetic Op)"
+            "hipGraphLaunch->_sparse_attn_decode_gfx950_partial_kernel.kd "
+            "(Synthetic Op)"
         )
-        == "GroupQuant"
+        == "Attention"
     )
-    # A norm fused with the quant stays a norm, matching the registered op.
+
+
+def test_registered_ops_keep_the_report_category():
     assert (
         report_kernel_category(
             "prefill/vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant"
@@ -274,11 +272,32 @@ def test_a_fused_group_quant_kernel_joins_group_quant():
         == "RMSNorm"
     )
     assert (
+        report_kernel_category("prefill/aiter::dynamic_per_group_scaled_quant")
+        == "GroupQuant"
+    )
+    assert (
+        report_kernel_category("prefill/vllm::rocm_aiter_act_mul_and_fp8_group_quant")
+        is None
+    )
+    assert (
+        report_kernel_category(
+            "decode/hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_kernel"
+            "IDF16b (Synthetic Op)"
+        )
+        is None
+    )
+    assert (
         report_kernel_category(
             "decode/hipGraphLaunch->_fused_rms_fp8_group_quant_kernel_BLOCK "
             "(Synthetic Op)"
         )
-        == "RMSNorm"
+        is None
+    )
+    assert (
+        report_kernel_category(
+            "hipGraphLaunch->void at::native::elementwise_kernel (Synthetic Op)"
+        )
+        == "elementwise"
     )
 
 
@@ -626,7 +645,7 @@ def test_launch_scaling_uses_the_mean_launch_not_the_costliest():
         [regime],
         [
             _kernel(
-                "hipGraphLaunch->prefill/flash_attn::_flash_attn_varlen_forward",
+                "prefill/flash_attn::_flash_attn_varlen_forward",
                 71213.7,
                 122,
             )

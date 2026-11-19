@@ -30,9 +30,10 @@ from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms, load_arch
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_PATTERNS,
     OP_CATEGORY_REGISTRY,
-    categorize_torch_op,
 )
-from TraceLens.Visualizer.model_explorer_export.roofline_augment import classify_kernel
+from TraceLens.Visualizer.model_explorer_export.roofline_augment import (
+    categorize_operation,
+)
 
 # Constants
 
@@ -511,46 +512,7 @@ def flop_shares(ops: tuple[dict[str, Any], ...]) -> dict[str, float]:
     return shares
 
 
-# A graph launch names the device kernel, not the registered op. These still
-# implement a group quant. A norm fused with that quant stays a norm: the
-# prefill op ``rocm_aiter_rmsnorm_with_add_fp8_group_quant`` is already RMSNorm.
-_GROUP_QUANT_KERNEL = re.compile(
-    r"group_quant|per_token_scaled_quant|per_group_scaled_quant", re.IGNORECASE
-)
-_RMS_KERNEL = re.compile(r"rms_?norm|fused_rms", re.IGNORECASE)
-# Computations the op registry does not name. The pattern is the device
-# kernel's own math, never the Python function that launched it. A kernel is
-# listed here only when a performance model prices that kernel: the causal
-# conv model, the recurrent gated-delta update, and a split-K GEMM. The
-# chunked delta kernels and the prepare kernel have no model.
-_COMPUTATION_CATEGORY = (
-    (re.compile(r"causal_conv1d", re.IGNORECASE), "CONV_fwd"),
-    (
-        re.compile(
-            r"fused_recurrent_gated_delta_rule|gated_delta_rule_update",
-            re.IGNORECASE,
-        ),
-        "Attention",
-    ),
-    (re.compile(r"wvsplitk", re.IGNORECASE), "GEMM"),
-)
-
-
 _SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
-
-
-def _report_op_name(name: str) -> str:
-    """Op name the perf report would categorize.
-
-    A graph launch names the device kernel after ``->``. A leading ``prefill/``
-    or ``decode/`` is this plot's phase tag, not part of the op name.
-    """
-    computation = _kernel_computation(name)
-    lowered = computation.lower()
-    for prefix in ("prefill/", "decode/"):
-        if lowered.startswith(prefix):
-            return computation[len(prefix) :]
-    return computation
 
 
 def _kernel_computation(name: str) -> str:
@@ -571,28 +533,14 @@ def _kernel_computation(name: str) -> str:
 def report_kernel_category(name: str) -> str | None:
     """Category of the computation the kernel ran.
 
-    A launcher or Python display name is not a computation: ``qwen_gdn_attention_core``
-    launches a conv, the chunked delta kernels, and a prepare kernel, and only
-    the kernel symbol says which. The category is ``categorize_torch_op``, the
-    same function the perf report uses. ``unknown`` and ``other`` match no
-    series unless the kernel symbol itself names a group quant or one of the
-    computations the registry does not.
+    A leading ``prefill/`` or ``decode/`` is this plot's phase tag. The rest of
+    the name is the op the perf report categorizes, and the text after ``->``
+    is the GPU kernel that categorizer and the trace's kernel-name categories
+    both see.
     """
-    computation = _report_op_name(name)
-    report = classify_kernel(computation)
-    if report:
-        return report
-    report = categorize_torch_op({"name": computation})
-    if report and report.lower() not in _UNCLASSIFIED:
-        return report
-    if _RMS_KERNEL.search(computation) and _GROUP_QUANT_KERNEL.search(computation):
-        return "RMSNorm"
-    if _GROUP_QUANT_KERNEL.search(computation):
-        return "GroupQuant"
-    for pattern, category in _COMPUTATION_CATEGORY:
-        if pattern.search(computation):
-            return category
-    return None
+    op_name = _PHASE_PREFIX.sub("", name)
+    kernel = _PHASE_PREFIX.sub("", _kernel_computation(op_name))
+    return categorize_operation(op_name, kernel)
 
 
 def _projection_series_category(row: dict[str, Any]) -> str:
