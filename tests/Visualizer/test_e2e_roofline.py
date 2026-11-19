@@ -299,6 +299,22 @@ def test_registered_ops_keep_the_report_category():
         )
         == "elementwise"
     )
+    assert (
+        report_kernel_category(
+            "hipGraphLaunch->void wvSplitK_hf_sml_<bf16>(...) [clone .kd] "
+            "(Synthetic Op)"
+        )
+        == "GEMM"
+    )
+    assert report_kernel_category("_fused_sconv_kernel") == "CONV_fwd"
+    assert report_kernel_category("_add_rmsnorm_fwd_kernel") == "RMSNorm"
+    assert report_kernel_category("mfma_moe1_silu_mul_afp4_wfp4_bf16") == "MoE"
+    assert report_kernel_category("mfma_moe2_afp4_wfp4_bf16") == "MoE"
+    assert (
+        report_kernel_category("aiter::fused_mx_quant_moe_sort_kernel<bf16>")
+        == "GroupQuant"
+    )
+    assert report_kernel_category("aiter::opus_moe_sorting_entry<K>") == "MoE"
 
 
 def test_series_markers_do_not_repeat():
