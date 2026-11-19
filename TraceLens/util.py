@@ -461,7 +461,10 @@ class DataLoader:
             _restore_streaming_device_ids(parsed)
             _attach_xplane_event_args(parsed, filename_path)
         if save_preprocessed:
-            out_path = filename_path.replace("pb", "processed.json")
+            for suffix in ("pb", "json.gz", "json"):
+                if filename_path.endswith(suffix):
+                    out_path = filename_path.removesuffix(suffix) + "processed.json"
+                    break
             with open(out_path, "w") as writefile:
                 json.dump(parsed, writefile)
         return parsed
