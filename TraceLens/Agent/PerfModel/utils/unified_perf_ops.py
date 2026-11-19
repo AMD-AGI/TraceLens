@@ -18,7 +18,8 @@ other-bucket (default):
 top-ops:
   Groups ALL rows by `name`, sums runtime across shapes, and lists every op
   whose summed runtime is at least --threshold of the global
-  total and has has_perf_model == False on some row.
+  total and has a row without a perf model (has_perf_model false, or true with
+  zero GFLOPS and Data Moved).
 
 Usage:
   python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops unified_perf_summary.csv

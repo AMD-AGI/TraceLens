@@ -6,13 +6,13 @@ See LICENSE for license information.
 
 # Perf-model validation: reference
 
-Detail for [SKILL.md](SKILL.md). Read each section when its step needs it. The
-scripts live in `TraceLens/Agent/PerfModel/validate_perf_model/`.
+Detail for [SKILL.md](SKILL.md). The scripts live in
+`TraceLens/Agent/PerfModel/validate_perf_model/`.
 
 ## Prerequisites
 
 - ROCm with `rocprofv3` on PATH (or pass `--rocprofv3-path`)
-- `aiter` installed in the Python environment or container the user named
+- `aiter` installed in the Python environment or container the caller named
 - vLLM for `vllm_*` ops and SGLang (`sgl_kernel`) for SGLang ops; ops from a
   framework that is not installed are reported as failures, the rest still run
 - AMD GPU: MI300X or MI325X (`--arch gfx942`), or MI350X or MI355X
@@ -47,7 +47,7 @@ Each op is declared once, in `harnesses.py`:
     category="gemm",                              # --category grouping
     description="...",
     model=(PERF_MODEL_EXT, "gemm_a8w8_blockscale"),  # (source, class or trace name)
-    defaults={"M": 2048, "N": 4096, "K": 8192},   # fill CLI args the user omits
+    defaults={"M": 2048, "N": 4096, "K": 8192},   # fill CLI args the caller omits
     trace_names=("aiter::gemm_a8w8_blockscale_ck", ...),  # --cases mapping
 )
 def _gemm_a8w8_blockscale_event(args):
@@ -187,8 +187,7 @@ Comparisons in the report:
   lossy annotation rebuild).
 - **Kernel check** (`--cases`): `kernel_match` is `match` when a measured kernel
   has the same family (name before template arguments or Triton tuning
-  suffixes) as a kernel in the trace row, `mismatch` otherwise. A mismatch means
-  the harness ran another code path; fix the inputs before trusting a ratio.
+  suffixes) as a kernel in the trace row, `mismatch` otherwise.
 
 - **Throughput** (TF/s, TB/s): uses the kernel runtime from the
   `--kernel-trace` pass.
@@ -261,8 +260,9 @@ validator, so the code matches the kernel that was measured.
 5. **Record** the result in the validation CSV, editing only that row and
    only after the investigation is done: set `match_status` from
    `deviation-suspect` to `deviation-explained`, and replace the `comment` hint
-   with the cause, its file and line, and the quantitative check. Without both
-   the file and line and the check, leave the row `deviation-suspect`. Never
+   with the cause, its file and line, and the quantitative check. Without the
+   file and line from step 2 and the check from step 3, leave the row
+   `deviation-suspect`. Never
    change ratios, bands or other rows, and never mark `over-predicted` or
    `no prediction` rows as explained.
 
@@ -322,10 +322,6 @@ Output in `--output-dir`:
 - per-op directories (`<op>/` for batch runs, `<idx>_<trace name>/` for
   `--cases` runs) with `validation_report.txt` and the rocprofv3 CSVs and logs
 
-Before running, have everything listed under Inputs in SKILL.md: the ops (single op,
-category, all, or a cases file), the GPU and `--arch`, the output directory,
-and where to run.
-
 ---
 
 ## Adding an op: where things go
@@ -360,8 +356,7 @@ Writing a harness for a new op:
    `test_<key>` and set `csv_harness=True`.
 4. **Check that the same kernel ran.** Compare the kernel the validator
    discovered for the harness with the row's `kernel_details_summary`. If they
-   differ, the harness took another branch and the run measures the wrong
-   kernel; fix the inputs before trusting any ratio.
+   differ, the harness took another branch; fix its inputs.
 
 Harness conventions (see `replay/gemm.py`):
 

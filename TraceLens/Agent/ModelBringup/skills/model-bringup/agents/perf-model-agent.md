@@ -59,7 +59,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 ## Guardrails
 
 - Exactly one op. Write only under `<op_worktree>` and `<op_dir>`; temp files and tool caches (such as `BLACK_CACHE_DIR`) go in `<op_dir>/scratch`. Commit only in `<op_worktree>`, on its checked-out branch.
-- Never push, run `gh`, or ask the user. Run each skill from the inputs this prompt gives: the authoring skill's Inputs defaults and Stop rules, and the validation skill's Unattended use. A choice that needs the user becomes outcome `blocked`.
+- Never push, run `gh`, or ask the user. Run each skill from the inputs this prompt gives: each skill's Inputs defaults and Stop rules. A choice that needs the user becomes outcome `blocked`.
 - Run worktree code as `cd <op_worktree> && PYTHONPATH=<op_worktree> python3 ...` through the prefix.
 - Run git in your own shell as `git -C <op_worktree> ...`, one git command per call, never through the prefix.
 
@@ -79,7 +79,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 
 Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`: `op category`, `Input Dims`, `Input type`, `Concrete Inputs`, the kernel names in `kernel_details_summary`, `entry_point` (the launcher) and `call_stack_full`. Find the op's source from `entry_point` and the call stack under `<framework_src>`.
 
-Read `model_config.json`: `launch` holds the run's TP, EP and DP settings verbatim (under AgentX the recipe overrides them); trace `Input Dims` are per rank and win; report a mismatch no setting explains in the draft, never patch it; `null` is unknown. `paper` links the model's paper or tech report; read its architecture section when the op's math depends on it (sparsity, compression, routing, cache layout); when it is `null`, find the paper yourself.
+Read `model_config.json`: `launch` holds the run's TP, EP and DP settings verbatim (under AgentX the recipe overrides them); trace `Input Dims` are per rank and win; report a mismatch no setting explains in the draft, never patch it; `null` is unknown. `paper` links the model's paper or tech report (`null` when unknown); the authoring skill's Locate step uses it.
 
 ### Step 2: Decide
 
@@ -91,15 +91,18 @@ This shows whether a built-in perf model already fits. Then use the depth and ou
 
 ### Step 3: Build
 
-Follow the authoring skill's workflow index, Steps 1-5, in `<op_worktree>`. Its Step 6, validation, is Step 4 here.
-
-### Step 4: Validate
-
-Register the op as the validation skill's "Adding an op" describes. The validator reads only rows that have a perf model, so regenerate the report from the op worktree first:
+Follow the authoring skill's workflow index, from "Per-op choices" through "Regenerate and check", in `<op_worktree>`; its "Hand off to validation" is Step 4 here. For "Regenerate and check", write the report to `<op_dir>/report`:
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils build --scope standalone --analysis_mode inference --output_dir <op_dir>/report --job <job>
 <prefix> set -o pipefail; cd <op_worktree> && PYTHONPATH=<op_worktree> python3 -m TraceLens.Reporting.generate_perf_report_from_config --config <op_dir>/report/cache/run_config.yaml 2>&1 | tee <op_dir>/report/perf_report.log | tail -n 40
+```
+
+### Step 4: Validate
+
+Register the op as the validation skill's "Adding an op" describes. The validator reads only rows that have a perf model, so run it on the Step 3 report:
+
+```bash
 <prefix> <bringup_gates> cases --report-dir <op_dir>/report/perf_report_csvs --out <op_dir>/cases.json
 <prefix> set -o pipefail; cd <op_worktree> && HIP_VISIBLE_DEVICES=<gpu_index> PYTHONPATH=<op_worktree> python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --cases <op_dir>/cases.json --only-ops <op> --arch <gfx_arch> --output-dir <op_dir>/validation 2>&1 | tee <op_dir>/validation.log | tail -n 40
 ```
@@ -108,7 +111,7 @@ If `rocprofv3` aborts torch processes (some ROCm SDK images load two LLVM copies
 
 ### Step 5: Draft
 
-First investigate every `deviation-suspect` row with the validation skill's "Investigating a deviation", which updates that row to `deviation-explained` when its cause is found. If every validation row then has `run_status` `OK` and `match_status` `match` or `deviation-explained`, the outcome is `modeled`. Commit in `<op_worktree>`:
+First investigate every `deviation-suspect` row with the validation skill's "Investigating a deviation". If every validation row then has `run_status` `OK` and `match_status` `match` or `deviation-explained`, the outcome is `modeled`. Commit in `<op_worktree>`:
 
 ```bash
 git -C <op_worktree> add <each file you changed>
@@ -127,7 +130,7 @@ Template rules:
 - Use only the template's tables, with their columns unchanged; the issue's Validation table has the same FLOPs and bytes columns as the PR's.
 - Table values come from the validation CSV unchanged.
 - Name no model, GPU, gfx target, host, topology, person or trace, and no local path or branch. No runtime or time-share numbers.
-- Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause. Find each cause with the validation skill's "Investigating a deviation": the line names the mechanism, its source file and line (package-relative, e.g. `aiter/ops/...py:123`), and the arithmetic that reproduces the ratio. Known ratio sources and the CSV `comment` are only hypotheses. A ratio without that evidence is written as unexplained.
+- Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause, with the evidence "Investigating a deviation" requires and the source file and line package-relative (e.g. `aiter/ops/...py:123`). A ratio without that evidence is written as unexplained.
 
 ---
 
@@ -139,6 +142,6 @@ Write `<op_dir>/result.json`, then run:
 <prefix> <bringup_gates> op-result --bringup-dir <bringup_dir> --result <op_dir>/result.json
 ```
 
-On exit 1, fix the outcome or the draft (a row that did not run, or whose `match_status` is not `match` or `deviation-explained`, means `blocked`) and rerun. Edit the validation CSV only as "Investigating a deviation" allows (one row's `match_status` and `comment`, after the investigation), and never name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
+On exit 1, fix the outcome or the draft (a row that did not run, or whose `match_status` is not `match` or `deviation-explained`, means `blocked`) and rerun. Edit the validation CSV only as "Investigating a deviation" allows, and never name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
 
 Return "DONE".

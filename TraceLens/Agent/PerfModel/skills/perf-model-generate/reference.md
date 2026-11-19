@@ -6,14 +6,15 @@ See LICENSE for license information.
 
 # Perf-model authoring: reference
 
-Detail for [SKILL.md](SKILL.md). Read each section when its step needs it.
+Detail for [SKILL.md](SKILL.md). Run every `python3` command below in the Python
+environment (or command prefix) given as an input, not the system `python3`.
 
-## Entry points — pick one to begin
+## Entry points
 
 Only in standalone use, when the op is not given. A caller that supplies the op
 skips this section.
 
-### EP1 — CSV-driven: top ops missing a perf model
+### EP1: CSV-driven, top ops missing a perf model
 
 Use when a `unified_perf_summary.csv` is available and you want to prioritize by
 runtime impact. The top-ops ranking reads each op's call stack from the CSV's
@@ -27,9 +28,12 @@ python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops \
 ```
 
 This groups rows by `name`, sums runtime across all shapes, keeps names whose
-summed runtime is at least `--threshold` of the global total and that have no perf model
-(`row_has_perf_model`: `has_perf_model` true with non-zero GFLOPS or Data Moved), and prints a confirmable candidate table.  Add `--emit-extension` to write a
-starter `<csv_stem>_triage_extension.py` beside the CSV.
+summed runtime is at least `--threshold` of the global total and that have no
+perf model (`row_has_perf_model`: `has_perf_model` true with non-zero GFLOPS or
+Data Moved), and prints a confirmable candidate table. Add `--emit-extension` to
+write a starter `<csv_stem>_triage_extension.py` beside the CSV, holding
+`TRIAGE_OP_NAMES` (the ranked candidate names) and empty `perf_model_extension`
+and `op_category_extension` dicts.
 
 Also run the legacy `other-bucket` mode (default) to catch ops in the "other"
 category even if they are individually below `--threshold`:
@@ -38,27 +42,18 @@ python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops \
     /path/to/unified_perf_summary.csv --also-global-pareto
 ```
 
-**After printing the table**, confirm the candidate list with the user before
-proceeding to authoring (standalone use only).
+### EP2: Manual op
 
+Use when the cpu_op is named directly: the exact profiler `name` string (e.g.
+`aiter::my_op`), and optionally the kernel name from rocprofv3 /
+`kernel_details_summary` and the call stack.
 
-### EP2 — Manual op
+Proceed to "Authoring steps" below with that single op. No script required.
 
-Use when the user directly names the cpu_op (and optionally the kernel name and
-call stack).
+### EP3: Framework scan
 
-1. Ask the user for:
-   - `name`: the exact profiler `name` string (e.g. `aiter::my_op`)
-   - Optional: kernel name from rocprofv3 / `kernel_details_summary`
-   - Optional: call stack (or the user pastes it)
-2. Proceed to "Authoring steps" below with that single op.
-
-No script required.
-
-### EP3 — Framework scan
-
-Use when the user asks to enumerate cpu_ops for a whole framework (aiter, vLLM,
-SGLang, or ATOM), optionally filtered (e.g. "attention kernels").
+Use to enumerate the cpu_ops of a whole framework (aiter, vLLM, SGLang, or
+ATOM), optionally filtered (e.g. "attention kernels").
 
 ```bash
 python3 -m TraceLens.Agent.PerfModel.utils.scan_framework_ops \
@@ -74,7 +69,9 @@ The script performs a **static source scan** (no GPU/run required):
   `sglang_profiler::*`
 
 Add `--check-mapping` to mark ops that already have a built-in perf model
-(needs TraceLens importable, e.g. `pip install -e .`).
+(needs TraceLens importable, e.g. `pip install -e .`). It checks the core map
+before `apply_extension`, so an op that an extension registers shows False; that
+is not a gap.
 
 For each matched op it outputs: registered name, source file, a regex-based
 hint of the call chain to the kernel (confirm it in the source), and any sibling `test_<op>` / `benchmark_<op>` files
@@ -82,8 +79,6 @@ hint of the call chain to the kernel (confirm it in the source), and any sibling
 
 For deep or ambiguous chains, instruct an explore sub-agent to traverse the
 repo (same technique used to map FlyDSL ops).
-
-**Confirm the candidate table with the user before proceeding** (standalone use only).
 
 The scanner covers aiter, vLLM, and SGLang. For ATOM, use an explore sub-agent
 on `atom/model_ops/` and the model files: ATOM mostly calls aiter ops, so the
@@ -97,30 +92,31 @@ differ, and those names will show up in other traces.
 ## Per-op choices
 
 Each op gets a depth and an output mode. Use the defaults from SKILL.md's Inputs
-unless the caller (or, in standalone use, the user) chooses otherwise:
+unless the caller chooses otherwise:
 
 | Choice | What to produce |
 |--------|----------------|
 | **full** | A perf model class with `get_param_details`, `flops()`, `bytes()`, `get_compute_precision()` + registration |
-| **categorize-only** | Category label only; no class; `has_perf_model` stays False |
+| **categorize-only** | Category label only (`op_category_extension` or `get_pseudo_op_category_only_mappings()`); no class; `has_perf_model` stays False. Always the choice for a `(Synthetic Op)` name: the name embeds templates and shapes, and its time is only part of the logical op |
 
 Then pick the output mode:
 
 | Mode | Where the result goes |
 |------|-----------------------|
 | **integrate** | Class added to `TraceLens/PerfModel/extensions/*_perf_model_extensions.py`; name registered in `pseudo_ops_perf_utils.py` |
-| **extension-only** | Class + mappings added to the `<csv_stem>_triage_extension.py` file; pass via `--extension_file` |
+| **extension-only** | Class + mappings added to an extension file ([Mode B](#mode-b-extension-only-file)) |
 
 ---
 
 ## Authoring steps (per op, full model)
 
-### Step 1 — Locate the implementation
+### Locate
 
-From the call stack (EP1/EP3) or user-provided info (EP2):
+From the call stack (EP1/EP3) or the info given directly (EP2):
 - Read the paper or blog for architectural choices that change the math
-  (sparsity, compression, routing, cache layout). Some of these are not
-  obvious from the trace or the kernel.
+  (sparsity, compression, routing, cache layout), starting from the model
+  config's `paper` link when one is given and finding it yourself otherwise.
+  Some of these are not obvious from the trace or the kernel.
 - Find the Python binding in the vendor repo.  Record the **relative path**
   (used in the class docstring `Reference implementation:` line).
 - Find the underlying kernel (HIP/Triton/CUDA).  Look for:
@@ -130,7 +126,7 @@ From the call stack (EP1/EP3) or user-provided info (EP2):
   - ATOM: `atom/model_ops/...` → usually an aiter op, sometimes a FlyDSL or
     Triton kernel called directly
 
-### Step 2 — Check for vendor test_*/benchmark_* roofline
+### Vendor reference
 
 vLLM, aiter, SGLang, and ATOM frequently ship `test_<op>.py` /
 `bench_<op>.py` / `op_tests/` beside the kernel.  These often print
@@ -147,7 +143,7 @@ theoretical FLOPs and bytes.
 HW-counter validation).  If the wrapper, the kernel, and the vendor formula
 disagree, find out why. Do not pick the most convenient number.
 
-### Step 3 — Match Input Dims to the signature
+### Map Input Dims
 
 Inspect several events, not one shape. Map `event["args"]["Input Dims"][i]`
 and `event["args"]["Input type"][i]` to the function's arguments. Also check
@@ -156,7 +152,8 @@ flags), `annotation`, and which parent or child actually owns the GPU time.
 
 Do not assume `Input Dims[0]` is the main input, that it sets the compute
 precision, or that the output dtype matches the first input. Cover every dtype
-the binding can emit, not only the dtype in this trace.
+the binding can emit, not only the dtype in this trace. Read sizes from
+`Input Dims` or `Concrete Inputs`, never from the op name.
 
 - MoE: token counts may be before or after routing and padding. Weights may be
   read for every expert or only the active ones.
@@ -164,7 +161,7 @@ the binding can emit, not only the dtype in this trace.
   shape, accumulator dtype, output dtype, and the matrix-instruction dtype
   used for the roofline peak.
 
-### Step 4 — Choose the right base class
+### Base class
 
 | Op kind | Base class | File |
 |---------|-----------|------|
@@ -184,11 +181,11 @@ subclass and override `get_param_details`. Add a new base only when several
 models share a concept that has no owner. `get_pseudo_op_mappings()` also
 holds direct op names that are not pseudo ops.
 
-### Step 5 — Implement the class
+### Implement
 
-Use the mandatory docstring template (see below).  Key rules:
+Use the mandatory [docstring template](#perf-model-class-docstring-template).  Key rules:
 
-**FLOPs — derive from the real kernel:**
+**FLOPs, from the real kernel:**
 - Read the kernel source; count **major MFMA / tensor-core operations** of the
   operation for FLOPs.
 - Do not estimate from the output buffer alone.
@@ -203,7 +200,7 @@ Use the mandatory docstring template (see below).  Key rules:
 - For attention prefill: `flops = 4 * T^2 * H * d` (QK + softmax + V).
 - For recurrent attention (GDN): per-token flops from the state update rule.
 
-**Bytes — account for all major loads and stores:**
+**Bytes, all major loads and stores:**
 - Every input tensor that is read: `nelems * bpe_in`.
 - Every output tensor that is written: `nelems * bpe_out`.
 - For quantized ops: activations, weights, and scales are separate read terms;
@@ -226,10 +223,10 @@ Use the mandatory docstring template (see below).  Key rules:
   is missing, the report can show TFLOP/s and bandwidth but no roofline
   percentage, and the impact score falls back to a heuristic.
 
-**Attention annotations:**
+#### Attention annotations
 
 `InferenceAttention` subclasses do **not** read FLOPs/bytes from `Input Dims`
-alone — for chunked-prefill / paged-decode the per-request KV context lengths
+alone: for chunked-prefill / paged-decode the per-request KV context lengths
 are runtime-only. They come from the trace's per-step `user_annotation` event,
 which `InferenceAttention._parse_chunk_stats(event["annotation"])` passes to
 `IterationAnnotation(...).chunk_stats()` in
@@ -267,21 +264,33 @@ The stats mean the same thing for every format:
   `g_sq > #requests`.
 
 You normally do **not** synthesize the annotation yourself. It must be attached
-to the event before the perf model runs (see propagation below). Your job is to
-map `Input Dims` to Q/K/V shapes and `Input type` to dtypes in
-`get_param_details`, then let the base `flops()`/`bytes()` consume the parsed
-`c_*`/`g_*` stats.
+to the event before the perf model runs (see
+[Annotation propagation](#annotation-propagation)). Your job is to map
+`Input Dims` to Q/K/V shapes and `Input type` to dtypes in `get_param_details`,
+then let the base `flops()`/`bytes()` consume the parsed `c_*`/`g_*` stats.
 
-**Propagating the annotation to a new op (required for new attention ops):**
-the inference report copies the enclosing step annotation only onto ops whose
-name starts with an entry in `_INFERENCE_ANNOTATION_OP_PREFIXES` in
+**FP8 KV cache:** paged decode kernels often store K/V as FP8 (1 byte) while Q
+and the output stay BF16. KV reads dominate decode bytes, so override `bytes()`
+to use the cache dtype (`name2bpe(Input type[k_cache])`) for the K/V read terms
+rather than the Q dtype.
+
+- Document the `Input Dims` layout your class expects and that it needs a
+  detailed (sq/sk) annotation.
+
+#### Annotation propagation
+
+Required when the model reads `event["annotation"]`, attention or not. The
+inference report copies the enclosing step annotation only onto ops whose name
+starts with an entry in `_INFERENCE_ANNOTATION_OP_PREFIXES` in
 `TraceLens/Reporting/generate_perf_report_pytorch_inference.py`. If your op is
 not listed, its events have **no** `annotation` and the model silently degrades
 to no-perf.
 
 - **Integrate mode:** add the op name to `_INFERENCE_ANNOTATION_OP_PREFIXES`.
 - **Extension-only mode:** core files stay untouched, so re-run annotation from
-  the extension with a module-level `tree_postprocess_extension`:
+  the extension with a module-level `tree_postprocess_extension`, which the
+  report generator calls on the built tree after the built-in
+  `apply_annotation` and before perf models execute:
   ```python
   def tree_postprocess_extension(trace_tree):
       trace_tree.apply_annotation(name_filters=["<your op name>"])
@@ -295,15 +304,7 @@ annotation event, or its format has no sq/sk sums, wrap your
 `InferenceAttention.no_perf_param_details()` so `flops()`/`bytes()` return
 `None` gracefully.
 
-**FP8 KV cache:** paged decode kernels often store K/V as FP8 (1 byte) while Q
-and the output stay BF16. KV reads dominate decode bytes, so override `bytes()`
-to use the cache dtype (`name2bpe(Input type[k_cache])`) for the K/V read terms
-rather than the Q dtype.
-
-- Document the `Input Dims` layout your class expects and that it needs a
-  detailed (sq/sk) annotation.
-
-**Annotation use for other inference ops:**
+#### Annotation use for other inference ops
 
 Inference ops often depend on the true KV length, while `Input Dims` only show
 the allocated buffer sizes (the KV cache pool, padded or maximum lengths).
@@ -312,7 +313,8 @@ category-only, check whether the step annotation can supply what is missing:
 its sq/sk sums give the query and KV lengths per step, as the existing
 attention models use. Where the annotation only bounds the value, for example
 for a per-request quantity, an approximation is acceptable if the class
-docstring says so.
+docstring says so. The annotation reaches the event as described in
+[Annotation propagation](#annotation-propagation).
 
 The annotation describes the whole step, not necessarily this op's inputs.
 Guard its use:
@@ -325,9 +327,9 @@ Guard its use:
   compressed or pooled KV (sparse indexers, compressed caches), scale `sk` by
   the compression ratio, or return no-perf if that ratio is not known.
 
-### Step 6 — Register the op
+### Register
 
-**Integrate mode** — add to `pseudo_ops_perf_utils.py`:
+**Integrate mode**: add to `pseudo_ops_perf_utils.py`:
 ```python
 # in get_pseudo_op_mappings():
 "aiter::my_op": perf_model_extensions.MyOp,
@@ -336,7 +338,7 @@ Guard its use:
 "aiter::my_op": "GEMM",
 ```
 
-**Extension-only mode** — add to `<csv_stem>_triage_extension.py`:
+**Extension-only mode**: add to the extension file ([Mode B](#mode-b-extension-only-file)):
 ```python
 perf_model_extension = {
     "aiter::my_op": MyOp,   # category comes from the class
@@ -346,7 +348,13 @@ op_category_extension = {
 }
 ```
 
-### Step 7 — Validate with py_compile
+Key the mapping on the CPU op name that appears in the trace (or a registered
+pseudo op), never on a kernel name. A generic key (e.g. `aten::topk`, or a kernel
+shared by several models) must not map to a model-specific class: list its
+callers across frameworks, and keep the model generic or guard it so other
+callers get no-perf.
+
+### Regenerate and check
 
 ```bash
 python3 -m py_compile /path/to/extension_or_module.py
@@ -374,8 +382,8 @@ hardcode a dtype, layout, or variant that the op can vary.
 ## Pseudo ops
 
 Never add a pseudo op on your own judgment: run the stability and
-cost check below and let the user decide. This section says when one is a
-candidate and what it needs if the user approves.
+cost check below and report the table; the caller decides. This section says
+when one is a candidate and what it needs if the caller approves.
 
 **A pseudo op is a candidate only when the profiler event is the wrong unit.** A stable
 CPU op that already owns the runtime and the arguments needs a mapping, not a
@@ -388,21 +396,19 @@ pseudo op. Add one when:
   `pseudo_v4_paged_decode_csa`, and `pseudo_v4_paged_decode_hca`.
 
 If synthetic ops are among the top kernels, check the tree visually before
-modeling the synthetic name. `(Synthetic Op)` rows are usually category-only:
-the names embed templates and shapes, and the time is only part of the logical
-op.
+modeling the logical op. The `(Synthetic Op)` name itself is categorize-only (see
+[Per-op choices](#per-op-choices)).
 
-If the user approves, a pseudo op needs both an injector in `TraceLens/Trace2Tree/extensions`
-(stable detection and a shape donor) and the same name in
-`get_pseudo_op_mappings()`. Detect from an op name, call-stack range, or kernel
-family, not from one timestamp, UID, or an unstable full kernel name. The
-report must run with pseudo ops enabled. Check that each kernel is attached
-once, parents are correct, neighbors are not captured, and injection time stays
-low as the tree grows.
+If the caller approves, a pseudo op needs both an injector in
+`TraceLens/Trace2Tree/extensions` (stable detection and a shape donor) and the
+same name in `get_pseudo_op_mappings()`. Detect from an op name, call-stack
+range, or kernel family, not from one timestamp, UID, or an unstable full kernel
+name. The report must run with pseudo ops enabled. Check that each kernel is
+attached once, parents are correct, neighbors are not captured, and injection
+time stays low as the tree grows.
 
 **Stability and cost check (required before adding a pseudo op).** Do both
-checks below and report the results to the user, who decides whether the
-pseudo op is worth adding.
+checks below.
 
 1. **Brittleness.** The injector matches on certain Python functions and events
    between the parent `cpu_op` and the insertion point. Those must appear on
@@ -433,15 +439,15 @@ Report it like this:
 ## Hand off to validation
 
 Hand the regenerated `perf_report_csvs` directory and the op name to the
-validate-perf-model skill (`TraceLens/Agent/PerfModel/skills/validate-perf-model/SKILL.md`),
-which takes them as its Inputs along with the GPU, `--arch` and output directory
-it requires. The validator loads only perf models integrated into TraceLens core,
-so integrate an extension-only model first. In standalone use, ask before
-validating.
+validate-perf-model skill
+(`TraceLens/Agent/PerfModel/skills/validate-perf-model/SKILL.md`), which takes
+them as its Inputs along with the GPU, `--arch` and output directory it
+requires. The validator loads only perf models integrated into TraceLens core,
+so integrate an extension-only model first.
 
 ---
 
-## Perf model class docstring template (required)
+## Perf model class docstring template
 
 Every class registered in `perf_model_extension` or `get_pseudo_op_mappings()`
 MUST have a docstring following this layout:
@@ -550,8 +556,6 @@ class MyOp(ExistingClass):
   covers. A variant the model does not cover must return no-perf. A documented
   approximation, such as an approximate KV length from the annotation, is fine;
   an undocumented guess is not.
-- No perf model classes for `(Synthetic Op)` names. Categorize them only
-  (`op_category_extension` or `get_pseudo_op_category_only_mappings()`).
 - Always state `output_bpe` explicitly when it differs from `input_bpe`.
 - `get_param_details` returns every value `flops()` and `bytes()` use, including
   those parsed from the annotation. They become `perf_params` in the report,
@@ -559,7 +563,7 @@ class MyOp(ExistingClass):
 
 ---
 
-## Output modes — detail
+## Output modes
 
 ### Mode A: integrate into TraceLens core
 
@@ -573,24 +577,13 @@ Edit these files in `TraceLens/PerfModel/extensions/`:
 
 ### Mode B: extension-only file
 
-The `--emit-extension` flag of `unified_perf_ops` produces
-`<csv_stem>_triage_extension.py` with:
-- `TRIAGE_OP_NAMES`, the ranked candidate names
-- an empty `perf_model_extension` dict (name → class)
-- an empty `op_category_extension` dict (name → category) for categorize-only ops
+Add the class and mappings to an extension file: the one EP1's `--emit-extension`
+writes, or a new `.py` with the same dicts. The dict layout is under
+[Register](#register), the annotation hook under
+[Annotation propagation](#annotation-propagation).
 
-`dict_cat2names_extension` is deprecated; the report generator ignores it.
-
-Optional module-level hooks the report generator will call if present:
-- `tree_postprocess_extension(trace_tree)` — runs against the built tree before
-  perf models execute (after the built-in `apply_annotation`). Use it to attach
-  attention annotations to ops outside `_INFERENCE_ANNOTATION_OP_PREFIXES`, e.g.
-  `trace_tree.apply_annotation(name_filters=["<your op name>"])`.
-
-Pass it to the report generator via `--extension_file`.
-
-**Do not** edit `torch_op_mapping.py` or `agentic_perf_model_extensions.py`
-for perf-model authoring — those are product code / legacy stubs.
+**Do not** edit `torch_op_mapping.py` for perf-model authoring; it is product
+code.
 
 ---
 
@@ -607,34 +600,3 @@ A silent fallback between variants is risky. Prefer a warning or a no-perf
 result when a wrong assumption would change the report, unless the
 approximation is documented in the class docstring. Show the value that was
 used in `param_details`.
-
----
-
-## Pitfalls
-
-| Pitfall | Correct approach |
-|---------|----------------|
-| Inferring FLOPs from output buffer only | Read the kernel source; count the operation's MFMA work, without padding |
-| Assuming `output_bpe == input_bpe` | Check the output dtype in the binding |
-| Using `bpe = 1` for fp4/mxfp4 weights | Use `bpe = 0.5` |
-| Wrong `get_compute_precision()` | Check which MFMA path the kernel actually uses |
-| New attention op has no FLOPs/bytes | Its events lack `annotation`. Integrate mode: add the op to `_INFERENCE_ANNOTATION_OP_PREFIXES`. Extension-only: add `tree_postprocess_extension` calling `apply_annotation(name_filters=[...])` |
-| Using BF16 bpe for an FP8 KV cache | Override `bytes()` to read the K/V cache dtype from `Input type`; KV reads dominate decode |
-| Assuming KV context length is in `Input Dims` | It's runtime-only; comes from the `user_annotation` event via `_parse_chunk_stats` |
-| Assuming the annotation is the vLLM `execute_*` format | Any format `IterationAnnotation` parses with sq/sk sums works (vLLM, SGLang, ATOM); add new ones with `register_format` |
-| Profiling with native (count-only) annotations | Enable detailed annotations; without sq/sk the attention op is no-perf |
-| Adding perf model for `(Synthetic Op)` name | Categorize only; names are unstable |
-| Editing TraceLens core in extension-only mode | Only edit extension file; pass via `--extension_file` |
-| Trusting `--check-mapping` "False" as gap | It checks core map before `apply_extension`; extensions show False there |
-| Using system `python3` for TraceLens import | Use the given environment or command prefix; in standalone use, ask for the conda/venv Python |
-| Skipping vendor test_*/benchmark_* check | Always look for roofline reference before writing formulas |
-| Wrapper, kernel, and vendor formula disagree | Investigate; do not pick the convenient number |
-| Modeling one dtype from one trace | Cover every dtype the binding can emit |
-| Missing compute precision or compute unit | Roofline percentage is blank and impact score uses a heuristic |
-| Pseudo op for an op that already has a stable cpu_op | Register that name directly |
-| Pseudo-op rule tied to one UID or timestamp | Detect from op name, call stack, or kernel family |
-| Generic key (e.g. `aten::topk`, or a kernel shared by several models) mapped to a model-specific class | List its callers across frameworks; keep the model generic or guard it so other callers get no-perf |
-| Kernel name used as the mapping key | Key on the CPU op name that appears in the trace (or a registered pseudo op) |
-| Size taken from the op name | Read it from `Input Dims` or `Concrete Inputs` |
-| Raw-token annotation counts used with compressed scores or KV | Scale by the compression ratio, or return no-perf |
-| Tile, padding or matrix-instruction size terms in `flops()` / `bytes()` | Model the operation, not the kernel; tiling is a kernel artifact unless the padded tensor is part of the op's contract |
