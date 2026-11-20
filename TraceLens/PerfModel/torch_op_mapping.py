@@ -310,6 +310,16 @@ unary_elemwise_ops = [
     "aten::sqrt_",
     "aten::reciprocal",
     "aten::reciprocal_",
+    # clamp(x, min, max) with scalar bounds; tensor bounds broadcast against x
+    # and do not change the element count the kernel walks.
+    "aten::clamp",
+    "aten::clamp_",
+    "aten::bitwise_not",
+    # Softmax reads its row and writes a row of the same width, so the unary
+    # read + write roofline holds. Only the dispatched `_softmax` is
+    # registered: the `aten::softmax` wrapper above it owns no kernel, so
+    # pricing it too would report FLOPs against zero kernel time.
+    "aten::_softmax",
 ]
 
 binary_elemwise_ops = [
@@ -321,6 +331,17 @@ binary_elemwise_ops = [
     "aten::add_",
     "aten::sub",
     "aten::sub_",
+    "aten::minimum",
+    "aten::maximum",
+    "aten::floor_divide",
+    "aten::bitwise_and",
+    "aten::bitwise_or",
+    "aten::bitwise_xor",
+    # masked_fill(self, mask, value): reads self and the bool mask, writes
+    # self. The scalar value sits in Concrete Inputs, so the inherited
+    # two-input accounting is already the right one.
+    "aten::masked_fill",
+    "aten::masked_fill_",
     "aten::sigmoid_backward",
     "aten::threshold_backward",
 ]
@@ -422,8 +443,14 @@ for op in ("aten::pad",):
     op_to_perf_model_class_map[op] = perf_model.aten_pad
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
-for op in ("aten::eq", "aten::ne", "aten::lt", "aten::gt"):
+for op in ("aten::eq", "aten::ne", "aten::lt", "aten::gt", "aten::le", "aten::ge"):
     op_to_perf_model_class_map[op] = perf_model.aten_comparison
+for op in ("aten::fill", "aten::fill_", "aten::zero_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_fill
+for op in ("aten::argmax", "aten::argmin"):
+    op_to_perf_model_class_map[op] = perf_model.aten_argreduce
+for op in ("aten::any", "aten::all"):
+    op_to_perf_model_class_map[op] = perf_model.aten_boolreduce
 for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:

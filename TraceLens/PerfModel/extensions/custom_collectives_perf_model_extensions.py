@@ -183,6 +183,64 @@ class vllm_all_reduce(custom_ar_all_reduce):
         return 2 * self.num_elems * self.bpe_in
 
 
+class sglang_outplace_all_reduce(custom_ar_all_reduce):
+    """
+    Performance model for sglang::outplace_all_reduce.
+
+    Reference implementation:
+        python/sglang/srt/distributed/parallel_state.py
+            # outplace_all_reduce -> _all_reduce_out_place
+        python/sglang/srt/distributed/device_communicators/quick_all_reduce.py
+            # QuickAllReduce.quick_all_reduce
+        python/sglang/srt/distributed/device_communicators/custom_all_reduce.py
+            # CustomAllreduce.custom_all_reduce
+
+    The op is the cpu_op that owns SGLang's all-reduce kernels: quickreduce
+    (`quickreduce::allreduce_prototype_twoshot`) on the eager path and aiter
+    (`aiter::cross_device_reduce_2stage`) inside the decode CUDA graphs. Which
+    kernel runs is chosen at runtime; both move the same tensor, so one model
+    covers both.
+
+    Signature: outplace_all_reduce(tensor, group_name, op_name)
+        tensor      — shape [M, N], the local shard to reduce
+        group_name  — str (empty in the trace)
+        op_name     — str (empty in the trace)
+
+    Expected Input Dims from trace:
+        [tensor_shape, group_name_scalar, op_name_scalar]
+        e.g. [(144, 6144), (), ()] decode, [(30208, 6144), (), ()] prefill
+
+    FLOPs: 0 — the reduction arithmetic is negligible beside the transfer,
+        which is how the rest of this family is priced.
+    Bytes: memory traffic per GPU (read the local shard + write the result).
+        Peer and IPC traffic are omitted, as in custom_ar_all_reduce.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"].get("Input type") or []
+        strides = event["args"].get("Input Strides") or []
+        return {
+            "op_shape": tuple(dims[0]) if dims and dims[0] else (),
+            "dtype_in": types[0] if types else "",
+            "stride_input": tuple(strides[0]) if strides and strides[0] else (),
+        }
+
+    def __init__(self, event, arch=None, **kwargs):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+        shape = self.param_details["op_shape"]
+        self.num_elems = prod(shape) if shape else 0
+        self.bpe_in = name2bpe(self.param_details["dtype_in"]) if shape else None
+
+    def bytes(self):
+        if not self.num_elems or self.bpe_in is None:
+            return None
+        return 2 * self.num_elems * self.bpe_in
+
+
 class sgl_kernel_all_reduce_reg(custom_ar_all_reduce):
     """
     Performance model for sgl_kernel::all_reduce_reg.

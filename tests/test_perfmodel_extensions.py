@@ -34,6 +34,7 @@ from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions imp
     sgl_kernel_all_reduce_reg,
     sgl_kernel_qr_all_reduce,
     sgl_kernel_reg_all_gather_into_tensor,
+    sglang_outplace_all_reduce,
 )
 from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
     BiasedGroupedTopk,
@@ -59,6 +60,9 @@ from TraceLens.PerfModel.extensions.perf_model_extensions import (
     aiter_fused_dynamic_mxfp4_quant_moe_sort_hip,
     aiter_gelu_and_mul,
     aiter_gelu_tanh_and_mul,
+    aiter_hipb_mm,
+    aiter_per_group_quant_hip,
+    aiter_per_token_quant_hip,
     aiter_rope_cached_positions_2c_fwd_impl,
     aiter_silu_and_mul,
     batched_gemm_a16wfp4,
@@ -374,6 +378,36 @@ class TestCustomCollectivesExtensions:
         assert model.param_details["num_channels"] == 7168
         assert model.flops() > 0
         assert model.bytes() > 0
+
+    def test_sglang_outplace_all_reduce(self):
+        """The cpu_op that owns SGLang's quickreduce and aiter all-reduce kernels."""
+        event = {
+            "name": "sglang::outplace_all_reduce",
+            "args": {
+                "Input Dims": [[144, 6144], [], []],
+                "Input type": ["c10::BFloat16", "", ""],
+                "Input Strides": [[6144, 1], [], []],
+                "Concrete Inputs": ["", "", ""],
+            },
+        }
+        model = sglang_outplace_all_reduce(event)
+        assert model.flops() == 0
+        # local read + reduced write of the bf16 shard
+        assert model.bytes() == 2 * 144 * 6144 * 2
+        assert model.param_details["stride_input"] == (6144, 1)
+        assert model.category == custom_ar_all_reduce.category
+
+    def test_sglang_outplace_all_reduce_without_a_shape(self):
+        event = {
+            "name": "sglang::outplace_all_reduce",
+            "args": {
+                "Input Dims": [[], [], []],
+                "Input type": ["", "", ""],
+                "Input Strides": [[], [], []],
+                "Concrete Inputs": ["", "", ""],
+            },
+        }
+        assert sglang_outplace_all_reduce(event).bytes() is None
 
 
 class TestAttentionExtensions:
@@ -2927,6 +2961,180 @@ class TestElementwiseReduceCoverage:
         model = perf_model.aten_reduce(event)
         assert model.flops() == flops_per_elem * 4 * 256
 
+    def test_aten_fill_pays_for_the_store_only(self):
+        """The fill value is a kernel argument, so there is nothing to read."""
+        event = {
+            "name": "aten::fill_",
+            "args": {
+                "Input Dims": [[4, 8, 1024], []],
+                "Input type": ["c10::BFloat16", "Scalar"],
+                "Input Strides": [[8192, 1024, 1], []],
+                "Concrete Inputs": ["", "0."],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::fill_"](event)
+        assert model.flops() == 0
+        assert model.bytes() == 4 * 8 * 1024 * 2
+
+    def test_aten_zero_takes_no_scalar_operand(self):
+        event = {
+            "name": "aten::zero_",
+            "args": {
+                "Input Dims": [[239]],
+                "Input type": ["long int"],
+                "Input Strides": [[1]],
+                "Concrete Inputs": [""],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::zero_"](event)
+        assert model.flops() == 0
+        assert model.bytes() == 239 * 8
+
+    @pytest.mark.parametrize("name", ["aten::argmax", "aten::argmin"])
+    def test_aten_argreduce_writes_int64_indices(self, name):
+        event = {
+            "name": name,
+            "args": {
+                "Input Dims": [[4, 200064], [], []],
+                "Input type": ["float", "Scalar", "Scalar"],
+                "Input Strides": [[200064, 1], [], []],
+                "Concrete Inputs": ["", "-1", "False"],
+            },
+        }
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == 4 * 200064
+        # reducing the last dim of a (4, 200064) tensor leaves four indices
+        assert model.bytes() == 4 * 200064 * 4 + 4 * 8
+
+    def test_aten_argreduce_honours_keepdim(self):
+        event = {
+            "name": "aten::argmax",
+            "args": {
+                "Input Dims": [[4, 8], [], []],
+                "Input type": ["float", "Scalar", "Scalar"],
+                "Input Strides": [[8, 1], [], []],
+                "Concrete Inputs": ["", "1", "True"],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::argmax"](event)
+        assert model.bytes() == 4 * 8 * 4 + 4 * 8
+
+    def test_aten_argreduce_without_a_parseable_dim(self):
+        """A full reduction, and the fallback when the dim is missing."""
+        event = {
+            "name": "aten::argmax",
+            "args": {
+                "Input Dims": [[4, 8], [], []],
+                "Input type": ["float", "Scalar", "Scalar"],
+                "Input Strides": [[8, 1], [], []],
+                "Concrete Inputs": ["", "", ""],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::argmax"](event)
+        assert model.bytes() == 4 * 8 * 4 + 1 * 8
+
+    @pytest.mark.parametrize("name", ["aten::any", "aten::all"])
+    def test_aten_boolreduce_writes_a_bool(self, name):
+        """The result is a bool whatever the input width is."""
+        event = {
+            "name": name,
+            "args": {
+                "Input Dims": [[64]],
+                "Input type": ["float"],
+                "Input Strides": [[1]],
+                "Concrete Inputs": [""],
+            },
+        }
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == 64
+        assert model.bytes() == 64 * 4 + 1 * 1
+
+    def test_aten_masked_fill_reads_self_and_mask(self):
+        event = {
+            "name": "aten::masked_fill_",
+            "args": {
+                "Input Dims": [[1, 200064], [1, 200064], []],
+                "Input type": ["float", "bool", "Scalar"],
+                "Input Strides": [[200064, 1], [200064, 1], []],
+                "Concrete Inputs": ["", "", "0."],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::masked_fill_"](event)
+        assert model.flops() == 200064
+        assert model.bytes() == 200064 * 4 + 200064 * 1 + 200064 * 4
+
+    def test_aten_softmax_reads_and_writes_the_same_row(self):
+        event = {
+            "name": "aten::_softmax",
+            "args": {
+                "Input Dims": [[1, 200064], [], []],
+                "Input type": ["float", "Scalar", "Scalar"],
+                "Input Strides": [[200064, 1], [], []],
+                "Concrete Inputs": ["", "-1", "False"],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::_softmax"](event)
+        assert model.flops() == 12 * 200064
+        assert model.bytes() == 2 * 200064 * 4
+
+    def test_aten_softmax_wrapper_is_not_registered(self):
+        """The wrapper owns no kernel; pricing it would bill zero kernel time."""
+        assert "aten::softmax" not in op_to_perf_model_class_map
+
+    @pytest.mark.parametrize(
+        "name,flops_per_elem",
+        [
+            ("aten::minimum", 1),
+            ("aten::maximum", 1),
+            ("aten::bitwise_and", 1),
+            ("aten::bitwise_or", 1),
+            ("aten::bitwise_xor", 1),
+            ("aten::floor_divide", 5),
+        ],
+    )
+    def test_aten_binary_additions_read_the_op_table(self, name, flops_per_elem):
+        event = {
+            "name": name,
+            "args": {
+                "Input Dims": [[4, 256], [4, 256], [4, 256]],
+                "Input type": ["int", "int", "int"],
+                "Input Strides": [[256, 1], [256, 1], [256, 1]],
+                "Concrete Inputs": ["", "", ""],
+            },
+        }
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == flops_per_elem * 4 * 256
+        assert model.bytes() == 3 * 4 * 256 * 4
+
+    @pytest.mark.parametrize("name", ["aten::le", "aten::ge"])
+    def test_aten_le_ge_write_bool(self, name):
+        event = {
+            "name": name,
+            "args": {
+                "Input Dims": [[4, 256], [4, 256], [4, 256]],
+                "Input type": ["float", "float", "bool"],
+                "Input Strides": [[256, 1], [256, 1], [256, 1]],
+                "Concrete Inputs": ["", "", ""],
+            },
+        }
+        model = op_to_perf_model_class_map[name](event)
+        assert model.flops() == 4 * 256
+        assert model.bytes() == 2 * 4 * 256 * 4 + 4 * 256 * 1
+
+    def test_aten_bitwise_not_is_unary(self):
+        event = {
+            "name": "aten::bitwise_not",
+            "args": {
+                "Input Dims": [[4, 256]],
+                "Input type": ["bool"],
+                "Input Strides": [[256, 1]],
+                "Concrete Inputs": [""],
+            },
+        }
+        model = op_to_perf_model_class_map["aten::bitwise_not"](event)
+        assert model.flops() == 4 * 256
+        assert model.bytes() == 2 * 4 * 256 * 1
+
 
 class TestNormalizationCoverage:
     def test_batch_norm_fwd(self):
@@ -3333,6 +3541,107 @@ class TestPerfModelExtensionsCoverage:
             }
         )
         assert sample.flops() > 0
+
+
+def _quant_event(name, shape, concrete):
+    return {
+        "name": name,
+        "args": {
+            "Input Dims": [list(shape)] + [[]] * (len(concrete) - 1),
+            "Input type": ["c10::BFloat16"] + [""] * (len(concrete) - 1),
+            "Input Strides": [[shape[-1], 1]] + [[]] * (len(concrete) - 1),
+            "Concrete Inputs": concrete,
+        },
+    }
+
+
+def _mm_event(M, K, N):
+    return {
+        "name": "aiter::_hipb_mm",
+        "args": {
+            "Input Dims": [[M, K], [K, N], [], [M, N], [], [], [], [], [], []],
+            "Input type": [
+                "c10::BFloat16",
+                "c10::BFloat16",
+                "Scalar",
+                "c10::BFloat16",
+                "",
+                "",
+                "",
+                "",
+                "Scalar",
+                "",
+            ],
+            "Input Strides": [[K, 1], [1, K], [], [N, 1], [], [], [], [], [], []],
+            "Concrete Inputs": ["", "", "439546", "", "", "", "", "", "False", ""],
+        },
+    }
+
+
+class TestAiterQuantAndGemmCoverage:
+    """aiter::per_group_quant_hip, per_token_quant_hip and _hipb_mm."""
+
+    def test_per_group_quant_hip_reads_dtype_ordinals(self):
+        """Concrete Inputs carry fp8 (24) out and fp32 (6) scales, group 128."""
+        event = _quant_event(
+            "aiter::per_group_quant_hip",
+            (144, 6144),
+            ["", "", "24", "128", "True", "", "1", "6"],
+        )
+        model = aiter_per_group_quant_hip(event)
+        assert model.param_details["group_size"] == 128
+        assert model.param_details["num_groups"] == 48
+        assert model.param_details["bpe_quant"] == 1
+        assert model.param_details["bpe_scale"] == 4
+        assert model.flops() == 6 * 144 * 6144
+        assert model.bytes() == 144 * 6144 * 2 + 144 * 6144 * 1 + 144 * 48 * 4
+
+    def test_per_group_quant_hip_falls_back_on_a_bad_ordinal(self):
+        event = _quant_event(
+            "aiter::per_group_quant_hip",
+            (16, 256),
+            ["", "", "not-a-dtype", "64", "True", "", "1", "nope"],
+        )
+        model = aiter_per_group_quant_hip(event)
+        assert model.param_details["bpe_quant"] == 1
+        assert model.param_details["bpe_scale"] == 4
+        assert model.bytes() == 16 * 256 * 2 + 16 * 256 * 1 + 16 * 4 * 4
+
+    def test_per_token_quant_hip_uses_one_scale_per_row(self):
+        """No group_size operand, so the group spans the whole row."""
+        event = _quant_event(
+            "aiter::per_token_quant_hip",
+            (80, 6144),
+            ["", "", "24", "", "1"],
+        )
+        model = aiter_per_token_quant_hip(event)
+        assert model.param_details["group_size"] == 6144
+        assert model.param_details["num_groups"] == 1
+        # the trailing '1' is a row count, not a scale dtype ordinal
+        assert model.param_details["bpe_scale"] == 4
+        assert model.bytes() == 80 * 6144 * 2 + 80 * 6144 * 1 + 80 * 4
+
+    def test_quant_without_a_shape_reports_nothing(self):
+        event = _quant_event("aiter::per_token_quant_hip", (16, 16), ["", ""])
+        event["args"]["Input Dims"] = [[], []]
+        model = aiter_per_token_quant_hip(event)
+        assert model.flops() is None
+        assert model.bytes() is None
+
+    def test_hipb_mm_is_a_plain_gemm(self):
+        model = aiter_hipb_mm(_mm_event(192, 6144, 50016))
+        assert model.flops() == 2 * 192 * 6144 * 50016
+        assert model.bytes() == (192 * 6144 * 2 + 6144 * 50016 * 2 + 192 * 50016 * 2)
+        assert model.param_details["bias"] is False
+        # mat2 arrives column-major
+        assert model.param_details["stride_B"] == (1, 6144)
+
+    def test_hipb_mm_without_matrix_shapes(self):
+        event = _mm_event(1, 1, 1)
+        event["args"]["Input Dims"][0] = []
+        model = aiter_hipb_mm(event)
+        assert model.flops() is None
+        assert model.bytes() is None
 
 
 class TestMoeExtensionsCoverage:

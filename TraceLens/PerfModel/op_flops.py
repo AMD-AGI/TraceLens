@@ -34,7 +34,16 @@ OP_FLOPS_PER_ELEM: dict[str, int] = {
     "clone": 0,
     "embedding": 0,
     "pad": 0,
+    # The fill value is a kernel argument, so the store is all these ops do.
+    "fill": 0,
+    "zero": 0,
     # One arithmetic, compare, or select instruction.
+    "bitwise_and": _ARITH,
+    "bitwise_or": _ARITH,
+    "bitwise_xor": _ARITH,
+    "bitwise_not": _ARITH,
+    # Select between the kept element and the scalar the mask calls for.
+    "masked_fill": _ARITH,
     "add": _ARITH,
     "sub": _ARITH,
     "mul": _ARITH,
