@@ -1345,7 +1345,7 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
             "inter_dim": cls.INTER_DIM,
             "num_experts": cls.NUM_EXPERTS,
             "topk": 1,
-            "gated": True
+            "gated": True,
         }
 
     def flops(self):
