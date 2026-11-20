@@ -12,6 +12,8 @@ Tests for primus_turbo and aiter MXFP4 ops (#637, #644):
   - aiter::gemm_a4w4 / aiter::_gemm_a4w4_asm -> GEMM (AITER FP4 backend)
 """
 
+import pytest
+
 from TraceLens.PerfModel.perf_model import (
     aiter_gemm_a4w4,
     gemm_fp4_impl,
@@ -19,12 +21,18 @@ from TraceLens.PerfModel.perf_model import (
     primus_turbo_quantize_mxfp4_dual,
     GEMM,
     UnaryElementwise,
+    FP4GemmMXFunction,
+    FP4GemmMXFunctionBackward,
+    FP4GroupedMLPMXFunc,
+    FP4GroupedMLPMXFuncBackward,
 )
 from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
     op_to_perf_model_class_map,
 )
-from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe
+from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
+
+BF16 = "c10::BFloat16"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -740,3 +748,193 @@ def test_gemm_fp4_impl_compute_precision():
 
     model = gemm_fp4_impl(_gemm_fp4_impl_event())
     assert model.get_compute_precision() == torch_dtype_map("mxfp4")
+
+
+# =========================================================================== #
+# gpt-oss / primus-megatron MXFP4 composite autograd ops
+#   FP4GemmMXFunction / FP4GemmMXFunctionBackward
+#   FP4GroupedMLPMXFunc / FP4GroupedMLPMXFuncBackward
+# Covers get_param_details, flops()/bytes(), the Sequence-number fwd/bwd cache
+# (hit + miss -> None), the two-GEMM backward roll-up, get_compute_precision,
+# and the NotImplementedError guards on the forward GEMM class.
+# =========================================================================== #
+def _fp4mx_gemm_event(M, N, K, seq=None, dtypes=(BF16, BF16)):
+    args = {
+        "Input Dims": [(M, K), (N, K), (), (), (), ()],
+        "Input type": [dtypes[0], dtypes[1], "", "", "", ""],
+    }
+    if seq is not None:
+        args["Sequence number"] = seq
+    return {"name": "FP4GemmMXFunction", "args": args}
+
+
+def _fp4mx_gemm_bwd_event(M, N, seq=None, dtype=BF16):
+    args = {"Input Dims": [(M, N)], "Input type": [dtype]}
+    if seq is not None:
+        args["Sequence number"] = seq
+    return {"name": "FP4GemmMXFunctionBackward", "args": args}
+
+
+def _fp4mx_grouped_event(M, N, K, G, seq=None):
+    inter = N // 2
+    args = {
+        "Input Dims": [(M, K), (M,), (G, N, K), (G, K, inter), (), (), (), (G,), (G + 1,)],
+        "Input type": [BF16, "", BF16, BF16, "", "", "", "", ""],
+    }
+    if seq is not None:
+        args["Sequence number"] = seq
+    return {"name": "FP4GroupedMLPMXFunc", "args": args}
+
+
+def _fp4mx_grouped_bwd_event(M, K, seq=None):
+    args = {"Input Dims": [(M, K)], "Input type": [BF16]}
+    if seq is not None:
+        args["Sequence number"] = seq
+    return {"name": "FP4GroupedMLPMXFuncBackward", "args": args}
+
+
+# --------------------------------------------------------------------------- #
+# FP4GemmMXFunction (forward)
+# --------------------------------------------------------------------------- #
+def test_fp4mx_gemm_param_details_and_flops():
+    M, N, K = 32768, 2880, 4096
+    m = FP4GemmMXFunction(_fp4mx_gemm_event(M, N, K))
+    assert (m.M, m.N, m.K) == (M, N, K)
+    assert m.param_details["bias"] is False
+    assert m.param_details["dtype_A_B"] == (BF16, BF16, "c10::BFloat16")
+    assert m.flops() == 2 * M * N * K
+
+
+def test_fp4mx_gemm_bytes_is_bf16_roofline():
+    M, N, K = 64, 128, 256
+    m = FP4GemmMXFunction(_fp4mx_gemm_event(M, N, K))
+    bpe = name2bpe(BF16)
+    assert m.bytes() == (M * K + N * K + M * N) * bpe
+
+
+def test_fp4mx_gemm_compute_precision_is_mxfp4():
+    m = FP4GemmMXFunction(_fp4mx_gemm_event(16, 16, 32))
+    assert m.get_compute_precision() == torch_dtype_map("mxfp4")
+
+
+def test_fp4mx_gemm_backward_methods_raise_not_implemented():
+    m = FP4GemmMXFunction(_fp4mx_gemm_event(16, 16, 32))
+    with pytest.raises(NotImplementedError):
+        m.flops_bwd()
+    with pytest.raises(NotImplementedError):
+        m.bytes_bwd()
+
+
+def test_fp4mx_gemm_caches_by_sequence_number():
+    FP4GemmMXFunction.fwd_pass_cache.clear()
+    FP4GemmMXFunction(_fp4mx_gemm_event(100, 200, 300, seq=42))
+    assert FP4GemmMXFunction.fwd_pass_cache[42]["K"] == 300
+
+
+def test_fp4mx_gemm_without_sequence_number_not_cached():
+    FP4GemmMXFunction.fwd_pass_cache.clear()
+    FP4GemmMXFunction(_fp4mx_gemm_event(10, 20, 30))
+    assert FP4GemmMXFunction.fwd_pass_cache == {}
+
+
+# --------------------------------------------------------------------------- #
+# FP4GemmMXFunctionBackward
+# --------------------------------------------------------------------------- #
+def test_fp4mx_gemm_backward_linked_recovers_dims():
+    FP4GemmMXFunction.fwd_pass_cache.clear()
+    M, N, K = 32768, 5120, 2880
+    FP4GemmMXFunction(_fp4mx_gemm_event(M, N, K, seq=7))
+    b = FP4GemmMXFunctionBackward(_fp4mx_gemm_bwd_event(M, N, seq=7))
+    assert b.param_details["linked_fwd"] is True
+    assert (b.M, b.N, b.K) == (M, N, K)
+    assert b.flops() == 4 * M * N * K
+    assert b.bytes() is not None and b.bytes() > 0
+    assert b.get_compute_precision() == torch_dtype_map("mxfp4")
+
+
+def test_fp4mx_gemm_backward_cache_miss_returns_none():
+    FP4GemmMXFunction.fwd_pass_cache.clear()
+    b = FP4GemmMXFunctionBackward(_fp4mx_gemm_bwd_event(32768, 5120, seq=999))
+    assert b.param_details["linked_fwd"] is False
+    assert b.K is None
+    assert b.flops() is None
+    assert b.bytes() is None
+
+
+def test_fp4mx_gemm_backward_scalar_grad_out_gives_none_n():
+    FP4GemmMXFunction.fwd_pass_cache.clear()
+    b = FP4GemmMXFunctionBackward(
+        {"args": {"Input Dims": [(4096,)], "Input type": [BF16]}}
+    )
+    assert b.param_details["N"] is None
+    assert b.flops() is None
+    assert b.bytes() is None
+
+
+# --------------------------------------------------------------------------- #
+# FP4GroupedMLPMXFunc (forward)
+# --------------------------------------------------------------------------- #
+def test_fp4mx_grouped_param_details_and_flops():
+    M, N, K, G = 131072, 5760, 2880, 32
+    m = FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G))
+    assert (m.M, m.N, m.K, m.G) == (M, N, K, G)
+    assert m.flops() == m.flops_func(M, K, N) + m.flops_func(M, N // 2, K)
+
+
+def test_fp4mx_grouped_bytes_nonzero_and_precision():
+    M, N, K, G = 1024, 512, 256, 8
+    m = FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G))
+    assert m.bytes() > 0
+    assert m.get_compute_precision() == torch_dtype_map("mxfp4")
+
+
+def test_fp4mx_grouped_caches_by_sequence_number():
+    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
+    FP4GroupedMLPMXFunc(_fp4mx_grouped_event(128, 64, 32, 4, seq=5))
+    assert 5 in FP4GroupedMLPMXFunc.fwd_pass_cache
+
+
+def test_fp4mx_grouped_forward_bwd_rollup_matches_backward_class():
+    # flops_bwd/bytes_bwd on the FORWARD class drive the category-level backward
+    # roll-up. They must model the two-GEMM backward (gate_up + down), i.e. match
+    # FP4GroupedMLPMXFuncBackward, not the one-GEMM GroupedGemm base.
+    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
+    M, N, K, G = 131072, 5760, 2880, 32
+    fwd = FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G, seq=21))
+    bwd = FP4GroupedMLPMXFuncBackward(_fp4mx_grouped_bwd_event(M, K, seq=21))
+
+    # two-GEMM sums (exercises the flops_bwd/bytes_bwd overrides directly)
+    assert fwd.flops_bwd() == fwd.flops_bwd_func(M, K, N) + fwd.flops_bwd_func(
+        M, N // 2, K
+    )
+    assert fwd.bytes_bwd() == fwd.bytes_bwd_func(
+        M, K, N, G, fwd.bpe_in, fwd.bpe_out
+    ) + fwd.bytes_bwd_func(M, N // 2, K, G, fwd.bpe_in, fwd.bpe_out)
+
+    # roll-up path (forward.flops_bwd/bytes_bwd) equals the dedicated backward op
+    assert fwd.flops_bwd() == bwd.flops()
+    assert fwd.bytes_bwd() == bwd.bytes()
+    # and is strictly larger than a single-GEMM backward would give
+    assert fwd.flops_bwd() > fwd.flops_bwd_func(M, K, N)
+
+
+# --------------------------------------------------------------------------- #
+# FP4GroupedMLPMXFuncBackward
+# --------------------------------------------------------------------------- #
+def test_fp4mx_grouped_backward_linked():
+    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
+    M, N, K, G = 131072, 5760, 2880, 32
+    FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G, seq=11))
+    b = FP4GroupedMLPMXFuncBackward(_fp4mx_grouped_bwd_event(M, K, seq=11))
+    assert b.param_details["linked_fwd"] is True
+    assert b.flops() == b.flops_bwd_func(M, K, N) + b.flops_bwd_func(M, N // 2, K)
+    assert b.bytes() is not None and b.bytes() > 0
+    assert b.get_compute_precision() == torch_dtype_map("mxfp4")
+
+
+def test_fp4mx_grouped_backward_cache_miss_returns_none():
+    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
+    b = FP4GroupedMLPMXFuncBackward(_fp4mx_grouped_bwd_event(131072, 2880, seq=404))
+    assert b.param_details["linked_fwd"] is False
+    assert b.flops() is None
+    assert b.bytes() is None
