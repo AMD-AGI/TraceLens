@@ -1157,4 +1157,5 @@ def merge_capture_trace_into_graph(
             "Graph capture merge failed; returning None (report will be unaugmented)."
         )
         return None
-    finalize_non_gpu_paths(graph_tre
+    finalize_non_gpu_paths(graph_tree)
+    return graph_tree
