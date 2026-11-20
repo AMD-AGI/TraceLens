@@ -19,6 +19,7 @@ from collections import Counter, OrderedDict, deque, defaultdict
 from typing import Dict, List, Optional, Tuple
 import json
 import os
+import re
 import warnings
 import TraceLens
 
@@ -27,8 +28,12 @@ from .trace_to_tree import TraceToTree
 from ..util import GPU_KERNEL_CATEGORIES, extract_rank
 from ..TraceUtils.utils.annotation_utils import (
     SGLANG_RUNNER_BS_PATTERN,
+    SPEC_ROLE_DRAFTER,
+    SPEC_ROLE_DRAFTER_EXTEND,
     SPEC_ROLE_TARGET,
     find_known_annotations,
+    find_step_label,
+    parse_draft_prefill_tokens,
     find_spec_decode_annotations,
     parse_annotation,
     spec_decode_batch_sizes,
@@ -559,7 +564,41 @@ def find_execution_roots(graph_tree):
         for e in find_known_annotations(graph_tree.events)
         + find_spec_decode_annotations(graph_tree.events)
     }
+    # SGLang spec-decode prefill nests the target prefill step[EXTEND] inside
+    # an outer step[EXTEND] that also spans the draft prefill. Use the
+    # innermost one so its graph launches are only the target's.
+    extends = innermost_extend_steps(graph_tree.events)
+    if extends:
+        outer = {
+            uid
+            for uid, e in roots.items()
+            if e.get("name", "").startswith("step[EXTEND")
+        }
+        for uid in outer:
+            roots.pop(uid, None)
+        for e in extends:
+            roots[e[UID]] = e
     return sorted(roots.values(), key=lambda e: e.get("ts", 0))
+
+
+def innermost_extend_steps(events):
+    """``step[EXTEND ...]`` spans that contain no other ``step[EXTEND ...]``."""
+    steps = sorted(
+        (
+            e
+            for e in events
+            if e.get("name", "").startswith("step[EXTEND") and "dur" in e
+        ),
+        key=lambda e: (e.get("ts", 0), -e.get("dur", 0)),
+    )
+    inner = []
+    for i, e in enumerate(steps):
+        end = e["ts"] + e["dur"]
+        nxt = steps[i + 1] if i + 1 < len(steps) else None
+        if nxt is not None and nxt["ts"] + nxt["dur"] <= end:
+            continue
+        inner.append(e)
+    return inner
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
@@ -769,6 +808,15 @@ def _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources):
     return pairs, data, trees
 
 
+def _batch_sizes_by_mode(capture_map) -> Dict[Tuple[str, str], List[int]]:
+    """Captured batch sizes per ``(role, mode)`` from ``{role}_{bs}_{mode}`` keys."""
+    sizes: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+    for key in capture_map:
+        role, bs, mode = key.rsplit("_", 2)
+        sizes[(role, mode)].append(int(bs))
+    return dict(sizes)
+
+
 def find_closest_batch_size(
     batch_size: int, capture_batch_sizes: List[int]
 ) -> Optional[int]:
@@ -796,6 +844,198 @@ def find_execution_details(execution_root) -> Optional[str]:
     if len(parts) > 1 and parts[1].lstrip("-").isdigit():
         return parts[1]
     return None
+
+
+def _preferred_target_mode(step_label) -> Optional[str]:
+    """Capture mode a target step replays: prefill (EXTEND) is PIECEWISE,
+    decode/verify is FULL. ``None`` when the label is unknown."""
+    if not step_label:
+        return None
+    m = re.match(r"step\[(\w+)", step_label)
+    if not m:
+        return None
+    kind = m.group(1).upper()
+    if kind == "EXTEND":
+        return "PIECEWISE"
+    if kind in ("DECODE", "VERIFY", "TARGET_VERIFY"):
+        return "FULL"
+    return None
+
+
+def _resolve_capture_query(execution_root, step_label, spec_batch_size):
+    """``(role, batch_sizes, preferred_mode)`` used to look up captures.
+
+    *batch_sizes* is a tuple of candidate sizes, or ``None`` when unknown.
+    *preferred_mode* is ``None`` when any capture mode may match.
+    """
+    role = spec_decode_role(execution_root["name"]) or SPEC_ROLE_TARGET
+    if role == SPEC_ROLE_DRAFTER_EXTEND:
+        draft_prefill_tokens = parse_draft_prefill_tokens(step_label)
+        if draft_prefill_tokens is not None:
+            # draft_extend around a prefill replays the draft model's
+            # piecewise prefill graphs, keyed by prompt tokens.
+            return SPEC_ROLE_DRAFTER, (draft_prefill_tokens,), "PIECEWISE"
+    # spec_batch_size is a tuple of candidate batch sizes.  For vLLM
+    # drafter roots this contains both the decode batch size
+    # (num_requests) and the prefill batch size
+    # (num_requests * (num_spec_tokens + 1)), because the drafter
+    # uses separate CUDA graph managers for each phase.
+    batch_size = spec_batch_size or find_execution_details(execution_root)
+    if batch_size is not None and not isinstance(batch_size, tuple):
+        batch_size = (batch_size,)
+    preferred_mode = (
+        _preferred_target_mode(step_label) if role == SPEC_ROLE_TARGET else None
+    )
+    return role, batch_size, preferred_mode
+
+
+def _candidate_capture_sizes(
+    batch_sizes, role, preferred_mode, capture_sizes, request_bs_multiplier
+):
+    """Captured sizes that *batch_sizes* round up to, sorted.
+
+    *capture_sizes* must be the sizes of the replayed mode: FULL and
+    PIECEWISE captures of one role use different units (padded requests
+    vs. tokens), and only FULL sizes carry the request-bs multiplier.
+    """
+    multiplier = (
+        1 if preferred_mode == "PIECEWISE" else request_bs_multiplier.get(role, 1)
+    )
+    candidates = set()
+    for bs in batch_sizes:
+        cbs = find_closest_batch_size(int(bs) * multiplier, capture_sizes)
+        if cbs is not None:
+            candidates.add(cbs)
+    return sorted(candidates)
+
+
+def _pair_capture_roots(graph_tree, graph_roots, all_sources, preferred_mode):
+    """Pair *graph_roots* with capture roots; see ``_match_graph_roots_to_captures``
+    for the return value."""
+    # Prefill replays are PIECEWISE and decode/verify replays are FULL;
+    # both can share a batch size, so keep the matching mode.
+    if preferred_mode is not None:
+        matching = [s for s in all_sources if s[3] == preferred_mode]
+        if matching:
+            all_sources = matching
+    # When a single source has the right root count, pair positionally
+    # (preserves the old 1:1 and 1:N behaviour and avoids mis-pairing
+    # roots that share the same dispatch count).
+    for src_tree, cap_roots, cap_root_data, _mode in all_sources:
+        if len(cap_roots) == 1:
+            return (
+                [(cap_roots[0], g) for g in graph_roots],
+                [cap_root_data[0]] * len(graph_roots),
+                [src_tree] * len(graph_roots),
+            )
+        if len(cap_roots) == len(graph_roots):
+            return (
+                list(zip(cap_roots, graph_roots)),
+                cap_root_data,
+                [src_tree] * len(graph_roots),
+            )
+    return _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources)
+
+
+def _merge_capture_pair(graph_tree, c_root, g_root, capture_root_data, capture_tree):
+    """Graft the capture subtree of *c_root* under graph root *g_root*.
+
+    Returns ``(graph_tree, failed)``. Pairs that cannot be aligned are
+    skipped with a warning; *failed* is True only when the whole merge
+    must be abandoned.
+    """
+    cached_events, filtered_uids = capture_root_data
+    # Shallow-copy each event dict: every mutation downstream replaces
+    # top-level keys (UID, ts, dur, parent, children) or adds new ones
+    # (gpu_events). No nested structure is ever mutated in-place, so a
+    # full deepcopy is unnecessary.
+    capture_events = [{**e} for e in cached_events]
+
+    capture_filtered_events = [e for e in capture_events if e[UID] in filtered_uids]
+
+    graph_events, graph_filtered_events = get_subtree_events(
+        graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
+    )
+
+    if len(graph_filtered_events) == 0:
+        print(
+            "Warning: no kernel events in graph root {}; skipping merge".format(
+                g_root["name"]
+            )
+        )
+        return graph_tree, False
+
+    if is_multistream(graph_filtered_events):
+        if not capture_has_kernel_names(capture_filtered_events):
+            print(
+                "Graph capture merge failed: multistream graph root {} but "
+                "capture kernel names are absent".format(g_root["name"])
+            )
+            return graph_tree, True
+        aligned = align_streams(graph_filtered_events, capture_filtered_events)
+        if aligned is None:
+            print(
+                "Warning: multistream alignment failed for capture root {} and graph root {}".format(
+                    c_root["name"], g_root["name"]
+                )
+            )
+            return graph_tree, False
+        capture_filtered_events = aligned
+    else:
+        (
+            verify_success,
+            capture_filtered_events,
+            graph_filtered_events,
+        ) = verify_subtree_events(capture_filtered_events, graph_filtered_events)
+
+        if verify_success == 0:
+            print(
+                "Warning: subtree events verification failed for capture root {} and graph root {}".format(
+                    c_root["name"], g_root["name"]
+                )
+            )
+            return graph_tree, False
+
+    graph_tree = _graft_capture_subtree(
+        graph_tree,
+        c_root,
+        g_root,
+        capture_tree,
+        capture_events,
+        capture_filtered_events,
+        graph_filtered_events,
+    )
+    return graph_tree, False
+
+
+def _graft_capture_subtree(
+    graph_tree,
+    c_root,
+    g_root,
+    capture_tree,
+    capture_events,
+    capture_filtered_events,
+    graph_filtered_events,
+):
+    """Re-time *c_root*'s aligned capture events onto *g_root* and attach them."""
+    start_uid = graph_tree.events[-1][UID] + 1
+    capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
+        capture_tree,
+        capture_events,
+        capture_filtered_events,
+        start_uid,
+        g_root["ts"],
+        c_root,
+        g_root["dur"],
+    )
+
+    capture_events[0]["parent"] = g_root[UID]
+    g_root["children"].append(capture_events[0][UID])
+    graph_tree = append_subtree_to_event(
+        graph_tree, capture_events, g_root, cpu_root_nodes
+    )
+
+    return make_connections(graph_tree, graph_filtered_events, capture_filtered_events)
 
 
 def merge_capture_trace_into_graph(
@@ -840,8 +1080,13 @@ def merge_capture_trace_into_graph(
     spec_batch_sizes = spec_decode_batch_sizes(
         [root for root, _ in execution_graph_root_map]
     )
+    mode_batch_sizes = _batch_sizes_by_mode(capture_map)
 
     # ── Per-execution-root merge loop ──
+    step_events = sorted(
+        (e for e in graph_tree.events if e.get("name", "").startswith("step[")),
+        key=lambda e: e.get("ts", 0),
+    )
     merge_failed = False
     for (execution_root, graph_roots), spec_batch_size in zip(
         execution_graph_root_map, spec_batch_sizes
@@ -856,13 +1101,11 @@ def merge_capture_trace_into_graph(
             continue
 
         # ── Resolve capture tree + roots for this execution root ──
-        role = spec_decode_role(execution_root["name"]) or SPEC_ROLE_TARGET
-        # spec_batch_size is a tuple of candidate batch sizes.  For vLLM
-        # drafter roots this contains both the decode batch size
-        # (num_requests) and the prefill batch size
-        # (num_requests * (num_spec_tokens + 1)), because the drafter
-        # uses separate CUDA graph managers for each phase.
-        batch_size = spec_batch_size or find_execution_details(execution_root)
+        role, batch_size, preferred_mode = _resolve_capture_query(
+            execution_root,
+            find_step_label(step_events, execution_root),
+            spec_batch_size,
+        )
         if batch_size is None:
             print(
                 "Warning: could not determine batch size for execution root {}".format(
@@ -870,14 +1113,13 @@ def merge_capture_trace_into_graph(
                 )
             )
             continue
-        if not isinstance(batch_size, tuple):
-            batch_size = (batch_size,)
-        candidate_batch_sizes = set()
-        for bs in batch_size:
-            bs_int = int(bs) * request_bs_multiplier.get(role, 1)
-            cbs = find_closest_batch_size(bs_int, capture_batch_sizes[role])
-            if cbs is not None:
-                candidate_batch_sizes.add(cbs)
+        candidate_batch_sizes = _candidate_capture_sizes(
+            batch_size,
+            role,
+            preferred_mode,
+            mode_batch_sizes.get((role, preferred_mode)) or capture_batch_sizes[role],
+            request_bs_multiplier,
+        )
         if not candidate_batch_sizes:
             print(
                 "Warning: no {} capture batch size found for execution root {}".format(
@@ -887,31 +1129,11 @@ def merge_capture_trace_into_graph(
             continue
 
         all_sources = _load_all_capture_sources(
-            capture_map, role, sorted(candidate_batch_sizes)
+            capture_map, role, candidate_batch_sizes
         )
-        # When a single source has the right root count, pair positionally
-        # (preserves the old 1:1 and 1:N behaviour and avoids mis-pairing
-        # roots that share the same dispatch count).
-        result = None
-        for src_tree, cap_roots, cap_root_data, _mode in all_sources:
-            if len(cap_roots) == 1:
-                result = (
-                    [(cap_roots[0], g) for g in graph_roots],
-                    [cap_root_data[0]] * len(graph_roots),
-                    [src_tree] * len(graph_roots),
-                )
-                break
-            if len(cap_roots) == len(graph_roots):
-                result = (
-                    list(zip(cap_roots, graph_roots)),
-                    cap_root_data,
-                    [src_tree] * len(graph_roots),
-                )
-                break
-        if result is None:
-            result = _match_graph_roots_to_captures(
-                graph_tree, graph_roots, all_sources
-            )
+        result = _pair_capture_roots(
+            graph_tree, graph_roots, all_sources, preferred_mode
+        )
         if result is None:
             print(
                 "Warning: could not match capture roots to graph roots "
@@ -925,85 +1147,11 @@ def merge_capture_trace_into_graph(
                 len(pairs), len(graph_roots)
             )
         )
-        for (c_root, g_root), (cached_events, filtered_uids), capture_tree in zip(
-            pairs, data, capture_trees
-        ):
-            # Shallow-copy each event dict: every mutation downstream replaces
-            # top-level keys (UID, ts, dur, parent, children) or adds new ones
-            # (gpu_events). No nested structure is ever mutated in-place, so a
-            # full deepcopy is unnecessary.
-            capture_events = [{**e} for e in cached_events]
-
-            capture_filtered_events = [
-                e for e in capture_events if e[UID] in filtered_uids
-            ]
-
-            graph_events, graph_filtered_events = get_subtree_events(
-                graph_tree, g_root, cat_filter=["kernel", "gpu_memset", "gpu_memcpy"]
+        for (c_root, g_root), crd, capture_tree in zip(pairs, data, capture_trees):
+            graph_tree, failed = _merge_capture_pair(
+                graph_tree, c_root, g_root, crd, capture_tree
             )
-
-            if len(graph_filtered_events) == 0:
-                print(
-                    "Warning: no kernel events in graph root {}; skipping merge".format(
-                        g_root["name"]
-                    )
-                )
-                continue
-
-            if is_multistream(graph_filtered_events):
-                if not capture_has_kernel_names(capture_filtered_events):
-                    print(
-                        "Graph capture merge failed: multistream graph root {} but "
-                        "capture kernel names are absent".format(g_root["name"])
-                    )
-                    merge_failed = True
-                    continue
-                aligned = align_streams(graph_filtered_events, capture_filtered_events)
-                if aligned is None:
-                    print(
-                        "Warning: multistream alignment failed for capture root {} and graph root {}".format(
-                            c_root["name"], g_root["name"]
-                        )
-                    )
-                    continue
-                capture_filtered_events = aligned
-            else:
-                (
-                    verify_success,
-                    capture_filtered_events,
-                    graph_filtered_events,
-                ) = verify_subtree_events(
-                    capture_filtered_events, graph_filtered_events
-                )
-
-                if verify_success == 0:
-                    print(
-                        "Warning: subtree events verification failed for capture root {} and graph root {}".format(
-                            c_root["name"], g_root["name"]
-                        )
-                    )
-                    continue
-
-            start_uid = graph_tree.events[-1][UID] + 1
-            capture_events, _, cpu_root_nodes = update_subtree_uids_and_timestamps(
-                capture_tree,
-                capture_events,
-                capture_filtered_events,
-                start_uid,
-                g_root["ts"],
-                c_root,
-                g_root["dur"],
-            )
-
-            capture_events[0]["parent"] = g_root[UID]
-            g_root["children"].append(capture_events[0][UID])
-            graph_tree = append_subtree_to_event(
-                graph_tree, capture_events, g_root, cpu_root_nodes
-            )
-
-            graph_tree = make_connections(
-                graph_tree, graph_filtered_events, capture_filtered_events
-            )
+            merge_failed = merge_failed or failed
     if merge_failed:
         print(
             "Graph capture merge failed; returning None (report will be unaugmented)."
