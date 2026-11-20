@@ -616,7 +616,7 @@ def project_roofline(
             if scope not in replaced_eager_attention:
                 replaced_eager_attention.add(scope)
                 _dims_only, dtype = _split_shape_text(output_text)
-                bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+                bpe = (_BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None) or _RT.act_bpe
                 boundary = _softmax_attention_row(
                     scope,
                     section,
@@ -632,7 +632,7 @@ def project_roofline(
             continue
         result.ops.append(op)
         _dims_only, dtype = _split_shape_text(output_text)
-        bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+        bpe = (_BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None) or _RT.act_bpe
         if (
             role == "attention"
             and op.modeled
@@ -758,7 +758,7 @@ def _persistent_state_ops(
         if not output_text:
             continue
         shape_text, dtype = _split_shape_text(output_text)
-        bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+        bpe = (_BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None) or _RT.act_bpe
         if bpe is None:
             continue
         try:
@@ -1252,7 +1252,7 @@ def _project_op(
         instances=instances,
     )
     _dims_only, dtype = _split_shape_text(output_text)
-    bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    bpe = (_BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None) or _RT.act_bpe
 
     # Introspective boundaries: the modeling source tags each module with a role
     # ("attention"/"ffn") and the arch spec says whether the model is MoE, so we
@@ -1531,6 +1531,7 @@ class _RuntimeIntrospection:
         "config_attn_kv_heads",
         "config_attn_head_dim",
         "kv_cache_bpe",
+        "act_bpe",
     )
 
     def __init__(self):
@@ -1580,6 +1581,7 @@ class _RuntimeIntrospection:
         self.config_attn_kv_heads = None
         self.config_attn_head_dim = None
         self.kv_cache_bpe = None
+        self.act_bpe = None
 
 
 _RT = _RuntimeIntrospection()
@@ -1741,6 +1743,7 @@ def _populate_introspection(spec):
     tcfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else cfg
     quant = cfg.get("quantization_config")
     _RT.weight_bpe = _introspect_weight_bpe(quant)
+    _RT.act_bpe = _activation_bpe(spec)[0]
     excluded = ()
     if isinstance(quant, dict):
         raw = (
@@ -4188,7 +4191,7 @@ def conv_ops_from_meta(
     graph draws one conv per stage; each live instance here carries the geometry
     to cost that instance, and the CLI uses these rows in place of the graph's
     conv rows so the repeated stage is not counted twice."""
-    bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    bpe = (_BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None) or _RT.act_bpe
     ops: list[RooflineOp] = []
     for conv in meta_convs or []:
         out_shape = tuple(conv.get("output_shape") or ())
