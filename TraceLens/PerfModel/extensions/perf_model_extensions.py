@@ -2651,3 +2651,47 @@ class topk_softplus_sqrt(topk_gating_fwd):
         if self.param_details.get("use_hash"):
             total += self.M * bpe_i + self.M * topk * bpe_i
         return total
+
+
+class bf16_splitk_gemm_partials(GEMM):
+    """Perf model for ``_dense_partial`` (Muse-Spark bf16 split-K GEMM).
+
+    ``Y[M, N] = A[M, K] @ B[N, K].T`` split across ``split_k`` K-slices, each
+    writing its own fp32 partial to ``[split_k, M, N]`` (reduced later). bf16
+    inputs, fp32 partials.
+
+    Backfilled Input Dims / type:
+        [[M, K], [N, K], [split_k, M, N]]   (A, B, partials)   bf16, bf16, float
+
+    FLOPs: ``2 * M * N * K`` (inherited; split-K leaves the MAC count unchanged).
+    Bytes: M*K*bpe(A) + N*K*bpe(B) + split_k*M*N*bpe(partials).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        a_shape, b_shape, out_shape = dims[0], dims[1], dims[2]
+        M, K = a_shape[0], a_shape[1]
+        N = b_shape[0]  # B is [N, K]
+        split_k = out_shape[0]  # partials [split_k, M, N]
+        return {
+            "B": 1,
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "split_k": split_k,
+            "dtype_A_B": (types[0], types[1], types[2]),
+        }
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        d = self.param_details["dtype_A_B"]
+        bpe_a, bpe_b, bpe_out = name2bpe(d[0]), name2bpe(d[1]), name2bpe(d[2])
+        if None in (bpe_a, bpe_b, bpe_out):
+            return None
+        return (
+            self.M * self.K * bpe_a  # A read
+            + self.N * self.K * bpe_b  # B read
+            + self.param_details["split_k"] * self.M * self.N * bpe_out  # partials
+        )

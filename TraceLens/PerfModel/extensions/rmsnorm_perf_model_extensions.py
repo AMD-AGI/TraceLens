@@ -9,6 +9,7 @@ Performance models for RMSNorm pseudo-op extensions.
 """
 
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
+from TraceLens.PerfModel.utils import name2bpe
 
 
 class RMSNorm(CoreRMSNorm):
@@ -681,3 +682,53 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         bytes_write_out = M * self.n_out * self.bpe_in
         bytes_write_res = M * N * self.bpe_in
         return bytes_read + bytes_write_out + bytes_write_res
+
+
+class fused_norm_residual_triton(RMSNorm):
+    """Perf model for ``_fused_norm_residual_triton_kernel`` (Muse-Spark).
+
+    Fused residual-add + RMSNorm issued through ``forward_triton``:
+        new_residual = residual + hidden               (fp32, written back)
+        out          = rmsnorm(new_residual) * weight    (bf16)
+
+    Backfilled Input Dims / type (the affine weight and the two outputs are
+    modelled from the op, not recorded):
+        0  residual  [M, N]  fp32
+        1  hidden    [M, N]  bf16
+
+    FLOPs: residual-add (``num_elems``) + RMSNorm (inherited).
+    Bytes: 2 * num_elems * (bpe_residual + bpe_hidden) + N * bpe_hidden.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        dims = event["args"]["Input Dims"]
+        types = event["args"]["Input type"]
+        op_shape = tuple(dims[0])  # [M, N]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (types[1], types[1]),  # bf16 activation I/O
+            "stride_input": tuple(event["args"]["Input Strides"][0]),
+            "stride_output": None,
+            "num_channels": op_shape[-1],  # N (normalized dim)
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+            "_bpe_tensors": (name2bpe(types[0]), name2bpe(types[1])),
+        }
+
+    def flops(self):
+        # Residual add (num_elems) + TWO RMSNorms. The kernel runs both the
+        # post-norm (on branch) and the pre-norm (on new_stream); the base
+        # RMSNorm.flops() is one norm, so count it twice. (Confirmed against the
+        # compiled kernel: it executes ~2 norms + add worth of fp32 FLOPs; the
+        # rocprofv3 TOTAL_32_OPS counter under-reports because it does not
+        # double-count packed fp32 (v_pk_*) instructions -- see the PR doc.)
+        return self.num_elems + 2 * super().flops()
+
+    def bytes(self):
+        bpe0, bpe1 = self.param_details["_bpe_tensors"]
+        # each [M, N] tensor read once + its same-dtype output written once
+        data = 2 * self.num_elems * (bpe0 + bpe1)
+        weight = self.num_channels * self.bpe_out  # bf16 affine weight
+        return data + weight

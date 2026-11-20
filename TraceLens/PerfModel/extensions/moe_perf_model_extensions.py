@@ -16,7 +16,9 @@ from TraceLens.PerfModel.utils import (
     name2bpe,
     torch_dtype_map,
 )
-from TraceLens.TraceUtils.utils.annotation_utils import add_logical_batch_size
+from TraceLens.TraceUtils.utils.annotation_utils import (
+    add_logical_batch_size,
+)
 
 
 def _weight_bpe_on_unpacked_k(dtype):
@@ -1286,6 +1288,107 @@ class moe_opus_stage1_a8w4(UnfusedMoE_Up):
         return "matrix"
 
 
+class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
+    """Perf model for ``mfma_moe1_silu_mul_afp4_wfp4_fp4_...`` (Muse-Spark).
+
+    MXFP4 MoE stage-1: the grouped gate+up projection fused with SwiGLU
+    (``silu_mul``) over the top-k routed experts, via ``run_a4w4 ->
+    flydsl_moe_stage1``. fp4 activations x fp4 weights with e8m0 MX scales.
+
+    Shape-backfilled through the ``run_a4w4`` launcher:
+        0  x / hidden  [num_tokens, hidden]   bf16
+        1  scores      [num_tokens, top_k]    float
+        2  ids         [num_tokens, top_k]    int
+        3  norm_weight [hidden]               bf16
+    num_tokens / hidden / top_k are read from these; the intermediate size and
+    expert count stay Muse-Spark constants (N = 4096, 32 local experts on an
+    EP=8 rank).
+
+    FLOPs (UnfusedMoE_Up.flops_func, gated gate+up):
+        2 * (num_tokens * top_k) * hidden * (2 * inter)
+    Bytes (inherited): fp4 activations + expert fp4 weights + e8m0 scales, output.
+    """
+
+    category = "MoE_unfused"
+    bwd_category = None
+
+    NUM_EXPERTS = 32  # TEMPORARY HARDCODE: local expert shard on this EP=8 rank (global 256 / 8); weights are hidden in the experts object so not derivable from args  # fmt: skip
+    INTER_DIM = 4096  # TEMPORARY HARDCODE: moe_intermediate_size
+    MX_BLOCK = 32  # TEMPORARY HARDCODE: MXFP4 block (1 e8m0 / 32 fp4)
+    INPUT_BPE = 0.5  # TEMPORARY HARDCODE: fp4 activation dtype
+    WEIGHT_BPE = 0.5  # TEMPORARY HARDCODE: fp4 weight dtype
+    OUTPUT_BPE = 2  # TEMPORARY HARDCODE: bf16 output dtype
+    SCALE_BPE = 1  # TEMPORARY HARDCODE: e8m0 scale dtype
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @classmethod
+    def get_param_details(cls, event):
+        # run_a4w4 launcher tensor args: x (num_tokens, hidden), scores/ids
+        # (num_tokens, top_k), norm_weight (hidden). num_tokens / hidden / top_k
+        # come from these; the intermediate size and expert count are not carried
+        # by the launcher, so they stay Muse-Spark constants.
+        dims = (event.get("args") or {}).get("Input Dims")
+        try:
+            num_tokens, hidden = dims[0][0], dims[0][1]
+            topk = dims[1][1]
+        except (IndexError, TypeError):
+            return {"_no_perf": True}
+        if num_tokens <= 0 or hidden <= 0 or topk <= 0:
+            return {"_no_perf": True}
+        return {
+            "num_tokens": num_tokens * topk,  # routed token-expert rows
+            "hidden_dim": hidden,
+            "inter_dim": cls.INTER_DIM,
+            "num_experts": cls.NUM_EXPERTS,
+            "topk": 1,
+            "gated": True,
+        }
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return self.flops_func(
+            p["num_tokens"], p["hidden_dim"], p["inter_dim"], p["topk"], p["gated"]
+        )
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        total = self.bytes_func(
+            p["num_tokens"],
+            p["hidden_dim"],
+            p["inter_dim"],
+            p["num_experts"],
+            p["topk"],
+            p["gated"],
+            self.INPUT_BPE,
+            self.WEIGHT_BPE,
+            self.OUTPUT_BPE,
+        )
+        if total is None:
+            return None
+        # e8m0 MX scales: one byte per MX_BLOCK fp4 values on activations + weights.
+        M, K, N = p["num_tokens"], p["hidden_dim"], p["inter_dim"]
+        E, topk = p["num_experts"], p["topk"]
+        e_active = E * (1 - ((E - topk) / E) ** M)
+        scale_elems = (M * K + e_active * 2 * K * N) / self.MX_BLOCK
+        return total + scale_elems * self.SCALE_BPE
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return "matrix"
+
+
 class moe_aiter_ck_stage2(UnfusedMoE_Down):
     """
     Performance model for AITER CK-based unfused MoE stage2 (down projection).
@@ -2288,3 +2391,131 @@ def _optional_tensor_bytes(dims, types, index):
     if bpe is None:
         return None
     return prod(dims[index]) * bpe
+
+
+class compact_a4_experts_synthetic:
+    """Perf model for ``compact_a4_experts`` (Muse-Spark MXFP4 MoE), at the
+    launcher **cpu-op** level -- it covers the whole op, so the report emits one
+    row instead of per-kernel synthetic ops. The launcher fires three kernels:
+    ``_route_quant_a4`` (quantize activations + route) and two ``_expert_a4``
+    GEMMs (gate+up with SwiGLU, then down). fp4 activations x fp4 expert weights
+    with e8m0 MX scales, bf16 output. Weight-/bandwidth-bound.
+
+    Launcher Input Dims / type:
+        0 act         [num_tokens, hidden]              bf16
+        1 ids         [num_tokens, top_k]               int
+        2 w1 (gate+up)[num_experts, 2*inter, hidden/2]  fp4 (uint8-packed)
+        3 w2 (down)   [num_experts, hidden, inter/2]    fp4
+        4 w1 scale    [num_experts, 2*inter, hidden/32] e8m0
+        5 w2 scale    [num_experts, hidden, inter/32]   e8m0
+        6 act_q       [num_tokens, hidden/2]            fp4
+        7 act scale   [num_tokens, hidden/32]           e8m0
+
+    num_rows = num_tokens * top_k.
+    FLOPs (the two expert GEMMs; ``_route_quant_a4`` is elementwise, negligible):
+        2 * num_rows * hidden * (2*inter + inter).
+    Bytes -- summed over the three kernels:
+        route_quant  read bf16 act, write fp4 act_q + e8m0 scale  (only when the
+                     activations are actually quantized -- else it just routes)
+        gate+up      read act_q+scale, read active w1+scale, write intermediate
+        down         read intermediate, read active w2+scale, write bf16 output
+    Per-expert weights are discounted to the active experts (E_active,
+    uniform-routing estimate), since only routed experts' weights are loaded.
+    """
+
+    category = "MoE_unfused"
+    bwd_category = None
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            dims = event["args"]["Input Dims"]
+            types = event["args"]["Input type"]
+            num_tokens, hidden = dims[0][0], dims[0][1]
+            top_k = dims[1][1]
+            num_experts = dims[2][0]
+            two_inter = dims[2][1]
+            return {
+                "num_tokens": num_tokens,
+                "hidden": hidden,
+                "top_k": top_k,
+                "num_experts": num_experts,
+                "two_inter": two_inter,
+                "inter": two_inter // 2,
+                "num_rows": num_tokens * top_k,
+                "dims": dims,
+                "types": types,
+            }
+        except (IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        rows, hidden, two_inter, inter = (
+            p["num_rows"],
+            p["hidden"],
+            p["two_inter"],
+            p["inter"],
+        )
+        return 2 * rows * hidden * (two_inter + inter)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        dims, types = p["dims"], p["types"]
+        topk, M = p["top_k"], p["num_tokens"]
+        rows, inter, hidden = p["num_rows"], p["inter"], p["hidden"]
+        E = p["num_experts"] * 8  # TEMPORARY HARDCODE: this trace is typically run with EP=8. Scaling local shards -> global shards  # fmt: skip
+        # Only the routed experts' weights are read from HBM (uniform-routing
+        # estimate of the active fraction).
+        active = (1 - ((E - topk) / E) ** M) if E else 1.0
+
+        # Bytes of each recorded operand (layout: 0 act, 2 w1, 3 w2, 4 w1_scale,
+        # 5 w2_scale, 6 act_q, 7 act_scale).
+        bpe = [name2bpe(t) or 0 for t in types]
+        act = prod(dims[0]) * bpe[0]  # bf16 activations
+        act_q = prod(dims[6]) * bpe[6]  # quantized fp4 activations
+        act_scale = prod(dims[7]) * bpe[7]  # e8m0 activation scale
+        w1 = prod(dims[2]) * bpe[2]  # gate+up weight (fp4)
+        w1_scale = prod(dims[4]) * bpe[4]
+        w2 = prod(dims[3]) * bpe[3]  # down weight (fp4)
+        w2_scale = prod(dims[5]) * bpe[5]
+        out = rows * hidden * (bpe[0] or 2)  # bf16 output
+        # Intermediate (gate+up output re-quantized to fp4 + scale): scale the
+        # quantized activations from [num_tokens, hidden] to [num_rows, inter].
+        interm = (
+            (act_q + act_scale) * (rows / M) * (inter / hidden) if M and hidden else 0.0
+        )
+
+        total = 0.0
+        # route_quant: quantize activations (bf16 -> fp4 + scale), only when the
+        # input is higher precision than the quantized form (else it just routes).
+        if bpe[6] and bpe[0] > bpe[6]:
+            total += act + act_q + act_scale  # read bf16 act, write fp4 act_q + scale
+        # gate+up: read quantized act + active w1, write intermediate
+        total += act_q + act_scale + active * (w1 + w1_scale) + interm
+        # down: read intermediate + active w2, write bf16 output
+        total += interm + active * (w2 + w2_scale) + out
+        return total
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return "matrix"
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward not defined for compact_a4_experts.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward not defined for compact_a4_experts.")

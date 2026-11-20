@@ -330,6 +330,15 @@ def torch_dtype_map(dtype):
     return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
 
 
+_CXX_DTYPE_TO_TORCH = {
+    "std::bfloat16_t": "c10::BFloat16",
+    "std::half_t": "c10::Half",
+    "__half": "c10::Half",
+    "std::float_t": "float",
+    "float": "float",
+}
+
+
 def parse_bool(input):
     if isinstance(input, bool):
         return input
