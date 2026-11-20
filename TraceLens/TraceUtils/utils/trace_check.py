@@ -366,9 +366,14 @@ def _check_gpu_idle(ctx) -> List[TraceCheck]:
     cols = getattr(tl, "columns", [])
     if tl is None or "type" not in cols or "percent" not in cols:
         return []
-    # One "idle_time" row by default; --micro_idle_thresh_us splits it into
-    # "micro_idle_time" + "macro_idle_time", so sum whichever are present.
-    idle_rows = tl[tl["type"].isin(["idle_time", "micro_idle_time", "macro_idle_time"])]
+    # idle_time is the total. micro_idle_time and macro_idle_time break that
+    # total down when --micro_idle_thresh_us is set, so they are not added
+    # on top of idle_time. Reports written before the total row was kept
+    # have only the split rows; sum those when idle_time is absent.
+    if (tl["type"] == "idle_time").any():
+        idle_rows = tl[tl["type"] == "idle_time"]
+    else:
+        idle_rows = tl[tl["type"].isin(["micro_idle_time", "macro_idle_time"])]
     if idle_rows.empty:
         return []
     idle_pct = float(idle_rows["percent"].sum())

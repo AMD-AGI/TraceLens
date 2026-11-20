@@ -644,8 +644,8 @@ class TestEdgeCases:
         assert not any("GPU idle" in f.message for f in report.findings)
 
     def test_gpu_idle_micro_macro_split_summed(self, monkeypatch):
-        # --micro_idle_thresh_us splits idle into micro/macro rows (no idle_time
-        # row); the check must sum them. 50 + 40 = 90% >= 30% warn threshold.
+        # Reports from before idle_time was kept alongside the split have only
+        # micro/macro rows. The check sums those. 50 + 40 = 90% >= 30%.
         import pandas as pd
 
         monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
@@ -663,6 +663,31 @@ class TestEdgeCases:
         assert len(idle) == 1
         assert idle[0].status == Status.INFO
         assert "90.0%" in idle[0].message
+
+    def test_gpu_idle_uses_total_when_split_rows_are_present(self, monkeypatch):
+        # idle_time is the total. Summing it with the split rows would report 180%.
+        import pandas as pd
+
+        monkeypatch.setenv("TRACELENS_DETAILED_QUALITY_CHECKS", "1")
+        tl = pd.DataFrame(
+            {
+                "type": [
+                    "computation_time",
+                    "idle_time",
+                    "micro_idle_time",
+                    "macro_idle_time",
+                ],
+                "time ms": [10.0, 90.0, 50.0, 40.0],
+                "percent": [10.0, 90.0, 50.0, 40.0],
+            }
+        )
+        report = trace_check.run_trace_checks(
+            pre_report=False, dfs={"gpu_timeline": tl}, framework="pytorch"
+        )
+        idle = [f for f in report.findings if "GPU idle" in f.message]
+        assert len(idle) == 1
+        assert "90.0%" in idle[0].message
+        assert "180" not in idle[0].message
 
     def test_runtime_instability_from_summary(self):
         # CV 0.5 > 0.25 threshold → finding with count + example in metrics.
