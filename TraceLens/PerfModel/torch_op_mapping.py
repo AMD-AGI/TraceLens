@@ -71,6 +71,7 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     (re.compile(r".*_dense_partial"), "GEMM"),
     (re.compile(r".*mfma_moe1_silu_mul"), "MoE_unfused"),
     (re.compile(r".*_expert_a4"), "MoE_unfused"),
+    (re.compile(r".*launcher_shapes::compact_a4_experts"), "MoE_unfused"),
     (re.compile(r".*_fused_norm_residual_triton_kernel"), "RMSNorm"),
     (
         re.compile(
@@ -558,10 +559,14 @@ def _match_mfma_moe1(name):
 register_perf_model_matcher(_match_mfma_moe1)
 
 
-def _match_expert_a4(name):
-    """Resolve the Muse-Spark MXFP4 MoE full-expert kernel (``_expert_a4``,
-    from ``compact_a4_experts``) when it appears as a Synthetic Op."""
-    if "_expert_a4" in name:
+def _match_compact_a4_experts(name):
+    """Resolve the Muse-Spark MXFP4 compacted MoE at the ``compact_a4_experts``
+    launcher **cpu-op** level, so the whole op (``_route_quant_a4`` + the two
+    ``_expert_a4`` GEMMs) is one row. Requires the ``launcher_shapes::`` cpu op
+    (which carries the Input Dims) and no ``->`` -- so it matches neither the
+    per-kernel synthetic ops nor the shapeless ``<jit_shape_tracer>`` python
+    frame. ``collect`` then stops here before fanning out per-kernel rows."""
+    if "launcher_shapes::compact_a4_experts" in name and "->" not in name:
         from TraceLens.PerfModel.extensions import (
             moe_perf_model_extensions as _m,
         )
@@ -570,7 +575,7 @@ def _match_expert_a4(name):
     return None
 
 
-register_perf_model_matcher(_match_expert_a4)
+register_perf_model_matcher(_match_compact_a4_experts)
 
 
 def _match_fused_norm_residual(name):

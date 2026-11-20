@@ -273,16 +273,29 @@ class TestMoeExtensions:
             [8, 128],
         ]
         types = ["c10::BFloat16", "int"] + ["unsigned char"] * 6
-        event = {
-            "name": "launcher_shapes::compact_a4_experts->_expert_a4 (Synthetic Op)",
-            "args": {"Input Dims": dims, "Input type": types},
-        }
+        # Resolves at the launcher cpu-op level (whole op, one row) -- not the
+        # per-kernel ``->_expert_a4`` synthetic op.
+        from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
+
+        cpu_name = "launcher_shapes::compact_a4_experts"
+        assert (
+            resolve_perf_model_class(cpu_name).__name__
+            == "compact_a4_experts_synthetic"
+        )
+        assert (
+            resolve_perf_model_class(cpu_name + "->_expert_a4 (Synthetic Op)") is None
+        )
+        event = {"name": cpu_name, "args": {"Input Dims": dims, "Input type": types}}
         m = moe_ext.compact_a4_experts_synthetic(event)
         # num_rows = 8*8 = 64; up (2*inter=8192) + down (inter=4096) over hidden=4096
         assert m.flops() == 2 * 64 * 4096 * (8192 + 4096)
         assert m.get_compute_precision() == "fp4"
         assert m.get_maf_type() == "matrix"
-        assert m.bytes() > 800e6  # weight-bound (~856 MB of fp4 experts + scales)
+        # Whole-op bytes = route_quant + both expert GEMMs; per-expert weights
+        # discounted to the active experts. num_experts is scaled x8 (temporary
+        # EP=8 hardcode) -> global 256, top_k 8 -> E_active frac ~0.224, so the
+        # weight-dominated total is ~193 MB.
+        assert 185e6 < m.bytes() < 200e6
 
     def test_mfma_moe1_backfilled_shapes(self):
         from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class

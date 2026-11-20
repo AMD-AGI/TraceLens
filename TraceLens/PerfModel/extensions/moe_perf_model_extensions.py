@@ -1301,7 +1301,8 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
         2  ids         [num_tokens, top_k]    int
         3  norm_weight [hidden]               bf16
     num_tokens / hidden / top_k are read from these; the intermediate size and
-    expert count stay Muse-Spark constants (N = 4096, 256 experts).
+    expert count stay Muse-Spark constants (N = 4096, 32 local experts on an
+    EP=8 rank).
 
     FLOPs (UnfusedMoE_Up.flops_func, gated gate+up):
         2 * (num_tokens * top_k) * hidden * (2 * inter)
@@ -1311,7 +1312,7 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
     category = "MoE_unfused"
     bwd_category = None
 
-    NUM_EXPERTS = 256
+    NUM_EXPERTS = 32  # TEMPORARY HARDCODE: local expert shard on this EP=8 rank (global 256 / 8); weights are hidden in the experts object so not derivable from args  # fmt: skip
     INTER_DIM = 4096  # moe_intermediate_size
     MX_BLOCK = 32  # one e8m0 scale per 32 fp4 values
     INPUT_BPE = 0.5  # fp4 activation
@@ -2393,13 +2394,14 @@ def _optional_tensor_bytes(dims, types, index):
 
 
 class compact_a4_experts_synthetic:
-    """Perf model for ``compact_a4_experts -> _expert_a4`` (Muse-Spark MXFP4 MoE).
+    """Perf model for ``compact_a4_experts`` (Muse-Spark MXFP4 MoE), at the
+    launcher **cpu-op** level -- it covers the whole op, so the report emits one
+    row instead of per-kernel synthetic ops. The launcher fires three kernels:
+    ``_route_quant_a4`` (quantize activations + route) and two ``_expert_a4``
+    GEMMs (gate+up with SwiGLU, then down). fp4 activations x fp4 expert weights
+    with e8m0 MX scales, bf16 output. Weight-/bandwidth-bound.
 
-    Runs the full routed-expert MLP in one launch -- gate+up with SwiGLU, then
-    down -- over the compacted (token, expert) rows. fp4 activations x fp4 expert
-    weights with e8m0 MX scales, bf16 output. Weight-/bandwidth-bound.
-
-    Backfilled Input Dims / type:
+    Launcher Input Dims / type:
         0 act         [num_tokens, hidden]              bf16
         1 ids         [num_tokens, top_k]               int
         2 w1 (gate+up)[num_experts, 2*inter, hidden/2]  fp4 (uint8-packed)
@@ -2410,9 +2412,15 @@ class compact_a4_experts_synthetic:
         7 act scale   [num_tokens, hidden/32]           e8m0
 
     num_rows = num_tokens * top_k.
-    FLOPs (gate+up + down): 2 * num_rows * hidden * (2*inter + inter).
-    Bytes: every recorded input read once (expert fp4 weights + scales dominate)
-    + the bf16 output [num_rows, hidden].
+    FLOPs (the two expert GEMMs; ``_route_quant_a4`` is elementwise, negligible):
+        2 * num_rows * hidden * (2*inter + inter).
+    Bytes -- summed over the three kernels:
+        route_quant  read bf16 act, write fp4 act_q + e8m0 scale  (only when the
+                     activations are actually quantized -- else it just routes)
+        gate+up      read act_q+scale, read active w1+scale, write intermediate
+        down         read intermediate, read active w2+scale, write bf16 output
+    Per-expert weights are discounted to the active experts (E_active,
+    uniform-routing estimate), since only routed experts' weights are loaded.
     """
 
     category = "MoE_unfused"
@@ -2462,12 +2470,40 @@ class compact_a4_experts_synthetic:
         p = self.param_details
         if p.get("_no_perf"):
             return None
-        total = 0
-        for shape, dtype in zip(p["dims"], p["types"]):
-            bpe = name2bpe(dtype)
-            if bpe and shape:
-                total += prod(shape) * bpe
-        total += p["num_rows"] * p["hidden"] * name2bpe(p["types"][0])
+        dims, types = p["dims"], p["types"]
+        topk, M = p["top_k"], p["num_tokens"]
+        rows, inter, hidden = p["num_rows"], p["inter"], p["hidden"]
+        E = p["num_experts"] * 8  # TEMPORARY HARDCODE: this trace is typically run with EP=8. Scaling local shards -> global shards  # fmt: skip
+        # Only the routed experts' weights are read from HBM (uniform-routing
+        # estimate of the active fraction).
+        active = (1 - ((E - topk) / E) ** M) if E else 1.0
+
+        # Bytes of each recorded operand (layout: 0 act, 2 w1, 3 w2, 4 w1_scale,
+        # 5 w2_scale, 6 act_q, 7 act_scale).
+        bpe = [name2bpe(t) or 0 for t in types]
+        act = prod(dims[0]) * bpe[0]  # bf16 activations
+        act_q = prod(dims[6]) * bpe[6]  # quantized fp4 activations
+        act_scale = prod(dims[7]) * bpe[7]  # e8m0 activation scale
+        w1 = prod(dims[2]) * bpe[2]  # gate+up weight (fp4)
+        w1_scale = prod(dims[4]) * bpe[4]
+        w2 = prod(dims[3]) * bpe[3]  # down weight (fp4)
+        w2_scale = prod(dims[5]) * bpe[5]
+        out = rows * hidden * (bpe[0] or 2)  # bf16 output
+        # Intermediate (gate+up output re-quantized to fp4 + scale): scale the
+        # quantized activations from [num_tokens, hidden] to [num_rows, inter].
+        interm = (
+            (act_q + act_scale) * (rows / M) * (inter / hidden) if M and hidden else 0.0
+        )
+
+        total = 0.0
+        # route_quant: quantize activations (bf16 -> fp4 + scale), only when the
+        # input is higher precision than the quantized form (else it just routes).
+        if bpe[6] and bpe[0] > bpe[6]:
+            total += act + act_q + act_scale  # read bf16 act, write fp4 act_q + scale
+        # gate+up: read quantized act + active w1, write intermediate
+        total += act_q + act_scale + active * (w1 + w1_scale) + interm
+        # down: read intermediate + active w2, write bf16 output
+        total += interm + active * (w2 + w2_scale) + out
         return total
 
     def get_compute_precision(self):
