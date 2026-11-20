@@ -6527,11 +6527,6 @@ __all__ = [name for name in globals() if not name.startswith("_")]
 
 # ---------------------------------------------------------------------------
 # Primus-Turbo MXFP4 training ops (gpt-oss / primus-megatron).
-#
-# torch.autograd.Function ops that take logical BF16 inputs and quantize to
-# MXFP4 (E2M1 + E8M0 per-32-elem block scales) internally. Forward and backward
-# surface as separate trace op names; the backward recovers K from the forward
-# via the Sequence-number fwd_pass_cache (same pattern as ConvBias_ above).
 # ---------------------------------------------------------------------------
 
 
