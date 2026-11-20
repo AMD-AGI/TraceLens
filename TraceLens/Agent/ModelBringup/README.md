@@ -80,6 +80,7 @@ flowchart TD
         direction TB
         B1["Build the perf model or category mapping on its own branch"] --> B2["Validate the perf model against hardware counters"]
         B2 --> B3["Draft a PR, or an issue when blocked"]
+        B1 -- categorize-only --> B3
     end
     S6 --> S7["Step 7: Rerun the perf report on the merged branches"]
     S7 --> S8["Step 8: Summary"]

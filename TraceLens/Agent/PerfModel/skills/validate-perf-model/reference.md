@@ -11,7 +11,7 @@ Detail for [SKILL.md](SKILL.md). The scripts live in
 
 ## Prerequisites
 
-- ROCm with `rocprofv3` on PATH (or pass `--rocprofv3-path`)
+- ROCm with `rocprofv3` on PATH, or pass `--rocprofv3-path`. On ROCm SDK images that load two LLVM copies, rocprofv3 aborts torch processes; pass the SDK's `_rocm_sdk_core/bin/rocprofv3`.
 - `aiter` installed in the Python environment or container the caller named
 - vLLM for `vllm_*` ops and SGLang (`sgl_kernel`) for SGLang ops; ops from a
   framework that is not installed are reported as failures, the rest still run

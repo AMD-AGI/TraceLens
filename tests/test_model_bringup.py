@@ -33,7 +33,7 @@ _OK_ROW = "OK,1.0000,match,1.0000,match,match\n"
 
 
 def _template_body(name):
-    return (bringup_gates.TEMPLATES_DIR / name).read_text().split("-->", 1)[1]
+    return (bringup_gates.TEMPLATES_DIR / name).read_text().rsplit("-->", 1)[1]
 
 
 # Cut before Ratio Deviations so text appended to the draft lands in Validation.

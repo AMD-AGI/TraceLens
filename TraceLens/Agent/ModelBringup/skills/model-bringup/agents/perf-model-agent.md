@@ -26,16 +26,17 @@ Build and validate the perf model for one op that has none, or only categorize i
 - `<gfx_arch>`, `<gpu_index>`
 - `<framework>`, `<framework_src>`
 - `<bringup_gates>`: the gates module command
+- `<templates_dir>`: the draft templates directory
 - `<prefix>`: command prefix from `<bringup_dir>/cache/cmd_prefix.txt`, a template with a `{CMD}` placeholder; substitute the command
 
 **Input files:**
 - `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`
 - `<bringup_dir>/cache/model_config.json`
-- Authoring skill: `<pm_dir>/skills/perf-model-generate/SKILL.md`; read its `reference.md` sections as each step needs them
-- Validation skill: `<pm_dir>/skills/validate-perf-model/SKILL.md`; read its `reference.md` sections as each step needs them
-- Draft templates: `TraceLens/Agent/ModelBringup/skills/model-bringup/templates/perf_model_pr.md` and `perf_model_issue.md`; copy the body below the header comment
+- `<authoring_skill>`: `<op_worktree>/TraceLens/Agent/PerfModel/skills/perf-model-generate/SKILL.md`; read its `reference.md` sections as each step needs them
+- `<validation_skill>`: `<op_worktree>/TraceLens/Agent/PerfModel/skills/validate-perf-model/SKILL.md`; read its `reference.md` sections as each step needs them
+- Draft templates: `<templates_dir>/perf_model_pr.md` and `perf_model_issue.md`; follow the rules in each template's header comments and copy the body below them
 
-`<pm_dir>` is `<op_worktree>/TraceLens/Agent/PerfModel`. Substitute it before a command goes through `<prefix>`. Follow the skills; do not restate them.
+Follow the skills; do not restate them.
 
 **Output files you must write:**
 - `<op_dir>/perf_model_pr.md` or `<op_dir>/perf_model_issue.md`, the draft body
@@ -50,7 +51,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 {"op": "<op>", "op_slug": "<op_slug>",
  "outcome": "modeled | categorized | blocked | error",
  "commit": "<sha or null>",
- "validation_csv": "<op_dir>/validation/validation_report.csv | null",
+ "validation_csv": "<op_dir>/validation/validation_report.csv when the validator wrote one, else null",
  "reason": "<required unless outcome is modeled or categorized>"}
 ```
 
@@ -69,7 +70,7 @@ Build and validate the perf model for one op that has none, or only categorize i
 
 **If a command cannot run:** write `result.json` with `outcome` `error`, and the command and the tail of its stderr in `reason`. Do not hand-write FLOPs or bytes.
 
-**If the validator exits 1 with `FAIL` rows, or a skill's Stop rules or Error handling say stop:** that is a result, not an error. Go to Step 5 (Draft) with outcome `blocked` and the reason.
+**If the validator exits 1 with `FAIL` rows, or a skill's Stop rules or Error handling say stop:** that is a result, not an error. Go to Draft with outcome `blocked` and the reason.
 
 ---
 
@@ -79,58 +80,46 @@ Build and validate the perf model for one op that has none, or only categorize i
 
 Read the op's rows in `<analysis_dir>/perf_report_csvs/unified_perf_summary.csv`: `op category`, `Input Dims`, `Input type`, `Concrete Inputs`, the kernel names in `kernel_details_summary`, `entry_point` (the launcher) and `call_stack_full`. Find the op's source from `entry_point` and the call stack under `<framework_src>`.
 
-Read `model_config.json`: `launch` holds the run's TP, EP and DP settings verbatim (under AgentX the recipe overrides them); trace `Input Dims` are per rank and win; report a mismatch no setting explains in the draft, never patch it; `null` is unknown. `paper` links the model's paper or tech report (`null` when unknown); the authoring skill's Locate step uses it.
+Read `model_config.json`: `launch` holds the run's TP, EP and DP settings verbatim (under AgentX the recipe overrides them); trace `Input Dims` are per rank and win; report a mismatch no setting explains in the draft, never patch it; `null` is unknown. `paper` links the model's paper or tech report (`null` when unknown); `<authoring_skill>`'s Locate step uses it.
 
-### Step 2: Decide
+### Step 2: Build
 
-```bash
-<prefix> python3 -m TraceLens.Agent.PerfModel.utils.unified_perf_ops <analysis_dir>/perf_report_csvs/unified_perf_summary.csv --mode top-ops --threshold 0 --include-covered --check-mapping
-```
+When `<categorize_only>` is true, the depth is categorize-only (`<authoring_skill>`'s "Per-op choices"); go to Draft after "Regenerate and check".
 
-This shows whether a built-in perf model already fits. Then use the depth and output mode defaults from the authoring skill's Inputs. A categorize-only op is categorized, not modeled.
-
-### Step 3: Build
-
-Follow the authoring skill's workflow index, from "Per-op choices" through "Regenerate and check", in `<op_worktree>`; its "Hand off to validation" is Step 4 here. For "Regenerate and check", write the report to `<op_dir>/report`:
+Follow `<authoring_skill>`'s workflow index, from "Per-op choices" through "Regenerate and check", in `<op_worktree>`; its "Hand off to validation" is the Validate step here. For "Regenerate and check", write the report to `<op_dir>/report`:
 
 ```bash
 <prefix> python3 -m TraceLens.Agent.Analysis.utils.config_utils build --scope standalone --analysis_mode inference --output_dir <op_dir>/report --job <job>
 <prefix> set -o pipefail; cd <op_worktree> && PYTHONPATH=<op_worktree> python3 -m TraceLens.Reporting.generate_perf_report_from_config --config <op_dir>/report/cache/run_config.yaml 2>&1 | tee <op_dir>/report/perf_report.log | tail -n 40
 ```
 
-### Step 4: Validate
+### Step 3: Validate
 
-Register the op as the validation skill's "Adding an op" describes. The validator reads only rows that have a perf model, so run it on the Step 3 report:
+Register the op as `<validation_skill>`'s "Adding an op" describes. The validator reads only rows that have a perf model, so run it on the Build report:
 
 ```bash
 <prefix> <bringup_gates> cases --report-dir <op_dir>/report/perf_report_csvs --out <op_dir>/cases.json
 <prefix> set -o pipefail; cd <op_worktree> && HIP_VISIBLE_DEVICES=<gpu_index> PYTHONPATH=<op_worktree> python3 -m TraceLens.Agent.PerfModel.validate_perf_model.validator --cases <op_dir>/cases.json --only-ops <op> --arch <gfx_arch> --output-dir <op_dir>/validation 2>&1 | tee <op_dir>/validation.log | tail -n 40
 ```
 
-If `rocprofv3` aborts torch processes (some ROCm SDK images load two LLVM copies), pass `--rocprofv3-path` pointing at the SDK's `_rocm_sdk_core/bin/rocprofv3`.
+If `rocprofv3` aborts, see `<validation_skill>`'s Prerequisites.
 
-### Step 5: Draft
+### Step 4: Draft
 
-First investigate every `deviation-suspect` row with the validation skill's "Investigating a deviation". If every validation row then has `run_status` `OK` and `match_status` `match` or `deviation-explained`, the outcome is `modeled`. Commit in `<op_worktree>`:
+First investigate every `deviation-suspect` row with `<validation_skill>`'s "Investigating a deviation". Then pick the outcome:
+
+- `modeled`: every validation row has `run_status` `OK` and `match_status` `match` or `deviation-explained`. Commit as `feat(perfmodel): Add Performance Model for <op>` and write `<op_dir>/perf_model_pr.md` from the PR template.
+- `categorized`: `<categorize_only>` is true. Commit the category mapping as `feat(perfmodel): Categorize <op>` and write `<op_dir>/perf_model_pr.md` from the PR template.
+- `blocked`: otherwise, including when the op needs a pseudo op or a skill's Stop rules say stop. Write `<op_dir>/perf_model_issue.md` from the issue template. For a pseudo op, do not add it: run `<authoring_skill>`'s stability and cost check ("Pseudo ops" in its reference.md), write its full table to `<op_dir>/pseudo_op_check.md`, and put the table without the measured overhead in the issue's Pseudo Op Check.
+
+For `modeled` and `categorized`, commit in `<op_worktree>`:
 
 ```bash
 git -C <op_worktree> add <each file you changed>
-git -C <op_worktree> commit -m "feat(perfmodel): Add Performance Model for <op>"
+git -C <op_worktree> commit -m "<message>"
 ```
 
-Then write `<op_dir>/perf_model_pr.md` from the PR template and fill it in.
-
-If the op is categorize-only, the outcome is `categorized`: there is no perf model to validate, so skip Step 4. Commit the category mapping in `<op_worktree>` the same way, with the message `feat(perfmodel): Categorize <op>`, set `validation_csv` to null, and write `<op_dir>/perf_model_pr.md` from the same template, keeping only Operator and Changes. Operator ends "It had no category."
-
-If a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `precision-mismatch`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or Step 2 (Decide) needs the user, the outcome is `blocked`. For a pseudo op, do not add it: run the authoring skill's stability and cost check ("Pseudo ops" in its reference.md), write its full table (including the measured overhead) to `<op_dir>/pseudo_op_check.md` for the user. Write `<op_dir>/perf_model_issue.md` from the issue template.
-
-Template rules:
-- Keep the sections in order. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates, the issue's Pseudo Op Check when no pseudo op is proposed, and the issue's Validation when there are no validation rows.
-- The measured overhead of a pseudo op stays in `<op_dir>/pseudo_op_check.md`; the issue carries only its complexity and the events it adds.
-- Use only the template's tables, with their columns unchanged; the issue's Validation table has the same FLOPs and bytes columns as the PR's.
-- Table values come from the validation CSV unchanged.
-- Name no model, GPU, gfx target, host, topology, person or trace, and no local path or branch. No runtime or time-share numbers.
-- Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause, with the evidence "Investigating a deviation" requires and the source file and line package-relative (e.g. `aiter/ops/...py:123`). A ratio without that evidence is written as unexplained.
+Fill each draft with table values from the validation CSV unchanged, and name no model, GPU, gfx target, host, topology, person, trace, local path or branch, and give no runtime or time-share numbers.
 
 ---
 
@@ -142,6 +131,6 @@ Write `<op_dir>/result.json`, then run:
 <prefix> <bringup_gates> op-result --bringup-dir <bringup_dir> --result <op_dir>/result.json
 ```
 
-On exit 1, fix the outcome or the draft (a row that did not run, or whose `match_status` is not `match` or `deviation-explained`, means `blocked`) and rerun. Edit the validation CSV only as "Investigating a deviation" allows, and never name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
+On exit 1, fix the outcome or the draft and rerun. Edit the validation CSV only as `<validation_skill>`'s "Investigating a deviation" allows, and never name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
 
 Return "DONE".
