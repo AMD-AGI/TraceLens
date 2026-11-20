@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Tests for SGLang spec-decode capture matching (verify, prefill, draft prefill)."""
 
 from TraceLens.TraceUtils.utils.annotation_utils import (
