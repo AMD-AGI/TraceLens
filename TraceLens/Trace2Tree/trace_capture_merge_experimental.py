@@ -19,6 +19,7 @@ from collections import Counter, OrderedDict, deque, defaultdict
 from typing import Dict, List, Optional, Tuple
 import json
 import os
+import re
 import warnings
 import TraceLens
 
@@ -27,6 +28,8 @@ from .trace_to_tree import TraceToTree
 from ..util import GPU_KERNEL_CATEGORIES, extract_rank
 from ..TraceUtils.utils.annotation_utils import (
     SGLANG_RUNNER_BS_PATTERN,
+    SPEC_ROLE_DRAFTER,
+    SPEC_ROLE_DRAFTER_EXTEND,
     SPEC_ROLE_TARGET,
     find_known_annotations,
     find_spec_decode_annotations,
@@ -559,7 +562,41 @@ def find_execution_roots(graph_tree):
         for e in find_known_annotations(graph_tree.events)
         + find_spec_decode_annotations(graph_tree.events)
     }
+    # SGLang spec-decode prefill nests the target prefill step[EXTEND] inside
+    # an outer step[EXTEND] that also spans the draft prefill. Use the
+    # innermost one so its graph launches are only the target's.
+    extends = innermost_extend_steps(graph_tree.events)
+    if extends:
+        outer = {
+            uid
+            for uid, e in roots.items()
+            if e.get("name", "").startswith("step[EXTEND")
+        }
+        for uid in outer:
+            roots.pop(uid, None)
+        for e in extends:
+            roots[e[UID]] = e
     return sorted(roots.values(), key=lambda e: e.get("ts", 0))
+
+
+def innermost_extend_steps(events):
+    """``step[EXTEND ...]`` spans that contain no other ``step[EXTEND ...]``."""
+    steps = sorted(
+        (
+            e
+            for e in events
+            if e.get("name", "").startswith("step[EXTEND") and "dur" in e
+        ),
+        key=lambda e: (e.get("ts", 0), -e.get("dur", 0)),
+    )
+    inner = []
+    for i, e in enumerate(steps):
+        end = e["ts"] + e["dur"]
+        nxt = steps[i + 1] if i + 1 < len(steps) else None
+        if nxt is not None and nxt["ts"] >= e["ts"] and nxt["ts"] + nxt["dur"] <= end:
+            continue
+        inner.append(e)
+    return inner
 
 
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
@@ -769,6 +806,15 @@ def _match_graph_roots_to_captures(graph_tree, graph_roots, all_sources):
     return pairs, data, trees
 
 
+def _batch_sizes_by_mode(capture_map) -> Dict[Tuple[str, str], List[int]]:
+    """Captured batch sizes per ``(role, mode)`` from ``{role}_{bs}_{mode}`` keys."""
+    sizes: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+    for key in capture_map:
+        role, bs, mode = key.rsplit("_", 2)
+        sizes[(role, mode)].append(int(bs))
+    return dict(sizes)
+
+
 def find_closest_batch_size(
     batch_size: int, capture_batch_sizes: List[int]
 ) -> Optional[int]:
@@ -795,6 +841,48 @@ def find_execution_details(execution_root) -> Optional[str]:
     parts = name.split("_")
     if len(parts) > 1 and parts[1].lstrip("-").isdigit():
         return parts[1]
+    return None
+
+
+def _step_label(step_events, execution_root) -> Optional[str]:
+    """The ``step[...]`` label of an execution root.
+
+    The root itself when it is a step label; otherwise the step annotation
+    that starts within the root's time span (SGLang wraps each forward in
+    ``scheduler.run_batch`` and emits the step label alongside it).
+    """
+    name = execution_root.get("name", "")
+    if name.startswith("step["):
+        return name
+    start = execution_root.get("ts", 0)
+    end = start + execution_root.get("dur", 0)
+    for e in step_events:
+        if start <= e.get("ts", -1) <= end:
+            return e["name"]
+    return None
+
+
+def _draft_prefill_tokens(step_label) -> Optional[int]:
+    """Prompt tokens of an SGLang ``step[DRAFT ... toks=N]`` label, else None."""
+    if not step_label or not step_label.startswith("step[DRAFT"):
+        return None
+    m = re.search(r"\btoks=(\d+)", step_label)
+    return int(m.group(1)) if m else None
+
+
+def _preferred_target_mode(step_label) -> Optional[str]:
+    """Capture mode a target step replays: prefill (EXTEND) is PIECEWISE,
+    decode/verify is FULL. ``None`` when the label is unknown."""
+    if not step_label:
+        return None
+    m = re.match(r"step\[(\w+)", step_label)
+    if not m:
+        return None
+    kind = m.group(1).upper()
+    if kind == "EXTEND":
+        return "PIECEWISE"
+    if kind in ("DECODE", "VERIFY", "TARGET_VERIFY"):
+        return "FULL"
     return None
 
 
@@ -840,8 +928,13 @@ def merge_capture_trace_into_graph(
     spec_batch_sizes = spec_decode_batch_sizes(
         [root for root, _ in execution_graph_root_map]
     )
+    mode_batch_sizes = _batch_sizes_by_mode(capture_map)
 
     # ── Per-execution-root merge loop ──
+    step_events = sorted(
+        (e for e in graph_tree.events if e.get("name", "").startswith("step[")),
+        key=lambda e: e.get("ts", 0),
+    )
     merge_failed = False
     for (execution_root, graph_roots), spec_batch_size in zip(
         execution_graph_root_map, spec_batch_sizes
@@ -862,7 +955,23 @@ def merge_capture_trace_into_graph(
         # (num_requests) and the prefill batch size
         # (num_requests * (num_spec_tokens + 1)), because the drafter
         # uses separate CUDA graph managers for each phase.
-        batch_size = spec_batch_size or find_execution_details(execution_root)
+        step_label = _step_label(step_events, execution_root)
+        preferred_mode = None
+        draft_prefill_tokens = (
+            _draft_prefill_tokens(step_label)
+            if role == SPEC_ROLE_DRAFTER_EXTEND
+            else None
+        )
+        if draft_prefill_tokens is not None:
+            # draft_extend around a prefill replays the draft model's
+            # piecewise prefill graphs, keyed by prompt tokens.
+            role = SPEC_ROLE_DRAFTER
+            batch_size = (draft_prefill_tokens,)
+            preferred_mode = "PIECEWISE"
+        else:
+            batch_size = spec_batch_size or find_execution_details(execution_root)
+            if role == SPEC_ROLE_TARGET:
+                preferred_mode = _preferred_target_mode(step_label)
         if batch_size is None:
             print(
                 "Warning: could not determine batch size for execution root {}".format(
@@ -872,10 +981,18 @@ def merge_capture_trace_into_graph(
             continue
         if not isinstance(batch_size, tuple):
             batch_size = (batch_size,)
+        # Round up within the replayed mode: FULL and PIECEWISE captures of
+        # one role use different units (padded requests vs. tokens).
+        sizes = mode_batch_sizes.get((role, preferred_mode)) or capture_batch_sizes[
+            role
+        ]
+        multiplier = (
+            1 if preferred_mode == "PIECEWISE" else request_bs_multiplier.get(role, 1)
+        )
         candidate_batch_sizes = set()
         for bs in batch_size:
-            bs_int = int(bs) * request_bs_multiplier.get(role, 1)
-            cbs = find_closest_batch_size(bs_int, capture_batch_sizes[role])
+            bs_int = int(bs) * multiplier
+            cbs = find_closest_batch_size(bs_int, sizes)
             if cbs is not None:
                 candidate_batch_sizes.add(cbs)
         if not candidate_batch_sizes:
@@ -889,6 +1006,12 @@ def merge_capture_trace_into_graph(
         all_sources = _load_all_capture_sources(
             capture_map, role, sorted(candidate_batch_sizes)
         )
+        # Prefill replays are PIECEWISE and decode/verify replays are FULL;
+        # both can share a batch size, so keep the matching mode.
+        if preferred_mode is not None:
+            matching = [s for s in all_sources if s[3] == preferred_mode]
+            if matching:
+                all_sources = matching
         # When a single source has the right root count, pair positionally
         # (preserves the old 1:1 and 1:N behaviour and avoids mis-pairing
         # roots that share the same dispatch count).

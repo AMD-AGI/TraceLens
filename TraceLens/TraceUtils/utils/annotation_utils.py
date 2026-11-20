@@ -204,11 +204,13 @@ def _fill_vllm_native(ann, name):
 
 def _fill_sglang_native(ann, name):
     """Base SGLang label with no roofline suffix"""
-    m = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
+    # Trailing fields (e.g. ``forward_id=866``) may follow bs/toks; ignore them.
+    m = re.match(r"step\[(\w+)\s+bs=(\d+)([^\]]*)\]", name)
     if not m:
         return False
     kind_word, bs = m.group(1).upper(), int(m.group(2))
-    toks = int(m.group(3) or 0)
+    toks_m = re.search(r"\btoks=(\d+)", m.group(3))
+    toks = int(toks_m.group(1)) if toks_m else 0
     # VERIFY carries no per-request draft-token count, so g_sq is requests here.
     if kind_word in ("DECODE", "VERIFY", "TARGET_VERIFY"):
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
