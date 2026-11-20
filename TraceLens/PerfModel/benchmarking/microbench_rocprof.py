@@ -18,6 +18,10 @@ Single-run mode (wrapped by rocprofv3):
 Orchestrator mode (default):
     python -m TraceLens.PerfModel.benchmarking.microbench_rocprof --device 0 \\
         --output results/rocprof_compare.json
+
+On RDNA targets (gfx11, gfx12), which have no MFMA counters, the orchestrator
+runs RDNA mode instead (:func:`run_rdna`): the shader clock, dual-issue share
+and DRAM read bytes of the RDNA protocol's kernels, each counter value checked.
 """
 
 from __future__ import annotations
@@ -26,15 +30,33 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Reuse all the benchmark helpers from microbench.py so the plain run is
 # byte-identical to what microbench.py does.
 from . import microbench as mb
+from . import microbench_rdna as rd
+from .microbench_utils import (
+    RDNA_GL2C_READ_BYTES,
+    RDNA_WARM_S,
+    RDNA_WINDOW_MS,
+    SysfsTelemetry,
+    checked_counter_value,
+    counter_clock_mhz,
+    gfx_target,
+    parse_counter_list,
+    parse_rdna_counters,
+    pci_bdf,
+    platform_record,
+    rdna_family,
+    resolve_rdna_window,
+)
 
 # Metric -> rocprofv3 PMC counter (None means: benchmark only, no counter).
 COUNTER_MAP: Dict[str, Optional[str]] = {
@@ -77,6 +99,36 @@ GEMM_NAME_HINTS: Tuple[str, ...] = (
     "mxfp",
     "_mm_",
 )
+
+# RDNA mode. gfx11 / gfx12 have WMMA rather than MFMA and expose no WMMA
+# instruction counters, so GEMM FLOPs cannot be cross-checked there.
+RDNA_FLOP_CHECK = (
+    "unavailable: RDNA exposes no WMMA instruction counters, so GEMM FLOPs "
+    "cannot be cross-checked; only the clock, dual issue and DRAM read bytes can"
+)
+# Busy-cycle counters for the shader clock, in order of preference; rocprofv3
+# sums each over its instances. GRBM_GUI_ACTIVE reads 0 on gfx1100.
+RDNA_CLOCK_COUNTERS: Tuple[str, ...] = ("GRBM_GUI_ACTIVE", "SQ_BUSY_CYCLES")
+RDNA_DUAL_COUNTERS: Tuple[str, ...] = ("SQ_INSTS_VALU", "SQ_INSTS_DUAL_VALU_WAVE32")
+# Counters per rocprofv3 pass; more GL2C counters in one pass abort it on gfx1151.
+RDNA_COUNTERS_PER_PASS = 2
+# Case -> kernel-name substrings that pick its dispatches.
+RDNA_CASES: Dict[str, Tuple[str, ...]] = {
+    "matrix_fp16": GEMM_NAME_HINTS,
+    "matrix_bf16": GEMM_NAME_HINTS,
+    "vector_fp32": ("_fma_tile_kernel",),
+    "vector_fp16": ("_fma_tile_kernel",),
+    "read_bw": ("_read_kernel",),
+}
+# Case -> (checked value, counters it comes from).
+RDNA_COUNTER_CHECKS: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    "vector_fp32": ("dual_issue_share", RDNA_DUAL_COUNTERS),
+    "vector_fp16": ("dual_issue_share", RDNA_DUAL_COUNTERS),
+    "read_bw": ("read_bytes_ratio", tuple(RDNA_GL2C_READ_BYTES)),
+}
+RDNA_MATRIX_SHAPE = (4096, 4096, 4096)
+RDNA_READ_BYTES = 1024 * 1024 * 1024
+RDNA_VECTOR_REPEAT = 1024
 
 
 # ── single-run dispatch (Mode A) ──────────────────────────────────────────
@@ -195,6 +247,61 @@ def _run_single(metric: str, M: int, N: int, K: int, device: int) -> Dict[str, f
     return result
 
 
+def _rdna_case_call(case: str, M: int, N: int, K: int, dev: str):
+    """(call, work per call, rate key) of an RDNA mode case: the RDNA protocol's
+    NT GEMM, accumulator-tile FMA kernel or read kernel."""
+    torch = mb.torch
+    if case in ("matrix_fp16", "matrix_bf16"):
+        dtype = torch.float16 if case == "matrix_fp16" else torch.bfloat16
+        call = rd._gemm_call(M, N, K, dtype, dev, "nt")
+        return call, float(mb._gemm_flops(M, N, K)), "tflops"
+    if case in ("vector_fp32", "vector_fp16"):
+        dtype = torch.float32 if case == "vector_fp32" else torch.float16
+        block, warps = rd.VECTOR_TILE_CONFIGS_RDNA[0]
+        call = rd._vector_call("tile", block, warps, dtype, dev, RDNA_VECTOR_REPEAT)
+        return call, 2.0 * RDNA_VECTOR_REPEAT * rd.VECTOR_N_ELEMENTS, "tflops"
+    if case == "read_bw":
+        block, grid = rd.BW_READ_CONFIGS[1]
+        call = rd._read_buffer_call(RDNA_READ_BYTES, block, grid, dev)
+        return call, float(RDNA_READ_BYTES), "gbps"
+    raise ValueError(f"unknown RDNA mode case: {case}")
+
+
+def _run_single_rdna(
+    case: str,
+    M: int,
+    N: int,
+    K: int,
+    device: int,
+    warmup: Optional[int],
+    rep: Optional[int],
+) -> Dict[str, object]:
+    """One RDNA mode case as a rocprof target, timed as the RDNA protocol times
+    it (a warm-up, then the median of a window), with the sysfs clocks of the
+    window."""
+    torch = mb.torch
+    torch.cuda.set_device(device)
+    warm_s, window_ms, _ = resolve_rdna_window(RDNA_WARM_S, RDNA_WINDOW_MS, warmup, rep)
+    call, work, rate_key = _rdna_case_call(case, M, N, K, f"cuda:{device}")
+    props = torch.cuda.get_device_properties(device)
+    telemetry = SysfsTelemetry(pci_bdf(props)).start()
+    proto = rd._RdnaProtocol(telemetry, warm_s=warm_s, window_ms=window_ms)
+    try:
+        call()
+        proto.warm(call)
+        ms, clock = proto.time(call)
+    finally:
+        telemetry.stop()
+    scale = 1e12 if rate_key == "tflops" else 1e9
+    return {
+        "metric": case,
+        "measured_ms": float(ms),
+        f"measured_{rate_key}": work / (ms * 1e-3) / scale,
+        "work_per_call": work,
+        "sysfs_clock": clock,
+    }
+
+
 # ── rocprof CSV parser ────────────────────────────────────────────────────
 
 
@@ -276,6 +383,36 @@ def _parse_rocprof_csv(csv_path: Path, counter: str) -> Dict[str, object]:
     }
 
 
+def list_rocprof_counters(rocprofv3: str) -> Optional[Dict[str, int]]:
+    """Counters ``rocprofv3 -L`` lists, with their instances; ``None`` if it
+    cannot list them."""
+    # Once HIP starts in this process it sets ROCPROFILER_REGISTER_LIBRARY in
+    # the C environment, and a rocprofv3 child that inherits it exits at once.
+    # os.environ is Python's copy from interpreter start, which lacks it.
+    try:
+        r = subprocess.run(
+            [rocprofv3, "-L"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=os.environ.copy(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return parse_counter_list(r.stdout) or None
+
+
+def stderr_reason(stderr: Optional[str]) -> str:
+    """The last exception line of a child's stderr, else its last 400 characters."""
+    text = stderr or ""
+    errors = [
+        line
+        for line in text.splitlines()
+        if re.match(r"[A-Za-z_.]*(Error|Exception):", line)
+    ]
+    return errors[-1][:400] if errors else text[-400:]
+
+
 # ── orchestrator (Mode B) ─────────────────────────────────────────────────
 
 
@@ -348,6 +485,9 @@ def _shape_ok_for_metric(metric: str, M: int, N: int, K: int) -> Tuple[bool, str
 
 
 def run_orchestrator(args: argparse.Namespace) -> int:
+    gfx, props = _device_gfx(args.device)
+    if rdna_family(gfx) is not None:
+        return run_rdna(args, gfx, props)
     out_root = Path(args.output).resolve()
     out_root.parent.mkdir(parents=True, exist_ok=True)
 
@@ -672,6 +812,205 @@ def run_orchestrator(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── RDNA mode ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _RdnaRun:
+    """What every RDNA mode case shares: the options, the matrix shape, the
+    working directory, and the counters ``rocprofv3 -L`` lists with their
+    instances (``None`` if it cannot list them)."""
+
+    args: argparse.Namespace
+    shape: Tuple[int, int, int]
+    work_dir: Path
+    listed: Optional[Dict[str, int]]
+
+    def is_listed(self, counter: str) -> bool:
+        return self.listed is None or counter in self.listed
+
+    def child(
+        self, case: str, tag: str, counters: Sequence[str] = ()
+    ) -> Dict[str, Any]:
+        """Runs *case* in a child, under rocprofv3 collecting *counters* when
+        given. Returns the child's timing JSON, or with *counters* what
+        :func:`parse_rdna_counters` reads; ``{"error": ...}`` on failure."""
+        run_dir = self.work_dir / case / tag
+        run_dir.mkdir(parents=True, exist_ok=True)
+        rocprof_cmd = None
+        if counters:
+            rocprof_cmd = [self.args.rocprofv3, "--pmc", *counters]
+            rocprof_cmd += ["--output-format", "csv", "-o", "run", "-d", str(run_dir)]
+        out_json = run_dir / "timing.json"
+        out_json.unlink(missing_ok=True)
+        a = self.args
+        r = _run_subprocess_single(
+            sys.executable,
+            case,
+            *self.shape,
+            a.device,
+            a.warmup,
+            a.rep,
+            out_json,
+            rocprof_cmd=rocprof_cmd,
+        )
+        if r.returncode != 0 or not out_json.exists():
+            reason = stderr_reason(r.stderr)
+            return {"error": f"{tag} run failed (rc={r.returncode}): {reason}"}
+        if not counters:
+            return json.loads(out_json.read_text())
+        pmc_csv = _find_pmc_csv(run_dir)
+        if pmc_csv is None:
+            return {"error": f"rocprofv3 wrote no counter CSV under {run_dir}"}
+        try:
+            return parse_rdna_counters(pmc_csv, RDNA_CASES[case])
+        except (RuntimeError, KeyError, ValueError) as e:
+            return {"error": f"parse failed: {e}"}
+
+
+def _rdna_clock(
+    run: _RdnaRun, case: str, sysfs_clock: Dict[str, Any]
+) -> Dict[str, Any]:
+    """The case's shader clock: from the first of ``RDNA_CLOCK_COUNTERS`` that
+    gives a plausible value (:func:`counter_clock_mhz`), else the sysfs clock
+    of the plain run; with the reason each counter was passed over."""
+    sclk = sysfs_clock.get("sclk_mhz")
+    rejected: Dict[str, str] = {}
+    for counter in RDNA_CLOCK_COUNTERS:
+        if not run.is_listed(counter):
+            rejected[counter] = "not listed by rocprofv3 -L"
+            continue
+        parsed = run.child(case, counter, (counter,))
+        if "error" in parsed:
+            rejected[counter] = parsed["error"]
+            continue
+        instances = (run.listed or {}).get(counter, 1)
+        mhz, why = counter_clock_mhz(
+            counter,
+            parsed["counters"].get(counter, 0.0),
+            instances,
+            parsed["kernel_ms"],
+            sclk,
+        )
+        if mhz is None:
+            rejected[counter] = why
+            continue
+        return {
+            "clock_mhz": round(mhz, 1),
+            "clock_source": f"{counter} / {instances} instance(s)",
+            "clock_vs_sysfs": round(mhz / sclk, 3) if sclk else None,
+            "rocprof_kernel_ms": round(parsed["kernel_ms"], 4),
+            "clock_rejected": rejected,
+        }
+    return {
+        "clock_mhz": sclk,
+        "clock_source": "sysfs hwmon, plain run" if sclk else None,
+        "clock_rejected": rejected,
+    }
+
+
+def _rdna_counter_check(run: _RdnaRun, case: str) -> Dict[str, Any]:
+    """The case's checked value (``RDNA_COUNTER_CHECKS``) from the counters the
+    board lists, collected ``RDNA_COUNTERS_PER_PASS`` per rocprofv3 pass."""
+    if case not in RDNA_COUNTER_CHECKS:
+        return {}
+    name, wanted = RDNA_COUNTER_CHECKS[case]
+    listed = [c for c in wanted if run.is_listed(c)]
+    unlisted = [c for c in wanted if c not in listed]
+    if not listed or (name == "dual_issue_share" and unlisted):
+        return {
+            name: None,
+            f"{name}_rejected": f"not listed by rocprofv3 -L: {unlisted}",
+        }
+    counters: Dict[str, float] = {}
+    for i in range(0, len(listed), RDNA_COUNTERS_PER_PASS):
+        group = listed[i : i + RDNA_COUNTERS_PER_PASS]
+        parsed = run.child(case, "+".join(group), group)
+        if "error" in parsed:
+            return {name: None, f"{name}_rejected": parsed["error"]}
+        counters.update(parsed["counters"])
+    value, why = checked_counter_value(name, counters, RDNA_READ_BYTES)
+    out: Dict[str, Any] = {"counters": counters, name: value}
+    if value is None:
+        out[f"{name}_rejected"] = why
+    return out
+
+
+def _rdna_case(run: _RdnaRun, case: str) -> Dict[str, Any]:
+    """One RDNA mode case: a plain run, then the clock and the counter check."""
+    print(f"\n── {case} ──")
+    row: Dict[str, Any] = {"metric": case}
+    if case.startswith("matrix_"):
+        row.update(zip("MNK", run.shape))
+    plain = run.child(case, "plain")
+    if "error" in plain:
+        row["error"] = plain["error"]
+        print(f"  {row['error']}")
+        return row
+    row.update({k: v for k, v in plain.items() if k.startswith("measured_")})
+    row["sysfs_clock"] = plain.get("sysfs_clock", {})
+    row.update(_rdna_clock(run, case, row["sysfs_clock"]))
+    row.update(_rdna_counter_check(run, case))
+    shown = ("measured_tflops", "measured_gbps", "clock_mhz", "clock_source")
+    shown += ("dual_issue_share", "read_bytes_ratio")
+    print("  " + "  ".join(f"{k}={row[k]}" for k in shown if row.get(k) is not None))
+    for key in [k for k in row if k.endswith("_rejected") and row[k]]:
+        print(f"  {key}: {row[key]}")
+    return row
+
+
+def run_rdna(args: argparse.Namespace, gfx: str, props: Any) -> int:
+    """
+    RDNA mode: per case (``RDNA_CASES``, or those of ``--metrics``), a plain
+    run timed as the RDNA protocol times it, then rocprofv3 runs for the
+    shader clock and the case's counter check. A zero or implausible counter
+    value is rejected with its reason, never reported. Writes one JSON row
+    per case to ``--output``.
+    """
+    out_root = Path(args.output).resolve()
+    out_root.parent.mkdir(parents=True, exist_ok=True)
+    if not args.allow_busy:
+        idle, msg = rd.check_idle(props, args.idle_util_threshold)
+        print(f"Idle check: {msg}")
+        if not idle:
+            print(
+                "ERROR: GPU is not idle. Stop other workloads on this device or "
+                "rerun with --allow-busy to override.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    listed = list_rocprof_counters(args.rocprofv3)
+    run = _RdnaRun(
+        args=args,
+        shape=_parse_shapes(args.shapes)[0] if args.shapes else RDNA_MATRIX_SHAPE,
+        work_dir=Path(args.rocprof_dir).resolve(),
+        listed=listed,
+    )
+    cases = [m.strip() for m in args.metrics.split(",")] if args.metrics else []
+    cases = [c for c in RDNA_CASES if not cases or c in cases]
+    print(f"RDNA mode on {gfx}: GEMM FLOP check {RDNA_FLOP_CHECK}")
+    print(f"Counters listed by {args.rocprofv3} -L: {len(listed or {})}")
+    rows = [_rdna_case(run, case) for case in cases]
+    payload = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "gfx_arch": gfx,
+        "mode": "rdna",
+        "rocprofv3": args.rocprofv3,
+        "flop_check": RDNA_FLOP_CHECK,
+        "counters_listed": listed is not None,
+        "sclk_levels_mhz": platform_record(pci_bdf(props))["dpm_levels_mhz"]["sclk"],
+        "rows": rows,
+    }
+    out_root.write_text(json.dumps(payload, indent=2))
+    print(f"\nWrote {out_root}")
+    return 0
+
+
+def _device_gfx(device: int) -> Tuple[str, Any]:
+    props = mb.torch.cuda.get_device_properties(device)
+    return gfx_target(getattr(props, "gcnArchName", "")), props
+
+
 # ── main / CLI ────────────────────────────────────────────────────────────
 
 
@@ -750,7 +1089,12 @@ def main() -> int:
             print("--single-run requires --metric, --shape, --out", file=sys.stderr)
             return 2
         M, N, K = (int(x) for x in args.shape.split(","))
-        result = _run_single(args.metric, M, N, K, args.device)
+        if rdna_family(_device_gfx(args.device)[0]) is not None:
+            result = _run_single_rdna(
+                args.metric, M, N, K, args.device, args.warmup, args.rep
+            )
+        else:
+            result = _run_single(args.metric, M, N, K, args.device)
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as f:
