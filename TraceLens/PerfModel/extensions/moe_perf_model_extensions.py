@@ -1313,12 +1313,12 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
     bwd_category = None
 
     NUM_EXPERTS = 32  # TEMPORARY HARDCODE: local expert shard on this EP=8 rank (global 256 / 8); weights are hidden in the experts object so not derivable from args  # fmt: skip
-    INTER_DIM = 4096  # moe_intermediate_size
-    MX_BLOCK = 32  # one e8m0 scale per 32 fp4 values
-    INPUT_BPE = 0.5  # fp4 activation
-    WEIGHT_BPE = 0.5  # fp4 weight
-    OUTPUT_BPE = 2  # bf16 gate_up / intermediate output
-    SCALE_BPE = 1  # e8m0 MX scale
+    INTER_DIM = 4096  # TEMPORARY HARDCODE: moe_intermediate_size
+    MX_BLOCK = 32  # TEMPORARY HARDCODE: MXFP4 block (1 e8m0 / 32 fp4)
+    INPUT_BPE = 0.5  # TEMPORARY HARDCODE: fp4 activation dtype
+    WEIGHT_BPE = 0.5  # TEMPORARY HARDCODE: fp4 weight dtype
+    OUTPUT_BPE = 2  # TEMPORARY HARDCODE: bf16 output dtype
+    SCALE_BPE = 1  # TEMPORARY HARDCODE: e8m0 scale dtype
 
     def __init__(self, event, arch=None):
         self.event = event
@@ -1345,7 +1345,7 @@ class mfma_moe1_silu_mul_synthetic(UnfusedMoE_Up):
             "inter_dim": cls.INTER_DIM,
             "num_experts": cls.NUM_EXPERTS,
             "topk": 1,
-            "gated": True,
+            "gated": True
         }
 
     def flops(self):
