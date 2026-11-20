@@ -33,6 +33,7 @@ Derived:
 | `<container>` | `bringup_<basename of <bringup_dir>>` | 0 |
 | `<prefix>` | `ssh <node> "docker exec -i -w <tracelens_dir> <container> bash -c '{CMD}'"` | 0 |
 | `<bringup_gates>` | `python3 -m TraceLens.Agent.ModelBringup.utils.bringup_gates` | 0 |
+| `<templates_dir>` | `<tracelens_dir>/TraceLens/Agent/ModelBringup/skills/model-bringup/templates` | 0 |
 | `<tl_extension>`, `<gpu_devices>`, `<framework_src>`, `<gfx_arch>`, `<platform>`, `<image_path>`, `<user>`, `<uid_gid>`, `<device_gids>` | printed in Step 0 | 0 |
 | `<gpu_count>` | the number of `<gpu_devices>` | 0 |
 | `<gpu_need>`, `<gpu_pin>` | `envs.TP` in `<benchmark_yaml>`, 1 when unset (Magpie's default), times `envs.PP_SIZE` and `envs.PCP_SIZE` (each 1 when unset) for AgentX; without `<benchmark_yaml>`, `workload_params.tp`, 8 when unset (the profiling templates' default). `<gpu_pin>` is 0 to `<gpu_need>`-1, comma-separated | 0 |
@@ -223,6 +224,7 @@ Pass `--threshold` only when `min_share` is set. Do not edit `gaps.json`. An emp
        - GPU arch: <gfx_arch>; GPU index: <gpu_index>
        - Framework: <framework>, source <framework_src>
        - Gates: <bringup_gates>
+       - Draft templates: <templates_dir>
        - Command prefix: Read <bringup_dir>/cache/cmd_prefix.txt and substitute {CMD}
        - Output file: <op_dir>/result.json
 

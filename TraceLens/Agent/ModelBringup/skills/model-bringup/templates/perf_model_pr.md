@@ -4,6 +4,10 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
+<!--
+Keep the sections in order. Changes lists only the lines that apply. Omit Ratio Deviations when no ratio deviates. A categorized PR keeps only Operator and Changes, and its Operator ends "It had no category." Every ratio whose band is `deviation` appears under Ratio Deviations with its value as the CSV prints it, one line per cause, citing the source file and line package-relative (e.g. `aiter/ops/...py:123`).
+-->
+
 ## Operator
 
 `<op>`: what it computes and the kernels it launches. It had no performance model.

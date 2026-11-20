@@ -4,6 +4,10 @@ Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 See LICENSE for license information.
 -->
 
+<!--
+Omit Pseudo Op Check when no pseudo op is proposed, and Validation when there are no validation rows.
+-->
+
 ## Operator
 
 `<op>`: what it computes, the framework call that launches it, and its kernels.
