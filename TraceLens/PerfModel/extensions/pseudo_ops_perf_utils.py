@@ -67,6 +67,7 @@ def get_pseudo_op_mappings():
         "pseudo_mla_prefill_fwd": attention_perf_model_extensions.pseudo_mla_prefill_fwd,
         "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
         "aiter::mla_decode_v4_asm": attention_perf_model_extensions.mla_decode_v4_asm,
+        "hipModuleLaunchKernel->_sparse_gqa_chunk_prefill (Synthetic Op)": attention_perf_model_extensions.sparse_gqa,
         "pseudo_vllm_sparse_attn_decode": attention_perf_model_extensions.vllm_sparse_attn_decode,
         # DeepSeek-V4 sparse paged decode (mode-specific pseudo ops)
         "pseudo_v4_paged_decode_swa": attention_perf_model_extensions.pseudo_v4_paged_decode_swa,
