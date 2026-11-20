@@ -51,7 +51,7 @@ Follow the skills; do not restate them.
 {"op": "<op>", "op_slug": "<op_slug>",
  "outcome": "modeled | categorized | blocked | error",
  "commit": "<sha or null>",
- "validation_csv": "<op_dir>/validation/validation_report.csv | null",
+ "validation_csv": "<op_dir>/validation/validation_report.csv when the validator wrote one, else null",
  "reason": "<required unless outcome is modeled or categorized>"}
 ```
 
@@ -108,9 +108,9 @@ If `rocprofv3` aborts, see `<validation_skill>`'s Prerequisites.
 
 First investigate every `deviation-suspect` row with `<validation_skill>`'s "Investigating a deviation". Then pick the outcome:
 
-- `modeled`: every validation row has `run_status` `OK` and `match_status` `match` or `deviation-explained`. Commit with the message `feat(perfmodel): Add Performance Model for <op>`, set `validation_csv` to the validation CSV, and write `<op_dir>/perf_model_pr.md` from the PR template.
-- `categorized`: `<categorize_only>` is true and there is no perf model to validate. Commit the category mapping with the message `feat(perfmodel): Categorize <op>`, set `validation_csv` to null, and write `<op_dir>/perf_model_pr.md` from the PR template.
-- `blocked`: a row did not run (`run_status` not `OK`) or its `match_status` is `over-predicted`, `precision-mismatch`, `deviation-suspect` or `no prediction`, the op needs a pseudo op, or a skill's Stop rules say stop. Make no commit, set `validation_csv` to the validation CSV when the validator wrote one, else null, and write `<op_dir>/perf_model_issue.md` from the issue template. For a pseudo op, do not add it: run `<authoring_skill>`'s stability and cost check ("Pseudo ops" in its reference.md) and write its full table, including the measured overhead, to `<op_dir>/pseudo_op_check.md` for the user; the issue's Pseudo Op Check has the same table with Events Added in place of the measured overhead.
+- `modeled`: every validation row has `run_status` `OK` and `match_status` `match` or `deviation-explained`. Commit as `feat(perfmodel): Add Performance Model for <op>` and write `<op_dir>/perf_model_pr.md` from the PR template.
+- `categorized`: `<categorize_only>` is true. Commit the category mapping as `feat(perfmodel): Categorize <op>` and write `<op_dir>/perf_model_pr.md` from the PR template.
+- `blocked`: otherwise, including when the op needs a pseudo op or a skill's Stop rules say stop. Write `<op_dir>/perf_model_issue.md` from the issue template. For a pseudo op, do not add it: run `<authoring_skill>`'s stability and cost check ("Pseudo ops" in its reference.md), write its full table to `<op_dir>/pseudo_op_check.md`, and put the table without the measured overhead in the issue's Pseudo Op Check.
 
 For `modeled` and `categorized`, commit in `<op_worktree>`:
 
@@ -131,6 +131,6 @@ Write `<op_dir>/result.json`, then run:
 <prefix> <bringup_gates> op-result --bringup-dir <bringup_dir> --result <op_dir>/result.json
 ```
 
-On exit 1, fix the outcome or the draft (a row that did not run, or whose `match_status` is not `match` or `deviation-explained`, means `blocked`) and rerun. Edit the validation CSV only as `<validation_skill>`'s "Investigating a deviation" allows, and never name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
+On exit 1, fix the outcome or the draft and rerun. Edit the validation CSV only as `<validation_skill>`'s "Investigating a deviation" allows, and never name an older one. Max 2 attempts. An `error` outcome has nothing to fix.
 
 Return "DONE".
