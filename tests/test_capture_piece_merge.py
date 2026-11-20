@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 from TraceLens.TraceUtils.utils.annotation_utils import (
     IterationAnnotation,
+    find_step_label,
+    parse_draft_prefill_tokens,
     spec_decode_role,
 )
 import TraceLens.Trace2Tree.trace_capture_merge_experimental as merge
@@ -17,12 +19,10 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     UID,
     _batch_sizes_by_mode,
     _candidate_capture_sizes,
-    _draft_prefill_tokens,
     _merge_capture_pair,
     _pair_capture_roots,
     _preferred_target_mode,
     _resolve_capture_query,
-    _step_label,
     find_execution_roots,
     innermost_extend_steps,
 )
@@ -60,9 +60,9 @@ def test_preferred_target_mode():
 
 
 def test_draft_prefill_tokens():
-    assert _draft_prefill_tokens("step[DRAFT bs=1 toks=2048 c_sq=2048]") == 2048
-    assert _draft_prefill_tokens("step[VERIFY bs=8]") is None
-    assert _draft_prefill_tokens(None) is None
+    assert parse_draft_prefill_tokens("step[DRAFT bs=1 toks=2048 c_sq=2048]") == 2048
+    assert parse_draft_prefill_tokens("step[VERIFY bs=8]") is None
+    assert parse_draft_prefill_tokens(None) is None
 
 
 def _span(uid, name, ts, dur):
@@ -82,9 +82,9 @@ def test_step_label_finds_draft_label_inside_draft_extend():
         _span(1, "step[EXTEND bs=1 toks=2048]", 0, 200),
         _span(2, "step[DRAFT bs=1 toks=2048]", 110, 30),
     ]
-    assert _step_label(steps, draft_extend) == "step[DRAFT bs=1 toks=2048]"
-    assert _step_label(steps, {"name": "step[VERIFY bs=8]"}) == "step[VERIFY bs=8]"
-    assert _step_label(steps, {"name": "draft", "ts": 500, "dur": 10}) is None
+    assert find_step_label(steps, draft_extend) == "step[DRAFT bs=1 toks=2048]"
+    assert find_step_label(steps, {"name": "step[VERIFY bs=8]"}) == "step[VERIFY bs=8]"
+    assert find_step_label(steps, {"name": "draft", "ts": 500, "dur": 10}) is None
 
 
 def test_batch_sizes_split_by_mode():

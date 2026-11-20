@@ -582,6 +582,33 @@ def spec_decode_batch_sizes(
     return sizes
 
 
+def find_step_label(step_events: List[dict], root: dict) -> Optional[str]:
+    """The SGLang ``step[...]`` label of an execution root.
+
+    The root itself when it is a step label; otherwise the first of the
+    ts-sorted *step_events* that starts within the root's time span (SGLang
+    wraps each forward in ``scheduler.run_batch`` and emits the step label
+    alongside it).
+    """
+    name = root.get("name", "")
+    if name.startswith("step["):
+        return name
+    start = root.get("ts", 0)
+    end = start + root.get("dur", 0)
+    for e in step_events:
+        if start <= e.get("ts", -1) <= end:
+            return e["name"]
+    return None
+
+
+def parse_draft_prefill_tokens(step_label: Optional[str]) -> Optional[int]:
+    """Prompt tokens of an SGLang ``step[DRAFT ... toks=N]`` label, else None."""
+    if not step_label or not step_label.startswith("step[DRAFT"):
+        return None
+    m = re.search(r"\btoks=(\d+)", step_label)
+    return int(m.group(1)) if m else None
+
+
 # --- family keys ------------------------------------------------------------
 _DIGIT_RUN = re.compile(r"\d+")
 SKELETON_PLACEHOLDER = "#"

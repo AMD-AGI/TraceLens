@@ -32,6 +32,8 @@ from ..TraceUtils.utils.annotation_utils import (
     SPEC_ROLE_DRAFTER_EXTEND,
     SPEC_ROLE_TARGET,
     find_known_annotations,
+    find_step_label,
+    parse_draft_prefill_tokens,
     find_spec_decode_annotations,
     parse_annotation,
     spec_decode_batch_sizes,
@@ -844,32 +846,6 @@ def find_execution_details(execution_root) -> Optional[str]:
     return None
 
 
-def _step_label(step_events, execution_root) -> Optional[str]:
-    """The ``step[...]`` label of an execution root.
-
-    The root itself when it is a step label; otherwise the step annotation
-    that starts within the root's time span (SGLang wraps each forward in
-    ``scheduler.run_batch`` and emits the step label alongside it).
-    """
-    name = execution_root.get("name", "")
-    if name.startswith("step["):
-        return name
-    start = execution_root.get("ts", 0)
-    end = start + execution_root.get("dur", 0)
-    for e in step_events:
-        if start <= e.get("ts", -1) <= end:
-            return e["name"]
-    return None
-
-
-def _draft_prefill_tokens(step_label) -> Optional[int]:
-    """Prompt tokens of an SGLang ``step[DRAFT ... toks=N]`` label, else None."""
-    if not step_label or not step_label.startswith("step[DRAFT"):
-        return None
-    m = re.search(r"\btoks=(\d+)", step_label)
-    return int(m.group(1)) if m else None
-
-
 def _preferred_target_mode(step_label) -> Optional[str]:
     """Capture mode a target step replays: prefill (EXTEND) is PIECEWISE,
     decode/verify is FULL. ``None`` when the label is unknown."""
@@ -894,7 +870,7 @@ def _resolve_capture_query(execution_root, step_label, spec_batch_size):
     """
     role = spec_decode_role(execution_root["name"]) or SPEC_ROLE_TARGET
     if role == SPEC_ROLE_DRAFTER_EXTEND:
-        draft_prefill_tokens = _draft_prefill_tokens(step_label)
+        draft_prefill_tokens = parse_draft_prefill_tokens(step_label)
         if draft_prefill_tokens is not None:
             # draft_extend around a prefill replays the draft model's
             # piecewise prefill graphs, keyed by prompt tokens.
@@ -1126,7 +1102,9 @@ def merge_capture_trace_into_graph(
 
         # ── Resolve capture tree + roots for this execution root ──
         role, batch_size, preferred_mode = _resolve_capture_query(
-            execution_root, _step_label(step_events, execution_root), spec_batch_size
+            execution_root,
+            find_step_label(step_events, execution_root),
+            spec_batch_size,
         )
         if batch_size is None:
             print(
@@ -1179,5 +1157,4 @@ def merge_capture_trace_into_graph(
             "Graph capture merge failed; returning None (report will be unaugmented)."
         )
         return None
-    finalize_non_gpu_paths(graph_tree)
-    return graph_tree
+    finalize_non_gpu_paths(graph_tre
