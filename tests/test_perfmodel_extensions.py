@@ -421,6 +421,63 @@ class TestAttentionExtensions:
         model = aext.sparse_gqa({"args": {}})
         assert model.flops() is None
         assert model.bytes() is None
+        assert model.get_compute_precision() is None
+        assert model.get_maf_type() is None
+
+    def test_sparse_gqa_rejects_empty_or_non_positive_shapes(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [32, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [32, 16, 256],
+                    [],
+                ],
+                "Input type": ["c10::BFloat16"] * 4 + ["int"],
+            }
+        }
+        assert aext.sparse_gqa(event).flops() is None
+        event["args"]["Input Dims"][0] = [0, 16, 256]
+        event["args"]["Input Dims"][4] = [32, 2048]
+        assert aext.sparse_gqa(event).flops() is None
+
+    def test_sparse_gqa_keeps_topk_when_annotation_has_no_lengths(self):
+        event = {
+            "annotation": "not-an-annotation",
+            "args": {
+                "Input Dims": [
+                    [32, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [32, 16, 256],
+                    [32, 2048],
+                ],
+                "Input type": ["c10::BFloat16"] * 4 + ["int"],
+            },
+        }
+        assert aext.sparse_gqa(event).param_details["selected"] == 2048
+
+    def test_sparse_gqa_skips_bytes_when_not_dense_or_dtype_unknown(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [32, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [32, 16, 256],
+                    [32, 2048],
+                ],
+                "Input type": ["c10::BFloat16"] * 4 + ["int"],
+                "Input Strides": [[1, 1, 1], [], [], [], []],
+            }
+        }
+        model = aext.sparse_gqa(event)
+        assert model.flops() is not None
+        assert model.bytes() is None
+        event["args"].pop("Input Strides")
+        event["args"]["Input type"] = ["not-a-dtype"] * 5
+        assert aext.sparse_gqa(event).bytes() is None
 
     def test_gdn_attention_core(self):
         event = {
