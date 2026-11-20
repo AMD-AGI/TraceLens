@@ -47,6 +47,7 @@ The TraceLens source code is hosted at `github.com/AMD-AGI/TraceLens <https://gi
       * :doc:`Project a model's roofline from its checkpoint <how-to/generate-model-roofline-projection>`
       * :doc:`Analyze collective communication <how-to/nccl-analysis>`
       * :doc:`Estimate kernel times with Origami <how-to/origami-integration>`
+      * :doc:`Map a GPU kernel to its source <how-to/map-kernel-source>`
       * :doc:`Agentic performance analysis with the TraceLens Agent <how-to/agent>`
       * :doc:`Visualize a model with the TraceLens Agent <how-to/visualize-model>`
 
