@@ -207,6 +207,10 @@ class TestPseudoOpsPerfUtils:
         )
         assert mappings["sgl_kernel::fast_topk"] is sgl_kernel_fast_topk
         assert mappings["fused_k_norm_rope_q_flashmla"] is fused_k_norm_rope_q_flashmla
+        assert (
+            mappings["hipModuleLaunchKernel->_sparse_gqa_chunk_prefill (Synthetic Op)"]
+            is aext.sparse_gqa
+        )
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -216,6 +220,10 @@ class TestPseudoOpsPerfUtils:
             category_only["aiter::fused_dynamic_mxfp4_quant_moe_sort_hip"] == "MoE_aux"
         )
         assert category_only["aiter::indexer_score_topk"] == "InferenceAttention"
+        assert (
+            "hipModuleLaunchKernel->_sparse_gqa_chunk_prefill (Synthetic Op)"
+            not in category_only
+        )
         assert (
             category_only[
                 "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)"
@@ -377,6 +385,100 @@ class TestCustomCollectivesExtensions:
 
 
 class TestAttentionExtensions:
+    def test_sparse_gqa_caps_at_topk(self):
+        event = {
+            "annotation": (
+                "execute_32_context_0(sq0sk0sqsq0sqsk0)_generation_32"
+                "(sq32sk1048576sqsq32sqsk1048576)"
+            ),
+            "args": {
+                "Input Dims": [
+                    [32, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [32, 16, 256],
+                    [32, 2048],
+                ],
+                "Input type": [
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "c10::BFloat16",
+                    "int",
+                ],
+            },
+        }
+        model = aext.sparse_gqa(event)
+        assert model.param_details["selected"] == 2048
+        assert model.get_compute_precision() == "bf16"
+        assert model.get_maf_type() == "matrix"
+        assert model.flops() == 4 * 32 * 16 * 256 * 2048
+        assert model.bytes() == (
+            2 * 32 * 16 * 256 * 2 + 32 * 2 * 2048 * 256 * 4 + 32 * 2048 * 4
+        )
+
+    def test_sparse_gqa_without_shapes_is_no_perf(self):
+        model = aext.sparse_gqa({"args": {}})
+        assert model.flops() is None
+        assert model.bytes() is None
+        assert model.get_compute_precision() is None
+        assert model.get_maf_type() is None
+
+    def test_sparse_gqa_rejects_empty_or_non_positive_shapes(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [32, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [32, 16, 256],
+                    [],
+                ],
+                "Input type": ["c10::BFloat16"] * 4 + ["int"],
+            }
+        }
+        assert aext.sparse_gqa(event).flops() is None
+        event["args"]["Input Dims"][0] = [0, 16, 256]
+        event["args"]["Input Dims"][4] = [32, 2048]
+        assert aext.sparse_gqa(event).flops() is None
+
+    def test_sparse_gqa_keeps_topk_when_annotation_has_no_lengths(self):
+        event = {
+            "annotation": "not-an-annotation",
+            "args": {
+                "Input Dims": [
+                    [32, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [32, 16, 256],
+                    [32, 2048],
+                ],
+                "Input type": ["c10::BFloat16"] * 4 + ["int"],
+            },
+        }
+        assert aext.sparse_gqa(event).param_details["selected"] == 2048
+
+    def test_sparse_gqa_skips_bytes_when_not_dense_or_dtype_unknown(self):
+        event = {
+            "args": {
+                "Input Dims": [
+                    [32, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [32, 16, 256],
+                    [32, 2048],
+                ],
+                "Input type": ["c10::BFloat16"] * 4 + ["int"],
+                "Input Strides": [[1, 1, 1], [], [], [], []],
+            }
+        }
+        model = aext.sparse_gqa(event)
+        assert model.flops() is not None
+        assert model.bytes() is None
+        event["args"].pop("Input Strides")
+        event["args"]["Input type"] = ["not-a-dtype"] * 5
+        assert aext.sparse_gqa(event).bytes() is None
+
     def test_gdn_attention_core(self):
         event = {
             "annotation": _GDN_ANNOTATION,
