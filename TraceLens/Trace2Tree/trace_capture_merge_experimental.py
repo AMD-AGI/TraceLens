@@ -593,7 +593,7 @@ def innermost_extend_steps(events):
     for i, e in enumerate(steps):
         end = e["ts"] + e["dur"]
         nxt = steps[i + 1] if i + 1 < len(steps) else None
-        if nxt is not None and nxt["ts"] >= e["ts"] and nxt["ts"] + nxt["dur"] <= end:
+        if nxt is not None and nxt["ts"] + nxt["dur"] <= end:
             continue
         inner.append(e)
     return inner
