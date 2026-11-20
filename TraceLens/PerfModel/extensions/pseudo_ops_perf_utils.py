@@ -89,11 +89,6 @@ def _get_attention_mappings():
         "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
         "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
         "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
-        # FlydSL Flash Attention (Flux v26.7 training)
-        "flux_flydsl::attn_fwd": primus_flux_perf_model_extensions.flux_flydsl_attn_fwd,
-        "flux_flydsl::attn_fwd_split": primus_flux_perf_model_extensions.flux_flydsl_attn_fwd_split,
-        "flux_flydsl::attn_bwd": primus_flux_perf_model_extensions.flux_flydsl_attn_bwd,
-        "flux_flydsl::attn_bwd_split": primus_flux_perf_model_extensions.flux_flydsl_attn_bwd_split,
     }
 
 
