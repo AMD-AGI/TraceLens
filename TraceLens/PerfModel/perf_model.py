@@ -4973,8 +4973,9 @@ class BatchNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
-        is_training = bool(event["args"]["Concrete Inputs"][5])
+        # an optional tensor that is not passed shows up as [] in Input Dims
+        is_affine = bool(args_input_dims[2])
+        is_training = parse_bool(event["args"]["Concrete Inputs"][5])
         dtype_out = None
         stride_output = None
         # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
@@ -5022,14 +5023,14 @@ class BatchNormBwd(Normalization):
             has_output = True
             is_training = False  # by assertion
         else:
-            is_training = bool(event["args"]["Concrete Inputs"][7])
+            is_training = parse_bool(event["args"]["Concrete Inputs"][7])
         op_shape = tuple(args_input_dims[input_index])
         # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
         num_channels = op_shape[1]
         dtype_in = event["args"]["Input type"][input_index]
         stride_input = tuple(event["args"]["Input Strides"][input_index])
         output_mask = [has_output]
-        is_affine = args_input_dims[is_affine_index] is not None
+        is_affine = bool(args_input_dims[is_affine_index])
         dtype_out = None
         stride_output = None
         return {
@@ -5083,10 +5084,10 @@ class LayerNorm(Normalization):
         # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
         num_channels = prod(parse_list(concrete_inputs[1], int))
-        has_bias = args_input_dims[3] is not None
+        has_bias = bool(args_input_dims[3])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = bool(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5185,7 +5186,7 @@ class GroupNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = bool(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5222,7 +5223,7 @@ class GroupNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = args_input_dims[5] is not None
+        is_affine = bool(args_input_dims[4])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5275,11 +5276,11 @@ class InstanceNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = bool(args_input_dims[2])
         # The "use_input_stats" argument means that we need to calculate stats from the batch,
         # effectively the same as how we use training in other cases
         # layernorm actually calls batchnorm and sets is_training to use_input_stats
-        is_training = bool(concrete_inputs[5])
+        is_training = parse_bool(concrete_inputs[5])
         dtype_out = None
         stride_output = None
         return {
@@ -5332,7 +5333,7 @@ class RMSNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = bool(args_input_dims[2])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[1], int))
@@ -5394,7 +5395,7 @@ class RMSNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = args_input_dims[4] is not None
+        is_affine = bool(args_input_dims[4])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[2], int))
