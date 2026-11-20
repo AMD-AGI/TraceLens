@@ -226,6 +226,189 @@ class TestSdpaTile:
         assert shapes == [(128, 256, 64, 1, 1), (128, 64, 256, 1, 1)]
         assert fwd > 4.0
 
+    def test_paged_flash_uses_the_attended_key_length(self):
+        shapes = []
+
+        def gemm_time(arch, M, N, K, B, dtype, force_to_l1, num_cus):
+            shapes.append((M, N, K))
+            return 1.0
+
+        params = {
+            "B": 1,
+            "H_Q": 6,
+            "N_Q": 100,
+            "N_KV": 100,
+            "d_h_qk": 64,
+            "c_sq": 100,
+            "c_sk": 400,
+            "flash_impl": True,
+            "dtype_Q": "c10::BFloat16",
+        }
+        arch = {**ARCH, "num_cus": 304, "gemm_units_per_cu": 4, "freq_mhz": 2100}
+        with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            timed = sdpa_tile.standard_attention_time_us(
+                "vllm_unified_attention_with_output",
+                params,
+                arch,
+                1024,
+                gemm_time=gemm_time,
+            )
+        assert timed > 2.0
+        # The current chunk is 100 keys. The annotation attended 400.
+        assert shapes[0] == (100, 400, 64)
+
+    def test_sparse_and_linear_attention_are_not_origami(self):
+        params = {
+            "B": 1,
+            "H_Q": 1,
+            "d_h_qk": 64,
+            "c_sq": 16,
+            "c_sk": 16,
+            "flash_impl": True,
+            "dtype_Q": "c10::BFloat16",
+        }
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "vllm_sparse_attn_decode", params, ARCH, 1024
+            )
+            is None
+        )
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "qwen_gdn_attention_core", params, ARCH, 1024
+            )
+            is None
+        )
+
+    def test_standard_attention_rejects_shapes_it_cannot_time(self):
+        arch = {**ARCH, "num_cus": 304, "gemm_units_per_cu": 4, "freq_mhz": 2100}
+        priced = {
+            "B": 1,
+            "H_Q": 6,
+            "d_h_qk": 64,
+            "N_Q": 32,
+            "N_KV": 32,
+            "dtype_A_B": ("c10::BFloat16", "c10::BFloat16"),
+        }
+        assert sdpa_tile.standard_attention_time_us("sdpa", priced, None, 1024) is None
+        assert (
+            sdpa_tile.standard_attention_time_us("sdpa", ["not-a-dict"], arch, 1024)
+            is None
+        )
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "sdpa", {**priced, "_no_perf": True}, arch, 1024
+            )
+            is None
+        )
+        assert (
+            sdpa_tile.standard_attention_time_us("sdpa", priced, arch, 1024, bwd=True)
+            is None
+        )
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "sdpa", {**priced, "N_Q": 0, "N_KV": 0}, arch, 1024
+            )
+            is None
+        )
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "sdpa", {**priced, "dtype_A_B": None}, arch, 1024
+            )
+            is None
+        )
+        assert (
+            sdpa_tile.standard_attention_time_us(
+                "sdpa", {**priced, "H_Q": 0}, arch, 1024
+            )
+            is None
+        )
+
+        def no_time(*_args, **_kwargs):
+            return None
+
+        with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            assert (
+                sdpa_tile.standard_attention_time_us(
+                    "sdpa", priced, arch, 1024, gemm_time=no_time
+                )
+                is None
+            )
+
+    def test_inference_attention_is_timed_and_sparse_decode_is_not(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            InferenceAttention,
+        )
+
+        params = {
+            "B": 1,
+            "H_Q": 6,
+            "d_h_qk": 64,
+            "N_Q": 16,
+            "N_KV": 16,
+            "flash_impl": True,
+            "dtype_Q": "c10::BFloat16",
+        }
+        arch = {**ARCH, "num_cus": 304, "gemm_units_per_cu": 4, "freq_mhz": 2100}
+
+        class _Paged(InferenceAttention):
+            def __init__(self):
+                self.param_details = params
+
+            def bytes(self):
+                return 1024
+
+        class _BytesNeedWidth(InferenceAttention):
+            def __init__(self):
+                self.param_details = params
+
+            def bytes(self, bytes_per_element):
+                return 2048
+
+        class _V4PagedDecodeBase(InferenceAttention):
+            def __init__(self):
+                self.param_details = params
+
+            def bytes(self):
+                return 1024
+
+        def gemm_time(*_args, **_kwargs):
+            return 1.0
+
+        with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            timed = sdpa_tile.sdpa_tile_time_us(_Paged(), arch, gemm_time)
+            widened = sdpa_tile.sdpa_tile_time_us(_BytesNeedWidth(), arch, gemm_time)
+        assert timed > 0
+        assert widened > 0
+        assert sdpa_tile.sdpa_tile_time_us(_Paged(), arch, gemm_time, bwd=True) is None
+        assert sdpa_tile.sdpa_tile_time_us(_V4PagedDecodeBase(), arch, gemm_time) is None
+
+    def test_sdpa_backward_uses_the_bwd_tile_model(self):
+        def gemm_time(*_args, **_kwargs):
+            return 1.0
+
+        arch = {**ARCH, "num_cus": 304}
+        with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            timed = sdpa_tile.sdpa_tile_time_us(
+                _Attention({}), arch, gemm_time, bwd=True
+            )
+        assert timed > 0
+
+    def test_a_missing_tile_gemm_drops_the_time(self):
+        calls = {"n": 0}
+
+        def second_is_missing(*_args, **_kwargs):
+            calls["n"] += 1
+            return None if calls["n"] == 2 else 1.0
+
+        arch = {**ARCH, "num_cus": 304}
+        args = (arch, "bf16", "c10::BFloat16", 1024, 1, 8, 128, 128, 64)
+        with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
+            assert sdpa_tile.sdpa_fwd_time_us(*args, gemm_time=second_is_missing) is None
+            calls["n"] = 0
+            assert sdpa_tile.sdpa_bwd_time_us(*args, gemm_time=lambda *_a, **_k: None) is None
+            assert sdpa_tile.sdpa_bwd_time_us(*args, gemm_time=second_is_missing) is None
+
 
 class _Attention(perf_model.SDPA):
     @staticmethod

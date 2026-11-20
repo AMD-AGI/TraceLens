@@ -39,6 +39,10 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
 
 # Constants
 
+# Element width of a KV cache. Q and the attention output stay at the
+# activation dtype; only K and V move at this width.
+_KV_CACHE_BPE = {"bf16": 2.0, "fp16": 2.0, "fp8": 1.0, "fp4": 0.5}
+
 _TABLE_COLUMNS = (
     "section",
     "name",
@@ -136,6 +140,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a GPU arch JSON (same schema as --gpu-arch-name); takes precedence",
     )
     parser.add_argument(
+        "--enable-origami-gemm",
+        action="store_true",
+        default=False,
+        help=(
+            "Time GEMMs with Origami, and attention with TraceLens's SDPA tile "
+            "model using Origami for each tile GEMM, when a GPU arch is given."
+        ),
+    )
+    parser.add_argument(
         "--output-csv",
         type=Path,
         metavar="PATH",
@@ -146,6 +159,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help="Write the per-op table and rollup as JSON",
+    )
+    parser.add_argument(
+        "--kv-cache-dtype",
+        choices=("bf16", "fp16", "fp8", "fp4"),
+        default=None,
+        help=(
+            "Width of the KV cache attention reads. K and V move at this width; "
+            "Q and the output stay at the activation dtype. Default: the "
+            "activation dtype."
+        ),
     )
     parser.add_argument(
         "--top-n",
@@ -221,6 +244,8 @@ def _op_row(op: RooflineOp) -> dict[str, object]:
         "roofline_bound": op.roofline_bound,
         "roofline_time_us": op.roofline_time_us,
         "total_roofline_time_us": op.total_roofline_time_us,
+        "origami_time_us": op.origami_time_us,
+        "total_origami_time_us": op.total_origami_time_us,
         "reason": op.reason,
     }
 
@@ -313,6 +338,8 @@ def run_projection(args):
         gpu_arch=gpu_arch,
         num_predicted_tokens=args.num_predicted_tokens,
         checkpoint=checkpoint,
+        kv_cache_bpe=_KV_CACHE_BPE.get(getattr(args, "kv_cache_dtype", None)),
+        enable_origami_gemm=bool(getattr(args, "enable_origami_gemm", False)),
     )
     # Convolutional models: the graph draws one conv per stage (and the stem /
     # downsampling convs that lead those stages). Cost each live instance from a

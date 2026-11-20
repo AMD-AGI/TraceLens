@@ -968,6 +968,20 @@ class TraceEventUtils:
         }
         UncategorizedEventKey = "Uncategorized Events"
 
+        @classmethod
+        def category_for_kernel_name(cls, name: str) -> Optional[str]:
+            """Category ``_categorize_gpu_kernel_ops`` assigns from the kernel name.
+
+            The first ``ClassCategories`` filter contained in ``name`` wins.
+            ``None`` when none match; the caller applies the HLO fallback.
+            """
+            if not name:
+                return None
+            for category, filters in cls.ClassCategories.items():
+                if any(token in name for token in filters):
+                    return category
+            return None
+
     class TraceKeys(StrEnum):
         PID = "pid"
         TID = "tid"

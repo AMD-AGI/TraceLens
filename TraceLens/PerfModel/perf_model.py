@@ -1602,13 +1602,38 @@ class SDPA:
         return "matrix"
 
     @staticmethod
-    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
+    def bytes_func(
+        B,
+        N_Q,
+        H_Q,
+        N_KV,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        causal,
+        bytes_per_element,
+        kv_bytes_per_element=None,
+    ):
+        # One attention moves
+        #   (Q + Out) * bytes_per_element + (K + V) * kv_bpe
+        # where
+        #   Q   = B * N_Q * H_Q * d_h_qk
+        #   Out = B * N_Q * H_Q * d_h_v
+        #   K   = B * N_KV * H_KV * d_h_qk
+        #   V   = B * N_KV * H_KV * d_h_v
+        # Q and the output use the activation width. K and V are the cache, so
+        # they use kv_bytes_per_element when it is set: an fp8 cache is 1 byte
+        # while a bfloat16 Q stays 2. Unset, K and V use bytes_per_element too.
+        kv_bpe = (
+            bytes_per_element if kv_bytes_per_element is None else kv_bytes_per_element
+        )
         elems_q_read = B * N_Q * H_Q * d_h_qk
         elems_k_read = B * N_KV * H_KV * d_h_qk
         elems_v_read = B * N_KV * H_KV * d_h_v
         elems_out_write = B * N_Q * H_Q * d_h_v
-        total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
-        return total_elems_moved * bytes_per_element
+        return (elems_q_read + elems_out_write) * bytes_per_element + (
+            elems_k_read + elems_v_read
+        ) * kv_bpe
 
     # TODO make bytes_per_element based on profile info
     def bytes(self, bytes_per_element=2):

@@ -66,6 +66,9 @@ from TraceLens.ModelUtils.blocks import (
 _log = logging.getLogger(__name__)
 
 _SKIP_INIT_CLASS_NAMES = frozenset({"Parameter", "Buffer", "getattr"})
+# A roofline stops on the norm class. ``NormGated`` is also marked as a
+# modeling op, which would otherwise open the eager pow/mean/cast body.
+_ROOFLINE_NORM_CLASS = re.compile(r"(?i)(?:rms|layer|group|batch|instance)norm")
 
 # Sentinel for ``build_block_node(class_overrides=...)``: a submodule a per-layer variant
 # omits entirely (its conditional ``__init__`` leaves the attribute ``None``), so the
@@ -2416,6 +2419,17 @@ def build_block_node(
             label=kernel_step_label(step_details) or "Kernel",
             details=attention_kernel_details(step_details),
             basic=False,
+        )
+
+    # A norm subclass's forward is the reference elementwise chain. The
+    # roofline filter stops on the class so that chain is not costed as
+    # kernel traffic. Detailed diagrams still open it.
+    if basic_ops.roofline and _ROOFLINE_NORM_CLASS.search(class_name or ""):
+        return _leaf_node(
+            attr_name=attr_name,
+            class_name=class_name,
+            forward_order=forward_order,
+            details=details,
         )
 
     if resolve_is_basic(

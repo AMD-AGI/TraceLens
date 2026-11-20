@@ -17,7 +17,8 @@ This utility closes that gap *without* needing trace shapes. It runs TraceLens's
 model-explorer roofline (:func:`...roofline_cli.run_projection`), which derives
 op shapes from the model config, at one or more runtime regimes (decode/prefill,
 batch, context). It maps the dominant unmodeled kernel of each roofline category
-(Attention, MoE, ...) to the matching orchestrator finding by kernel name, then:
+to the matching orchestrator finding by the category the perf report and
+the trace's kernel-name categories give that kernel, then:
 
 - writes ``cache/roofline_augmentation.json`` (the full record), and
 - merges an additive ``roofline`` block onto the matching
@@ -46,30 +47,80 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Substrings (lowercased) in a KERNEL NAME that identify its roofline op
-# category. Name-based, not module-based: a bare projection GEMM launched from
-# an attention module is a GEMM, not the attention core, so matching on the
-# module chain would mis-map it. A GEMM kernel maps to "GEMM" (and is dropped
-# when the roofline has no standalone GEMM category, i.e. projections are folded
-# into the attention/MoE boundary ops).
-_CATEGORY_MATCHERS: dict[str, tuple[str, ...]] = {
-    "Attention": ("rel_attention", "flash_attn", "fmha", "sdpa", "_attn_", "attention"),
-    "MoE": ("fused_moe", "moe_", "_moe", "grouped_gemm", "expert"),
-    "GEMM": ("cijk", "tensile", "cutlass", "::mm", "addmm", "gemm"),
+from TraceLens.PerfModel.torch_op_mapping import categorize_torch_op
+from TraceLens.util import TraceEventUtils
+
+# ``categorize_torch_op`` returns one of these when no rule matches. They are
+# not a roofline category.
+_UNCLASSIFIED = frozenset({"", "other", "unknown", "others"})
+
+# The roofline projection names an attention op ``Attention`` and an MoE op
+# ``MoE``. These are the report categories that are that op.
+_PROJECTION_CATEGORY = {
+    "SDPA_fwd": "Attention",
+    "SDPA_bwd": "Attention",
+    "InferenceAttention": "Attention",
+    "MoE_fused": "MoE",
+    "MoE_unfused": "MoE",
+    "MoE_aux": "MoE",
+    "MoE_comm_fwd": "MoE",
+    "MoE_comm_bwd": "MoE",
+    # The trace labels a ``conv_`` kernel ``Conv``. The projection prices the
+    # same op as CONV_fwd.
+    "Conv": "CONV_fwd",
 }
 
 
-def classify_kernel(kernel_name: str | None, module_chain: Any = None) -> str | None:
-    """Map a trace kernel to a roofline op category by its NAME.
+_SYNTHETIC_OP_SUFFIX = " (Synthetic Op)"
 
-    Attention/MoE win over the generic GEMM bucket. ``module_chain`` is accepted
-    for signature compatibility but intentionally unused — matching on it would
-    mis-map a projection GEMM (launched from an attention module) to Attention."""
-    name = (kernel_name or "").lower()
-    for category in ("Attention", "MoE", "GEMM"):
-        if any(token in name for token in _CATEGORY_MATCHERS[category]):
-            return category
-    return None
+
+def _device_kernel(name: str) -> str:
+    """GPU kernel inside a ``launcher->kernel (Synthetic Op)`` name."""
+    body = (
+        name[: -len(_SYNTHETIC_OP_SUFFIX)]
+        if name.endswith(_SYNTHETIC_OP_SUFFIX)
+        else name
+    )
+    arrow = body.rfind("->")
+    if arrow >= 0:
+        tail = body[arrow + 2 :].strip()
+        if tail:
+            return tail
+    return body
+
+
+def categorize_operation(name: str, kernel_name: str | None = None) -> str | None:
+    """Category the perf report and the trace's kernel walk assign.
+
+    ``categorize_torch_op`` is the report's op categorizer. It reads the op
+    name and, for an ``at::native`` kernel, ``kernel_details``. When that
+    returns no category, the kernel name is labeled with
+    ``JaxOpKeys.category_for_kernel_name``, the same match
+    ``TraceToTree._categorize_gpu_kernel_ops`` uses. That is what puts a
+    Tensile ``Cijk_`` kernel in GEMM. Attention and MoE report labels use the
+    projection's names for those ops. Every other label is returned as the
+    report wrote it.
+    """
+    if not name and not kernel_name:
+        return None
+    op_name = name or kernel_name or ""
+    kernel = kernel_name if kernel_name is not None else _device_kernel(op_name)
+    category = categorize_torch_op(
+        {"name": op_name, "kernel_details": [{"name": kernel}]}
+    )
+    if not category or category.lower() in _UNCLASSIFIED:
+        category = TraceEventUtils.JaxOpKeys.category_for_kernel_name(kernel)
+    if not category or str(category).lower() in _UNCLASSIFIED:
+        return None
+    return _PROJECTION_CATEGORY.get(category, category)
+
+
+def classify_kernel(kernel_name: str | None, module_chain: Any = None) -> str | None:
+    """Category of a kernel. ``module_chain`` is unused."""
+    del module_chain
+    if not kernel_name:
+        return None
+    return categorize_operation(kernel_name)
 
 
 def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, dict]:
@@ -90,9 +141,12 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
                 "bytes": 0.0,
                 "roofline_time_us": 0.0,
                 "bound_time": {},
-                # Per-invocation (one layer, one forward) FLOPs/bytes of the
-                # category's dominant op, used to scale against a trace kernel's
-                # measured per-invocation cost.
+                # Launches in one forward: each projected row is ``instances``
+                # launches of one op (one per layer).
+                "invocations": 0,
+                # Per-invocation FLOPs/bytes of the category's dominant op. Only a
+                # fallback for a rollup that has no invocation count: the
+                # measurement scales the category total by launches/invocations.
                 "flops_per_invocation": 0.0,
                 "bytes_per_invocation": 0.0,
                 "_dominant_flops": -1.0,
@@ -101,6 +155,7 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
         acc["flops"] += op.total_flops or 0.0
         acc["bytes"] += op.total_bytes or 0.0
         acc["roofline_time_us"] += op.total_roofline_time_us or 0.0
+        acc["invocations"] += op.instances or 0
         if op.roofline_bound:
             acc["bound_time"][op.roofline_bound] = acc["bound_time"].get(
                 op.roofline_bound, 0.0
@@ -129,6 +184,7 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
             "bytes": acc["bytes"],
             "flops_per_invocation": acc["flops_per_invocation"],
             "bytes_per_invocation": acc["bytes_per_invocation"],
+            "invocations": acc["invocations"],
             "vs_ridge": (
                 None
                 if ai is None or ridge is None
@@ -141,21 +197,27 @@ def summarize_projection(projection, tp: int, ridge: float | None) -> dict[str, 
 def achieved_from_measurement(
     facts: dict, time_ms: float | None, count: int | None, arch: dict | None
 ) -> dict | None:
-    """Combine a kernel's measured time with the analytical per-invocation
-    FLOPs/bytes to report achieved throughput vs peak -- the measured side of a
-    roofline that the main report would compute from trace Input Dims.
+    """Combine a kernel's measured time with the projected FLOPs and bytes.
 
-    Each of ``count`` invocations is assumed to run the projected per-invocation
-    (one-layer) shape. That holds for a single-regime capture; a mixed-regime
-    one (e.g. an agentic prefill+decode replay) will skew it, which the caller
-    must flag."""
+    The numerator is one forward's cost times ``count / invocations``: how many
+    forwards those launches are. Scaling the forward, not one op, keeps the
+    result right when the category mixes ops of different cost, instead of
+    crediting every launch with the costliest op. A summary with no invocation
+    count falls back to the per-invocation cost times ``count``. Either reading
+    assumes the capture is one regime; a mixed one (an agentic prefill+decode
+    replay) skews it, which the caller must flag."""
     if not time_ms or not count:
         return None
-    fpi = facts.get("flops_per_invocation") or 0.0
-    bpi = facts.get("bytes_per_invocation") or 0.0
+    invocations = facts.get("invocations") or 0
+    if invocations:
+        flops = (facts.get("flops") or 0.0) * count / invocations
+        nbytes = (facts.get("bytes") or 0.0) * count / invocations
+    else:
+        flops = (facts.get("flops_per_invocation") or 0.0) * count
+        nbytes = (facts.get("bytes_per_invocation") or 0.0) * count
     seconds = time_ms / 1000.0
-    achieved_tflops = (fpi * count) / seconds / 1e12 if fpi else None
-    achieved_gbps = (bpi * count) / seconds / 1e9 if bpi else None
+    achieved_tflops = flops / seconds / 1e12 if flops else None
+    achieved_gbps = nbytes / seconds / 1e9 if nbytes else None
     peak_tflops = (arch or {}).get("peak_tflops")
     mem_bw_gbps = (arch or {}).get("mem_bw_gbps")
     # Report utilisation against whichever ceiling the roofline bound selects.
@@ -230,8 +292,9 @@ def _note(
         achieved_txt = (
             f" Measured throughput ≈ {thr} = **{achieved['pct_of_peak']:.1f}% of "
             f"{achieved['ceiling']}** (from the kernel's trace time against the "
-            f"config-derived FLOPs/bytes; assumes every invocation runs the "
-            f"projected {phase}-phase shape, so a mixed-regime capture skews it)."
+            f"config-derived FLOPs/bytes, scaled by launches/invocations so the "
+            f"numerator is the mean launch of the projected {phase}-phase shape; "
+            f"a mixed-regime capture skews it)."
         )
     return (
         f"> **Analytical roofline (model-explorer, config-derived):** the trace "
