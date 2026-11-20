@@ -1002,6 +1002,17 @@ class TestPerfModelExtensions:
         assert model.bytes() is None
         assert stage2.flops() is None
         assert stage2.bytes() is None
+        assert stage2.get_compute_precision() is None
+        assert stage2.get_maf_type() is None
+
+    def test_mla_decode_v4_stage2_skips_bytes_when_partial_is_not_dense(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        strides = [[]] * 17
+        strides[13] = [1, 1, 1, 1]
+        event["args"]["Input Strides"] = strides
+        model = aext.mla_decode_v4_stage2_asm(event)
+        assert model.flops() is not None
+        assert model.bytes() is None
 
     @staticmethod
     def _mqa_logits_event(annotation, rows=4, q_per_block=1):
