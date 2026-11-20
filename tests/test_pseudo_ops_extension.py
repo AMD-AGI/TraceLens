@@ -13,14 +13,13 @@ Tests verify that:
 3. Parent pointers are properly rewired (pseudo ops are in parent chain)
 """
 
-import sys, os, json, pytest, gzip
+import os, json, pytest, gzip
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
 from typing import Dict, List
 from copy import deepcopy
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from example_megatron_extension import (
+from TraceLens.PerfModel.extensions.megatron_perf_model_extensions import (
     _link_checkpoint_fwd_bwd,
     op_category_extension,
     perf_model_extension,

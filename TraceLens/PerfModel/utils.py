@@ -8,23 +8,7 @@
 Utils. for perf. model.
 """
 
-
-def optional_int(value, default=None):
-    """Parse *value* as int, returning *default* when conversion fails."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def optional_float(value, default=0.0):
-    """Parse *value* as float, returning *default* when conversion fails."""
-    if value in ("", "None", None):
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+from TraceLens.util import optional_float, optional_int, parse_bool  # noqa: F401
 
 
 def rates_for_duration(gflops, bytes_moved, time_us):
@@ -256,6 +240,7 @@ def name2bpe(name):
     element (two FP4 values). ``fp4`` is one logical value, half a byte, for
     callers that have already unpacked K.
     """
+
     if name is None:
         return None
     key = str(name).strip().lower().split("::")[-1]
@@ -284,6 +269,10 @@ def scalar_type_bpe(token):
         return None
     return name2bpe(name)
 
+
+# MXFP4 block size: number of FP4 elements that share one E8M0 scale value.
+# Fixed at 32 by the OCP Microscaling spec.
+MXFP4_GROUP_SIZE = 32
 
 # Keys are stored without a namespace, because torch_dtype_map strips one off
 # its input before looking it up. That way "c10::Half" and the already-stripped
@@ -328,17 +317,3 @@ def torch_dtype_map(dtype):
     if dtype is None:
         return None
     return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
-
-
-def parse_bool(input):
-    if isinstance(input, bool):
-        return input
-    if input is None:
-        return False
-    if isinstance(input, str):
-        value = input.strip().lower()
-        if value in {"true", "1"}:
-            return True
-        if value in {"false", "0", ""}:
-            return False
-    return bool(input)
