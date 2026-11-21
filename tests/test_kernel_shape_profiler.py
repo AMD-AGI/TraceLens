@@ -13,6 +13,8 @@ inference, custom-op registration and dispatch, reference patching, and the
 runs in CPU CI (no GPU / sglang / aiter install required).
 """
 
+import functools
+import gc
 import inspect
 import sys
 import types
@@ -52,6 +54,8 @@ def ksp():
 def _hermetic_and_disabled(ksp, monkeypatch):
     """Stub the package walker so enable() imports nothing; disable afterwards."""
     monkeypatch.setattr(ksp, "_force_import_submodules", lambda _prefix: None)
+    # Discovery results are cached per process; each test discovers afresh.
+    monkeypatch.setattr(ksp, "_discovered_entry_points", None)
     yield
     if ksp.is_enabled():
         ksp.disable()
@@ -167,6 +171,18 @@ class TestBuildSchemaFromSig:
         assert schema == "(Tensor x) -> ()"
         assert tensor_params == ["x"]
         assert non_tensor == []
+
+    def test_hints_type_unannotated_tensors(self, ksp):
+        def fn(q, k, sinks=None, flag: bool = False):
+            return None
+
+        schema, tensor_params, non_tensor = ksp._build_schema_from_sig(
+            inspect.signature(fn),
+            hints={"q": "Tensor", "k": "Tensor", "sinks": "Tensor?"},
+        )
+        assert schema == "(Tensor q, Tensor k, Tensor? sinks) -> ()"
+        assert tensor_params == ["q", "k", "sinks"]
+        assert non_tensor == ["flag"]
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +315,29 @@ class TestLauncherHeuristics:
 
         assert ksp._is_likely_kernel_launcher(plain, inspect.signature(plain)) is False
 
+    def test_partial_annotations_fall_back_to_source(self, ksp):
+        # Bare tensors next to an annotated flag: the flag alone must not exclude it.
+        def launcher(x, flag: bool = False):
+            return torch.ops.aten.relu(x)
+
+        assert ksp._is_likely_kernel_launcher(launcher, inspect.signature(launcher))
+
+        def plain(x, flag: bool = False):
+            return x
+
+        assert not ksp._is_likely_kernel_launcher(plain, inspect.signature(plain))
+
+    def test_hinted_function_is_launcher(self, ksp, monkeypatch):
+        def bare(q, k, flag: bool = False):
+            return q
+
+        monkeypatch.setitem(
+            ksp._TENSOR_PARAM_HINTS,
+            (bare.__module__, bare.__qualname__),
+            {"q": "Tensor", "k": "Tensor"},
+        )
+        assert ksp._is_likely_kernel_launcher(bare, inspect.signature(bare))
+
 
 # ---------------------------------------------------------------------------
 # Target resolution & reference patching
@@ -354,7 +393,8 @@ class TestPatchAllReferences:
         monkeypatch.setitem(sys.modules, "fake_ref_a", mod_a)
         monkeypatch.setitem(sys.modules, "fake_ref_b", mod_b)
 
-        patches = ksp._patch_all_references(original, wrapper)
+        index = ksp._index_module_references({id(original)})
+        patches = ksp._patch_all_references(original, wrapper, index)
 
         assert mod_a.f is wrapper
         assert mod_b.g is wrapper
@@ -374,7 +414,79 @@ class TestPatchAllReferences:
         monkeypatch.setitem(sys.modules, "fake_none_mod", None)
         monkeypatch.setitem(sys.modules, "fake_int_mod", 42)
         # Must scan without raising despite the odd entries.
-        ksp._patch_all_references(original, wrapper)
+        index = ksp._index_module_references({id(original)})
+        ksp._patch_all_references(original, wrapper, index)
+
+    def test_skips_reference_rebound_after_indexing(self, ksp, monkeypatch):
+        def original():
+            return "orig"
+
+        def wrapper():
+            return "wrapped"
+
+        def other():
+            return "other"
+
+        mod = types.ModuleType("fake_ref_stale")
+        mod.f = original
+        monkeypatch.setitem(sys.modules, "fake_ref_stale", mod)
+        index = ksp._index_module_references({id(original)})
+        mod.f = other
+
+        assert ksp._patch_all_references(original, wrapper, index) == []
+        assert mod.f is other
+
+
+class TestPatchDecoratorClosures:
+    @staticmethod
+    def _held(ksp, monkeypatch):
+        # ``self.fn = decorator(fn)`` keeps fn only in a closure cell, never in a
+        # module global, so only the closure pass can reach it.
+        name, mod = "fake_closure_mod", _make_kernel_module("fake_closure_mod")
+        monkeypatch.setitem(sys.modules, name, mod)
+        monkeypatch.setattr(ksp, "_KERNEL_ENTRY_POINTS", [(name, "my_kernel")])
+        target = mod.my_kernel
+
+        def decorate(fn):
+            @functools.wraps(fn)
+            def inner(*args, **kwargs):
+                return fn(*args, **kwargs)
+
+            return inner
+
+        return target, decorate(target)
+
+    def test_sees_closures_after_gc_freeze(self, ksp, monkeypatch):
+        # Servers freeze the heap after warmup, hiding it from gc.get_objects().
+        target, held = self._held(ksp, monkeypatch)
+        gc_was_enabled = gc.isenabled()
+        gc.freeze()
+        try:
+            assert not any(o is held for o in gc.get_objects())
+            ksp.enable()
+            assert getattr(
+                held.__closure__[0].cell_contents, "_kernel_shape_wrapper", False
+            )
+            assert gc.get_freeze_count() > 0
+            assert gc.isenabled() is gc_was_enabled
+            ksp.disable()
+            assert held.__closure__[0].cell_contents is target
+        finally:
+            gc.unfreeze()
+
+    def test_rebinds_and_restores_wraps_closure(self, ksp, monkeypatch):
+        target, held = self._held(ksp, monkeypatch)
+        assert held.__closure__[0].cell_contents is target
+
+        ksp.enable()
+        assert getattr(
+            held.__closure__[0].cell_contents, "_kernel_shape_wrapper", False
+        )
+        x, w = torch.ones(2), torch.ones(2)
+        assert torch.allclose(held(x, w, alpha=2.0), x + w * 2.0)
+
+        ksp.disable()
+        assert held.__closure__[0].cell_contents is target
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +658,7 @@ class TestEnableDisable:
         orig = mod.my_kernel
         # Simulate a launcher with no discoverable ``from x import y`` refs so
         # enable() falls back to a direct attribute rebind.
-        monkeypatch.setattr(ksp, "_patch_all_references", lambda _o, _w: [])
+        monkeypatch.setattr(ksp, "_patch_all_references", lambda _o, _w, _i: [])
 
         ksp.enable()
         assert getattr(mod.my_kernel, "_kernel_shape_wrapper", False) is True
@@ -562,6 +674,79 @@ class TestEnableDisable:
 
         ksp.enable()
         assert ksp.is_enabled() is True
+
+
+class TestPrepare:
+    def _install(self, ksp, monkeypatch):
+        name = "fake_prepare_mod"
+        mod = _make_kernel_module(name)
+        monkeypatch.setitem(sys.modules, name, mod)
+        monkeypatch.setattr(ksp, "_KERNEL_ENTRY_POINTS", [])
+        calls = []
+
+        def discover():
+            calls.append(1)
+            return [(name, "my_kernel")]
+
+        monkeypatch.setattr(ksp, "_discover_kernel_entry_points", discover)
+        return mod, calls
+
+    def test_discovery_runs_once_across_windows(self, ksp, monkeypatch):
+        mod, calls = self._install(ksp, monkeypatch)
+        for _ in range(2):
+            ksp.enable()
+            assert getattr(mod.my_kernel, "_kernel_shape_wrapper", False) is True
+            ksp.disable()
+        assert len(calls) == 1
+
+    def test_prepare_builds_without_patching(self, ksp, monkeypatch):
+        mod, calls = self._install(ksp, monkeypatch)
+        orig = mod.my_kernel
+
+        ksp.prepare()
+        assert len(calls) == 1
+        assert mod.my_kernel is orig
+        assert ksp.is_enabled() is False
+
+        ksp.enable()
+        # The window reuses the prepared discovery and wrapper.
+        assert len(calls) == 1
+        assert mod.my_kernel is ksp._built_wrappers["fake_prepare_mod.my_kernel"][0]
+        ksp.disable()
+        assert mod.my_kernel is orig
+
+    def test_prepare_is_noop_while_enabled(self, ksp, monkeypatch):
+        mod, calls = self._install(ksp, monkeypatch)
+        ksp.enable()
+        wrapper = mod.my_kernel
+        ksp.prepare()
+        assert len(calls) == 1
+        assert mod.my_kernel is wrapper
+
+    def test_hinted_launcher_records_shapes(self, ksp, monkeypatch):
+        name = "fake_hinted_mod"
+        mod = types.ModuleType(name)
+
+        def bare_attn(q, k, causal: bool = True):
+            return q + k
+
+        bare_attn.__module__ = name
+        bare_attn.__qualname__ = "bare_attn"
+        mod.bare_attn = bare_attn
+        monkeypatch.setitem(sys.modules, name, mod)
+        monkeypatch.setattr(ksp, "_KERNEL_ENTRY_POINTS", [(name, "bare_attn")])
+        monkeypatch.setitem(
+            ksp._TENSOR_PARAM_HINTS, (name, "bare_attn"), {"q": "Tensor", "k": "Tensor"}
+        )
+
+        ksp.enable()
+        q, k = torch.ones(4, 8), torch.ones(4, 8)
+        with torch.profiler.profile(record_shapes=True) as prof:
+            out = mod.bare_attn(q, k, causal=False)
+        assert torch.allclose(out, q + k)
+        events = [e for e in prof.events() if "fake_hinted_mod_bare_attn" in e.name]
+        assert events, "hinted launcher was not registered as a custom op"
+        assert events[0].input_shapes[:2] == [[4, 8], [4, 8]]
 
 
 # ---------------------------------------------------------------------------
