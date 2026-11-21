@@ -418,7 +418,11 @@ def _check_kernels_dropped_correlation(ctx) -> List[TraceCheck]:
         return []
     dropped = 0
     for uid in tree.runtime_event_uids:
-        event = tree.events_by_uid[uid]
+        # Extensions may prune tree.events / events_by_uid while leaving
+        # runtime_event_uids pointing at removed UIDs; skip those.
+        event = tree.events_by_uid.get(uid)
+        if event is None:
+            continue
         if "launch" not in event.get("name", "").lower():
             continue
         if not event.get("gpu_events"):

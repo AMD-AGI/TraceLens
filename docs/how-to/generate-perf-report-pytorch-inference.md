@@ -533,6 +533,7 @@ Run the tool with `--help` for the complete, version-specific argument list.
 ## Related topics
 
 - [Inference performance analysis in TraceLens](../conceptual/inference-analysis.md)
+- [Inference kernel timeline extension (prefill/decode layer tabs)](../inference_extensions_and_vllm_reports.md)
 - [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 - [Index a corpus of traces](./trace-index.md)
 - [Compare two traces](./compare-traces.md)
