@@ -10,12 +10,17 @@ Tests for the registry-based torch op categorizer.
 
 import pytest
 
+from TraceLens.PerfModel.extensions.perf_model_extensions import (
+    gemm_a16w16_asm,
+    mhc_post,
+)
 from TraceLens.PerfModel.torch_op_mapping import (
     OP_CATEGORY_REGISTRY,
     build_sheet_category_to_op_names,
     categorize_torch_op,
     op_to_perf_model_class_map,
     register_op_categories,
+    resolve_perf_model_class,
 )
 
 
@@ -56,6 +61,8 @@ def _row(name, kernel_details=None):
         ("aiter::topk_softmax", "MoE_aux"),
         ("_C_cache_ops::reshape_and_cache_flash", "InferenceAttention"),
         ("aiter::silu_and_mul", "elementwise"),
+        ("aiter::mhc_post", "mHC"),
+        ("aiter::_opus_gemm_a16w16_launch_raw", "GEMM"),
         ("aten::sum", "reduce"),
         ("triton_per_token_quant_fp8", "triton"),
         ("record_param_comms_alltoall_base", "record_param_comms"),
@@ -64,6 +71,17 @@ def _row(name, kernel_details=None):
 )
 def test_categorize_torch_op_expected_categories(name, expected):
     assert categorize_torch_op(_row(name)) == expected
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("aiter::_opus_gemm_a16w16_launch_raw", gemm_a16w16_asm),
+        ("aiter::mhc_post", mhc_post),
+    ],
+)
+def test_resolve_dsv4_kernel_names(name, expected):
+    assert resolve_perf_model_class(name) is expected
 
 
 @pytest.mark.parametrize(
