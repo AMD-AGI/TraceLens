@@ -84,6 +84,10 @@ def get_pseudo_op_mappings():
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
         "aiter::dynamic_per_group_scaled_quant": perf_model_extensions.per_group_quant,
+        ## Same quant math, but the output and scale dtypes come from the
+        ## ScalarType ordinals in Concrete Inputs rather than the op name.
+        "aiter::per_group_quant_hip": perf_model_extensions.aiter_per_group_quant_hip,
+        "aiter::per_token_quant_hip": perf_model_extensions.aiter_per_token_quant_hip,
         "aiter::fused_add_rmsnorm_pad_": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
         "aiter::mixed_sample_outer_exponential": perf_model_extensions.mixed_sample_outer_exponential,
         "sglang_profiler::fp8_utils_gemm_a8w8_blockscale": perf_model_extensions.gemm_a8w8_blockscale,
@@ -103,6 +107,8 @@ def get_pseudo_op_mappings():
         "vllm::_rocm_aiter_preshuffled_per_token_w8a8_gemm": perf_model_extensions.gemm_a8w8_blockscale,
         "vllm::rocm_unquantized_gemm": perf_model_extensions.vllm_rocm_unquantized_gemm,
         "aiter::gemm_a16w16": perf_model_extensions.gemm_a16w16,
+        ## hipBLASLt GEMM picked by tuned solution index; lm_head in MiniMax.
+        "aiter::_hipb_mm": perf_model_extensions.aiter_hipb_mm,
         "aiter::fused_dynamic_mx_quant_moe_sort_hip": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip,
         "aiter::fused_dynamic_mx_quant_moe_sort_hip_bounded": perf_model_extensions.fused_dynamic_mx_quant_moe_sort_hip_bounded,
         "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
@@ -175,6 +181,7 @@ def get_pseudo_op_mappings():
         "aiter::_opus_moe_stage1_a8w4_fwd_raw": moe_perf_model_extensions.moe_opus_stage1_a8w4,
         "aiter::moe_sorting_opus_fwd": moe_perf_model_extensions.moe_sorting_opus_fwd,
         "vllm::all_reduce": custom_collectives_perf_model_extensions.vllm_all_reduce,
+        "sglang::outplace_all_reduce": custom_collectives_perf_model_extensions.sglang_outplace_all_reduce,
         ## Fused RMSNorm + per-group dynamic FP8 quant.
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
         ## AITER GroupNorm (same math as aten::group_norm, different event layout)

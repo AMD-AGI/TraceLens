@@ -22,6 +22,7 @@ from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
     name2bpe,
     optional_int,
+    scalar_type_bpe,
     torch_dtype_map,
 )
 from TraceLens.TraceUtils.utils.annotation_utils import add_logical_batch_size
@@ -1128,6 +1129,253 @@ class vllm_triton_per_token_group_quant_fp8(GroupQuant):
     def get_compute_precision(self):
         dtype = self.param_details.get("dtype_x")
         return torch_dtype_map(dtype) if dtype else None
+
+
+class aiter_per_group_quant_hip(GroupQuant):
+    """
+    Performance model for aiter::per_group_quant_hip.
+
+    Reference implementation:
+        aiter/csrc/py_itfs_cu/asm_quant.cu     # per_group_quant_hip
+        aiter/ops/quant.py                     # per_group_quant
+
+    Wraps `per_group_quant` (aiter quant.py), which launches the HIP kernel
+    `per_group_quant_hip`: for each row, each contiguous group of `group_size`
+    elements along the last dimension is scaled by its own factor and written
+    narrow. Same work as the quant models above; the difference is that the
+    output and scale dtypes are not in the op name, so they come from the
+    ScalarType ordinals the trace records in Concrete Inputs.
+
+    Signature: per_group_quant_hip(input, out, quant_dtype, group_size,
+                                   shuffle_scale, scale, num_rows, scale_dtype)
+
+    Roofline -- bytes moved:
+        Read  x [M, N] in the trace input dtype (typically BF16)
+        Write x_q [M, N] in the quant dtype
+        Write scales [M, ceil(N / group_size)] in the scale dtype
+
+    Roofline -- FLOPs:
+        Treated as ~6 FLOPs per input element (absmax reduction amortized over
+        groups, reciprocal, multiply, clamp), as for the sibling quant models.
+
+    Expected trace:
+        Input Dims: ((M, N), (), (), (), (), (), (), ()) e.g. ((192, 6144), ...);
+            only `input` is a tensor, the outputs are returned rather than passed
+        Input type: (dtype_x, '', 'Scalar', 'Scalar', 'Scalar', '', 'Scalar', 'Scalar')
+        Concrete Inputs: ('', '', '24', '128', 'True', '', '1', '6'), where [2] is
+            the quant dtype ordinal (24 is float8_e4m3fn), [3] is group_size and
+            [7] is the scale dtype ordinal (6 is float32). An ordinal that does not
+            parse falls back to 1 byte for the output and 4 for the scales.
+    """
+
+    QUANT_DTYPE_IDX = 2
+    GROUP_SIZE_IDX = 3
+    SCALE_DTYPE_IDX = 7
+    DEFAULT_BPE_QUANT = 1
+    DEFAULT_BPE_SCALE = 4
+
+    @classmethod
+    def _group_size(cls, concrete, N):
+        idx = cls.GROUP_SIZE_IDX
+        if idx is None or not 0 <= idx < len(concrete):
+            return N
+        raw = str(concrete[idx]).strip()
+        parsed = optional_int(raw) if raw else None
+        return parsed if parsed else N
+
+    @classmethod
+    def get_param_details(cls, event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        shape_x = tuple(dims[0]) if dims and dims[0] else ()
+        if len(shape_x) >= 2:
+            M, N = prod(shape_x[:-1]), shape_x[-1]
+        elif len(shape_x) == 1:
+            M, N = 1, shape_x[0]
+        else:
+            return {
+                "_no_perf": True,
+                "shape_in1": (),
+                "shape_in2": (),
+                "dtype_in1_in2_out": ("", None, None),
+                "stride_input1": None,
+                "stride_input2": None,
+                "stride_output": None,
+                "shape_out": (),
+            }
+
+        concrete = args.get("Concrete Inputs") or []
+        group_size = max(1, cls._group_size(concrete, N))
+        num_groups = max(1, (N + group_size - 1) // group_size)
+
+        def ordinal_bpe(idx, default):
+            if idx is None or not 0 <= idx < len(concrete):
+                return default
+            return scalar_type_bpe(concrete[idx]) or default
+
+        dtype_x = (args.get("Input type") or ("",))[0]
+        return {
+            "M": M,
+            "N": N,
+            "group_size": group_size,
+            "num_groups": num_groups,
+            "dtype_x": dtype_x,
+            "bpe_quant": ordinal_bpe(cls.QUANT_DTYPE_IDX, cls.DEFAULT_BPE_QUANT),
+            "bpe_scale": ordinal_bpe(cls.SCALE_DTYPE_IDX, cls.DEFAULT_BPE_SCALE),
+            "shape_in1": shape_x,
+            "shape_in2": (),
+            "shape_out": shape_x,
+            "dtype_in1_in2_out": (dtype_x, None, None),
+            "stride_input1": None,
+            "stride_input2": None,
+            "stride_output": None,
+        }
+
+    def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return 6 * self.param_details["M"] * self.param_details["N"]
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_in = name2bpe(p["dtype_x"])
+        if bpe_in is None:
+            return None
+        return (
+            p["M"] * p["N"] * bpe_in
+            + p["M"] * p["N"] * p["bpe_quant"]
+            + p["M"] * p["num_groups"] * p["bpe_scale"]
+        )
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_x")
+        return torch_dtype_map(dtype) if dtype else None
+
+
+class aiter_per_token_quant_hip(aiter_per_group_quant_hip):
+    """
+    Performance model for aiter::per_token_quant_hip.
+
+    Reference implementation:
+        aiter/csrc/py_itfs_cu/asm_quant.cu     # per_token_quant_hip
+
+    The per-token case of aiter_per_group_quant_hip: one scale per row, so the
+    group spans the whole row and there is no group_size operand.
+
+    Signature: per_token_quant_hip(input, out, quant_dtype, scale, num_rows)
+
+    Roofline: as aiter_per_group_quant_hip with num_groups = 1.
+
+    Expected trace:
+        Input Dims: ((M, N), (), (), (), ()) e.g. ((80, 6144), (), (), (), ())
+        Input type: (dtype_x, '', 'Scalar', '', 'Scalar')
+        Concrete Inputs: ('', '', '24', '', '1'), where [2] is the quant dtype
+            ordinal. This signature carries no scale-dtype ordinal, so the
+            scales are priced at the fp32 default; they are one value per row
+            against N of payload, so that moves total bytes by under a percent.
+    """
+
+    GROUP_SIZE_IDX = None
+    SCALE_DTYPE_IDX = None
+
+    @classmethod
+    def _group_size(cls, concrete, N):
+        return N
+
+
+class aiter_hipb_mm(GEMM):
+    """
+    Performance model for aiter::_hipb_mm.
+
+    Reference implementation:
+        aiter/csrc/ck_gemm_a16w16/hipbsolidxgemm.cu   # hipb_mm
+        aiter/ops/gemm_op_a16w16.py                   # hipb_mm wrapper
+
+    A hipBLASLt GEMM selected by a tuned solution index. In the MiniMax-M3.1
+    traces this is the lm_head projection, e.g. [192, 6144] @ [6144, 50016].
+
+    Signature: _hipb_mm(mat1, mat2, solution_index, out, bias, out_dtype,
+                        scaleA, scaleB, scaleOut, ...)
+
+    Roofline -- FLOPs:
+        The inherited GEMM 2 * M * N * K.
+
+    Roofline -- bytes moved:
+        The inherited GEMM read of both operands plus the output write, with
+        the output priced at its own traced dtype when index 3 is present.
+
+    Expected trace:
+        Input Dims: ((M, K), (K, N), (), (M, N), (), (), (), (), (), ())
+            e.g. ((192, 6144), (6144, 50016), (), (192, 50016), ...). Index 3 is
+            the preallocated output, not a bias: it carries the output shape,
+            and the bias operand is left empty in these traces.
+        Input type: (dtype_A, dtype_B, 'Scalar', dtype_out, ...)
+        Input Strides: ((K, 1), (1, K), (), (N, 1), ...); mat2 is column-major
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        types = args.get("Input type") or []
+        strides = args.get("Input Strides") or []
+        A_shape = tuple(dims[0]) if len(dims) > 0 and dims[0] else ()
+        B_shape = tuple(dims[1]) if len(dims) > 1 and dims[1] else ()
+        if len(A_shape) != 2 or len(B_shape) != 2:
+            return {
+                "_no_perf": True,
+                "M": 0,
+                "N": 0,
+                "K": 0,
+                "bias": False,
+                "stride_A": None,
+                "stride_B": None,
+                "dtype_A_B": ("", ""),
+            }
+
+        def stride(i):
+            return tuple(strides[i]) if len(strides) > i and strides[i] else None
+
+        out_dtype = types[3] if len(types) > 3 and dims[3:4] and dims[3] else None
+        return {
+            "M": A_shape[0],
+            "K": A_shape[1],
+            "N": B_shape[1],
+            "bias": False,
+            "stride_A": stride(0),
+            "stride_B": stride(1),
+            "dtype_A_B": (
+                types[0] if types else "",
+                types[1] if len(types) > 1 else "",
+            ),
+            "dtype_out": out_dtype,
+        }
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        bpe_a = name2bpe(p["dtype_A_B"][0])
+        bpe_b = name2bpe(p["dtype_A_B"][1])
+        bpe_out = name2bpe(p["dtype_out"]) if p.get("dtype_out") else bpe_a
+        if None in {bpe_a, bpe_b, bpe_out}:
+            return None
+        return super().bytes(
+            bpe_mat1=bpe_a, bpe_mat2=bpe_b, bpe_bias=bpe_out, bpe_output=bpe_out
+        )
+
+    def flops(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return super().flops()
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for aiter::_hipb_mm is not defined.")
+
+    def bytes_bwd(self, bytes_per_element=None):
+        raise NotImplementedError("Backward pass for aiter::_hipb_mm is not defined.")
 
 
 class aiter_silu_and_mul(UnaryElementwise):

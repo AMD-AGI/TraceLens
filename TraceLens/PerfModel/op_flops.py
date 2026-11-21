@@ -34,6 +34,9 @@ OP_FLOPS_PER_ELEM: dict[str, int] = {
     "clone": 0,
     "embedding": 0,
     "pad": 0,
+    # The fill value is a kernel argument, so the store is all these ops do.
+    "fill": 0,
+    "zero": 0,
     # One arithmetic, compare, or select instruction.
     "add": _ARITH,
     "sub": _ARITH,
