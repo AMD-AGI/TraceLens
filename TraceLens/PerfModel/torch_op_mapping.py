@@ -424,6 +424,12 @@ for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
 for op in ("aten::eq", "aten::ne", "aten::lt", "aten::gt"):
     op_to_perf_model_class_map[op] = perf_model.aten_comparison
+for op in ("aten::fill", "aten::fill_", "aten::zero_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_fill
+for op in ("aten::argmax", "aten::argmin"):
+    op_to_perf_model_class_map[op] = perf_model.aten_argreduce
+for op in ("aten::any", "aten::all"):
+    op_to_perf_model_class_map[op] = perf_model.aten_boolreduce
 for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:

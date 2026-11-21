@@ -3637,6 +3637,20 @@ class aten_to(aten_unary_elementwise):
             self.bpe_out = dest
 
 
+class aten_fill(aten_unary_elementwise):
+    """``aten::fill``, ``aten::fill_``, and ``aten::zero_``: write a constant.
+
+    The constant is a kernel argument, so the store is all these ops do. The
+    inherited read plus write would double the traffic. ``aten::zero_`` is the
+    same kernel with the constant fixed at 0 and takes no scalar operand.
+    """
+
+    def bytes(self):
+        if self.bpe_out is None:
+            return None
+        return self.nelems * self.bpe_out
+
+
 class aten_replication_pad(UnaryElementwise):
     category = "elementwise"
     sheet_category = "UnaryElementwise"
@@ -4096,6 +4110,67 @@ class aten_reduce(Reduce):
             "dtype_in_out": (dtype_in, dtype_out),
             "reduce_type": reduce_type,
         }
+
+
+class aten_argreduce(aten_reduce):
+    """``aten::argmax`` and ``aten::argmin``: reduce to the index of the extremum.
+
+    The same compare-per-element traversal as ``aten::max``, but the output is
+    int64 indices. ``Concrete Inputs[1]`` is the reduced dim and ``[2]`` is
+    keepdim; the trace records both as strings, which the inherited parser
+    skips, so this class reads them itself rather than collapsing every
+    reduction to a single output element.
+    """
+
+    INDEX_DTYPE = "long int"
+
+    @classmethod
+    def get_param_details(cls, event):
+        params = aten_reduce.get_param_details(event)
+        params["dtype_in_out"] = (params["dtype_in_out"][0], cls.INDEX_DTYPE)
+        args = event.get("args") or {}
+        dims = args.get("Input Dims") or []
+        input_shape = tuple(dims[0]) if dims and dims[0] else ()
+        params["num_output_elems"] = cls._output_elems(
+            input_shape, args.get("Concrete Inputs") or []
+        )
+        return params
+
+    @staticmethod
+    def _output_elems(input_shape, concrete):
+        """Rows left after reducing the dim named in ``Concrete Inputs[1]``."""
+        if not input_shape:
+            return 1
+        try:
+            dim = int(str(concrete[1]).strip())
+        except (IndexError, TypeError, ValueError):
+            return 1
+        ndim = len(input_shape)
+        dim = dim if dim >= 0 else ndim + dim
+        if not 0 <= dim < ndim:
+            return 1
+        keepdim = (
+            str(concrete[2]).strip().lower() == "true" if len(concrete) > 2 else False
+        )
+        out_shape = list(input_shape)
+        if keepdim:
+            out_shape[dim] = 1
+        else:
+            out_shape.pop(dim)
+        return prod(tuple(out_shape)) if out_shape else 1
+
+
+class aten_boolreduce(aten_reduce):
+    """``aten::any`` and ``aten::all``: reduce to a bool.
+
+    Same traversal as the other reductions, but the result is a bool whatever
+    the input dtype. The inherited default keeps the input width, which is only
+    right for a bool input.
+    """
+
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
+        self.bpe_out = name2bpe("bool")
 
 
 class GroupedGemm:
