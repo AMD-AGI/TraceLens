@@ -13,6 +13,7 @@ from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem, pow_flops_per_elem
 from .utils import (
     name2bpe,
     optional_float,
+    optional_tensor_passed,
     parse_bool,
     scalar_type_bpe,
     torch_dtype_map,
@@ -4973,8 +4974,7 @@ class BatchNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        # an optional tensor that is not passed shows up as [] in Input Dims
-        is_affine = bool(args_input_dims[2])
+        is_affine = optional_tensor_passed(args_input_dims[2])
         is_training = parse_bool(event["args"]["Concrete Inputs"][5])
         dtype_out = None
         stride_output = None
@@ -5030,7 +5030,7 @@ class BatchNormBwd(Normalization):
         dtype_in = event["args"]["Input type"][input_index]
         stride_input = tuple(event["args"]["Input Strides"][input_index])
         output_mask = [has_output]
-        is_affine = bool(args_input_dims[is_affine_index])
+        is_affine = optional_tensor_passed(args_input_dims[is_affine_index])
         dtype_out = None
         stride_output = None
         return {
@@ -5084,10 +5084,10 @@ class LayerNorm(Normalization):
         # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
         num_channels = prod(parse_list(concrete_inputs[1], int))
-        has_bias = bool(args_input_dims[3])
+        has_bias = optional_tensor_passed(args_input_dims[3])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = bool(args_input_dims[2])
+        is_affine = optional_tensor_passed(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5186,7 +5186,7 @@ class GroupNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = bool(args_input_dims[2])
+        is_affine = optional_tensor_passed(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5223,7 +5223,7 @@ class GroupNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = bool(args_input_dims[4])
+        is_affine = optional_tensor_passed(args_input_dims[4])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5276,7 +5276,7 @@ class InstanceNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = bool(args_input_dims[2])
+        is_affine = optional_tensor_passed(args_input_dims[2])
         # The "use_input_stats" argument means that we need to calculate stats from the batch,
         # effectively the same as how we use training in other cases
         # layernorm actually calls batchnorm and sets is_training to use_input_stats
@@ -5333,7 +5333,7 @@ class RMSNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = bool(args_input_dims[2])
+        is_affine = optional_tensor_passed(args_input_dims[2])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[1], int))
@@ -5395,7 +5395,7 @@ class RMSNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = bool(args_input_dims[4])
+        is_affine = optional_tensor_passed(args_input_dims[4])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[2], int))

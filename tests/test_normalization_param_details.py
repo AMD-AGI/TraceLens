@@ -171,3 +171,13 @@ def test_batch_norm_backward_eval():
 def test_instance_norm_reads_use_input_stats():
     assert InstanceNorm(_instance_norm(True, "True")).param_details["is_training"]
     assert not InstanceNorm(_instance_norm(True, "False")).param_details["is_training"]
+
+
+@pytest.mark.parametrize(
+    "dims, passed",
+    [(None, False), ([], False), ([0], False), ([8], True), ([4, 8], True)],
+)
+def test_optional_tensor_passed(dims, passed):
+    from TraceLens.PerfModel.utils import optional_tensor_passed
+
+    assert optional_tensor_passed(dims) is passed
