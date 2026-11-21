@@ -6,6 +6,7 @@
 
 import csv
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,13 @@ def test_trace_index_append_from_report_and_search(tmp_path):
                 "operation_count": "2",
                 "Kernel Time (us)_sum": "123.5",
                 "Percentage (%)": "80.0",
+                "Pct Roofline_max": "60.0",
+                "Pct Roofline_mean": "55.5",
+                "Pct Roofline_median": "54.0",
+                "Pct Roofline_min": "50.0",
+                "Pct Roofline_std": "2.5",
+                "Roofline Bound": "COMPUTE_BOUND",
+                "Roofline Time (\u00b5s)_first": "8.25",
                 "TFLOPS/s_mean": "98.1",
                 "perf_params": (
                     "{'M': 128, 'N': 64, 'K': 32, 'B': 1, 'bias': False, "
@@ -165,7 +173,9 @@ def test_trace_index_append_from_report_and_search(tmp_path):
 
     rows = execute_read_query(
         db_path,
-        "SELECT name, op_category, kernel_time_sum_us, gpu_kernel_pct "
+        "SELECT name, op_category, kernel_time_sum_us, gpu_kernel_pct, "
+        "pct_roofline_mean, pct_roofline_max, pct_roofline_min, "
+        "roofline_bound, roofline_time_us "
         "FROM unified_perf_rows "
         "ORDER BY source_row",
     )
@@ -174,6 +184,11 @@ def test_trace_index_append_from_report_and_search(tmp_path):
         "op_category": "GEMM",
         "kernel_time_sum_us": 123.5,
         "gpu_kernel_pct": 80.0,
+        "pct_roofline_mean": 55.5,
+        "pct_roofline_max": 60.0,
+        "pct_roofline_min": 50.0,
+        "roofline_bound": "COMPUTE_BOUND",
+        "roofline_time_us": 8.25,
     }
 
     gemm = execute_read_query(db_path, 'SELECT "M", "N", "K", "B" FROM gemm_perf')
@@ -243,6 +258,113 @@ def test_trace_index_append_from_report_and_search(tmp_path):
     search_rows = search_index(db_path, "Cijk", limit=10)
     assert search_rows
     assert search_rows[0]["trace_id"] == trace_id
+
+
+def test_init_schema_backfills_roofline_columns_from_raw_json(tmp_path):
+    """Existing catalogs gain typed roofline columns via ALTER + JSON UPDATE."""
+    db_path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE traces (
+            id INTEGER PRIMARY KEY,
+            tracelens_id TEXT UNIQUE,
+            root TEXT,
+            path TEXT NOT NULL UNIQUE,
+            rel_path TEXT,
+            name TEXT,
+            size_bytes INTEGER,
+            md5 TEXT,
+            format TEXT,
+            rank INTEGER,
+            top_dir TEXT,
+            parent_rel TEXT,
+            should_enrich INTEGER NOT NULL DEFAULT 1,
+            skip_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE unified_perf_rows (
+            id INTEGER PRIMARY KEY,
+            trace_id INTEGER NOT NULL,
+            source_row INTEGER NOT NULL,
+            name TEXT,
+            op_category TEXT,
+            operation_count INTEGER,
+            kernel_time_sum_us REAL,
+            kernel_time_mean_us REAL,
+            kernel_time_median_us REAL,
+            kernel_time_std_us REAL,
+            kernel_time_min_us REAL,
+            kernel_time_max_us REAL,
+            op_duration_us REAL,
+            tflops_mean REAL,
+            tflops_median REAL,
+            tbs_mean REAL,
+            tbs_median REAL,
+            gflops REAL,
+            data_moved_mb REAL,
+            flops_per_byte REAL,
+            compute_spec TEXT,
+            has_perf_model INTEGER,
+            overlap_pct REAL,
+            perf_params_json TEXT,
+            kernel_details_json TEXT,
+            raw_row_json TEXT
+        );
+        CREATE INDEX idx_trace_index_unified_trace ON unified_perf_rows(trace_id);
+        CREATE INDEX idx_trace_index_unified_category ON unified_perf_rows(op_category);
+        CREATE INDEX idx_trace_index_unified_name ON unified_perf_rows(name);
+        """)
+    conn.execute(
+        "INSERT INTO traces(id, path, created_at, updated_at) VALUES (1, 't.json', 'x', 'x')"
+    )
+    conn.execute(
+        "INSERT INTO unified_perf_rows(trace_id, source_row, name, raw_row_json) "
+        "VALUES (1, 0, 'aten::mm', ?)",
+        (
+            json.dumps(
+                {
+                    "Percentage (%)": "12.5",
+                    "Pct Roofline_mean": "55.5",
+                    "Pct Roofline_max": "60.0",
+                    "Pct Roofline_median": "54.0",
+                    "Pct Roofline_min": "50.0",
+                    "Pct Roofline_std": "2.5",
+                    "Roofline Bound": "MEMORY_BOUND",
+                    "Roofline Time (\u00b5s)_first": "8.25",
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SQLiteTraceIndexStore(db_path)
+    try:
+        store.init_schema()
+    finally:
+        store.close()
+
+    cols = table_column_names(db_path, "unified_perf_rows")
+    assert {
+        "gpu_kernel_pct",
+        "pct_roofline_mean",
+        "roofline_bound",
+        "roofline_time_us",
+    }.issubset(cols)
+    rows = execute_read_query(
+        db_path,
+        "SELECT gpu_kernel_pct, pct_roofline_mean, roofline_bound, roofline_time_us "
+        "FROM unified_perf_rows",
+    )
+    assert rows == [
+        {
+            "gpu_kernel_pct": 12.5,
+            "pct_roofline_mean": 55.5,
+            "roofline_bound": "MEMORY_BOUND",
+            "roofline_time_us": 8.25,
+        }
+    ]
 
 
 def test_import_handoff_uses_runner_tracelens_id_and_artifact_paths(tmp_path):
