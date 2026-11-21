@@ -206,6 +206,62 @@ def _fused_qk_rope_reshape_and_cache_kernel(q_ptr, k_ptr, n, BLOCK: tl.constexpr
     assert result.source_file == str(py)
 
 
+def test_not_found_launcher_matches_constexpr_repr_suffix(tmp_path, monkeypatch):
+    # make_kernel_repr appends ``KEY_value`` pairs. The normalizer only strips a
+    # trailing ``_`` + digits, and the substring tier compares the raw def
+    # (leading ``_``) to the stripped symbol, so the specialized name misses.
+    from TraceLens.TraceUtils.kernel_source import triton_pin
+    from TraceLens.TraceUtils.kernel_source.index import reset_index_cache
+
+    monkeypatch.setattr(
+        triton_pin,
+        "is_editable_source",
+        lambda p, *a, **k: str(p).lower().endswith(".py"),
+    )
+    reset_index_cache()
+    py = tmp_path / "gemm_a8w8_blockscale.py"
+    py.write_text(
+        """
+import triton
+import triton.language as tl
+
+@triton.jit
+def gemm(x_ptr, BLOCK: tl.constexpr):
+    tl.store(x_ptr, 1)
+
+@triton.jit
+def _gemm_a8w8_blockscale_kernel(
+    a_ptr, GROUP_K: tl.constexpr, cache_modifier: tl.constexpr,
+):
+    tl.store(a_ptr, 1)
+""",
+        encoding="utf-8",
+    )
+    symbol = (
+        "_gemm_a8w8_blockscale_kernel_GROUP_K_128_GROUP_N_128_"
+        "BLOCK_SIZE_M_128_cache_modifier_CG"
+    )
+    result = resolve_triton_source(
+        kernel_file="Not found",
+        symbol=symbol,
+        search_paths=[str(tmp_path)],
+    )
+    assert result.patchable is True
+    assert result.method == "triton_symbol_index"
+    assert result.source_file == str(py)
+    assert (
+        py.read_text(encoding="utf-8")
+        .splitlines()[result.line - 1]
+        .strip()
+        .startswith("def _gemm_a8w8_blockscale_kernel")
+    )
+    exact = resolve_triton_source(
+        "", symbol=symbol, search_paths=[str(tmp_path)], exact=True
+    )
+    assert exact.method == "triton_symbol_index"
+    assert exact.line == result.line
+
+
 def test_symbol_fallback_exact_rejects_substring_only(tmp_path, monkeypatch):
     root, _py = _fallback_fixture(tmp_path, monkeypatch)
     # "fused_real" is a substring of the def name but not an exact normalized
