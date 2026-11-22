@@ -6471,7 +6471,7 @@ class gemm_fp4_impl(GEMM):
         K_packed = dims[0][1]
         K = K_packed * 2  # Float4_e2m1fn_x2 packs two FP4 values per byte
         N = dims[3][0]
-        has_bias = len(dims[11]) > 0
+        has_bias = len(dims) > 11 and len(dims[11]) > 0
         return {
             "B": 1,
             "M": M,
