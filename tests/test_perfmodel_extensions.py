@@ -33,7 +33,9 @@ from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions imp
     custom_ar_qr_all_reduce,
     sgl_kernel_all_reduce_reg,
     sgl_kernel_qr_all_reduce,
+    record_param_comms_all_reduce,
     sgl_kernel_reg_all_gather_into_tensor,
+    sglang_inplace_all_reduce,
 )
 from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
     BiasedGroupedTopk,
@@ -4404,6 +4406,76 @@ class TestCustomCollectivesPerfModels:
         model = sgl_kernel_reg_all_gather_into_tensor(event)
         assert model.flops() == 0
         assert model.bytes() > 0
+
+    _DDA_TREE = "void meta::comms::ddaAllReduceTreeIpc<__hip_bfloat16, 8, false>(...)"
+    _DDA_FLAT = "void meta::comms::ddaAllReduceFlatIpc<__hip_bfloat16, 8, false>(...)"
+
+    @staticmethod
+    def _record_param_comms_event(collective, dtype, nelems, kernel):
+        return {
+            "args": {
+                "Collective name": collective,
+                "dtype": dtype,
+                "In msg nelems": nelems,
+                "Out msg nelems": nelems,
+            },
+            "kernel_details": [{"name": kernel}],
+        }
+
+    def test_record_param_comms_all_reduce(self):
+        elems = 2048 * 2560
+        model = record_param_comms_all_reduce(
+            self._record_param_comms_event(
+                "allreduce", "BFloat16", elems, self._DDA_TREE
+            )
+        )
+        assert model.flops() == elems
+        assert model.bytes() == (3 * elems + elems // 8) * 2
+        assert (
+            get_pseudo_op_mappings()["record_param_comms"]
+            is record_param_comms_all_reduce
+        )
+
+    def test_record_param_comms_other_collective_unmodeled(self):
+        model = record_param_comms_all_reduce(
+            self._record_param_comms_event("broadcast", "Int", 32, "ncclDevKernel")
+        )
+        with pytest.raises(NotImplementedError):
+            model.flops()
+        with pytest.raises(NotImplementedError):
+            model.bytes()
+
+    def test_sglang_inplace_all_reduce_flat(self):
+        event = {
+            "args": {
+                "Input Dims": [(32, 2560), ()],
+                "Input type": ["c10::BFloat16", ""],
+            },
+            "kernel_details": [{"name": self._DDA_FLAT}],
+        }
+        model = sglang_inplace_all_reduce(event)
+        elems = 32 * 2560
+        assert model.flops() == 8 * elems
+        assert model.bytes() == (8 + 3) * elems * 2
+        assert (
+            get_pseudo_op_mappings()["sglang::inplace_all_reduce"]
+            is sglang_inplace_all_reduce
+        )
+
+    def test_sglang_inplace_all_reduce_unknown_kernel_unmodeled(self):
+        event = {
+            "name": "sglang::inplace_all_reduce",
+            "args": {
+                "Input Dims": [(32, 2560), ()],
+                "Input type": ["c10::BFloat16", ""],
+            },
+            "kernel_details": [{"name": "mscclKernel_Sum_hip_bfloat16_LL_false"}],
+        }
+        model = sglang_inplace_all_reduce(event)
+        with pytest.raises(NotImplementedError):
+            model.flops()
+        with pytest.raises(NotImplementedError):
+            model.bytes()
 
 
 class TestTreePerfInitKwargs:

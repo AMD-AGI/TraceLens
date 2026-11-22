@@ -6,6 +6,15 @@
 
 import re
 
+# Constants
+DDA_ALL_REDUCE_RE = re.compile(r"ddaAllReduce(Flat|Tree)Ipc<[^,]+,\s*(\d+)")
+
+
+def dda_all_reduce_params(kernel_name):
+    """Return (algorithm, num_ranks) templated into a meta::comms DDA all-reduce kernel, or None."""
+    m = DDA_ALL_REDUCE_RE.search(kernel_name)
+    return (m.group(1), int(m.group(2))) if m else None
+
 
 def gemm_name_parser(kernel_name):
     """
