@@ -148,11 +148,11 @@ def sdpa_tile_time_us(perf_model, arch, gemm_time, bwd=False):
     name = type(perf_model).__name__
     if bwd:
         fa = name in ("flash_attention", "flash_attention_backward")
-        bytes = perf_model.bytes_bwd(name2bpe(dtype_A_B))
+        bytes = perf_model.bytes_bwd()
         tile_time = sdpa_bwd_time_us
     else:
         fa = name == "flash_attention"
-        bytes = perf_model.bytes(name2bpe(dtype_A_B))
+        bytes = perf_model.bytes()
         tile_time = sdpa_fwd_time_us
     return tile_time(
         arch,
