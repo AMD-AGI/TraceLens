@@ -82,15 +82,7 @@ def _align_capture_to_graph(capture_events, graph_events):
         while ci < len(capture_events):
             c_event = capture_events[ci]
             ci += 1
-            c_name = _capture_kernel_name(c_event)
-            if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
-                "Memset" in c_event["name"]
-                and ("Memset" in g_name or "fillBuffer" in g_name)
-            ):
-                aligned.append(c_event)
-                matched = True
-                break
-            if c_name == g_name:
+            if _names_match(c_event, g_name):
                 aligned.append(c_event)
                 matched = True
                 break
@@ -145,7 +137,9 @@ def _stream_of(event):
 
 def _names_match(c_event, g_name):
     """Pair a capture dispatch to a graph kernel by name (Memcpy/Memset carry no kernel arg)."""
-    if ("Memcpy" in c_event["name"] and "Memcpy" in g_name) or (
+    if (
+        "Memcpy" in c_event["name"] and ("Memcpy" in g_name or "copyBuffer" in g_name)
+    ) or (
         "Memset" in c_event["name"] and ("Memset" in g_name or "fillBuffer" in g_name)
     ):
         return True

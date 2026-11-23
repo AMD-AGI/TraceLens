@@ -579,6 +579,8 @@ class TestTraceCaptureMergeExperimental:
     def test_names_match_memcpy_and_memset(self):
         capture_memcpy = {"name": "Memcpy HtoD", "args": {}}
         assert _names_match(capture_memcpy, "Memcpy DtoH")
+        capture_graph_memcpy = {"name": "hipMemcpyAsync", "args": {}}
+        assert _names_match(capture_graph_memcpy, "__amd_rocclr_copyBuffer.kd")
         capture_memset = {"name": "Memset", "args": {}}
         assert _names_match(capture_memset, "fillBuffer")
 
