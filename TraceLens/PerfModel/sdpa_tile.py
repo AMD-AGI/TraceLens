@@ -15,7 +15,7 @@ no time.
 
 import math
 
-from .perf_model import SDPA, Softmax
+from .perf_model import Softmax
 from .utils import name2bpe, torch_dtype_map
 
 # Dense SDPA and flash attention. Sparse and linear attention are different
@@ -117,35 +117,38 @@ def standard_attention_time_us(name, params, arch, nbytes, gemm_time=None, bwd=F
     return total
 
 
-def sdpa_tile_time_us(perf_model, arch, gemm_time, bwd=False):
-    """Tile-model time in µs for standard or flash attention, else None.
+def inference_attention_time_us(perf_model, arch, gemm_time, bwd=False):
+    """Tile-model time in µs for a dense inference attention perf model.
 
-    SDPA and flash perf models are timed. So is dense inference attention
-    (paged and varlen flash). Sparse and linear attention are not.
+    Paged and varlen flash attention are timed. Sparse attention and
+    backward are not, and give ``None``.
+    """
+    if arch is None or bwd:
+        return None
+    # DeepSeek-V4 paged decode is sparse even when the class name is not.
+    if any(cls.__name__ == "_V4PagedDecodeBase" for cls in type(perf_model).mro()):
+        return None
+    try:
+        nbytes = perf_model.bytes()
+    except TypeError:
+        nbytes = perf_model.bytes(2)
+    return standard_attention_time_us(
+        type(perf_model).__name__,
+        perf_model.param_details,
+        arch,
+        nbytes,
+        gemm_time=gemm_time,
+    )
+
+
+def sdpa_tile_time_us(perf_model, arch, gemm_time, bwd=False):
+    """Tile-model time in µs for an SDPA or flash attention perf model.
+
+    The caller passes an ``SDPA`` perf model. Inference attention has its own
+    entry point, :func:`inference_attention_time_us`.
     """
     if arch is None:
         return None
-    if not isinstance(perf_model, SDPA):
-        from .extensions.attention_perf_model_extensions import InferenceAttention
-
-        if not isinstance(perf_model, InferenceAttention):
-            return None
-        if bwd:
-            return None
-        # DeepSeek-V4 paged decode is sparse even when the class name is not.
-        if any(cls.__name__ == "_V4PagedDecodeBase" for cls in type(perf_model).mro()):
-            return None
-        try:
-            nbytes = perf_model.bytes()
-        except TypeError:
-            nbytes = perf_model.bytes(2)
-        return standard_attention_time_us(
-            type(perf_model).__name__,
-            perf_model.param_details,
-            arch,
-            nbytes,
-            gemm_time=gemm_time,
-        )
     params = perf_model.param_details
     dtype_A_B = params["dtype_A_B"][0]
     dtype = params.get("simulation_dtype")

@@ -189,8 +189,33 @@ class TestSdpaTile:
 
     def test_only_sdpa_ops_with_an_arch_get_a_time(self):
         gemm_time = lambda *a, **k: 1.0
-        assert sdpa_tile.sdpa_tile_time_us(object(), ARCH, gemm_time) is None
         assert sdpa_tile.sdpa_tile_time_us(_Attention({}), None, gemm_time) is None
+
+    def test_ops_that_are_not_attention_never_reach_the_tile_model(self):
+        with patch.object(sdpa_tile, "sdpa_tile_time_us") as sdpa:
+            with patch.object(sdpa_tile, "inference_attention_time_us") as inference:
+                for pm in (None, object()):
+                    work = _work(category="GEMM", perf_model=pm)
+                    assert sdpa_tile_origami_op_projection(work, ARCH) is None
+        sdpa.assert_not_called()
+        inference.assert_not_called()
+
+    def test_inference_attention_is_timed_by_its_own_entry_point(self):
+        from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+            InferenceAttention,
+        )
+
+        pm = InferenceAttention.__new__(InferenceAttention)
+        work = _work(category="InferenceAttention", perf_model=pm)
+        with patch.object(sdpa_tile, "sdpa_tile_time_us") as sdpa:
+            with patch.object(
+                sdpa_tile, "inference_attention_time_us", return_value=5.0
+            ) as inference:
+                assert sdpa_tile_origami_op_projection(work, ARCH) == {"time_us": 5.0}
+        sdpa.assert_not_called()
+        inference.assert_called_once_with(
+            pm, ARCH, origami_helper.gemm_time_us, bwd=False
+        )
 
     def test_no_gemm_model_gives_no_time(self):
         assert sdpa_tile.tile_gemm_time(ARCH, 4, 8, 16, "bf16") is None
@@ -376,13 +401,19 @@ class TestSdpaTile:
             return 1.0
 
         with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
-            timed = sdpa_tile.sdpa_tile_time_us(_Paged(), arch, gemm_time)
-            widened = sdpa_tile.sdpa_tile_time_us(_BytesNeedWidth(), arch, gemm_time)
+            timed = sdpa_tile.inference_attention_time_us(_Paged(), arch, gemm_time)
+            widened = sdpa_tile.inference_attention_time_us(
+                _BytesNeedWidth(), arch, gemm_time
+            )
         assert timed > 0
         assert widened > 0
-        assert sdpa_tile.sdpa_tile_time_us(_Paged(), arch, gemm_time, bwd=True) is None
         assert (
-            sdpa_tile.sdpa_tile_time_us(_V4PagedDecodeBase(), arch, gemm_time) is None
+            sdpa_tile.inference_attention_time_us(_Paged(), arch, gemm_time, bwd=True)
+            is None
+        )
+        assert (
+            sdpa_tile.inference_attention_time_us(_V4PagedDecodeBase(), arch, gemm_time)
+            is None
         )
 
     def test_sdpa_backward_uses_the_bwd_tile_model(self):

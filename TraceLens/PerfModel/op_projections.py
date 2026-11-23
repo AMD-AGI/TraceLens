@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from . import origami_helper, sdpa_tile
+from .extensions.attention_perf_model_extensions import InferenceAttention
+from .perf_model import SDPA
 from .utils import add_duration_rate_columns, torch_dtype_map
 
 # Built-in labels come first in summaries, in this order; others follow in
@@ -294,12 +296,20 @@ def origami_gemm_op_projection(work, arch):
 def sdpa_tile_origami_op_projection(work, arch):
     """TraceLens's attention tile model (``sdpa_tile.py``), with Origami
     timing each tile GEMM. Origami only models GEMMs; the tiling is
-    TraceLens's own."""
-    return _time_output(
-        sdpa_tile.sdpa_tile_time_us(
-            work.perf_model, arch, origami_helper.gemm_time_us, bwd=work.bwd
+    TraceLens's own. Only SDPA, flash, and dense inference attention ops get
+    a time."""
+    perf_model = work.perf_model
+    if isinstance(perf_model, SDPA):
+        time_us = sdpa_tile.sdpa_tile_time_us(
+            perf_model, arch, origami_helper.gemm_time_us, bwd=work.bwd
         )
-    )
+    elif isinstance(perf_model, InferenceAttention):
+        time_us = sdpa_tile.inference_attention_time_us(
+            perf_model, arch, origami_helper.gemm_time_us, bwd=work.bwd
+        )
+    else:
+        return None
+    return _time_output(time_us)
 
 
 def default_op_projections(enable_origami_gemm=False, enable_origami_sdpa_tile=False):
