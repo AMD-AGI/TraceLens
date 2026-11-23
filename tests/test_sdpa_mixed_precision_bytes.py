@@ -16,9 +16,14 @@ import pytest
 from TraceLens.PerfModel import sdpa_tile
 from TraceLens.PerfModel.perf_model import (
     SDPA,
+    aiter__fmha_v3_backward,
+    aiter__fmha_v3_bwd,
     aiter__fmha_v3_varlen_backward,
+    aiter__fmha_v3_varlen_bwd,
+    aiter__mha_bwd,
     flash_attention,
     flash_attention_backward,
+    flash_attention_varlen_backward,
 )
 
 BF16 = "c10::BFloat16"
@@ -149,3 +154,33 @@ class TestMissingTrace:
         event = _fwd_event()
         event["args"]["Input type"] = types
         assert flash_attention(event).bytes() > 0
+
+
+class TestBackwardBytesForwarding:
+    """Every backward op's ``bytes`` hands both widths to ``bytes_bwd``."""
+
+    @pytest.mark.parametrize(
+        "cls",
+        [
+            flash_attention_backward,
+            flash_attention_varlen_backward,
+            aiter__fmha_v3_backward,
+            aiter__fmha_v3_bwd,
+            aiter__fmha_v3_varlen_bwd,
+            aiter__fmha_v3_varlen_backward,
+            aiter__mha_bwd,
+        ],
+    )
+    def test_bytes_passes_the_query_and_kv_widths_on(self, cls, monkeypatch):
+        calls = []
+
+        def fake_bytes_bwd(self, bytes_per_element=None, kv_bytes_per_element=None):
+            calls.append((bytes_per_element, kv_bytes_per_element))
+            return 123
+
+        monkeypatch.setattr(cls, "bytes_bwd", fake_bytes_bwd)
+        op = cls.__new__(cls)
+
+        assert op.bytes(2, 1) == 123
+        assert op.bytes() == 123
+        assert calls == [(2, 1), (None, None)]

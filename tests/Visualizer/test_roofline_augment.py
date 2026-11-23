@@ -13,6 +13,7 @@ import json
 import pytest
 
 from TraceLens.Visualizer.model_explorer_export.roofline_augment import (
+    categorize_operation,
     achieved_from_measurement,
     augment,
     augment_phases,
@@ -477,3 +478,8 @@ def test_phase_argvs_skips_unresolved_and_builds_one_argv_per_phase():
                 "phases": [{"phase": "train", "batch_size": 1, "seq_len": 1}],
             }
         )
+
+
+def test_an_op_with_no_name_and_no_kernel_has_no_category():
+    assert categorize_operation("") is None
+    assert categorize_operation("", None) is None

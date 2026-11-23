@@ -134,3 +134,8 @@ def test_uncategorized_bucket_is_always_seeded():
         unc in cat
     ), f"Uncategorized bucket missing when all events match a category: {list(cat)}"
     assert cat[unc] == [0, 0], f"expected [0, 0], got {cat[unc]}"
+
+
+def test_an_empty_kernel_name_has_no_category():
+    assert TraceEventUtils.JaxOpKeys.category_for_kernel_name("") is None
+    assert TraceEventUtils.JaxOpKeys.category_for_kernel_name(None) is None

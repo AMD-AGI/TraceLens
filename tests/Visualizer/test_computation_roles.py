@@ -75,3 +75,8 @@ def test_a_kernel_detail_uses_the_report_fallback():
     )
     assert stamp_computation_roles({"nodes": nodes}) == 0
     assert _attr(nodes[0], "role") == "other"
+
+
+def test_a_graph_entry_that_is_not_a_node_is_skipped():
+    nodes = ["stray", None, _node("a", "aten::_scaled_dot_product_flash_attention")]
+    assert stamp_computation_roles({"nodes": nodes}) == 1
