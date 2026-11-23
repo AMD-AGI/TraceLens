@@ -23,6 +23,7 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _pair_capture_roots,
     _preferred_target_mode,
     _resolve_capture_query,
+    _step_annotations,
     find_execution_roots,
     innermost_extend_steps,
 )
@@ -74,6 +75,24 @@ def test_innermost_extend_drops_outer_spec_prefill_wrapper():
     inner = _span(2, "step[EXTEND bs=1 toks=2048 c_sq=2048 c_sqsq=1]", 10, 800)
     plain = _span(3, "step[EXTEND bs=1 toks=512 c_sq=512 c_sqsq=1]", 2000, 300)
     assert [e[UID] for e in innermost_extend_steps([outer, inner, plain])] == [2, 3]
+
+
+def test_innermost_extend_ignores_gpu_annotation_copies():
+    outer = _span(1, "step[EXTEND bs=1 toks=2048 c_sq=2048 c_sqsq=1]", 0, 1000)
+    inner = _span(2, "step[EXTEND bs=1 toks=2048 c_sq=2048 c_sqsq=1]", 10, 800)
+    gpu_outer = dict(outer, **{UID: 11, "cat": "gpu_user_annotation", "ts": 5})
+    gpu_inner = dict(inner, **{UID: 12, "cat": "gpu_user_annotation", "ts": 15})
+    events = [outer, gpu_outer, inner, gpu_inner]
+    assert [e[UID] for e in innermost_extend_steps(events)] == [2]
+    roots = find_execution_roots(SimpleNamespace(events=events))
+    assert [e[UID] for e in roots] == [2]
+
+
+def test_step_annotations_keep_only_cpu_labels():
+    cpu = _span(1, "step[VERIFY bs=8 forward_id=4]", 0, 100)
+    gpu = dict(cpu, **{UID: 2, "cat": "gpu_user_annotation"})
+    other = _span(3, "scheduler.run_batch", 0, 100)
+    assert [e[UID] for e in _step_annotations([gpu, cpu, other])] == [1]
 
 
 def test_step_label_finds_draft_label_inside_draft_extend():

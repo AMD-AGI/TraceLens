@@ -27,6 +27,7 @@ UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 from ..util import GPU_KERNEL_CATEGORIES, extract_rank
 from ..TraceUtils.utils.annotation_utils import (
+    ANNOTATION_CAT,
     SGLANG_RUNNER_BS_PATTERN,
     SPEC_ROLE_DRAFTER,
     SPEC_ROLE_DRAFTER_EXTEND,
@@ -581,13 +582,22 @@ def find_execution_roots(graph_tree):
     return sorted(roots.values(), key=lambda e: e.get("ts", 0))
 
 
+def _step_annotations(events):
+    """CPU ``step[...]`` annotations; GPU-side copies (``gpu_user_annotation``) are skipped."""
+    return [
+        e
+        for e in events
+        if e.get("cat") == ANNOTATION_CAT and e.get("name", "").startswith("step[")
+    ]
+
+
 def innermost_extend_steps(events):
     """``step[EXTEND ...]`` spans that contain no other ``step[EXTEND ...]``."""
     steps = sorted(
         (
             e
-            for e in events
-            if e.get("name", "").startswith("step[EXTEND") and "dur" in e
+            for e in _step_annotations(events)
+            if e["name"].startswith("step[EXTEND") and "dur" in e
         ),
         key=lambda e: (e.get("ts", 0), -e.get("dur", 0)),
     )
@@ -1084,8 +1094,7 @@ def merge_capture_trace_into_graph(
 
     # ── Per-execution-root merge loop ──
     step_events = sorted(
-        (e for e in graph_tree.events if e.get("name", "").startswith("step[")),
-        key=lambda e: e.get("ts", 0),
+        _step_annotations(graph_tree.events), key=lambda e: e.get("ts", 0)
     )
     merge_failed = False
     for (execution_root, graph_roots), spec_batch_size in zip(
