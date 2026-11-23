@@ -1219,6 +1219,126 @@ class mla_decode_v4_asm(InferenceAttention):
         return super().get_maf_type()
 
 
+class sparse_gqa:
+    """
+    Performance model for SGLang's sparse grouped-query attention.
+
+    The kernel is named _sparse_gqa_chunk_prefill and runs for both extend
+    and decode.
+
+    One query token and one KV head group attend the selected keys. The
+    GROUP_SIZE query heads each do a QK and a PV dot against that shared K
+    and V. A query attends min(topk, context) keys: topk is the index-row
+    width, and context is the annotated mean KV length. With no annotation
+    every query is counted at topk.
+
+        _sparse_gqa_chunk_prefill(q, k, v, out, indices, ...)
+
+    Roofline calculation -- FLOPs:
+        FLOPs = 4 * Q * H * D * Ksel
+
+    Roofline calculation -- Bytes:
+        bytes_Q   = Q * H * D * bpe(Q)
+        bytes_KV  = Q * Hkv * Ksel * D * (bpe(K) + bpe(V))
+        bytes_idx = Q * Ksel * index_heads * 4
+        bytes_out = Q * H * D * bpe(out)
+        Total     = bytes_Q + bytes_KV + bytes_idx + bytes_out
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            args = event.get("args") or {}
+            dims = args.get("Input Dims") or []
+            types = args.get("Input type") or []
+            q, k, v, out, indices = dims[:5]
+            if len(q) != 3 or len(k) != 3 or len(v) != 3 or not indices:
+                raise ValueError
+            q_tokens, heads, dim = (int(q[0]), int(q[1]), int(q[2]))
+            kv_heads = int(k[1])
+            topk = int(indices[-1])
+            index_heads = int(indices[1]) if len(indices) == 3 else 1
+            if min(q_tokens, heads, dim, kv_heads, topk) <= 0:
+                raise ValueError
+            selected = topk
+            annotation = event.get("annotation")
+            if annotation:
+                try:
+                    stats = InferenceAttention._parse_chunk_stats(str(annotation))
+                    queries = stats["c_sq"] + stats["g_sq"]
+                    keys = stats["c_sk"] + stats["g_sk"]
+                except (NotImplementedError, ValueError, KeyError, TypeError):
+                    queries = 0
+                if queries > 0:
+                    q_tokens = min(q_tokens, queries)
+                    selected = min(topk, math.ceil(keys / queries))
+            return {
+                "q_tokens": q_tokens,
+                "heads": heads,
+                "kv_heads": kv_heads,
+                "dim": dim,
+                "topk": topk,
+                "selected": selected,
+                "index_heads": index_heads,
+                "dtype_q": types[0] if types else None,
+                "dtype_k": types[1] if len(types) > 1 else None,
+                "dtype_v": types[2] if len(types) > 2 else None,
+                "dtype_out": (
+                    types[3] if len(types) > 3 else (types[0] if types else None)
+                ),
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        return 4 * p["q_tokens"] * p["heads"] * p["dim"] * p["selected"]
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3, 4)):
+            return None
+        bpe_q = name2bpe(str(p["dtype_q"]).lower())
+        bpe_k = name2bpe(str(p["dtype_k"]).lower())
+        bpe_v = name2bpe(str(p["dtype_v"]).lower())
+        bpe_out = name2bpe(str(p["dtype_out"]).lower())
+        if None in (bpe_q, bpe_k, bpe_v, bpe_out):
+            return None
+        q_elems = p["q_tokens"] * p["heads"] * p["dim"]
+        kv_elems = p["q_tokens"] * p["kv_heads"] * p["selected"] * p["dim"]
+        return (
+            q_elems * bpe_q
+            + kv_elems * (bpe_k + bpe_v)
+            + p["q_tokens"] * p["selected"] * p["index_heads"] * 4
+            + q_elems * bpe_out
+        )
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for sparse GQA is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for sparse GQA is not defined.")
+
+    def get_compute_precision(self):
+        dtype = self.param_details.get("dtype_q")
+        return None if self.param_details.get("_no_perf") else torch_dtype_map(dtype)
+
+    def get_maf_type(self):
+        return None if self.param_details.get("_no_perf") else "matrix"
+
+
 class sgl_kernel_fast_topk_transform_fused:
     """
     Performance model for sgl_kernel::fast_topk_transform_fused (DSA indexer
