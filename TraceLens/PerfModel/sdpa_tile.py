@@ -239,7 +239,7 @@ def sdpa_fwd_time_us(
 
     # Flash softmax stays in L1 when the arch names that bandwidth. Without
     # it, the softmax term uses HBM; the tile GEMMs are still Origami's.
-    softmax_in_l1 = force_to_l1 and bool(arch.get("l1_bw_gbps"))
+    softmax_in_l1 = force_to_l1 and "l1_bw_gbps" in arch
     softmax_time = num_waves * Softmax.get_time(
         arch,
         block_N_Q,

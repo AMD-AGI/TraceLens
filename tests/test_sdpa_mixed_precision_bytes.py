@@ -137,6 +137,28 @@ class TestTileModel:
             sdpa_tile.sdpa_fwd_time_us = original
         assert captured["bytes"] == model.bytes()
 
+    def test_forward_flash_needs_no_l1_bandwidth(self):
+        # l1_bw_gbps is only required for backward. A flash forward on an arch
+        # that omits it times its softmax against HBM instead of raising.
+        model = flash_attention(_fwd_event())
+        arch = {
+            "mem_bw_gbps": 5300,
+            "num_cus": 304,
+            "gemm_units_per_cu": 4,
+            "freq_mhz": 2100,
+        }
+
+        def gemm_time(*args, **kwargs):
+            return 1.0
+
+        without_l1 = sdpa_tile.sdpa_tile_time_us(model, arch, gemm_time)
+        with_l1 = sdpa_tile.sdpa_tile_time_us(
+            model, {**arch, "l1_bw_gbps": 100}, gemm_time
+        )
+
+        assert without_l1 > 0
+        assert with_l1 > 0
+
 
 class TestMissingTrace:
     class _NoTrace(SDPA):
