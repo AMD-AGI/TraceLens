@@ -25,7 +25,7 @@ Confirm you have the following before installing TraceLens.
   by the profiling tools that *produce* the traces (for example, `rocprofv3`).
   See the [compatibility matrix](../reference/compatibility.md) for details.
 
-- Python 3.6 or later (3.10 recommended). Confirm your version:
+- Python 3.10 or later. Confirm your version:
 
   ```bash
   python3 --version
