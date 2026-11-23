@@ -14,6 +14,11 @@ output at two. The forward formula, the backward formula, the perf report's
 import pytest
 
 from TraceLens.PerfModel import sdpa_tile
+from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+    InferenceAttention,
+    aiter_fmha_v3_varlen_fwd,
+    pa_sparse_prefill_opus_fwd,
+)
 from TraceLens.PerfModel.perf_model import (
     SDPA,
     aiter__fmha_v3_backward,
@@ -206,3 +211,90 @@ class TestBackwardBytesForwarding:
         assert op.bytes(2, 1) == 123
         assert op.bytes() == 123
         assert calls == [(2, 1), (None, None)]
+
+
+class TestInferenceAttention:
+    """Inference attention takes widths the way ``SDPA`` does.
+
+    Only the cached K and V are read at the KV-cache width. The current chunk
+    is still in the query dtype.
+    """
+
+    _DIMS = dict(B=1, H_Q=8, H_KV=2, d_h_qk=64, d_h_v=64)
+    _DECODE = dict(c_sq=0, c_sk=0, g_sq=1, g_sk=1025)
+
+    def _expected(self, bpe, kv_bpe):
+        return InferenceAttention.bytes_func(
+            *self._DIMS.values(), *self._DECODE.values(), bpe, kv_bpe
+        )
+
+    def _model(self, dtype_q=BF16, dtype_kv=FP8):
+        params = {
+            **self._DIMS,
+            **self._DECODE,
+            "N_Q": 1,
+            "N_KV": 1025,
+            "dtype_Q": dtype_q,
+            "dtype_KV": dtype_kv,
+        }
+
+        class _Decode(InferenceAttention):
+            @staticmethod
+            def get_param_details(event):
+                return params
+
+        return _Decode({})
+
+    def test_the_report_call_reads_each_width_from_the_trace(self):
+        assert self._model().bytes() == self._expected(2, 1)
+
+    def test_an_explicit_width_alone_applies_to_every_tensor(self):
+        assert self._model().bytes(2) == self._expected(2, 2)
+        assert self._model().bytes(1) == self._expected(1, 1)
+
+    def test_an_explicit_kv_width_overrides_only_the_traced_kv_width(self):
+        assert self._model().bytes(kv_bytes_per_element=2) == self._expected(2, 2)
+        assert self._model().bytes(kv_bytes_per_element=1) == self._expected(2, 1)
+
+    def test_both_widths_explicit(self):
+        assert self._model().bytes(2, 1) == self._expected(2, 1)
+        assert self._model().bytes(1, 2) == self._expected(1, 2)
+
+    def test_no_dtype_anywhere_falls_back_to_two_bytes(self):
+        model = self._model(dtype_q=None, dtype_kv=None)
+        assert model.bytes() == self._expected(2, 2)
+
+    def test_a_missing_kv_dtype_is_the_query_dtype(self):
+        assert self._model(dtype_kv=None).bytes() == self._expected(2, 2)
+
+    def test_the_varlen_core_fallback_passes_both_widths_on(self, monkeypatch):
+        calls = []
+
+        class _Core:
+            def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+                calls.append((bytes_per_element, kv_bytes_per_element))
+                return 7
+
+        model = aiter_fmha_v3_varlen_fwd.__new__(aiter_fmha_v3_varlen_fwd)
+        model.param_details = {"_fallback_core": True}
+        monkeypatch.setattr(
+            aiter_fmha_v3_varlen_fwd, "_core_model", lambda self: _Core()
+        )
+
+        assert model.bytes() == 7
+        assert model.bytes(2, 1) == 7
+        assert calls == [(None, None), (2, 1)]
+
+    def test_sparse_prefill_reads_the_cache_at_the_kv_width(self):
+        model = pa_sparse_prefill_opus_fwd.__new__(pa_sparse_prefill_opus_fwd)
+        model.param_details = {
+            "dtype_Q": BF16,
+            "dtype_KV": FP8,
+            "prefill_pairs": 1000,
+            "d_h_v": 64,
+        }
+        model.N_Q, model.H_Q, model.d_h_qk, model.d_h_v = 16, 8, 64, 64
+        qo = 2 * 16 * 8 * 64
+        assert model.bytes() == qo * 2 + 1000 * 64 * 1
+        assert model.bytes(2) == qo * 2 + 1000 * 64 * 2
+        assert model.bytes(kv_bytes_per_element=2) == qo * 2 + 1000 * 64 * 2
