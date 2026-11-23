@@ -57,18 +57,8 @@ _TABLE_COLUMNS = (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="TraceLens_model_roofline_projection",
-        description=(
-            "Project a kernel-by-kernel roofline for a model checkpoint from its "
-            "config and modeling source alone, with no trace or GPU run. Ops are "
-            "costed with TraceLens.PerfModel's analytical FLOPs/bytes formulas; "
-            "ops with no direct formula (embeddings, reshapes, a convolution with "
-            "no weight geometry) are reported as unmodeled rather than silently "
-            "dropped."
-        ),
-    )
+def _add_shape_arguments(parser: argparse.ArgumentParser) -> None:
+    """The model to project and the shape to project it at."""
     parser.add_argument(
         "source",
         nargs="?",
@@ -123,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
             "--batch-size/--seq-len for the same key."
         ),
     )
+
+
+def _add_report_arguments(parser: argparse.ArgumentParser) -> None:
+    """The GPU to bound against, how to time ops, and what to write."""
     parser.add_argument(
         "--gpu-arch-name",
         metavar="NAME",
@@ -177,9 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Rows to print to stdout, ranked by total roofline time (default: 20; 0 for all)",
     )
-    add_model_source_arguments(parser)
-    add_runtime_regime_arguments(parser)
 
+
+def _add_partition_arguments(parser: argparse.ArgumentParser) -> None:
+    """The ``--engine``, ``--tp``, ``--pp`` and ``--ep`` device partitions."""
     partition_group = parser.add_argument_group(
         "device partitions",
         "How many ways to split the model before projecting its roofline. The "
@@ -212,6 +207,25 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Expert-parallel partitions (default: 1).",
     )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="TraceLens_model_roofline_projection",
+        description=(
+            "Project a kernel-by-kernel roofline for a model checkpoint from its "
+            "config and modeling source alone, with no trace or GPU run. Ops are "
+            "costed with TraceLens.PerfModel's analytical FLOPs/bytes formulas; "
+            "ops with no direct formula (embeddings, reshapes, a convolution with "
+            "no weight geometry) are reported as unmodeled rather than silently "
+            "dropped."
+        ),
+    )
+    _add_shape_arguments(parser)
+    _add_report_arguments(parser)
+    add_model_source_arguments(parser)
+    add_runtime_regime_arguments(parser)
+    _add_partition_arguments(parser)
     return parser
 
 

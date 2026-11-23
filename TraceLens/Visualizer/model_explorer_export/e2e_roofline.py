@@ -23,7 +23,7 @@ import sys
 import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms, load_arch
 from TraceLens.PerfModel.torch_op_mapping import (
@@ -70,6 +70,7 @@ _CONCURRENCY_COLORS = ("#4C78A8", "#F58518", "#111111", "#54A24B", "#E45756")
 # than this share of kernel time, both together and one by one.
 _UNMODELED_LIST_SHARE = 0.01
 _UNMODELED_LIST_LIMIT = 10
+_PROFILE_YLABEL = "TFLOP/s per GPU while the operation runs"
 _PHASE_PREFIX = re.compile(r"^(?:prefill|decode)/", re.IGNORECASE)
 _KERNEL_SUFFIX = re.compile(r"\.kd$", re.IGNORECASE)
 
@@ -881,6 +882,17 @@ def _accounted_kernels(
     return kept
 
 
+@dataclass(frozen=True)
+class _JoinContext:
+    """The inputs every series join in ``build_points`` reads, and its warnings."""
+
+    kernels: list[dict[str, Any]]
+    includes: dict[tuple[str, str], tuple[str, ...]]
+    time_overrides_us: dict[tuple[str, str], float]
+    multi_phase: bool
+    warnings: list[str]
+
+
 def build_points(
     regimes: list[Regime],
     kernels: list[dict[str, Any]],
@@ -896,135 +908,185 @@ def build_points(
     summed kernel time and, with it, the launch-scaled numerator: the override
     is the time of one forward.
     """
-    includes = includes or {}
-    time_overrides_us = time_overrides_us or {}
     phases = {regime.phase for regime in regimes}
-    multi_phase = len(phases) > 1
-    points: list[RooflinePoint] = []
     warnings: list[str] = []
+    context = _JoinContext(
+        kernels=kernels,
+        includes=includes or {},
+        time_overrides_us=time_overrides_us or {},
+        multi_phase=len(phases) > 1,
+        warnings=warnings,
+    )
+    points: list[RooflinePoint] = []
     for regime in regimes:
         for spec in series:
             if spec.phase is not None and spec.phase != regime.phase:
                 continue
-            key = (regime.phase, spec.label)
-            override = time_overrides_us.get(key)
-            # End to end in a mixed capture only has phase-tagged kernels, which
-            # are not the whole forward. Require an explicit one-forward time.
-            # Whole model is the attributed kernels, so it is plotted without one.
-            if spec.label == "End to end" and multi_phase and override is None:
-                warnings.append(
-                    f"{spec.label} {regime.phase}: mixed capture has no "
-                    "whole-forward time (pass --time-us)"
-                )
-                continue
-            include = includes.get(key, ())
-            matched = _matched_kernels(
-                kernels,
-                phase=regime.phase,
-                categories=spec.categories,
-                includes=() if spec.label == "Whole model" else include,
-                multi_phase=multi_phase,
-                kernel_name=spec.kernel_name,
-                kernel_shape=spec.kernel_shape,
-            )
-            # An include on Whole model adds unscoped kernels to the phase-tagged
-            # ones. On any other series the include is the whole match.
-            if spec.label == "Whole model" and include:
-                seen = {kernel["name"] for kernel in matched}
-                for kernel in _matched_kernels(
-                    kernels,
-                    phase=regime.phase,
-                    categories=spec.categories,
-                    includes=include,
-                    multi_phase=multi_phase,
-                ):
-                    if kernel["name"] not in seen:
-                        matched.append(kernel)
-                        seen.add(kernel["name"])
-            if spec.kernel_name is not None:
-                if not matched:
-                    continue
-                if not all(_has_profile_cost(kernel) for kernel in matched):
-                    warnings.append(f"{spec.label} {regime.phase}: no profile FLOPs")
-                    continue
-                time_us = (
-                    override
-                    if override is not None
-                    else sum(kernel["time_us"] for kernel in matched)
-                )
-                total_flops = sum(float(kernel["flops"]) for kernel in matched)
-                total_bytes = sum(float(kernel["bytes"]) for kernel in matched)
-                if time_us <= 0 or total_flops <= 0 or total_bytes <= 0:
-                    continue
-                points.append(
-                    RooflinePoint(
-                        series=spec.label,
-                        phase=regime.phase,
-                        concurrency=regime.concurrency,
-                        arithmetic_intensity=total_flops / total_bytes,
-                        achieved_tflops=total_flops / (time_us * 1e-6) / 1e12,
-                        flops=total_flops,
-                        bytes=total_bytes,
-                        time_us=time_us,
-                        cost_source="profile",
-                    )
-                )
-                continue
-            one_forward = override is not None
-            if one_forward:
-                time_us = override
-            else:
-                accounted = _accounted_kernels(matched, regime.ops, spec.categories)
-                time_us = sum(kernel["time_us"] for kernel in accounted)
-                if (
-                    spec.label == "Whole model"
-                    and multi_phase
-                    and any(
-                        kernel_phase(kernel["name"]) is None
-                        and not is_communication(kernel["name"])
-                        for kernel in kernels
-                    )
-                    and not include
-                ):
-                    warnings.append(
-                        f"Whole model {regime.phase}: unscoped kernels are left "
-                        "out of a mixed capture (pass --kernels)"
-                    )
-            if time_us <= 0:
-                # No costed kernel. Kernels that ran with no perf-model shape
-                # are left off the figure rather than priced from the static
-                # graph. A series that matched no kernel at all is missing its
-                # profile time.
-                ran = any(float(kernel["time_us"]) > 0 for kernel in matched)
-                bucket_flops, bucket_bytes, _, _ = _bucket_cost(
-                    regime.ops, spec.categories
-                )
-                if not ran and bucket_flops > 0 and bucket_bytes > 0:
-                    warnings.append(f"{spec.label} {regime.phase}: no profile time")
-                continue
-            total_flops, total_bytes, source = _series_work(
-                matched,
-                regime.ops,
-                spec.categories,
-                one_forward=one_forward,
-            )
-            if total_flops <= 0 or total_bytes <= 0:
-                continue
-            points.append(
-                RooflinePoint(
-                    series=spec.label,
-                    phase=regime.phase,
-                    concurrency=regime.concurrency,
-                    arithmetic_intensity=total_flops / total_bytes,
-                    achieved_tflops=total_flops / (time_us * 1e-6) / 1e12,
-                    flops=total_flops,
-                    bytes=total_bytes,
-                    time_us=time_us,
-                    cost_source=source,
-                )
-            )
+            point = _series_point(context, regime, spec)
+            if point is not None:
+                points.append(point)
     points = _drop_whole_model_matching_end_to_end(points, warnings)
     return points, warnings
+
+
+def _roofline_point(
+    label: str,
+    regime: Regime,
+    flops: float,
+    nbytes: float,
+    time_us: float,
+    source: str,
+) -> RooflinePoint:
+    """The point for ``flops`` and ``nbytes`` of work that ran in ``time_us``."""
+    return RooflinePoint(
+        series=label,
+        phase=regime.phase,
+        concurrency=regime.concurrency,
+        arithmetic_intensity=flops / nbytes,
+        achieved_tflops=flops / (time_us * 1e-6) / 1e12,
+        flops=flops,
+        bytes=nbytes,
+        time_us=time_us,
+        cost_source=source,
+    )
+
+
+def _series_point(
+    context: _JoinContext, regime: Regime, spec: Series
+) -> RooflinePoint | None:
+    """One series at one regime, or None when it has nothing to draw."""
+    key = (regime.phase, spec.label)
+    override = context.time_overrides_us.get(key)
+    # End to end in a mixed capture only has phase-tagged kernels, which
+    # are not the whole forward. Require an explicit one-forward time.
+    # Whole model is the attributed kernels, so it is plotted without one.
+    if spec.label == "End to end" and context.multi_phase and override is None:
+        context.warnings.append(
+            f"{spec.label} {regime.phase}: mixed capture has no "
+            "whole-forward time (pass --time-us)"
+        )
+        return None
+    include = context.includes.get(key, ())
+    matched = _series_kernels(context, regime.phase, spec, include)
+    if spec.kernel_name is not None:
+        return _top_kernel_point(context, regime, spec, matched, override)
+    return _category_point(context, regime, spec, matched, override, include)
+
+
+def _series_kernels(
+    context: _JoinContext, phase: str, spec: Series, include: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """The profile kernels that implement ``spec`` in ``phase``."""
+    matched = _matched_kernels(
+        context.kernels,
+        phase=phase,
+        categories=spec.categories,
+        includes=() if spec.label == "Whole model" else include,
+        multi_phase=context.multi_phase,
+        kernel_name=spec.kernel_name,
+        kernel_shape=spec.kernel_shape,
+    )
+    # An include on Whole model adds unscoped kernels to the phase-tagged
+    # ones. On any other series the include is the whole match.
+    if spec.label == "Whole model" and include:
+        seen = {kernel["name"] for kernel in matched}
+        for kernel in _matched_kernels(
+            context.kernels,
+            phase=phase,
+            categories=spec.categories,
+            includes=include,
+            multi_phase=context.multi_phase,
+        ):
+            if kernel["name"] not in seen:
+                matched.append(kernel)
+                seen.add(kernel["name"])
+    return matched
+
+
+def _top_kernel_point(
+    context: _JoinContext,
+    regime: Regime,
+    spec: Series,
+    matched: list[dict[str, Any]],
+    override: float | None,
+) -> RooflinePoint | None:
+    """A top-kernel marker: the kernel's own profile FLOPs over its time."""
+    if not matched:
+        return None
+    if not all(_has_profile_cost(kernel) for kernel in matched):
+        context.warnings.append(f"{spec.label} {regime.phase}: no profile FLOPs")
+        return None
+    time_us = (
+        override
+        if override is not None
+        else sum(kernel["time_us"] for kernel in matched)
+    )
+    total_flops = sum(float(kernel["flops"]) for kernel in matched)
+    total_bytes = sum(float(kernel["bytes"]) for kernel in matched)
+    if time_us <= 0 or total_flops <= 0 or total_bytes <= 0:
+        return None
+    return _roofline_point(
+        spec.label, regime, total_flops, total_bytes, time_us, "profile"
+    )
+
+
+def _leaves_out_unscoped(
+    context: _JoinContext, spec: Series, include: tuple[str, ...]
+) -> bool:
+    """True when a mixed capture's Whole model drops kernels with no phase tag."""
+    return (
+        spec.label == "Whole model"
+        and context.multi_phase
+        and any(
+            kernel_phase(kernel["name"]) is None
+            and not is_communication(kernel["name"])
+            for kernel in context.kernels
+        )
+        and not include
+    )
+
+
+def _category_point(
+    context: _JoinContext,
+    regime: Regime,
+    spec: Series,
+    matched: list[dict[str, Any]],
+    override: float | None,
+    include: tuple[str, ...],
+) -> RooflinePoint | None:
+    """A category, Whole model, or End to end marker from the costed kernels."""
+    one_forward = override is not None
+    if one_forward:
+        time_us = override
+    else:
+        accounted = _accounted_kernels(matched, regime.ops, spec.categories)
+        time_us = sum(kernel["time_us"] for kernel in accounted)
+        if _leaves_out_unscoped(context, spec, include):
+            context.warnings.append(
+                f"Whole model {regime.phase}: unscoped kernels are left "
+                "out of a mixed capture (pass --kernels)"
+            )
+    if time_us <= 0:
+        # No costed kernel. Kernels that ran with no perf-model shape
+        # are left off the figure rather than priced from the static
+        # graph. A series that matched no kernel at all is missing its
+        # profile time.
+        ran = any(float(kernel["time_us"]) > 0 for kernel in matched)
+        bucket_flops, bucket_bytes, _, _ = _bucket_cost(regime.ops, spec.categories)
+        if not ran and bucket_flops > 0 and bucket_bytes > 0:
+            context.warnings.append(f"{spec.label} {regime.phase}: no profile time")
+        return None
+    total_flops, total_bytes, source = _series_work(
+        matched,
+        regime.ops,
+        spec.categories,
+        one_forward=one_forward,
+    )
+    if total_flops <= 0 or total_bytes <= 0:
+        return None
+    return _roofline_point(
+        spec.label, regime, total_flops, total_bytes, time_us, source
+    )
 
 
 def _same_measurement(left: RooflinePoint, right: RooflinePoint) -> bool:
@@ -1286,20 +1348,33 @@ def model_coverage_note(coverage: ModelCoverage) -> str:
     return "\n".join(wrapped)
 
 
-def plot_e2e_roofline(
-    points: list[RooflinePoint],
-    arch: dict[str, Any],
-    regimes: list[Regime],
-    *,
-    title: str,
-    output_path: Path,
-    series: tuple[Series, ...] = DEFAULT_SERIES,
-    kernels: list[dict[str, Any]] | None = None,
-    ylabel: str = "TFLOP/s per GPU while the operation runs",
-):
-    """Draw the log-log roofline and write it to ``output_path``."""
-    import matplotlib.pyplot as plt
+@dataclass(frozen=True)
+class _RoofFrame:
+    """The roofs the arch lists and the axis limits the plot draws them in.
 
+    ``hardware`` holds ``(key, label, peak, linestyle, color)`` per roof, in
+    ``_HARDWARE_ROOFS`` order.
+    """
+
+    bandwidth: float
+    hardware: list[tuple[str, str, float, str, str]]
+    x_lo: float
+    x_hi: float
+    y_lo: float
+    y_hi: float
+
+    @property
+    def ordered(self) -> list[tuple[str, str, float, str, str]]:
+        """The roofs, lowest peak first."""
+        return sorted(self.hardware, key=lambda item: item[2])
+
+    @property
+    def lowest_ridge(self) -> float:
+        return self.ordered[0][2] / self.bandwidth
+
+
+def _roof_frame(points: list[RooflinePoint], arch: dict[str, Any]) -> _RoofFrame:
+    """The arch's matrix roofs, and limits that show them and every point."""
     bandwidth = bandwidth_tb_s(arch)
     peaks = arch.get("max_achievable_tflops") or {}
     hardware = [
@@ -1320,45 +1395,57 @@ def plot_e2e_roofline(
     x_hi = max(
         max(intensities) * 5.0, max(peak / bandwidth for peak in peak_values) * 5.0
     )
-    y_lo = min(min(rates) / 5.0, bandwidth * x_lo)
-    y_hi = max(max(rates) * 5.0, max(peak_values) * 1.4)
+    return _RoofFrame(
+        bandwidth=bandwidth,
+        hardware=hardware,
+        x_lo=x_lo,
+        x_hi=x_hi,
+        y_lo=min(min(rates) / 5.0, bandwidth * x_lo),
+        y_hi=max(max(rates) * 5.0, max(peak_values) * 1.4),
+    )
 
-    fig, ax = plt.subplots(figsize=(11, 8))
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlim(x_lo, x_hi)
-    ax.set_ylim(y_lo, y_hi)
-    ax.grid(True, which="both", linestyle="--", linewidth=0.4, color="0.85")
 
+def _diagonal_steps(frame: _RoofFrame) -> Iterator[tuple[float, float, str, str]]:
+    """``(start, ridge, linestyle, color)`` of each faster peak's diagonal.
+
+    Each peak above the lowest owns the bandwidth diagonal from the previous
+    ridge up to its own. A peak whose ridge is not past the previous owns none.
+    """
+    previous = frame.lowest_ridge
+    for _key, _label, peak, linestyle, color in frame.ordered[1:]:
+        ridge = peak / frame.bandwidth
+        if ridge <= previous:
+            continue
+        yield previous, ridge, linestyle, color
+        previous = ridge
+
+
+def _draw_hardware_roofs(ax: Any, frame: _RoofFrame) -> None:
+    """The bandwidth diagonal and each compute roof at its full peak."""
+    bandwidth = frame.bandwidth
+    lowest_ridge = frame.lowest_ridge
     # Below the lowest ridge every peak shares the bandwidth diagonal, drawn
     # solid. Each faster peak then owns the diagonal up to its own ridge, in
     # that peak's linestyle: dash-dot for fp8, dashed for fp4.
-    ordered = sorted(hardware, key=lambda item: item[2])
-    lowest_ridge = ordered[0][2] / bandwidth
     ax.plot(
-        [x_lo, lowest_ridge],
-        [bandwidth * x_lo, bandwidth * lowest_ridge],
+        [frame.x_lo, lowest_ridge],
+        [bandwidth * frame.x_lo, bandwidth * lowest_ridge],
         color="0.45",
         linewidth=1.6,
         label=f"Bandwidth roof, {_fmt_number(bandwidth)} TB/s",
     )
-    previous = lowest_ridge
-    for _key, _label, peak, linestyle, color in ordered[1:]:
-        ridge = peak / bandwidth
-        if ridge <= previous:
-            continue
+    for start, ridge, linestyle, color in _diagonal_steps(frame):
         ax.plot(
-            [previous, ridge],
-            [bandwidth * previous, bandwidth * ridge],
+            [start, ridge],
+            [bandwidth * start, bandwidth * ridge],
             color=color,
             linestyle=linestyle,
             linewidth=1.6,
         )
-        previous = ridge
-    for _key, label, peak, linestyle, color in hardware:
+    for _key, label, peak, linestyle, color in frame.hardware:
         ridge = ridge_flops_per_byte(peak, bandwidth)
         ax.plot(
-            [ridge, x_hi],
+            [ridge, frame.x_hi],
             [peak, peak],
             color=color,
             linestyle=linestyle,
@@ -1368,46 +1455,52 @@ def plot_e2e_roofline(
                 f"ridge {_fmt_number(ridge)} FLOP/byte"
             ),
         )
-    # A lower peak with the same bandwidth would only move the knee left
-    # along the roof already drawn. Scale the diagonal with the peak so each
-    # fraction has its own slope, in the same linestyle as the full roof.
-    for fraction, gray in _PEAK_FRACTIONS:
-        scaled = fraction * bandwidth
-        fraction_label = f"{fraction * 100:.0f}% of peak"
-        if lowest_ridge > x_lo:
-            ax.plot(
-                [x_lo, lowest_ridge],
-                [scaled * x_lo, scaled * lowest_ridge],
-                color=gray,
-                linewidth=0.7,
-                zorder=1,
-                label=fraction_label,
-            )
-        previous = lowest_ridge
-        for _key, _label, peak, linestyle, _color in ordered[1:]:
-            ridge = peak / bandwidth
-            if ridge <= previous:
-                continue
-            ax.plot(
-                [previous, ridge],
-                [scaled * previous, scaled * ridge],
-                color=gray,
-                linestyle=linestyle,
-                linewidth=0.7,
-                zorder=1,
-            )
-            previous = ridge
-        for _key, _label, peak, linestyle, _color in hardware:
-            ridge = ridge_flops_per_byte(peak, bandwidth)
-            ax.plot(
-                [max(ridge, x_lo), x_hi],
-                [fraction * peak, fraction * peak],
-                color=gray,
-                linestyle=linestyle,
-                linewidth=0.7,
-                zorder=1,
-            )
 
+
+def _draw_peak_fraction(ax: Any, frame: _RoofFrame, fraction: float, gray: str) -> None:
+    """Every roof scaled to ``fraction`` of its peak, in ``gray``.
+
+    A lower peak with the same bandwidth would only move the knee left along
+    the roof already drawn. Scale the diagonal with the peak so each fraction
+    has its own slope, in the same linestyle as the full roof.
+    """
+    scaled = fraction * frame.bandwidth
+    x_lo, x_hi = frame.x_lo, frame.x_hi
+    lowest_ridge = frame.lowest_ridge
+    if lowest_ridge > x_lo:
+        ax.plot(
+            [x_lo, lowest_ridge],
+            [scaled * x_lo, scaled * lowest_ridge],
+            color=gray,
+            linewidth=0.7,
+            zorder=1,
+            label=f"{fraction * 100:.0f}% of peak",
+        )
+    for start, ridge, linestyle, _color in _diagonal_steps(frame):
+        ax.plot(
+            [start, ridge],
+            [scaled * start, scaled * ridge],
+            color=gray,
+            linestyle=linestyle,
+            linewidth=0.7,
+            zorder=1,
+        )
+    for _key, _label, peak, linestyle, _color in frame.hardware:
+        ridge = ridge_flops_per_byte(peak, frame.bandwidth)
+        ax.plot(
+            [max(ridge, x_lo), x_hi],
+            [fraction * peak, fraction * peak],
+            color=gray,
+            linestyle=linestyle,
+            linewidth=0.7,
+            zorder=1,
+        )
+
+
+def _draw_blend_roofs(
+    ax: Any, frame: _RoofFrame, regimes: list[Regime], peaks: dict[str, float]
+) -> None:
+    """One blended end-to-end roof per concurrency whose mix spans specs."""
     seen_blend: set[int] = set()
     for regime in regimes:
         if regime.concurrency in seen_blend:
@@ -1420,14 +1513,14 @@ def plot_e2e_roofline(
         if len(shares) < 2:
             continue
         seen_blend.add(regime.concurrency)
-        ridge = ridge_flops_per_byte(peak, bandwidth)
+        ridge = ridge_flops_per_byte(peak, frame.bandwidth)
         other = max(
             (share, spec) for spec, share in shares.items() if spec != "matrix_bf16"
         )
         share, spec = other
         short = spec.removeprefix("matrix_")
         ax.plot(
-            [max(ridge, x_lo), x_hi],
+            [max(ridge, frame.x_lo), frame.x_hi],
             [peak, peak],
             linestyle="-.",
             linewidth=1.0,
@@ -1438,11 +1531,23 @@ def plot_e2e_roofline(
             ),
         )
 
+
+def _concurrency_colors(points: list[RooflinePoint]) -> dict[int, str]:
+    """A color per concurrency on the plot, keyed in ascending order."""
     concurrencies = sorted({point.concurrency for point in points})
-    colors = {
+    return {
         concurrency: _CONCURRENCY_COLORS[index % len(_CONCURRENCY_COLORS)]
         for index, concurrency in enumerate(concurrencies)
     }
+
+
+def _draw_points(
+    ax: Any,
+    points: list[RooflinePoint],
+    series: tuple[Series, ...],
+    colors: dict[int, str],
+) -> dict[str, list[RooflinePoint]]:
+    """Scatter every point in its series marker. Returns the points by series."""
     by_series: dict[str, list[RooflinePoint]] = {}
     for point in points:
         by_series.setdefault(point.series, []).append(point)
@@ -1467,16 +1572,24 @@ def plot_e2e_roofline(
                 linewidths=1.6,
                 zorder=3,
             )
+    return by_series
 
-    handles, labels = ax.get_legend_handles_labels()
-    # The points are {prefill, decode} x {attention, whole model, end to end}.
-    # Fill is the phase. The marker is the series.
-    families: list[tuple[str, str]] = []
+
+def _series_family(spec: Series) -> str:
+    """The legend family: both attention phases are one, others are their label."""
+    return "Attention" if spec.categories == ("Attention",) else spec.label
+
+
+def _legend_families(
+    series: tuple[Series, ...], by_series: dict[str, list[RooflinePoint]]
+) -> list[tuple[str, str | tuple[int, int, int]]]:
+    """``(family, marker)`` per family with a point, End to end first."""
+    families: list[tuple[str, str | tuple[int, int, int]]] = []
     seen_families: set[str] = set()
     for spec in series:
         if spec.label not in by_series:
             continue
-        family = "Attention" if spec.categories == ("Attention",) else spec.label
+        family = _series_family(spec)
         if family in seen_families:
             continue
         seen_families.add(family)
@@ -1484,16 +1597,32 @@ def plot_e2e_roofline(
     # End to end is the whole forward, so its key entry leads the markers,
     # ahead of the per-kernel and per-category series. Stable otherwise.
     families.sort(key=lambda item: item[0] != "End to end")
+    return families
+
+
+def _add_family_keys(
+    handles: list[Any],
+    labels: list[str],
+    series: tuple[Series, ...],
+    by_series: dict[str, list[RooflinePoint]],
+    points: list[RooflinePoint],
+    colors: dict[int, str],
+) -> None:
+    """Append a marker swatch per series family and phase that has a point.
+
+    The points are {prefill, decode} x {attention, whole model, end to end}.
+    Fill is the phase. The marker is the series.
+    """
+    from matplotlib.lines import Line2D
+
+    series_by_label = {spec.label: spec for spec in series}
     point_family = {
-        label: (
-            "Attention"
-            if series_by_label[label].categories == ("Attention",)
-            else label
-        )
+        label: _series_family(series_by_label[label])
         for label in by_series
         if label in series_by_label
     }
-    for family, marker in families:
+    concurrencies = list(colors)
+    for family, marker in _legend_families(series, by_series):
         for phase in ("prefill", "decode"):
             if not any(
                 point.phase == phase and point_family.get(point.series) == family
@@ -1504,7 +1633,7 @@ def plot_e2e_roofline(
             # concurrencies keep gray swatches and a separate color key.
             ink = colors[concurrencies[0]] if len(concurrencies) == 1 else "0.2"
             handles.append(
-                plt.Line2D(
+                Line2D(
                     [],
                     [],
                     marker=marker,
@@ -1515,20 +1644,100 @@ def plot_e2e_roofline(
                 )
             )
             labels.append(f"{family}, {phase}")
+
+
+def _add_concurrency_keys(
+    handles: list[Any], labels: list[str], colors: dict[int, str]
+) -> None:
+    """Append a color swatch per concurrency when the plot has more than one."""
+    from matplotlib.lines import Line2D
+
     # A single concurrency is the only color on the plot, so naming it adds nothing.
-    for concurrency in concurrencies if len(concurrencies) > 1 else ():
+    if len(colors) < 2:
+        return
+    for concurrency, color in colors.items():
         handles.append(
-            plt.Line2D(
+            Line2D(
                 [],
                 [],
                 marker="o",
                 linestyle="None",
-                markerfacecolor=colors[concurrency],
-                markeredgecolor=colors[concurrency],
+                markerfacecolor=color,
+                markeredgecolor=color,
                 markersize=8,
             )
         )
         labels.append(f"Concurrency {concurrency}")
+
+
+def _figure_note(
+    points: list[RooflinePoint],
+    series: tuple[Series, ...],
+    regimes: list[Regime],
+    kernels: list[dict[str, Any]] | None,
+) -> str | None:
+    """The caption under the legend: drawn kernel share, else model coverage."""
+    share = (
+        figure_kernel_time_share(points, series, kernels)
+        if kernels is not None
+        else None
+    )
+    if share is not None:
+        return figure_kernel_note(share)
+    coverage = model_coverage(regimes, kernels) if kernels else None
+    return model_coverage_note(coverage) if coverage is not None else None
+
+
+def _place_note_under_legend(fig: Any, legend: Any, note: str) -> None:
+    """Write ``note`` just below the legend, which sits below the axes."""
+    fig.canvas.draw()
+    below = legend.get_window_extent(fig.canvas.get_renderer())
+    below = below.transformed(fig.transFigure.inverted())
+    fig.text(
+        0.5,
+        below.y0 - 0.012,
+        note,
+        ha="center",
+        va="top",
+        fontsize=8,
+        color="0.2",
+        linespacing=1.4,
+    )
+
+
+def plot_e2e_roofline(
+    points: list[RooflinePoint],
+    arch: dict[str, Any],
+    regimes: list[Regime],
+    *,
+    title: str,
+    output_path: Path,
+    series: tuple[Series, ...] = DEFAULT_SERIES,
+    kernels: list[dict[str, Any]] | None = None,
+    ylabel: str = _PROFILE_YLABEL,
+):
+    """Draw the log-log roofline and write it to ``output_path``."""
+    import matplotlib.pyplot as plt
+
+    frame = _roof_frame(points, arch)
+    fig, ax = plt.subplots(figsize=(11, 8))
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(frame.x_lo, frame.x_hi)
+    ax.set_ylim(frame.y_lo, frame.y_hi)
+    ax.grid(True, which="both", linestyle="--", linewidth=0.4, color="0.85")
+
+    _draw_hardware_roofs(ax, frame)
+    for fraction, gray in _PEAK_FRACTIONS:
+        _draw_peak_fraction(ax, frame, fraction, gray)
+    _draw_blend_roofs(ax, frame, regimes, arch.get("max_achievable_tflops") or {})
+
+    colors = _concurrency_colors(points)
+    by_series = _draw_points(ax, points, series, colors)
+
+    handles, labels = ax.get_legend_handles_labels()
+    _add_family_keys(handles, labels, series, by_series, points, colors)
+    _add_concurrency_keys(handles, labels, colors)
     legend = ax.legend(
         handles,
         labels,
@@ -1542,30 +1751,9 @@ def plot_e2e_roofline(
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     fig.tight_layout()
-    share = (
-        figure_kernel_time_share(points, series, kernels)
-        if kernels is not None
-        else None
-    )
-    if share is not None:
-        note = figure_kernel_note(share)
-    else:
-        coverage = model_coverage(regimes, kernels) if kernels else None
-        note = model_coverage_note(coverage) if coverage is not None else None
+    note = _figure_note(points, series, regimes, kernels)
     if note is not None and legend is not None:
-        fig.canvas.draw()
-        below = legend.get_window_extent(fig.canvas.get_renderer())
-        below = below.transformed(fig.transFigure.inverted())
-        fig.text(
-            0.5,
-            below.y0 - 0.012,
-            note,
-            ha="center",
-            va="top",
-            fontsize=8,
-            color="0.2",
-            linespacing=1.4,
-        )
+        _place_note_under_legend(fig, legend, note)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -1604,6 +1792,16 @@ def build_parser() -> argparse.ArgumentParser:
             "reads no profile."
         ),
     )
+    _add_output_arguments(parser)
+    _add_arch_arguments(parser)
+    _add_regime_arguments(parser)
+    _add_profile_arguments(parser)
+    _add_series_arguments(parser)
+    return parser
+
+
+def _add_output_arguments(parser: argparse.ArgumentParser) -> None:
+    """The figure title and the PNG to write."""
     parser.add_argument("--title", required=True, help="Figure title")
     parser.add_argument(
         "--output",
@@ -1611,6 +1809,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="PNG path to write",
     )
+
+
+def _add_arch_arguments(parser: argparse.ArgumentParser) -> None:
+    """The GPU arch spec that sets the roofs."""
     parser.add_argument(
         "--gpu-arch-name",
         help=(
@@ -1623,6 +1825,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="GPU arch JSON. Takes precedence over --gpu-arch-name.",
     )
+
+
+def _add_regime_arguments(parser: argparse.ArgumentParser) -> None:
+    """The projected regimes: an augmentation file or projection JSONs."""
     parser.add_argument(
         "--augmentation",
         type=Path,
@@ -1638,6 +1844,10 @@ def build_parser() -> argparse.ArgumentParser:
             "--output-json. Repeat for each regime."
         ),
     )
+
+
+def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
+    """The profile to read, or ``--model-only`` to read none."""
     parser.add_argument(
         "--profile-dir",
         type=Path,
@@ -1657,6 +1867,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="JSON list of {name, time_us, count} kernel records",
     )
+
+
+def _add_series_arguments(parser: argparse.ArgumentParser) -> None:
+    """Which markers to draw and how each series matches the profile."""
     parser.add_argument(
         "--top-kernels",
         nargs="?",
@@ -1692,7 +1906,6 @@ def build_parser() -> argparse.ArgumentParser:
             "The numerator is then the projection's one-forward FLOPs."
         ),
     )
-    return parser
 
 
 def _projection_regime(entry: str) -> Regime:
@@ -1709,55 +1922,85 @@ def _projection_regime(entry: str) -> Regime:
     return regime_from_projection(Path(path), phase, concurrency_i)
 
 
+def _load_cli_arch(args: argparse.Namespace) -> dict[str, Any]:
+    """The arch JSON when given, else the named arch spec."""
+    if args.gpu_arch_json_path is not None:
+        return json.loads(args.gpu_arch_json_path.read_text(encoding="utf-8"))
+    if args.gpu_arch_name:
+        return load_arch(args.gpu_arch_name)
+    raise ValueError("pass --gpu-arch-name or --gpu-arch-json-path")
+
+
+def _load_cli_regimes(args: argparse.Namespace) -> list[Regime]:
+    """Augmentation regimes, then one per ``--projection``."""
+    regimes: list[Regime] = []
+    if args.augmentation is not None:
+        payload = json.loads(args.augmentation.read_text(encoding="utf-8"))
+        regimes.extend(regimes_from_augmentation(payload))
+    regimes.extend(_projection_regime(entry) for entry in args.projection)
+    if not regimes:
+        raise ValueError("pass --augmentation or at least one --projection")
+    return regimes
+
+
+def _load_cli_kernels(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Profile kernels from ``--profile-json``, else ``--profile-dir``."""
+    if args.profile_json is not None:
+        return load_profile_json(args.profile_json)
+    if args.profile_dir is not None:
+        return load_profile_kernels(args.profile_dir)
+    raise ValueError("pass --profile-dir or --profile-json")
+
+
+@dataclass(frozen=True)
+class _CliPlot:
+    """What ``main`` plots: the points, their warnings, and how to draw them."""
+
+    points: list[RooflinePoint]
+    warnings: list[str]
+    series: tuple[Series, ...]
+    kernels: list[dict[str, Any]] | None
+    ylabel: str
+
+
+def _cli_plot(args: argparse.Namespace, regimes: list[Regime]) -> _CliPlot:
+    """Points from the projection alone, or joined to the profile's kernels."""
+    if args.model_only:
+        if args.top_kernels is not None:
+            raise ValueError("--top-kernels needs a profile")
+        points, warnings = points_from_model(regimes, series=DEFAULT_SERIES)
+        return _CliPlot(
+            points, warnings, DEFAULT_SERIES, None, "TFLOP/s per GPU at the roofline"
+        )
+    kernels = _load_cli_kernels(args)
+    series = DEFAULT_SERIES
+    if args.top_kernels is not None:
+        series = top_kernel_series(kernels, args.top_kernels)
+    includes = _parse_keyed_flag(args.kernels, value_is_float=False)
+    overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
+    points, warnings = build_points(
+        regimes,
+        kernels,
+        series=series,
+        includes=includes,
+        time_overrides_us=overrides,
+    )
+    return _CliPlot(points, warnings, series, kernels, _PROFILE_YLABEL)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.gpu_arch_json_path is not None:
-            arch = json.loads(args.gpu_arch_json_path.read_text(encoding="utf-8"))
-        elif args.gpu_arch_name:
-            arch = load_arch(args.gpu_arch_name)
-        else:
-            raise ValueError("pass --gpu-arch-name or --gpu-arch-json-path")
-        regimes: list[Regime] = []
-        series = DEFAULT_SERIES
-        kernels = None
-        ylabel = "TFLOP/s per GPU while the operation runs"
+        arch = _load_cli_arch(args)
         if args.model_only and (
             args.profile_dir is not None or args.profile_json is not None
         ):
             raise ValueError("--model-only does not read a profile")
-        if args.augmentation is not None:
-            payload = json.loads(args.augmentation.read_text(encoding="utf-8"))
-            regimes.extend(regimes_from_augmentation(payload))
-        regimes.extend(_projection_regime(entry) for entry in args.projection)
-        if not regimes:
-            raise ValueError("pass --augmentation or at least one --projection")
-        if args.model_only:
-            if args.top_kernels is not None:
-                raise ValueError("--top-kernels needs a profile")
-            points, warnings = points_from_model(regimes, series=series)
-            ylabel = "TFLOP/s per GPU at the roofline"
-        else:
-            if args.profile_json is not None:
-                kernels = load_profile_json(args.profile_json)
-            elif args.profile_dir is not None:
-                kernels = load_profile_kernels(args.profile_dir)
-            else:
-                raise ValueError("pass --profile-dir or --profile-json")
-            if args.top_kernels is not None:
-                series = top_kernel_series(kernels, args.top_kernels)
-            includes = _parse_keyed_flag(args.kernels, value_is_float=False)
-            overrides = _parse_keyed_flag(args.time_us, value_is_float=True)
-            points, warnings = build_points(
-                regimes,
-                kernels,
-                series=series,
-                includes=includes,
-                time_overrides_us=overrides,
-            )
-        points, roof_warnings = flag_points_above_roof(points, arch)
-        warnings.extend(roof_warnings)
+        regimes = _load_cli_regimes(args)
+        plan = _cli_plot(args, regimes)
+        points, roof_warnings = flag_points_above_roof(plan.points, arch)
+        warnings = plan.warnings + roof_warnings
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"e2e_roofline: {exc}", file=sys.stderr)
         return 1
@@ -1772,9 +2015,9 @@ def main(argv: list[str] | None = None) -> int:
         regimes,
         title=args.title,
         output_path=args.output,
-        series=series,
-        kernels=kernels,
-        ylabel=ylabel,
+        series=plan.series,
+        kernels=plan.kernels,
+        ylabel=plan.ylabel,
     )
     for point in points:
         print(
