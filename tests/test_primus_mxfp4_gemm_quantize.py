@@ -23,8 +23,11 @@ from TraceLens.PerfModel.perf_model import (
     UnaryElementwise,
     FP4GemmMXFunction,
     FP4GemmMXFunctionBackward,
-    FP4GroupedMLPMXFunc,
-    FP4GroupedMLPMXFuncBackward,
+    primus_turbo_grouped_gemm_fp4,
+    primus_turbo_grouped_gemm_fp4_glu,
+    primus_turbo_grouped_gemm_fp4_dglu,
+    primus_turbo_grouped_gemm_variable_k_fp4,
+    primus_turbo_grouped_gemm_variable_k_accum_fp4,
 )
 from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
@@ -775,24 +778,6 @@ def _fp4mx_gemm_bwd_event(M, N, seq=None, dtype=BF16):
     return {"name": "FP4GemmMXFunctionBackward", "args": args}
 
 
-def _fp4mx_grouped_event(M, N, K, G, seq=None):
-    inter = N // 2
-    args = {
-        "Input Dims": [(M, K), (M,), (G, N, K), (G, K, inter), (), (), (), (G,), (G + 1,)],
-        "Input type": [BF16, "", BF16, BF16, "", "", "", "", ""],
-    }
-    if seq is not None:
-        args["Sequence number"] = seq
-    return {"name": "FP4GroupedMLPMXFunc", "args": args}
-
-
-def _fp4mx_grouped_bwd_event(M, K, seq=None):
-    args = {"Input Dims": [(M, K)], "Input type": [BF16]}
-    if seq is not None:
-        args["Sequence number"] = seq
-    return {"name": "FP4GroupedMLPMXFuncBackward", "args": args}
-
-
 # --------------------------------------------------------------------------- #
 # FP4GemmMXFunction (forward)
 # --------------------------------------------------------------------------- #
@@ -872,69 +857,172 @@ def test_fp4mx_gemm_backward_scalar_grad_out_gives_none_n():
 
 
 # --------------------------------------------------------------------------- #
-# FP4GroupedMLPMXFunc (forward)
+# FP4 MoE-MLP grouped GEMM leaf ops (primus_turbo::grouped_gemm_fp4_*_impl)
+# Expected byte counts are hand-written from the trace slot shapes and the
+# primus_turbo register_fake output shapes (without tile-alignment padding),
+# independently of the model formulas. Group tables are not modelled.
 # --------------------------------------------------------------------------- #
-def test_fp4mx_grouped_param_details_and_flops():
-    M, N, K, G = 131072, 5760, 2880, 32
-    m = FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G))
-    assert (m.M, m.N, m.K, m.G) == (M, N, K, G)
-    assert m.flops() == m.flops_func(M, K, N) + m.flops_func(M, N // 2, K)
+FP4 = "c10::Float4_e2m1fn_x2"
+E8M0 = "c10::Float8_e8m0fnu"
+LONG = "long int"
+
+# gpt-oss trace shapes: M tokens, K hidden (padded 2880 -> 2944), G experts
+M_T, KP_T, G_T = 131072, 1472, 32
 
 
-def test_fp4mx_grouped_bytes_nonzero_and_precision():
-    M, N, K, G = 1024, 512, 256, 8
-    m = FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G))
-    assert m.bytes() > 0
-    assert m.get_compute_precision() == torch_dtype_map("mxfp4")
+def _ev(name, dims, types):
+    return {"name": name, "args": {"Input Dims": dims, "Input type": types}}
 
 
-def test_fp4mx_grouped_caches_by_sequence_number():
-    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
-    FP4GroupedMLPMXFunc(_fp4mx_grouped_event(128, 64, 32, 4, seq=5))
-    assert 5 in FP4GroupedMLPMXFunc.fwd_pass_cache
+def _fixed_k_event(name, N, extra_dims=(), extra_types=()):
+    dims = [[M_T, KP_T], [G_T, N, KP_T], [M_T, 92], [G_T, N, 92], [G_T], [G_T + 1]]
+    types = [FP4, FP4, E8M0, E8M0, LONG, LONG]
+    return _ev(name, dims + list(extra_dims), types + list(extra_types))
 
 
-def test_fp4mx_grouped_forward_bwd_rollup_matches_backward_class():
-    # flops_bwd/bytes_bwd on the FORWARD class drive the category-level backward
-    # roll-up. They must model the two-GEMM backward (gate_up + down), i.e. match
-    # FP4GroupedMLPMXFuncBackward, not the one-GEMM GroupedGemm base.
-    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
-    M, N, K, G = 131072, 5760, 2880, 32
-    fwd = FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G, seq=21))
-    bwd = FP4GroupedMLPMXFuncBackward(_fp4mx_grouped_bwd_event(M, K, seq=21))
-
-    # two-GEMM sums (exercises the flops_bwd/bytes_bwd overrides directly)
-    assert fwd.flops_bwd() == fwd.flops_bwd_func(M, K, N) + fwd.flops_bwd_func(
-        M, N // 2, K
+def _fixed_k_reads(N, extra=0):
+    return (
+        M_T * KP_T  # a (fp4, 1 B per packed element)
+        + G_T * N * KP_T  # b
+        + M_T * 92  # a_scales (e8m0)
+        + G_T * N * 92  # b_scales
+        + extra
     )
-    assert fwd.bytes_bwd() == fwd.bytes_bwd_func(
-        M, K, N, G, fwd.bpe_in, fwd.bpe_out
-    ) + fwd.bytes_bwd_func(M, N // 2, K, G, fwd.bpe_in, fwd.bpe_out)
-
-    # roll-up path (forward.flops_bwd/bytes_bwd) equals the dedicated backward op
-    assert fwd.flops_bwd() == bwd.flops()
-    assert fwd.bytes_bwd() == bwd.bytes()
-    # and is strictly larger than a single-GEMM backward would give
-    assert fwd.flops_bwd() > fwd.flops_bwd_func(M, K, N)
 
 
-# --------------------------------------------------------------------------- #
-# FP4GroupedMLPMXFuncBackward
-# --------------------------------------------------------------------------- #
-def test_fp4mx_grouped_backward_linked():
-    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
-    M, N, K, G = 131072, 5760, 2880, 32
-    FP4GroupedMLPMXFunc(_fp4mx_grouped_event(M, N, K, G, seq=11))
-    b = FP4GroupedMLPMXFuncBackward(_fp4mx_grouped_bwd_event(M, K, seq=11))
-    assert b.param_details["linked_fwd"] is True
-    assert b.flops() == b.flops_bwd_func(M, K, N) + b.flops_bwd_func(M, N // 2, K)
-    assert b.bytes() is not None and b.bytes() > 0
-    assert b.get_compute_precision() == torch_dtype_map("mxfp4")
+def test_fp4_grouped_ops_map_to_fp4_subclasses():
+    from TraceLens.PerfModel.extensions.pseudo_ops_perf_utils import (
+        get_pseudo_op_mappings,
+    )
+
+    m = get_pseudo_op_mappings()
+    assert m["primus_turbo::grouped_gemm_fp4_impl"] is primus_turbo_grouped_gemm_fp4
+    assert m["primus_turbo::grouped_gemm_fp4_glu_impl"] is primus_turbo_grouped_gemm_fp4_glu
+    assert m["primus_turbo::grouped_gemm_fp4_dglu_impl"] is primus_turbo_grouped_gemm_fp4_dglu
+    assert (
+        m["primus_turbo::grouped_gemm_fp4_variable_k_impl"]
+        is primus_turbo_grouped_gemm_variable_k_fp4
+    )
+    assert (
+        m["primus_turbo::grouped_gemm_fp4_variable_k_accum_impl"]
+        is primus_turbo_grouped_gemm_variable_k_accum_fp4
+    )
+    assert "FP4GroupedMLPMXFunc" not in m
+    assert "FP4GroupedMLPMXFuncBackward" not in m
 
 
-def test_fp4mx_grouped_backward_cache_miss_returns_none():
-    FP4GroupedMLPMXFunc.fwd_pass_cache.clear()
-    b = FP4GroupedMLPMXFuncBackward(_fp4mx_grouped_bwd_event(131072, 2880, seq=404))
-    assert b.param_details["linked_fwd"] is False
-    assert b.flops() is None
-    assert b.bytes() is None
+def test_fp4_grouped_gemm_impl_flops_and_bytes():
+    N = 2880  # fc2 down
+    m = primus_turbo_grouped_gemm_fp4(
+        _fixed_k_event("primus_turbo::grouped_gemm_fp4_impl", N), None
+    )
+    assert (m.M, m.K, m.N, m.G) == (M_T, 2 * KP_T, N, G_T)  # K unpacked
+    assert m.flops() == 2 * M_T * 2944 * N
+    assert m.bytes() == _fixed_k_reads(N) + M_T * N * 2  # out[M, N] bf16
+    assert m.get_compute_precision() == torch_dtype_map("c10::Float4_e2m1fn_x2")
+
+
+def test_fp4_grouped_gemm_glu_writes_intermediate_and_quantized_activation():
+    N = 5760  # gate||up, I = 2880
+    probs = M_T * name2bpe("float")
+    m = primus_turbo_grouped_gemm_fp4_glu(
+        _fixed_k_event(
+            "primus_turbo::grouped_gemm_fp4_glu_impl", N, [[M_T]], ["float"]
+        ),
+        None,
+    )
+    assert m.flops() == 2 * M_T * 2944 * N
+    intermediate = M_T * N * 2  # [M, N] bf16
+    # activation [M, I=2880], row + col MXFP4: 2 x (M*I/2 data + M*I/32 scales)
+    act = 2 * (131072 * 2880 // 2 + 131072 * 2880 // 32)
+    assert act == 401080320
+    assert m.bytes() == _fixed_k_reads(N, probs) + intermediate + act
+
+
+def test_fp4_grouped_gemm_dglu_writes_grad_probs_and_quantized_grad_l1():
+    I = 2880  # dglu b is [G, I, K/2]
+    extra = M_T * name2bpe("float") + M_T * 2 * I * 2  # probs + intermediate bf16
+    m = primus_turbo_grouped_gemm_fp4_dglu(
+        _fixed_k_event(
+            "primus_turbo::grouped_gemm_fp4_dglu_impl",
+            I,
+            [[M_T], [M_T, 2 * I]],
+            ["float", "c10::BFloat16"],
+        ),
+        None,
+    )
+    assert m.flops() == 2 * M_T * 2944 * I
+    grad_probs = M_T * 4  # [M] fp32
+    # grad_l1 [M, 2I=5760], row + col MXFP4: 2 x (M*2I/2 data + M*2I/32 scales)
+    act = 2 * (131072 * 5760 // 2 + 131072 * 5760 // 32)
+    assert act == 802160640
+    assert m.bytes() == _fixed_k_reads(I, extra) + grad_probs + act
+
+
+def _wgrad_dims(out, inn, with_out_buffer):
+    dims = [[out, 69632], [inn, 69632], [out, 4352], [inn, 4352], [G_T], [G_T + 1]]
+    types = [FP4, FP4, E8M0, E8M0, LONG, LONG]
+    if with_out_buffer:
+        dims += [[], [], [], [], [], [], [], [G_T, out, inn]]
+        types += ["Scalar"] * 7 + ["c10::BFloat16"]
+    return dims, types
+
+
+def _wgrad_reads(out, inn):
+    return (out + inn) * 69632 + (out + inn) * 4352  # fp4 operands + e8m0 scales
+
+
+def test_fp4_variable_k_accum_reads_and_writes_grad_w():
+    out, inn = 5760, 2880  # fc1 wgrad
+    dims, types = _wgrad_dims(out, inn, with_out_buffer=True)
+    m = primus_turbo_grouped_gemm_variable_k_accum_fp4(
+        _ev("primus_turbo::grouped_gemm_fp4_variable_k_accum_impl", dims, types), None
+    )
+    # M=out, N=in, K=tokens (139264 = 131072 + 32*256 padding)
+    assert (m.M, m.N, m.K, m.G) == (out, inn, 139264, G_T)
+    assert m.flops() == 2 * out * 139264 * inn
+    grad_w = G_T * out * inn * 2
+    # accum: out += ... (beta=1) -> grad_W is read and written
+    assert m.bytes() == _wgrad_reads(out, inn) + grad_w + grad_w
+
+
+def test_fp4_variable_k_non_accum_writes_grad_w():
+    out, inn = 2880, 2880  # fc2 wgrad
+    dims, types = _wgrad_dims(out, inn, with_out_buffer=False)
+    m = primus_turbo_grouped_gemm_variable_k_fp4(
+        _ev("primus_turbo::grouped_gemm_fp4_variable_k_impl", dims, types), None
+    )
+    assert m.flops() == 2 * out * 139264 * inn
+    assert m.bytes() == _wgrad_reads(out, inn) + G_T * out * inn * 2  # write only
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        primus_turbo_grouped_gemm_fp4,
+        primus_turbo_grouped_gemm_fp4_glu,
+        primus_turbo_grouped_gemm_fp4_dglu,
+    ],
+)
+def test_fp4_fixed_k_backward_methods_raise(cls):
+    m = cls(_fixed_k_event("primus_turbo::grouped_gemm_fp4_impl", 2880), None)
+    with pytest.raises(NotImplementedError):
+        m.flops_bwd()
+    with pytest.raises(NotImplementedError):
+        m.bytes_bwd()
+
+
+@pytest.mark.parametrize(
+    "cls, accum",
+    [
+        (primus_turbo_grouped_gemm_variable_k_fp4, False),
+        (primus_turbo_grouped_gemm_variable_k_accum_fp4, True),
+    ],
+)
+def test_fp4_variable_k_backward_methods_raise(cls, accum):
+    dims, types = _wgrad_dims(2880, 2880, with_out_buffer=accum)
+    m = cls(_ev("primus_turbo::grouped_gemm_fp4_variable_k_impl", dims, types), None)
+    with pytest.raises(NotImplementedError):
+        m.flops_bwd()
+    with pytest.raises(NotImplementedError):
+        m.bytes_bwd()
