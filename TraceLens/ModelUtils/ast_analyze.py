@@ -1625,6 +1625,19 @@ def _body_assigns_self_attr(stmts: list[ast.stmt], attr: str) -> bool:
     return False
 
 
+def _compound_blocks(stmt: ast.stmt) -> list[list[ast.stmt]]:
+    """The statement lists of a loop, ``with`` or ``try`` that can assign ``self``.
+
+    A loop or ``try`` adds its ``else`` arm, and a ``try`` its ``finally`` arm.
+    """
+    blocks = [list(stmt.body)]
+    if isinstance(stmt, (ast.For, ast.While)):
+        blocks.append(list(stmt.orelse))
+    elif isinstance(stmt, ast.Try):
+        blocks.extend([list(stmt.orelse), list(stmt.finalbody)])
+    return blocks
+
+
 def _assignment_fate(
     stmts: list[ast.stmt],
     attr: str,
@@ -1656,11 +1669,7 @@ def _assignment_fate(
             if fate != "absent":
                 return fate
         elif isinstance(stmt, (ast.For, ast.While, ast.With, ast.Try)):
-            blocks = [list(stmt.body)]
-            if isinstance(stmt, (ast.For, ast.While)):
-                blocks.append(list(stmt.orelse))
-            elif isinstance(stmt, ast.Try):
-                blocks.extend([list(stmt.orelse), list(stmt.finalbody)])
+            blocks = _compound_blocks(stmt)
             if any(_body_assigns_self_attr(block, attr) for block in blocks):
                 return "unknown"
     return "absent"

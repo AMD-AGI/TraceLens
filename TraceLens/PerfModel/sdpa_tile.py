@@ -59,6 +59,16 @@ def _attention_dtype(params: dict) -> tuple[str | None, str | None]:
     return precision, None if raw is None else str(raw)
 
 
+def _attention_geometry(params: dict) -> tuple[int, int, int] | None:
+    """``(heads, batch, head_dim)`` of this launch, or ``None`` if any is missing."""
+    heads = int(params.get("H_Q") or 0)
+    batch = int(params.get("B") or 1)
+    head_dim = int(params.get("d_h") or params.get("d_h_qk") or 0)
+    if heads <= 0 or batch <= 0 or head_dim <= 0:
+        return None
+    return heads, batch, head_dim
+
+
 def standard_attention_time_us(name, params, arch, nbytes, gemm_time=None, bwd=False):
     """Origami tile-model time for one standard or flash attention launch.
 
@@ -78,11 +88,10 @@ def standard_attention_time_us(name, params, arch, nbytes, gemm_time=None, bwd=F
     precision, dtype_a_b = _attention_dtype(params)
     if precision is None:
         return None
-    heads = int(params.get("H_Q") or 0)
-    batch = int(params.get("B") or 1)
-    head_dim = int(params.get("d_h") or params.get("d_h_qk") or 0)
-    if heads <= 0 or batch <= 0 or head_dim <= 0:
+    geometry = _attention_geometry(params)
+    if geometry is None:
         return None
+    heads, batch, head_dim = geometry
     flash = bool(params.get("flash_impl")) or "flash" in name.lower()
     areas = [n_q * n_kv for n_q, n_kv in rectangles]
     total_area = sum(areas)

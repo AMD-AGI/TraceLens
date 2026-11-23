@@ -1590,46 +1590,18 @@ def _strip_prefix(name: str, prefix: str) -> str:
     return name[len(prefix) :] if prefix and name.startswith(prefix) else name
 
 
-def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
-    """Group the decoder layers by the submodules each one really constructs.
+def _varying_components(
+    decoder: Any, registry: dict[str, Any], resolve_config: dict[str, Any], depth: int
+) -> list[tuple[str, Any, str, str]]:
+    """The components whose construction can differ from layer to layer.
 
-    The parse's own per-instance answer, for when no live module tree is
-    available. A decoder class is ONE class, but its layers are not one thing:
-    DeepSeek builds a different compressor for layer 2 than for layer 3 and
-    none at all for layer 0, and a different router for the first three layers
-    than for the rest. Which it builds is decided by
-    ``config.layer_types[layer_idx]`` / ``config.mlp_layer_types[layer_idx]``,
-    so asking each class what IT constructs for one ``layer_idx`` gives the
-    split without instantiating anything.
-
-    Only attrs with more than one construction option are asked about -- those
-    are the only ones that can differ -- and a layer whose answers are all
-    unknown contributes nothing, so an unresolvable model degrades to the
-    single uniform banner exactly as before.
+    Each is ``(override_attr, resolve_cls, resolve_attr, override_key)``: which
+    component attr this variant swaps, the class to ask + the attr to ask it
+    about, and the override key ("" swaps the component's OWN class; a nested
+    name swaps a child).
     """
-    from TraceLens.ModelUtils.ast_analyze import (
-        INSTANCE_SUBMODULE_ABSENT,
-        instance_submodule_class,
-    )
+    from TraceLens.ModelUtils.ast_analyze import instance_submodule_class
 
-    registry = spec.class_registry or {}
-    decoder = registry.get(spec.decoder_class or "")
-    depth = spec.num_hidden_layers or 0
-    config = spec.raw_config or {}
-    if decoder is None or not depth or not config:
-        return []
-
-    # A multimodal checkpoint nests the text model's keys under ``text_config``;
-    # the decoder reads those directly (``config.dense_mlp_idx``), so flatten them
-    # up for the per-instance branch resolution (text keys win on conflict).
-    text_config = config.get("text_config")
-    resolve_config = (
-        {**config, **text_config} if isinstance(text_config, dict) else config
-    )
-
-    # ``(override_attr, resolve_cls, resolve_attr, override_key)``: which component
-    # attr this variant swaps, the class to ask + the attr to ask it about, and the
-    # override key ("" swaps the component's OWN class; a nested name swaps a child).
     varying: list[tuple[str, Any, str, str]] = []
     # The decoder's OWN conditional components: ``self.mlp = Dense if layer_id <
     # dense_mlp_idx else MoE`` makes one attr build two different CLASSES by layer.
@@ -1664,8 +1636,20 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
             answers.append(picked)
         if answers and len(set(answers)) > 1:
             varying.append((attr, decoder, attr, ""))
-    if not varying:
-        return []
+    return varying
+
+
+def _layer_signatures(
+    varying: list[tuple[str, Any, str, str]],
+    resolve_config: dict[str, Any],
+    depth: int,
+) -> list[tuple[tuple[str, str, str], ...]] | None:
+    """What each layer constructs for every varying component.
+
+    ``None`` when any answer is unknown: one unknown and the whole split is a
+    guess.
+    """
+    from TraceLens.ModelUtils.ast_analyze import instance_submodule_class
 
     signatures: list[tuple[tuple[str, str, str], ...]] = []
     for layer_idx in range(depth):
@@ -1675,12 +1659,81 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
                 resolve_cls, resolve_attr, resolve_config, {"layer_idx": layer_idx}
             )
             if picked is None:
-                return []  # one unknown and the whole split is a guess
+                return None
             chosen.append((override_attr, override_key, picked))
         signatures.append(tuple(chosen))
+    return signatures
 
-    if len(set(signatures)) <= 1:
-        return []  # every layer builds the same thing -- no variants to show
+
+def _signature_overrides(
+    signature: tuple[tuple[str, str, str], ...],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Per-component overrides and the display labels one layer signature implies."""
+    from TraceLens.ModelUtils.ast_analyze import INSTANCE_SUBMODULE_ABSENT
+
+    overrides: dict[str, dict[str, Any]] = {}
+    labels: list[str] = []
+    for comp_attr, nested, picked in signature:
+        absent = picked == INSTANCE_SUBMODULE_ABSENT
+        overrides.setdefault(comp_attr, {})[nested] = (
+            SUBMODULE_OMITTED if absent else picked
+        )
+        labels.append(f"no {nested}" if absent else picked)
+    return overrides, labels
+
+
+def _swap_component_class(
+    variant: LayerVariant, comp_attr: str, swapped: str, role: str | None
+) -> None:
+    """Point the variant's top-level FFN or attention at the class a layer builds."""
+    if role in ("ffn", "moe"):
+        variant.ffn_class = swapped
+        variant.ffn_attr = comp_attr
+        variant.ffn_label = swapped
+    elif role == "attention":
+        variant.attention_class = swapped
+        variant.attention_label = swapped
+
+
+def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
+    """Group the decoder layers by the submodules each one really constructs.
+
+    The parse's own per-instance answer, for when no live module tree is
+    available. A decoder class is ONE class, but its layers are not one thing:
+    DeepSeek builds a different compressor for layer 2 than for layer 3 and
+    none at all for layer 0, and a different router for the first three layers
+    than for the rest. Which it builds is decided by
+    ``config.layer_types[layer_idx]`` / ``config.mlp_layer_types[layer_idx]``,
+    so asking each class what IT constructs for one ``layer_idx`` gives the
+    split without instantiating anything.
+
+    Only attrs with more than one construction option are asked about -- those
+    are the only ones that can differ -- and a layer whose answers are all
+    unknown contributes nothing, so an unresolvable model degrades to the
+    single uniform banner exactly as before.
+    """
+    registry = spec.class_registry or {}
+    decoder = registry.get(spec.decoder_class or "")
+    depth = spec.num_hidden_layers or 0
+    config = spec.raw_config or {}
+    if decoder is None or not depth or not config:
+        return []
+
+    # A multimodal checkpoint nests the text model's keys under ``text_config``;
+    # the decoder reads those directly (``config.dense_mlp_idx``), so flatten them
+    # up for the per-instance branch resolution (text keys win on conflict).
+    text_config = config.get("text_config")
+    resolve_config = (
+        {**config, **text_config} if isinstance(text_config, dict) else config
+    )
+
+    varying = _varying_components(decoder, registry, resolve_config, depth)
+    if not varying:
+        return []
+    signatures = _layer_signatures(varying, resolve_config, depth)
+    # An unknown answer, or every layer building the same thing, leaves no split.
+    if signatures is None or len(set(signatures)) <= 1:
+        return []
 
     indices: dict[tuple, list[int]] = {}
     for layer_idx, signature in enumerate(signatures):
@@ -1693,14 +1746,7 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
     for signature, layers in sorted(
         indices.items(), key=lambda item: (-len(item[1]), item[1][0])
     ):
-        overrides: dict[str, dict[str, Any]] = {}
-        labels: list[str] = []
-        for comp_attr, nested, picked in signature:
-            absent = picked == INSTANCE_SUBMODULE_ABSENT
-            overrides.setdefault(comp_attr, {})[nested] = (
-                SUBMODULE_OMITTED if absent else picked
-            )
-            labels.append(f"no {nested}" if absent else picked)
+        overrides, labels = _signature_overrides(signature)
         variant = LayerVariant(
             label=" + ".join(labels),
             count=len(layers),
@@ -1720,14 +1766,9 @@ def _static_layer_variants(spec: ArchitectureSpec) -> list[LayerVariant]:
                 # it would count an attention the layer does not have.
                 omitted.add(comp_attr)
             elif isinstance(swapped, str):
-                role = comp_roles.get(comp_attr)
-                if role in ("ffn", "moe"):
-                    variant.ffn_class = swapped
-                    variant.ffn_attr = comp_attr
-                    variant.ffn_label = swapped
-                elif role == "attention":
-                    variant.attention_class = swapped
-                    variant.attention_label = swapped
+                _swap_component_class(
+                    variant, comp_attr, swapped, comp_roles.get(comp_attr)
+                )
             nested_overrides = {k: v for k, v in rel_overrides.items() if k != ""}
             if not nested_overrides:
                 continue
