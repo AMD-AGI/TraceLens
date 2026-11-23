@@ -13,7 +13,7 @@ that region.  It performs phase classification, adds a chronological kernel
 timeline sheet enriched with layer decomposition, and automatically detects
 and labels EAGLE/MTP speculative decoding sections.
 
-**File:** `examples/custom_workflows/inference_kernel_timeline_breakdown.py`
+**File:** `examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py`
 
 > **Setup:** Install TraceLens (editable from a clone, or from GitHub), then pass
 > the extension with `--extension_file`:
@@ -30,7 +30,7 @@ and labels EAGLE/MTP speculative decoding sections.
 ```bash
 TraceLens_generate_perf_report_pytorch_inference \
     --profile_json_path trace.json.gz \
-    --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown.py \
+    --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py \
     --group_by_parent_module \
     --output_xlsx_path report.xlsx
 ```
@@ -41,7 +41,7 @@ MTP verify section):
 ```bash
 TraceLens_generate_perf_report_pytorch_inference \
     --profile_json_path trace.json.gz \
-    --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown.py \
+    --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py \
     --group_by_parent_module \
     --output_xlsx_path report.xlsx \
     --moe_only --first_n_layers 1 --mtp_scope verify
@@ -285,7 +285,7 @@ Example with scope filters:
 ```bash
 TraceLens_generate_perf_report_pytorch_inference \
     --profile_json_path trace.json.gz \
-    --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown.py \
+    --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py \
     --group_by_parent_module \
     --output_xlsx_path report.xlsx \
     --moe_only --first_n_layers 1 --mtp_scope verify
