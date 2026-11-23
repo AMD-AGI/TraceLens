@@ -1868,7 +1868,7 @@ def _origami_time_us(
                     payload["N_Q"],
                     payload["N_KV"],
                     payload["d_h"],
-                    fa=bool(arch.get("l1_bw_gbps")),
+                    fa="l1_bw_gbps" in arch,
                     gemm_time=origami_helper.gemm_time_us,
                 )
             else:
