@@ -236,9 +236,7 @@ def _top_kernel_label(
         return f"{short} {shape}" if shape else name
     for count in range(1, len(tensors) + 1):
         bit = ", ".join(tensors[:count])
-        peer_bits = [
-            ", ".join(_shape_tensors(peer)[:count]) for peer in same
-        ]
+        peer_bits = [", ".join(_shape_tensors(peer)[:count]) for peer in same]
         if peer_bits.count(bit) == 1:
             return f"{short} {bit}"
     return f"{short} {shape}" if shape else name

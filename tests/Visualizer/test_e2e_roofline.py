@@ -793,7 +793,9 @@ def test_a_top_kernel_without_flops_is_not_drawn():
 
     bare = _kernel("plain_kernel", 20.0, 1)
     series = (
-        Series("plain_kernel", "o", None, None, kernel_name="plain_kernel", kernel_shape=""),
+        Series(
+            "plain_kernel", "o", None, None, kernel_name="plain_kernel", kernel_shape=""
+        ),
         Series("End to end", "D", None, None),
     )
     points, warnings = build_points(
@@ -824,7 +826,9 @@ def test_kernel_share_ignores_a_kernel_that_did_not_run():
         series=series,
     )
     idle = _kernel("idle", 0.0, 1)
-    assert figure_kernel_time_share(points, series, [kernel, idle]) == pytest.approx(1.0)
+    assert figure_kernel_time_share(points, series, [kernel, idle]) == pytest.approx(
+        1.0
+    )
     assert figure_kernel_time_share(points, series, [idle]) is None
 
 

@@ -73,9 +73,7 @@ def _decoder():
 
 def test_each_layer_builds_only_the_attention_its_type_names():
     decoder = _decoder()
-    linear = instance_submodule_class(
-        decoder, "linear_attn", CONFIG, {"layer_idx": 0}
-    )
+    linear = instance_submodule_class(decoder, "linear_attn", CONFIG, {"layer_idx": 0})
     linear_full = instance_submodule_class(
         decoder, "self_attn", CONFIG, {"layer_idx": 0}
     )

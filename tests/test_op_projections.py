@@ -381,7 +381,9 @@ class TestSdpaTile:
         assert timed > 0
         assert widened > 0
         assert sdpa_tile.sdpa_tile_time_us(_Paged(), arch, gemm_time, bwd=True) is None
-        assert sdpa_tile.sdpa_tile_time_us(_V4PagedDecodeBase(), arch, gemm_time) is None
+        assert (
+            sdpa_tile.sdpa_tile_time_us(_V4PagedDecodeBase(), arch, gemm_time) is None
+        )
 
     def test_sdpa_backward_uses_the_bwd_tile_model(self):
         def gemm_time(*_args, **_kwargs):
@@ -404,10 +406,17 @@ class TestSdpaTile:
         arch = {**ARCH, "num_cus": 304}
         args = (arch, "bf16", "c10::BFloat16", 1024, 1, 8, 128, 128, 64)
         with patch.object(perf_model.Softmax, "get_time", return_value=0.0):
-            assert sdpa_tile.sdpa_fwd_time_us(*args, gemm_time=second_is_missing) is None
+            assert (
+                sdpa_tile.sdpa_fwd_time_us(*args, gemm_time=second_is_missing) is None
+            )
             calls["n"] = 0
-            assert sdpa_tile.sdpa_bwd_time_us(*args, gemm_time=lambda *_a, **_k: None) is None
-            assert sdpa_tile.sdpa_bwd_time_us(*args, gemm_time=second_is_missing) is None
+            assert (
+                sdpa_tile.sdpa_bwd_time_us(*args, gemm_time=lambda *_a, **_k: None)
+                is None
+            )
+            assert (
+                sdpa_tile.sdpa_bwd_time_us(*args, gemm_time=second_is_missing) is None
+            )
 
 
 class _Attention(perf_model.SDPA):

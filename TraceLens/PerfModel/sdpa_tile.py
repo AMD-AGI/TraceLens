@@ -18,7 +18,6 @@ import math
 from .perf_model import SDPA, Softmax
 from .utils import name2bpe, torch_dtype_map
 
-
 # Dense SDPA and flash attention. Sparse and linear attention are different
 # algorithms; Origami's tile GEMMs do not describe them.
 _NOT_STANDARD_ATTENTION = ("sparse", "linear", "gdn", "gated_delta", "mla", "indexer")
@@ -125,9 +124,7 @@ def sdpa_tile_time_us(perf_model, arch, gemm_time, bwd=False):
         if bwd:
             return None
         # DeepSeek-V4 paged decode is sparse even when the class name is not.
-        if any(
-            cls.__name__ == "_V4PagedDecodeBase" for cls in type(perf_model).mro()
-        ):
+        if any(cls.__name__ == "_V4PagedDecodeBase" for cls in type(perf_model).mro()):
             return None
         try:
             nbytes = perf_model.bytes()
