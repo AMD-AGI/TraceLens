@@ -66,6 +66,13 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
+    (re.compile(r".*_muse_extend_kernel"), "InferenceAttention"),
+    (re.compile(r".*muse_extend_fly"), "InferenceAttention"),
+    (re.compile(r".*_dense_partial"), "GEMM"),
+    (re.compile(r".*mfma_moe1_silu_mul"), "MoE_unfused"),
+    (re.compile(r".*_expert_a4"), "MoE_unfused"),
+    (re.compile(r".*launcher_shapes::compact_a4_experts"), "MoE_unfused"),
+    (re.compile(r".*_fused_norm_residual_triton_kernel"), "RMSNorm"),
     (
         re.compile(
             r".*->(fused_compress_attn|hca_compress_forward)_\w+ \(Synthetic Op\)"
@@ -473,6 +480,9 @@ def resolve_perf_model_class(name):
     cls = op_to_perf_model_class_map.get(name)
     if cls is not None:
         return cls
+    # Don't resolve perf models for python function events
+    if ".py(" in name:
+        return None
     for matcher in _perf_model_matchers:
         cls = matcher(name)
         if cls is not None:
@@ -510,6 +520,90 @@ def _match_gsplat(name):
 
 
 register_perf_model_matcher(_match_gsplat)
+
+
+def _match_muse_extend(name):
+    """Resolve the Muse-Spark target-model EXTEND (chunked-prefill / verify)
+    attention kernel when it appears as a Synthetic Op.
+
+    The FlyDSL (``muse_extend_fly``) kernel computes the same attention as the
+    Gluon (``_muse_extend_kernel``) one plus the softmax denominator on the
+    matrix cores, so it uses a subclass that adds that logical row-sum."""
+    from TraceLens.PerfModel.extensions import (
+        attention_perf_model_extensions as _a,
+    )
+
+    if "muse_extend_fly" in name:
+        return _a.muse_extend_fly_synthetic
+    if "_muse_extend_kernel" in name:
+        return _a.muse_extend_synthetic
+    return None
+
+
+register_perf_model_matcher(_match_muse_extend)
+
+
+def _match_dense_partial(name):
+    """Resolve the Muse-Spark bf16 split-K GEMM partials kernel when it appears as a Synthetic Op."""
+    if "_dense_partial" in name:
+        from TraceLens.PerfModel.extensions import (
+            perf_model_extensions as _p,
+        )
+
+        return _p.bf16_splitk_gemm_partials
+    return None
+
+
+register_perf_model_matcher(_match_dense_partial)
+
+
+def _match_mfma_moe1(name):
+    """Resolve the Muse-Spark MXFP4 MoE stage-1 (gate+up + SwiGLU) grouped-GEMM
+    kernel when it appears as a Synthetic Op."""
+    if "mfma_moe1_silu_mul" in name:
+        from TraceLens.PerfModel.extensions import (
+            moe_perf_model_extensions as _m,
+        )
+
+        return _m.mfma_moe1_silu_mul_synthetic
+    return None
+
+
+register_perf_model_matcher(_match_mfma_moe1)
+
+
+def _match_compact_a4_experts(name):
+    """Resolve the Muse-Spark MXFP4 compacted MoE at the ``compact_a4_experts``
+    launcher **cpu-op** level, so the whole op (``_route_quant_a4`` + the two
+    ``_expert_a4`` GEMMs) is one row. Requires the ``launcher_shapes::`` cpu op
+    (which carries the Input Dims) and no ``->`` -- so it matches neither the
+    per-kernel synthetic ops nor the shapeless ``<jit_shape_tracer>`` python
+    frame. ``collect`` then stops here before fanning out per-kernel rows."""
+    if "launcher_shapes::compact_a4_experts" in name and "->" not in name:
+        from TraceLens.PerfModel.extensions import (
+            moe_perf_model_extensions as _m,
+        )
+
+        return _m.compact_a4_experts_synthetic
+    return None
+
+
+register_perf_model_matcher(_match_compact_a4_experts)
+
+
+def _match_fused_norm_residual(name):
+    """Resolve the Muse-Spark fused residual-add + RMSNorm Triton kernel
+    (``_fused_norm_residual_triton_kernel``) when it appears as a Synthetic Op."""
+    if "_fused_norm_residual_triton_kernel" in name:
+        from TraceLens.PerfModel.extensions import (
+            rmsnorm_perf_model_extensions as _r,
+        )
+
+        return _r.fused_norm_residual_triton
+    return None
+
+
+register_perf_model_matcher(_match_fused_norm_residual)
 
 OP_CATEGORY_REGISTRY = build_op_category_registry(
     op_to_perf_model_class_map,

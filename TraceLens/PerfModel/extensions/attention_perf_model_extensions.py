@@ -1733,3 +1733,91 @@ class fused_k_norm_rope_q_flashmla:
 
     def get_maf_type(self):
         return "vector"
+
+
+class muse_extend_synthetic(InferenceAttention):
+    """Perf model for ``_muse_extend_kernel`` (Muse-Spark target-model EXTEND).
+
+    Target-model EXTEND / speculative-verify attention for Muse-Spark, issued
+    through the aiter extend backend (``_forward_extend_unified``). Standard
+    causal GQA attention over a paged KV cache; not MLA.
+
+    Arg layout (sglang kernels/ops/attention/muse_extend_gluon.py):
+        0  Q        (N_Q, H_Q, d_h_qk)                    fp8 e4m3
+        1  K cache  (num_blocks, block_size, H_KV, d_h)   fp8 e4m3  (paged)
+        2  V cache  (num_blocks, block_size, H_KV, d_h)   fp8 e4m3  (paged)
+        3  output   (N_Q, H_Q, d_h_v)                     bf16
+        4..9        scalars / metadata (scales, cu_seqlens)
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    @classmethod
+    def get_param_details(cls, event, arch=None):
+        # Backfilled Input Dims/type make this a vanilla InferenceAttention, so
+        # delegate Q/K geometry and dtype parsing to the base. Patch only the
+        # two muse specifics: the value/output head dim (from the output
+        # tensor, arg 3) and the causal flag.
+        params = InferenceAttention.get_param_details(event)
+        if params.get("_no_perf"):
+            return params
+        try:
+            out_shape = event["args"]["Input Dims"][3]
+            params["d_h_v"] = out_shape[-1]
+            params["dtype_out"] = event["args"]["Input type"][3]
+        except (IndexError, KeyError, TypeError):
+            pass
+        params["causal"] = True
+        return params
+
+    def bytes(self, bytes_per_element=None):
+        """Correct the output write to its real dtype.
+
+        The shared :meth:`InferenceAttention.bytes` counts the output write in
+        the Q-dtype bucket (fp8 for muse); the muse output is bf16
+        (``Input type[3]``). Add the extra bytes for the output elements.
+        """
+        base = super().bytes(bytes_per_element)
+        if base is None:
+            return None
+        dtype_out = self.param_details.get("dtype_out")
+        if not dtype_out:
+            return base
+        bpe_out = name2bpe(dtype_out)
+        bpe_q = (
+            bytes_per_element
+            if bytes_per_element is not None
+            else (name2bpe(self.param_details.get("dtype_Q")) or 2)
+        )
+        if not bpe_out or bpe_out == bpe_q:
+            return base
+        p = self.param_details
+        out_elems = p["B"] * (p["c_sq"] + p["g_sq"]) * p["H_Q"] * p["d_h_v"]
+        return base + out_elems * (bpe_out - bpe_q)
+
+
+class muse_extend_fly_synthetic(muse_extend_synthetic):
+    """Perf model for ``muse_extend_fly`` (FlyDSL extend attention).
+
+    Identical attention to the Gluon :class:`muse_extend_synthetic`
+    (``_muse_extend_kernel``), except this kernel computes the softmax
+    denominator on the matrix cores as a ``ones x P^T`` row-sum (the Gluon
+    kernel does it with VALU adds). That row-sum is a rank-1 reduction over the
+    keys, so it adds **one depth** of matrix work over the same interaction
+    count I.
+
+        flops = H_Q * I * (d_h_qk + d_h_v + 1)
+    """
+
+    def flops(self):
+        base = super().flops()
+        if base is None:
+            return None
+        depth = self.d_h_qk + self.d_h_v
+        if depth <= 0:
+            return base
+        # ones x P^T softmax denominator: a rank-1 (depth-1) row-sum over the
+        # keys, adding H_Q * I matrix MACs. base = H_Q * I * depth, so this is
+        # base + base/depth.
+        return base // depth * (depth + 1)

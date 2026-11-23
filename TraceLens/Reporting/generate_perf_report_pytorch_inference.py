@@ -71,6 +71,11 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "aiter::moe_sorting_opus_fwd",
     "pseudo_vllm_sparse_attn_decode",
     "sgl_kernel::fast_topk_transform_fused",
+    # Covers both backfilled forms via startswith: muse_extend_attention (Gluon
+    # _muse_extend_kernel) and muse_extend_attention_fly (FlyDSL muse_extend_fly).
+    # Only the backfilled (launcher_shapes) forms carry Input Dims and can be
+    # perf-modelled; the bare hipModuleLaunchKernel launches have no dims.
+    "launcher_shapes::muse_extend_attention",
     "aiter::_fwd_sched_raw",
     "sgl_kernel::deepseek_v4_topk_transform_512",
     "sgl_kernel::fast_topk",

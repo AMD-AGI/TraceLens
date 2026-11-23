@@ -261,6 +261,69 @@ class TestFusedMoEHelpers:
 
 
 class TestMoeExtensions:
+    def test_compact_a4_experts(self):
+        dims = [
+            [8, 4096],
+            [8, 8],
+            [32, 8192, 2048],
+            [32, 4096, 2048],
+            [32, 8192, 128],
+            [32, 4096, 128],
+            [8, 2048],
+            [8, 128],
+        ]
+        types = ["c10::BFloat16", "int"] + ["unsigned char"] * 6
+        # Resolves at the launcher cpu-op level (whole op, one row) -- not the
+        # per-kernel ``->_expert_a4`` synthetic op.
+        from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
+
+        cpu_name = "launcher_shapes::compact_a4_experts"
+        assert (
+            resolve_perf_model_class(cpu_name).__name__
+            == "compact_a4_experts_synthetic"
+        )
+        assert (
+            resolve_perf_model_class(cpu_name + "->_expert_a4 (Synthetic Op)") is None
+        )
+        event = {"name": cpu_name, "args": {"Input Dims": dims, "Input type": types}}
+        m = moe_ext.compact_a4_experts_synthetic(event)
+        # num_rows = 8*8 = 64; up (2*inter=8192) + down (inter=4096) over hidden=4096
+        assert m.flops() == 2 * 64 * 4096 * (8192 + 4096)
+        assert m.get_compute_precision() == "fp4"
+        assert m.get_maf_type() == "matrix"
+        # Whole-op bytes = route_quant + both expert GEMMs; per-expert weights
+        # discounted to the active experts. num_experts is scaled x8 (temporary
+        # EP=8 hardcode) -> global 256, top_k 8 -> E_active frac ~0.224, so the
+        # weight-dominated total is ~193 MB.
+        assert 185e6 < m.bytes() < 200e6
+
+    def test_mfma_moe1_backfilled_shapes(self):
+        from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
+
+        # run_a4w4 shape-backfill: x(num_tokens,hidden), scores/ids(num_tokens,
+        # top_k), norm_weight(hidden). num_tokens/hidden/top_k from shapes.
+        name = (
+            "launcher_shapes::run_a4w4->"
+            "mfma_moe1_silu_mul_afp4_wfp4_fp4_t64x128x256_pm1 (Synthetic Op)"
+        )
+        assert resolve_perf_model_class(name).__name__ == "mfma_moe1_silu_mul_synthetic"
+        event = {
+            "name": name,
+            "args": {
+                "Input Dims": [[1362, 4096], [1362, 8], [1362, 8], [4096]],
+                "Input type": ["c10::BFloat16", "float", "int", "c10::BFloat16"],
+            },
+        }
+        m = moe_ext.mfma_moe1_silu_mul_synthetic(event)
+        pd = m.param_details
+        assert pd["num_tokens"] == 1362 * 8  # routed rows
+        assert pd["hidden_dim"] == 4096
+        assert pd["inter_dim"] == 4096
+        # stage-1 gate+up (gated): 2 * rows * hidden * (2*inter)
+        assert m.flops() == 2 * (1362 * 8) * 4096 * (2 * 4096)
+        assert m.get_compute_precision() == "fp4"
+        assert m.get_maf_type() == "matrix"
+
     def test_moe_aiter_fused_1stage_constructs_and_estimates(self):
         model = moe_aiter_fused_1stage(MOE_FUSED_EVENT)
         details = model.param_details
@@ -320,6 +383,31 @@ class TestRmsNormExtensions:
         assert model.flops() > 0
         assert model.bytes() > 0
 
+    def test_fused_norm_residual_triton(self):
+        # Backfilled Synthetic Op: fp32 residual + bf16 hidden, both [M, N].
+        event = {
+            "name": (
+                "launcher_shapes::forward_triton->"
+                "_fused_norm_residual_triton_kernel (Synthetic Op)"
+            ),
+            "args": {
+                "Input Dims": [(1360, 8192), (1360, 8192)],
+                "Input type": ("float", "c10::BFloat16"),
+                "Input Strides": [(8192, 1), (8192, 1)],
+            },
+        }
+        model = rms_ext.fused_norm_residual_triton(event)
+        M, N = 1360, 8192
+        assert model.num_channels == N
+        assert model.num_elems == M * N
+        assert model.get_compute_precision() == "bf16"
+        assert model.get_maf_type() == "vector"
+        # residual-add (num_elems) + TWO RMSNorms (post + pre)
+        assert model.flops() == M * N + 2 * (M * (2 * N + 2) + M * N * 2)
+        # 2 * num_elems * (bpe_fp32 + bpe_bf16) + affine weight (N * bpe_bf16)
+        assert model.bytes() == 2 * M * N * (4 + 2) + N * 2
+        assert model.flops() / model.bytes() < 1  # memory-bound
+
 
 class TestCustomCollectivesExtensions:
     def test_custom_ar_all_reduce(self):
@@ -377,6 +465,54 @@ class TestCustomCollectivesExtensions:
 
 
 class TestAttentionExtensions:
+    def test_muse_extend_fly_adds_logical_denominator(self):
+        from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
+
+        name = (
+            "launcher_shapes::muse_extend_attention_fly->muse_extend_fly (Synthetic Op)"
+        )
+        assert resolve_perf_model_class(name).__name__ == "muse_extend_fly_synthetic"
+        event = {
+            "name": name,
+            "annotation": "step[EXTEND bs=1 c_sq=1360 c_sqsq=1849600 c_sqsk=1849600 c_sk=1360]",
+            "args": {
+                "Input Dims": [
+                    [1360, 16, 64],
+                    [1005413, 16, 2, 64],
+                    [1005413, 16, 2, 64],
+                    [1360, 16, 64],
+                    [2],
+                    [1],
+                    [1, 10426],
+                    [1],
+                    [1],
+                    [1],
+                ],
+                "Input type": [
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "long int",
+                    "int",
+                    "float",
+                    "float",
+                    "float",
+                ],
+            },
+        }
+        m = aext.muse_extend_fly_synthetic(event)
+        assert m.H_Q == 16 and m.H_KV == 2 and m.d_h_qk == 64
+        assert m.get_compute_precision() == "fp8"
+        # FlyDSL computes the softmax denominator (ones x P^T) on the matrix
+        # cores: a logical depth-1 row-sum (NO tile padding), i.e. +H_Q*I over
+        # the Gluon kernel's 64+64 depth.
+        assert m.flops() == 16 * (64 + 64 + 1) * 1849600
+        gluon = aext.muse_extend_synthetic(event)
+        assert m.flops() == gluon.flops() + 16 * 1849600
+        assert m.bytes() == gluon.bytes()  # denominator adds no HBM traffic
+
     def test_gdn_attention_core(self):
         event = {
             "annotation": _GDN_ANNOTATION,
@@ -405,8 +541,90 @@ class TestAttentionExtensions:
         assert model.flops() == expected_flops
         assert model.bytes() > 0
 
+    def test_muse_extend_synthetic(self):
+        # Backfilled Synthetic Op: head geometry and dtypes come from
+        # Input Dims / Input type, token aggregates from the step[EXTEND ...]
+        # annotation. Dims are the real ones captured from the backfill report.
+        event = {
+            "name": (
+                "launcher_shapes::muse_extend_attention->"
+                "_muse_extend_kernel (Synthetic Op)"
+            ),
+            "annotation": (
+                "step[EXTEND bs=1 c_sq=1360 c_sqsq=1849600 " "c_sqsk=1849600 c_sk=1360]"
+            ),
+            "args": {
+                "Input Dims": [
+                    (1360, 16, 64),  # Q: tokens, H_Q, d_h_qk
+                    (1005413, 16, 2, 64),  # K cache: blocks, block, H_KV, d
+                    (1005413, 16, 2, 64),  # V cache
+                    (1360, 16, 64),  # output: tokens, H_Q, d_h_v
+                    (2,),
+                    (1,),
+                    (1, 10426),
+                    (1,),
+                    (1,),
+                    (1,),
+                ],
+                "Input type": (
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::Float8_e4m3fn",
+                    "c10::BFloat16",
+                    "int",
+                    "long int",
+                    "int",
+                    "float",
+                    "float",
+                    "float",
+                ),
+            },
+        }
+        model = aext.muse_extend_synthetic(event, arch={})
+        assert model.H_Q == 16
+        assert model.H_KV == 2  # paged cache [num_blocks, block, H_KV, head_dim]
+        assert model.d_h_qk == 64
+        assert model.d_h_v == 64
+        assert model.param_details["dtype_Q"] == "c10::Float8_e4m3fn"
+        assert model.param_details["dtype_KV"] == "c10::Float8_e4m3fn"
+        assert model.param_details["causal"] is True
+        assert model.get_compute_precision() == "fp8"
+        # H_Q * (d_h_qk + d_h_v) * (2 * c_sqsk - c_sqsq)
+        assert model.flops() == 16 * (64 + 64) * (2 * 1849600 - 1849600)
+        assert model.bytes() > 0
+
+    def test_muse_extend_synthetic_no_dims_abstains(self):
+        # The bare hipModuleLaunchKernel launch carries no Input Dims, so the
+        # model abstains rather than guessing.
+        event = {
+            "name": "hipModuleLaunchKernel->_muse_extend_kernel (Synthetic Op)",
+            "annotation": (
+                "step[EXTEND bs=1 c_sq=1360 c_sqsq=1849600 " "c_sqsk=1849600 c_sk=1360]"
+            ),
+            "args": {"Input Dims": None, "Input type": None},
+        }
+        model = aext.muse_extend_synthetic(event, arch={})
+        assert model.param_details.get("_no_perf") is True
+        assert model.flops() is None
+        assert model.bytes() is None
+        assert model.get_compute_precision() is None
+
 
 class TestPerfModelExtensions:
+    def test_bf16_splitk_gemm_partials(self):
+        event = {
+            "name": "launcher_shapes::bf16_splitk_gemm_partials->_dense_partial (Synthetic Op)",
+            "args": {
+                "Input Dims": [[8, 8192], [4608, 8192], [8, 8, 4608]],
+                "Input type": ["c10::BFloat16", "c10::BFloat16", "float"],
+            },
+        }
+        m = pext.bf16_splitk_gemm_partials(event)
+        M, K, N, sk = 8, 8192, 4608, 8
+        assert m.flops() == 2 * M * N * K
+        assert m.bytes() == M * K * 2 + N * K * 2 + sk * M * N * 4
+        assert m.get_compute_precision() == "bf16"
+
     def test_gemm_a8w8_blockscale(self):
         event = {
             "args": {
@@ -7184,6 +7402,42 @@ class TestPerfModelDeepCoverage2:
             }
         )
         assert ce.get_compute_precision() is not None
+
+
+class TestSyntheticOpPerfModels:
+    """Tests for annotation propagation to orphan Synthetic Ops."""
+
+    def test_propagate_annotation(self):
+        from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops
+
+        class FakeTree:
+            events = [
+                {
+                    "cat": "user_annotation",
+                    "name": "step[DECODE bs=4]",
+                    "ts": 0,
+                    "dur": 1000,
+                },
+            ]
+
+        events = [
+            {"name": "op1", "ts": 100, "dur": 10},
+            {"name": "op2", "ts": 200, "dur": 10, "annotation": "already_set"},
+        ]
+        _propagate_annotation_to_synthetic_ops(FakeTree(), events)
+        assert events[0]["annotation"] == "step[DECODE bs=4]"
+        assert events[1]["annotation"] == "already_set"
+
+    def test_propagate_annotation_no_annotations(self):
+        """Early return when trace has no user_annotation events."""
+        from TraceLens.TreePerf.tree_perf import _propagate_annotation_to_synthetic_ops
+
+        class FakeTree:
+            events = [{"cat": "cpu_op", "name": "no_annotations_here"}]
+
+        events = [{"name": "op1", "ts": 100, "dur": 10}]
+        _propagate_annotation_to_synthetic_ops(FakeTree(), events)
+        assert "annotation" not in events[0]
 
 
 def test_moe_sorting_opus_fwd_maps_and_models():

@@ -206,6 +206,38 @@ def event_process_thread_names(tree, event):
     }
 
 
+# World size (= TP group size) encoded as an integer template param on aiter's
+def _propagate_annotation_to_synthetic_ops(tree, events):
+    """Copy the enclosing iteration annotation onto Synthetic Op events
+    that were created after ``apply_annotation`` ran.
+
+    Synthetic Ops are generated during ``collect_unified_perf_events``
+    which runs after the tree's ``apply_annotation``, so they miss the
+    annotation pass.  This back-fills them using timestamp containment,
+    picking the innermost enclosing annotation so a coarse outer wrapper
+    (e.g. ``scheduler.run_batch``) does not shadow the per-step iteration
+    annotation (``step[...]``) that carries the token aggregates.
+    """
+    annotation_events = sorted(
+        (e for e in tree.events if "user_annotation" in (e.get("cat") or "")),
+        key=lambda e: e.get("ts", 0),
+    )
+    if not annotation_events:
+        return
+    for e in events:
+        if "annotation" in e:
+            continue
+        ts, dur = e.get("ts", 0), e.get("dur", 0)
+        innermost = None
+        for ann in annotation_events:
+            if ann["ts"] > ts:
+                break
+            if (ts + dur) < ann["ts"] + ann["dur"]:
+                innermost = ann
+        if innermost is not None:
+            e["annotation"] = innermost.get("name")
+
+
 class TreePerfAnalyzer:
     @staticmethod
     def from_file(
@@ -2005,6 +2037,8 @@ class TreePerfAnalyzer:
 
         if events is None:
             events = self.collect_unified_perf_events(include_nccl=include_nccl)
+
+        _propagate_annotation_to_synthetic_ops(self.tree, events)
 
         if len(events) == 0:
             warnings.warn(
