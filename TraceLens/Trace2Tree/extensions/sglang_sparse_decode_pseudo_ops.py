@@ -37,23 +37,25 @@ REDUCE_KERNEL = "_aiter_sparse_decode_reduce"
 
 
 def create_pseudo_ops_sglang_sparse_decode(trace_tree):
-    """Inject pseudo_v4_paged_decode_{mode} under each Flash sparse-decode owner."""
+    """Inject pseudo_v4_paged_decode_{mode} under each sparse-decode owner.
+
+    Mode comes from kernel-name heuristics (swa/csa/hca); no model-name
+    branching. Optional ``TL_TP`` stamps tensor-parallel width when set.
+    """
     owners = _find_owners(trace_tree)
     if not owners:
-        logger.warning("No SGLang Flash sparse-decode python owners found")
+        logger.warning("No SGLang sparse-decode python owners found")
         return
 
-    model_name = os.environ.get("TL_MODEL")
     tp = _safe_int(os.environ.get("TL_TP"), default=1)
     owners.sort(key=lambda e: (e.get("pid", 0), e.get("tid", 0), e.get("ts", 0)))
     logger.info(
-        "Processing %d SGLang sparse-decode owners (model_name=%r, tp=%s)",
+        "Processing %d SGLang sparse-decode owners (tp=%s)",
         len(owners),
-        model_name,
         tp,
     )
     for call_idx, owner in enumerate(owners):
-        _inject_owner(trace_tree, owner, model_name, tp, call_idx)
+        _inject_owner(trace_tree, owner, tp, call_idx)
 
 
 def _find_owners(trace_tree):
@@ -118,7 +120,7 @@ def _safe_int(value, default=None):
         return default
 
 
-def _inject_owner(trace_tree, owner, model_name, tp, call_idx):
+def _inject_owner(trace_tree, owner, tp, call_idx):
     if not owner.get("children") and not owner.get("gpu_events"):
         logger.warning(
             "SGLang sparse-decode owner UID %s has no children/gpu_events; skip",
@@ -134,10 +136,11 @@ def _inject_owner(trace_tree, owner, model_name, tp, call_idx):
 
     kernel_names = _kernel_names_under(trace_tree, owner)
     mode = _detect_mode(kernel_names)
+    # Stamp mode/tp only — paged-decode models use their own geometry defaults
+    # when v4_model_name is absent (no TL_MODEL / DeepSeek name branching here).
     extra_args = {
         "v4_mode": mode,
         "v4_call_index": call_idx,
-        "v4_model_name": model_name,
         "v4_tp": tp,
         "sglang_sparse_decode": True,
     }

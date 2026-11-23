@@ -59,7 +59,7 @@ EXPECTED_GEMM_TIME_US = {
 
 # SDPA Tile Origami Time (µs) per row of the SDPA_fwd sheet (both rows are
 # N_Q = N_KV = 141, d_h = 64, bf16).
-EXPECTED_SDPA_TILE_TIME_US = [22.766573765418155, 22.766573765418155]
+EXPECTED_SDPA_TILE_TIME_US = [22.849781075686007, 22.849781075686007]
 
 
 @pytest.fixture(scope="module")

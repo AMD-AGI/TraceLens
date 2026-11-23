@@ -75,11 +75,10 @@ def get_pseudo_op_mappings():
         "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
-        # DeepSeek-V4.1-Flash SGLang pseudo parents / guarded maps (Trace2Tree injectors)
+        # SGLang Trace2Tree pseudo parents (injectors)
         "pseudo_pa_mqa_logits_fp4": attention_perf_model_extensions.pseudo_pa_mqa_logits_fp4,
         "pseudo_quantize_fp4_indexer": attention_perf_model_extensions.pseudo_quantize_fp4_indexer,
-        # Flash indexer TopK FLOPs only via the injected pseudo parent — never
-        # bare aten::topk (too generic; other TopK sites are unrelated to DSV4).
+        # Indexer TopK FLOPs only via injected pseudo parent — never bare aten::topk.
         "pseudo_flash_indexer_topk": attention_perf_model_extensions.pseudo_flash_indexer_topk,
         "pseudo_hc_boundary": perf_model_extensions.hc_boundary,
         "pseudo_hc_mix_reduce_sinkhorn": perf_model_extensions.hc_mix_reduce_sinkhorn,
@@ -89,6 +88,11 @@ def get_pseudo_op_mappings():
         "pseudo_rmsnorm_fake_quant_fp8": rmsnorm_perf_model_extensions.rmsnorm_fake_quant_fp8,
         "pseudo_op::moe_flydsl_gemm2_a4w4": moe_perf_model_extensions.moe_flydsl_stage2,
         "pseudo_op::moe_flydsl_moe_reduction": moe_perf_model_extensions.moe_flydsl_stage2,
+        # Direct cpu_op maps (landed with #1176)
+        "aiter::_fwd_sched_raw": attention_perf_model_extensions.pa_mqa_logits_mxfp4,
+        "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
+        "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
+        "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
         ## Misc ops
         "aiter::batched_gemm_a16wfp4_": perf_model_extensions.batched_gemm_a16wfp4,
         "aiter::dynamic_per_token_scaled_quant": perf_model_extensions.per_group_quant,
@@ -174,6 +178,7 @@ def get_pseudo_op_mappings():
         "aiter::dynamic_per_group_scaled_quant_fp4": perf_model_extensions.aiter_dynamic_per_group_scaled_quant_fp4,
         "aiter::_gemm_a8w8_blockscale_bpreshuffle_asm": perf_model_extensions.gemm_a8w8_blockscale,
         "aiter::mhc_post": perf_model_extensions.mhc_post,
+        "sglang_profiler::hc_combine_hc_combine_split": perf_model_extensions.sglang_hc_combine_split,
         "aiter::mhc_pre_gemm_sqrsum": perf_model_extensions.mhc_pre_gemm_sqrsum,
         "aiter::mhc_pre_big_fuse_rmsnorm": perf_model_extensions.mhc_pre_big_fuse_rmsnorm,
         "aiter::mhc_fused_post_pre_gemm_sqrsum": perf_model_extensions.mhc_fused_post_pre_gemm_sqrsum,

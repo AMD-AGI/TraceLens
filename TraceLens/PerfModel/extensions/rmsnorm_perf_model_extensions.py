@@ -157,11 +157,9 @@ class aiter_fused_qk_rmsnorm(RMSNorm):
         }
 
     def flops(self):
-        flops_q = super().flops()
-        rows_k = self.k_num_elems / self.k_num_channels
-        flops_k = rows_k * (2 * self.k_num_channels + 2)
-        flops_k += self.k_num_elems * (2 if self.is_affine else 1)
-        return flops_q + flops_k
+        return super().flops() + self.flops_func(
+            self.k_num_elems, self.k_num_channels, self.is_affine
+        )
 
     def bytes(self):
         bytes_q = super().bytes()

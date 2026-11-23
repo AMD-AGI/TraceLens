@@ -113,10 +113,11 @@ from TraceLens.PerfModel.perf_model import (
     IndexedCopy,
     Normalization,
     Reduce,
+    RMSNorm,
     Softmax,
     UnaryElementwise,
 )
-from TraceLens.PerfModel.triton_compiled_perf_model import _FLOPS_PER_ELEM
+from TraceLens.PerfModel.op_flops import op_flops_per_elem
 from TraceLens.PerfModel.utils import name2bpe, torch_dtype_map
 from TraceLens.TreePerf.tree_perf import compute_roofline_time_and_bound
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
@@ -185,8 +186,7 @@ _ENGINE_MOE_CLASS_MARKERS = ("FusedMoE",)
 # norm layers (LlamaRMSNorm, Qwen2RMSNorm, CustomRMSNorm, ...). "rmsnorm" has
 # no learned bias; every other family here is assumed to have one. "generic"
 # families share the base Normalization.flops_func/bytes_func; "rmsnorm" uses
-# RMSNorm's own flops()/bytes() (see _rmsnorm_flops/_rmsnorm_bytes -- RMSNorm
-# has no flops_func/bytes_func to call directly). channel_first classes
+# RMSNorm.flops_func and _rmsnorm_bytes. channel_first classes
 # normalize over axis 1 (conv-style [N, C, ...]); the rest normalize over the
 # trailing feature axis.
 _NORMALIZATION_FAMILIES: tuple[tuple[str, str, bool, bool], ...] = (
@@ -246,12 +246,21 @@ _UNARY_POINTWISE_COMPUTATIONS = frozenset(
         "cast",
     }
 )
-# Graph labels whose aten name is not the label itself. The flop weight still
-# comes from _FLOPS_PER_ELEM; a label the table does not name stays at
-# one flop per element rather than the fused kernel's "unknown op is zero".
-_UNARY_LABEL_TO_ATEN_SUFFIX = {
+# Graph labels whose OP_FLOPS_PER_ELEM row is not the label itself.
+_LABEL_TO_OP_FLOPS_ROW = {
     "negate": "neg",
     "reciprocal sqrt": "rsqrt",
+    "cosine": "cos",
+    "sine": "sin",
+    "cast": "to",
+    "subtract": "sub",
+    "multiply": "mul",
+    "divide": "div",
+    "power": "pow",
+    "elementwise_add": "add",
+    "elementwise_mul": "mul",
+    "variance": "var",
+    "product": "prod",
 }
 _BINARY_POINTWISE_COMPUTATIONS = frozenset(
     {
@@ -2161,7 +2170,7 @@ def _attention_extra_ops(
                     instances,
                     "Normalization (RMSNorm)",
                     "vector",
-                    _rmsnorm_flops(elements, d_h, True),
+                    RMSNorm.flops_func(elements, d_h, True),
                     (
                         _rmsnorm_bytes(elements, d_h, True, bpe, bpe)
                         if bpe is not None
@@ -2733,7 +2742,7 @@ def _draft_depth_ops(
     drawn_names = _drawn_names(drawn) if drawn else set()
     partial = drawn is not None
     norm_elems = tokens * hidden
-    norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
+    norm_flops = RMSNorm.flops_func(norm_elems, hidden, True)
     norm_bytes = (
         _rmsnorm_bytes(norm_elems, hidden, True, bpe, bpe) if bpe is not None else None
     )
@@ -2996,7 +3005,7 @@ def _mtp_stack_ops(
         # No draft layer in the source. This template is the explicit fallback:
         # two RMSNorms, a 2H→H projection, attention, and a dense MLP.
         norm_elems = tokens * hidden
-        norm_flops = _rmsnorm_flops(norm_elems, hidden, True)
+        norm_flops = RMSNorm.flops_func(norm_elems, hidden, True)
         norm_bytes = (
             _rmsnorm_bytes(norm_elems, hidden, True, bpe, bpe)
             if bpe is not None
@@ -3429,12 +3438,16 @@ def _dispatch_op_cost(
         return _softmax_cost(output_shape, bpe)
     label = computation.lower()
     if label in _REDUCTION_COMPUTATIONS:
-        return _reduce_cost(input_shapes, output_shape, bpe)
+        return _reduce_cost(
+            input_shapes, output_shape, bpe, _label_flops_per_element(label)
+        )
     if label in _BINARY_POINTWISE_COMPUTATIONS:
-        return _binary_elementwise_cost(input_shapes, output_shape, bpe)
+        return _binary_elementwise_cost(
+            input_shapes, output_shape, bpe, _label_flops_per_element(label)
+        )
     if label in _UNARY_POINTWISE_COMPUTATIONS:
         return _unary_elementwise_cost(
-            output_shape, bpe, _unary_flops_per_element(label)
+            output_shape, bpe, _label_flops_per_element(label)
         )
     if _is_embedding_lookup(computation):
         return _embedding_lookup_cost(input_shapes, output_shape, bpe)
@@ -3691,7 +3704,7 @@ def _normalization_cost(
         return None
     is_affine = True
     if kind == "rmsnorm":
-        flops = _rmsnorm_flops(num_elems, num_channels, is_affine)
+        flops = RMSNorm.flops_func(num_elems, num_channels, is_affine)
         bytes_moved = (
             _rmsnorm_bytes(num_elems, num_channels, is_affine, bpe, bpe)
             if bpe is not None
@@ -3709,15 +3722,6 @@ def _normalization_cost(
             else None
         )
     return f"Normalization ({computation})", "vector", flops, bytes_moved
-
-
-def _rmsnorm_flops(num_elems: int, num_channels: int, is_affine: bool) -> float:
-    """Mirrors RMSNorm.flops() in TraceLens.PerfModel.perf_model (no static
-    flops_func exists there -- RMSNorm overrides the instance method directly)."""
-    non_normalized_elems = num_elems / num_channels
-    flops = non_normalized_elems * (2 * num_channels + 2)
-    flops += num_elems * (2 if is_affine else 1)
-    return flops
 
 
 def _rmsnorm_bytes(
@@ -3744,26 +3748,20 @@ def _softmax_cost(
     return "Softmax", "vector", flops, bytes_moved
 
 
-def _unary_flops_per_element(label: str) -> int:
-    """Per-element flops from ``_FLOPS_PER_ELEM``, or 1 when it has no row.
-
-    The table is the same one fused Triton kernels use. A missing row there
-    means "this name contributed nothing we could identify inside a fused
-    kernel," which is the wrong default for a standalone unary op.
-    """
-    suffix = _UNARY_LABEL_TO_ATEN_SUFFIX.get(label, label)
-    return _FLOPS_PER_ELEM.get(f"aten.{suffix}", 1)
+def _label_flops_per_element(label: str) -> int:
+    """Per-element flops of a pointwise or reduction label, from ``OP_FLOPS_PER_ELEM``."""
+    return op_flops_per_elem(_LABEL_TO_OP_FLOPS_ROW.get(label, label))
 
 
 def _unary_elementwise_cost(
     output_shape: tuple[int, ...],
     bpe: float | None,
-    flops_per_elem: int = 1,
+    flops_per_elem: int,
 ) -> tuple[str, str, float, float | None] | None:
     if not output_shape:
         return None
     nelems = prod(output_shape)
-    flops = flops_per_elem * nelems
+    flops = UnaryElementwise.flops_func(nelems, flops_per_elem)
     bytes_moved = (
         UnaryElementwise.bytes_func(nelems, bpe, bpe) if bpe is not None else None
     )
@@ -3774,6 +3772,7 @@ def _binary_elementwise_cost(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
+    flops_per_elem: int,
 ) -> tuple[str, str, float, float | None] | None:
     if not output_shape:
         return None
@@ -3784,7 +3783,7 @@ def _binary_elementwise_cost(
     shape2 = input_shapes[1] if len(input_shapes) > 1 else None
     nelems_in1 = prod(shape1) if shape1 else 1
     nelems_in2 = prod(shape2) if shape2 else 1
-    flops = BinaryElementwise.flops_func(nelems_out)
+    flops = BinaryElementwise.flops_func(nelems_out, flops_per_elem)
     bytes_moved = (
         BinaryElementwise.bytes_func(nelems_in1, nelems_in2, nelems_out, bpe, bpe, bpe)
         if bpe is not None
@@ -3797,13 +3796,14 @@ def _reduce_cost(
     input_shapes: list[tuple[int, ...] | None],
     output_shape: tuple[int, ...],
     bpe: float | None,
+    flops_per_elem: int,
 ) -> tuple[str, str, float, float | None] | None:
     if not input_shapes or not input_shapes[0]:
         return None
     input_shape = input_shapes[0]
     num_input_elems = prod(input_shape)
     num_output_elems = prod(output_shape) if output_shape else 1
-    flops = Reduce.flops_func(num_input_elems, num_output_elems)
+    flops = Reduce.flops_func(num_input_elems, flops_per_elem)
     bytes_moved = (
         Reduce.bytes_func(num_input_elems, num_output_elems, bpe, bpe)
         if bpe is not None

@@ -75,7 +75,10 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "pseudo_flash_indexer_topk",
     "pseudo_hc_boundary",
     "pseudo_hc_mix_reduce_sinkhorn",
-    "aten::topk",
+    "aiter::_fwd_sched_raw",
+    "sgl_kernel::deepseek_v4_topk_transform_512",
+    "sgl_kernel::fast_topk",
+    "fused_k_norm_rope_q_flashmla",
 ]
 
 

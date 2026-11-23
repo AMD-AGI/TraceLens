@@ -11,7 +11,6 @@ gain a FLOPs-capable cpu_op name. Geometry falls back to Flash defaults when
 the owner has no Input Dims (common on graph-capture Synthetic Op paths).
 """
 
-import os
 import re
 import logging
 
@@ -37,8 +36,8 @@ MXFP8_RE = re.compile(
     r"mxfp8_native_amd_gfx95\.py\(\d+\):\s*mxfp8_native_blockscaled_linear\b"
 )
 
-# Flash residual / hidden defaults (TP=1 Flash).
-_FLASH_DEFAULTS = {
+# Geometry defaults when Synthetic Ops lack Input Dims (overridable via args).
+_MISC_DEFAULTS = {
     "n": 4,
     "C": 5120,
     "hidden_dim": 5120,
@@ -48,20 +47,19 @@ _FLASH_DEFAULTS = {
 
 
 def create_pseudo_ops_sglang_flash_misc(trace_tree):
-    model_name = os.environ.get("TL_MODEL")
     tokens = _infer_tokens_from_annotation(trace_tree)
-    base = {"v4_model_name": model_name, "num_tokens": tokens, "M": tokens}
+    base = {"num_tokens": tokens, "M": tokens}
     _wrap(
         trace_tree,
         HC_BOUNDARY_RE,
         "pseudo_hc_boundary",
-        {**base, **_FLASH_DEFAULTS},
+        {**base, **_MISC_DEFAULTS},
     )
     _wrap(
         trace_tree,
         HC_SINKHORN_RE,
         "pseudo_hc_mix_reduce_sinkhorn",
-        {**base, "n": _FLASH_DEFAULTS["n"], "C": 1},
+        {**base, "n": _MISC_DEFAULTS["n"], "C": 1},
     )
     _wrap(
         trace_tree,
@@ -69,8 +67,8 @@ def create_pseudo_ops_sglang_flash_misc(trace_tree):
         "pseudo_rmsnorm_fake_quant_fp8",
         {
             **base,
-            "N": _FLASH_DEFAULTS["hidden_dim"],
-            "hidden_dim": _FLASH_DEFAULTS["hidden_dim"],
+            "N": _MISC_DEFAULTS["hidden_dim"],
+            "hidden_dim": _MISC_DEFAULTS["hidden_dim"],
         },
     )
     _wrap(
@@ -79,10 +77,10 @@ def create_pseudo_ops_sglang_flash_misc(trace_tree):
         "pseudo_router_gemv_split_k",
         {
             **base,
-            "E": _FLASH_DEFAULTS["num_experts"],
-            "K": _FLASH_DEFAULTS["hidden_dim"],
-            "num_experts": _FLASH_DEFAULTS["num_experts"],
-            "hidden_dim": _FLASH_DEFAULTS["hidden_dim"],
+            "E": _MISC_DEFAULTS["num_experts"],
+            "K": _MISC_DEFAULTS["hidden_dim"],
+            "num_experts": _MISC_DEFAULTS["num_experts"],
+            "hidden_dim": _MISC_DEFAULTS["hidden_dim"],
         },
     )
     _wrap(
@@ -91,9 +89,9 @@ def create_pseudo_ops_sglang_flash_misc(trace_tree):
         "pseudo_router_gate",
         {
             **base,
-            "E": _FLASH_DEFAULTS["num_experts"],
-            "topk": _FLASH_DEFAULTS["topk"],
-            "num_experts": _FLASH_DEFAULTS["num_experts"],
+            "E": _MISC_DEFAULTS["num_experts"],
+            "topk": _MISC_DEFAULTS["topk"],
+            "num_experts": _MISC_DEFAULTS["num_experts"],
         },
     )
     _wrap(
@@ -102,8 +100,8 @@ def create_pseudo_ops_sglang_flash_misc(trace_tree):
         "pseudo_mxfp8_gemv",
         {
             **base,
-            "N": _FLASH_DEFAULTS["hidden_dim"],
-            "K": _FLASH_DEFAULTS["hidden_dim"],
+            "N": _MISC_DEFAULTS["hidden_dim"],
+            "K": _MISC_DEFAULTS["hidden_dim"],
         },
     )
 

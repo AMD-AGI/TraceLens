@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Inject stable Flash indexer pseudo ops off SGLang/aiter python owners.
+"""Inject stable indexer pseudo ops off SGLang/aiter python owners.
 
 Covers:
   - pa_mqa_logits_fp4 → pseudo_pa_mqa_logits_fp4
@@ -13,7 +13,6 @@ Covers:
   - fused_k_norm_rope flashmla → fused_k_norm_rope_q_flashmla
 """
 
-import os
 import re
 import logging
 
@@ -32,28 +31,35 @@ FLASHMLA_OWNER_RE = re.compile(
 )
 ATEN_TOPK = "aten::topk"
 
+# Geometry stamps when Synthetic Ops lack Input Dims (overridable via args).
+_INDEXER_GEOM = {
+    "index_n_heads": 64,
+    "index_head_dim": 128,
+    "index_topk": 512,
+}
+_FLASHMLA_GEOM = {"d_h": 512, "rope_dim": 64}
+
 
 def create_pseudo_ops_sglang_flash_indexer(trace_tree):
-    model_name = os.environ.get("TL_MODEL")
     _inject_named_owners(
         trace_tree,
         MQA_OWNER_RE,
         "pseudo_pa_mqa_logits_fp4",
-        extra={"v4_model_name": model_name},
+        extra=dict(_INDEXER_GEOM),
     )
     _inject_named_owners(
         trace_tree,
         QUANT_OWNER_RE,
         "pseudo_quantize_fp4_indexer",
-        extra={"v4_model_name": model_name},
+        extra=dict(_INDEXER_GEOM),
     )
     _inject_named_owners(
         trace_tree,
         FLASHMLA_OWNER_RE,
         "fused_k_norm_rope_q_flashmla",
-        extra={"v4_model_name": model_name, "d_h": 512, "rope_dim": 64},
+        extra=dict(_FLASHMLA_GEOM),
     )
-    _inject_aten_topk_parents(trace_tree, model_name)
+    _inject_aten_topk_parents(trace_tree)
 
 
 def _inject_named_owners(trace_tree, pattern, pseudo_name, extra=None):
@@ -93,7 +99,8 @@ def _already_has_flash_indexer_topk(trace_tree, evt, parent):
     return bool(child and child.get("name") == "pseudo_flash_indexer_topk")
 
 
-def _is_flash_indexer_score_topk(evt):
+def _is_indexer_score_topk(evt):
+    """True when aten::topk looks like a wide score-matrix indexer selection."""
     args = evt.get("args") or {}
     dims = args.get("Input Dims") or []
     types = args.get("Input type") or []
@@ -108,12 +115,12 @@ def _is_flash_indexer_score_topk(evt):
     return True
 
 
-def _inject_aten_topk_parents(trace_tree, model_name):
-    """Attach a Flash indexer TopK pseudo around qualifying aten::topk ops.
+def _inject_aten_topk_parents(trace_tree):
+    """Attach an indexer TopK pseudo around qualifying aten::topk ops.
 
     Prefer injecting above the event when it has a parent; if it is a CPU root
-    (common on Flash PD captures), wrap its children instead so kernel time
-    still rolls under a FLOPs-capable pseudo name.
+    (common on PD captures), wrap its children instead so kernel time still
+    rolls under a FLOPs-capable pseudo name. Selection is shape-based only.
     """
     for uid in list(trace_tree.name2event_uids.get(ATEN_TOPK, [])):
         evt = trace_tree.get_UID2event(uid)
@@ -122,9 +129,9 @@ def _inject_aten_topk_parents(trace_tree, model_name):
         parent = trace_tree.get_parent_event(evt)
         if _already_has_flash_indexer_topk(trace_tree, evt, parent):
             continue
-        if not _is_flash_indexer_score_topk(evt):
+        if not _is_indexer_score_topk(evt):
             continue
-        extra = {"v4_model_name": model_name, "indexer_topk_parent": True}
+        extra = {"indexer_topk_parent": True}
         children = evt.get("children") or []
         if parent is None:
             if not children and not evt.get("gpu_events"):
