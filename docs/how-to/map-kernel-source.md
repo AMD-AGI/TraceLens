@@ -34,7 +34,7 @@ file and line that hold it.
   symbol decoding:
 
   ```bash
-  pip install "tracelens[kernel_source]"
+  pip install 'TraceLens[kernel_source] @ git+https://github.com/AMD-AGI/TraceLens.git'
   ```
 
 - The framework whose kernels you want to map installed in the same environment
