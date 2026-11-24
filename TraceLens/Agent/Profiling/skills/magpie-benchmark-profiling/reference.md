@@ -585,7 +585,7 @@ ssh <node> "source ~/miniconda3/etc/profile.d/conda.sh && conda activate <env> &
     --CONC <conc> --OSL <osl> --R <r>"
 ```
 
-Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
+Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [inference-analysis.md](../../../../../docs/conceptual/inference-analysis.md#steady-state-region) for details.
 
 This produces up to 3 trace files plus metadata in `trace_split/` (a window may be skipped if no matching run exists in the largest steady-state region):
 - `mixed_steady_state_*.json.gz` — representative DO:PD mix (closest to the reference or `--CONC/--OSL/--R`-derived ideal ratio). **Use this for analysis.**

@@ -253,7 +253,7 @@ Follow the model roofline projection skill installed with TraceLens and
 project <model> at batch size <N> and sequence length <N> on <GPU arch>.
 ```
 
-See [TraceLens/Agent/Visualizer/skills/model-roofline-projection/](../../TraceLens/Agent/Visualizer/skills/model-roofline-projection/SKILL.md)
+See [TraceLens/Agent/Visualizer/skills/model-roofline-projection/](https://github.com/AMD-AGI/TraceLens/blob/main/TraceLens/Agent/Visualizer/skills/model-roofline-projection/SKILL.md)
 for the skill's full procedure.
 
 ## Related topics

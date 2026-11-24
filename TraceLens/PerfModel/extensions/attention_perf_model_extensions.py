@@ -1219,6 +1219,60 @@ class mla_decode_v4_asm(InferenceAttention):
         return super().get_maf_type()
 
 
+class mla_decode_v4_stage2_asm(mla_decode_v4_asm):
+    """
+    Performance model for AITER's _fwd_kernel_stage2_asm.
+
+    Merges the FP32 split partials and LSEs written by mla_decode_v4_asm
+    into the BF16 output. For each query, head, and split the kernel
+    rescales the accumulator (D multiplies), blends in the partial
+    (D multiplies and D adds), and updates the running maximum and LSE
+    (2 exp, 2 sub, 1 max, 2 flops). It then divides the accumulator by
+    the LSE sum (D divides). The loop runs once per launched split.
+
+        _fwd_kernel_stage2_asm(partial, lse, out, ..., num_kv_splits)
+
+    Roofline calculation -- FLOPs:
+        FLOPs = Q * H * (splits * (3 * D + 7) + D)
+
+    Roofline calculation -- Bytes:
+        bytes_partial = numel(partial) * 4
+        bytes_lse     = numel(lse) * 4
+        bytes_output  = numel(output) * 2
+        Total         = bytes_partial + bytes_lse + bytes_output
+    """
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        q, h, d, splits = p["q_tokens"], p["H_Q"], p["d_h_v"], p["num_kv_splits"]
+        return q * h * (splits * (3 * d + 7) + d)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        base = p["buffer_base"]
+        if not dense_counted_tensor(self.event, (base, base + 1, base + 2)):
+            return None
+        return (
+            math.prod(p["split_shape"]) * 4
+            + math.prod(p["lse_shape"]) * 4
+            + math.prod(p["out_shape"]) * 2
+        )
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "fp32"
+
+    def get_maf_type(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "vector"
+
+
 class sgl_kernel_fast_topk_transform_fused:
     """
     Performance model for sgl_kernel::fast_topk_transform_fused (DSA indexer
