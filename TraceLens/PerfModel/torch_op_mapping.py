@@ -516,6 +516,12 @@ def _match_triton_compiled(name):
         )
 
         return TritonCompiledPerfModel
+    if name.startswith("triton_tem_"):
+        from TraceLens.PerfModel.triton_compiled_perf_model import (
+            TritonTemplateGemmPerfModel,
+        )
+
+        return TritonTemplateGemmPerfModel
     return None
 
 
