@@ -1865,6 +1865,38 @@ class TreePerfAnalyzer:
                 latest = annotation["name"]
         return latest
 
+    def _eager_kernel_families(self) -> dict[str, set[str]]:
+        """Each CPU op's kernel families where the trace ran it outside a graph.
+
+        A kernel launched by a runtime call under a CPU op belongs to that op;
+        a graph launch's kernels belong to no op the trace shows.
+        """
+        cached = getattr(self, "_kernel_families", None)
+        if cached is not None:
+            return cached
+        from TraceLens.TreePerf.graph_schedule import kernel_family
+
+        families: dict[str, set[str]] = {}
+        gpu = {category.value for category in TraceEventUtils.GpuEventCategories}
+        for event in self.tree.events:
+            if event.get("cat") not in gpu:
+                continue
+            runtime = self.tree.get_parent_event(event)
+            if runtime is None or runtime.get("name") in (
+                "hipGraphLaunch",
+                "cudaGraphLaunch",
+            ):
+                continue
+            op = self.tree.get_parent_event(runtime)
+            while op is not None and op.get("cat") != "cpu_op":
+                op = self.tree.get_parent_event(op)
+            if op is not None:
+                families.setdefault(op["name"], set()).add(
+                    kernel_family(event.get("name", ""))
+                )
+        self._kernel_families = families
+        return families
+
     def _launches_for(self, event, kernel_names):
         """The model's launch list for the invocation that replays ``event``.
 
@@ -1893,7 +1925,12 @@ class TreePerfAnalyzer:
         if key not in cache:
             from TraceLens.ModelUtils.graph_launches import graph_launches
 
-            cache[key] = graph_launches(self.graph_model, invocation, kernel_names)
+            cache[key] = graph_launches(
+                self.graph_model,
+                invocation,
+                kernel_names,
+                self._eager_kernel_families(),
+            )
         return cache[key]
 
     def collect_unified_perf_events(self, include_nccl=False):
@@ -1937,7 +1974,9 @@ class TreePerfAnalyzer:
                 else None
             )
             assigned = (
-                align_kernels(names, launches) if launches else [None] * len(ordered)
+                align_kernels(names, launches, self._eager_kernel_families())
+                if launches
+                else [None] * len(ordered)
             )
             for owner_index, members in group_stopped_ops(assigned):
                 owned = [ordered[index] for index in members]

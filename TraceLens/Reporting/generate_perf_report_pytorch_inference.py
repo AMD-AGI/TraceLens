@@ -8,6 +8,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 import warnings
 from typing import Dict, Optional
@@ -593,22 +594,182 @@ def _graph_model_for_trace(
     context, and pipeline. The compute-unit count and the GPU target come
     from the trace's device block.
     """
+    from TraceLens.ModelUtils.engine_facts import (
+        recorded_engine_version,
+        traced_engine_release,
+    )
     from TraceLens.ModelUtils.graph_launches import GraphModel
     from TraceLens.ModelUtils.parallel_plan import (
         ParallelDegree,
         parallel_degree_from_trace,
     )
+    from TraceLens.ModelUtils.torch_runtime import DeviceFacts
 
     degree = parallel_degree_from_trace(metadata) or ParallelDegree()
+    engine = _inference_engine(events) or ""
+    gfx_arch = TraceEventUtils.gpu_target_prefix_from_trace(metadata) or ""
+    # The version the caller states, else the one the trace records (its
+    # metadata, else the release its Python frames agree with); left empty,
+    # the newest release is read.
+    if not engine_version and engine:
+        engine_version = (
+            recorded_engine_version(metadata, engine)
+            or traced_engine_release(engine, events)
+            or ""
+        )
+    distributed = (metadata or {}).get("distributedInfo") or {}
     return GraphModel(
         checkpoint=checkpoint,
         parallel=degree,
         num_cus=TraceEventUtils.num_cus_from_trace(metadata) or 0,
-        gfx_arch=TraceEventUtils.gpu_target_prefix_from_trace(metadata) or "",
-        engine=_inference_engine(events) or "",
+        gfx_arch=gfx_arch,
+        engine=engine,
         engine_version=engine_version or "",
         settings=tuple(sorted((settings or {}).items())),
+        device=DeviceFacts.from_trace(metadata, gfx_target=gfx_arch),
+        nccl_version=str(distributed.get("nccl_version") or ""),
+        eager_shapes=_eager_shapes(events),
+        traced_functions=_traced_functions(events),
+        replay_graphs=_replayed_graphs(events),
+        replay_sizes=_replayed_sizes(events),
+        eager_kernels=_eager_kernels(events),
     )
+
+
+_GRAPH_LAUNCHES = ("hipGraphLaunch", "cudaGraphLaunch")
+
+
+def _replayed_sizes(events) -> frozenset:
+    """The batch sizes and token counts the trace's step annotations state."""
+    from TraceLens.TreePerf.graph_schedule import invocation_from_annotation
+
+    sizes = set()
+    for event in events:
+        if event.get("cat") != "user_annotation":
+            continue
+        invocation = invocation_from_annotation(event.get("name") or "")
+        if invocation is not None:
+            sizes.update((invocation.batch_size, invocation.tokens))
+    return frozenset(size for size in sizes if size)
+
+
+def _replayed_graphs(events) -> frozenset:
+    """Each distinct graph launch of the trace: its kernel names in order, and
+    the batch size and token count of the step annotation it ran within (or
+    the latest one before it)."""
+    from TraceLens.TreePerf.graph_schedule import invocation_from_annotation
+
+    steps = []
+    for event in events:
+        if event.get("cat") == "user_annotation":
+            invocation = invocation_from_annotation(event.get("name") or "")
+            if invocation is not None:
+                start = event.get("ts") or 0
+                steps.append(
+                    (
+                        start,
+                        start + (event.get("dur") or 0),
+                        (invocation.batch_size, invocation.tokens),
+                    )
+                )
+    steps.sort()
+    launches = {
+        (event.get("args") or {}).get("correlation"): event.get("ts") or 0
+        for event in events
+        if event.get("cat") == "cuda_runtime" and event.get("name") in _GRAPH_LAUNCHES
+    }
+    by_launch: dict = {}
+    for event in events:
+        correlation = (event.get("args") or {}).get("correlation")
+        if event.get("cat") == "kernel" and correlation in launches:
+            by_launch.setdefault(correlation, []).append(event)
+    found = set()
+    for correlation, kernels in by_launch.items():
+        start = launches[correlation]
+        within = [sizes for begin, end, sizes in steps if begin <= start <= end]
+        before = [sizes for begin, _, sizes in steps if begin <= start]
+        sizes = within[-1] if within else (before[-1] if before else ())
+        names = tuple(
+            event.get("name", "")
+            for event in sorted(kernels, key=lambda event: event.get("ts") or 0)
+        )
+        found.add((names, sizes))
+    return frozenset(found)
+
+
+def _eager_kernels(events) -> frozenset:
+    """``(op, kernel name)`` of each kernel a CPU op launched outside a graph.
+
+    A runtime call launches the kernel of its correlation; the op it was
+    made within is the innermost CPU op on its thread that spans it.
+    """
+    import bisect
+
+    ops: dict = {}
+    for event in events:
+        if event.get("cat") == "cpu_op":
+            start = event.get("ts") or 0
+            ops.setdefault((event.get("pid"), event.get("tid")), []).append(
+                (start, start + (event.get("dur") or 0), event.get("name", ""))
+            )
+    for spans in ops.values():
+        spans.sort()
+    starts = {thread: [span[0] for span in spans] for thread, spans in ops.items()}
+    owner: dict = {}
+    for event in events:
+        if event.get("cat") != "cuda_runtime" or event.get("name") in _GRAPH_LAUNCHES:
+            continue
+        correlation = (event.get("args") or {}).get("correlation")
+        thread = (event.get("pid"), event.get("tid"))
+        spans = ops.get(thread)
+        if correlation is None or not spans:
+            continue
+        moment = event.get("ts") or 0
+        # The latest op to begin before the call that still spans it is the innermost.
+        for index in range(bisect.bisect_right(starts[thread], moment) - 1, -1, -1):
+            begin, end, name = spans[index]
+            if end >= moment:
+                owner[correlation] = name
+                break
+    found = set()
+    for event in events:
+        if event.get("cat") == "kernel":
+            name = owner.get((event.get("args") or {}).get("correlation"))
+            if name is not None:
+                found.add((name, event.get("name", "")))
+    return frozenset(found)
+
+
+_PYTHON_FRAME = re.compile(r"^(.+\.py)\(\d+\): (\S+)$")
+
+
+def _traced_functions(events) -> frozenset:
+    """``(file, function)`` of each Python frame the trace records."""
+    found = set()
+    for event in events:
+        if event.get("cat") == "python_function":
+            matched = _PYTHON_FRAME.match(event.get("name") or "")
+            if matched:
+                found.add((matched.group(1), matched.group(2)))
+    return frozenset(found)
+
+
+def _eager_shapes(events) -> tuple:
+    """``(op name, input dims)`` of each distinct CPU op call the trace records."""
+    found = set()
+    for event in events:
+        if event.get("cat") != "cpu_op":
+            continue
+        dims = (event.get("args") or {}).get("Input Dims")
+        if dims:
+            found.add((event.get("name", ""), _frozen(dims)))
+    return tuple(sorted(found, key=repr))
+
+
+def _frozen(value):
+    if isinstance(value, list):
+        return tuple(_frozen(item) for item in value)
+    return value
 
 
 def attach_graph_model(

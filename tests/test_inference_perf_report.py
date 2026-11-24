@@ -1131,3 +1131,84 @@ def test_the_served_model_takes_its_sharding_device_and_engine_from_the_trace():
     assert model.settings == (("A", "1"),)
     attach_graph_model(analyzer, None)
     assert analyzer.graph_model is None
+
+
+def test_the_served_model_carries_the_trace_s_frames_and_replayed_kernels():
+    from types import SimpleNamespace
+
+    metadata = {"sglang_version": "0.5.21+g1234abcd"}
+    events = [
+        {"name": "sglang_profiler::gemm", "ts": 0},
+        {"cat": "python_function", "name": "/srv/sglang/srt/layer.py(12): forward"},
+        {
+            "cat": "user_annotation",
+            "name": "step[DECODE bs=4 g_sq=4 g_sqsq=4 g_sqsk=400 g_sk=400]",
+            "ts": 0,
+            "dur": 10,
+        },
+        {
+            "cat": "cuda_runtime",
+            "name": "hipGraphLaunch",
+            "ts": 1,
+            "args": {"correlation": 7},
+        },
+        {"cat": "kernel", "name": "second", "ts": 2, "args": {"correlation": 7}},
+        {"cat": "kernel", "name": "first", "ts": 1, "args": {"correlation": 7}},
+        {"cat": "kernel", "name": "eager", "ts": 3, "args": {"correlation": 8}},
+    ]
+    analyzer = SimpleNamespace(
+        trace_metadata=metadata, tree=SimpleNamespace(events=events)
+    )
+    attach_graph_model(analyzer, "org/model")
+    model = analyzer.graph_model
+    # The commit a development build names is the source it ran.
+    assert model.engine_version == "1234abcd"
+    assert model.traced_functions == frozenset(
+        {("/srv/sglang/srt/layer.py", "forward")}
+    )
+    assert model.replay_graphs == frozenset({(("first", "second"), (4, 4))})
+
+
+def test_the_served_model_knows_which_kernels_each_eager_op_launched():
+    from TraceLens.Reporting.generate_perf_report_pytorch_inference import (
+        _eager_kernels,
+    )
+
+    thread = {"pid": 1, "tid": 2}
+    events = [
+        {"cat": "cpu_op", "name": "aten::index", "ts": 0, "dur": 10, **thread},
+        {"cat": "cpu_op", "name": "aten::copy_", "ts": 2, "dur": 3, **thread},
+        {
+            "cat": "cuda_runtime",
+            "name": "hipLaunchKernel",
+            "ts": 3,
+            "args": {"correlation": 1},
+            **thread,
+        },
+        {
+            "cat": "cuda_runtime",
+            "name": "hipLaunchKernel",
+            "ts": 7,
+            "args": {"correlation": 2},
+            **thread,
+        },
+        {
+            "cat": "cuda_runtime",
+            "name": "hipGraphLaunch",
+            "ts": 8,
+            "args": {"correlation": 3},
+            **thread,
+        },
+        {"cat": "kernel", "name": "copy_kernel", "ts": 4, "args": {"correlation": 1}},
+        {"cat": "kernel", "name": "index_kernel", "ts": 8, "args": {"correlation": 2}},
+        {
+            "cat": "kernel",
+            "name": "replayed_kernel",
+            "ts": 9,
+            "args": {"correlation": 3},
+        },
+    ]
+    # Each kernel belongs to the innermost op spanning its launch; a graph's to none.
+    assert _eager_kernels(events) == frozenset(
+        {("aten::copy_", "copy_kernel"), ("aten::index", "index_kernel")}
+    )

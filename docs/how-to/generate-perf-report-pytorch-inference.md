@@ -535,30 +535,77 @@ The trace supplies everything else about the run:
 
 - The parallel degrees come from its process groups (`distributedInfo.pg_config`:
   `tp`, `moe_ep`, `moe_dp`, `attn_cp`, `pp`, and any other group).
-- The compute-unit count and the GPU target come from `deviceProperties`.
+- The device (its memory, compute units, and GPU target), the HIP version, and
+  the NCCL version come from `deviceProperties` and the trace's metadata.
 - The serving engine (SGLang or vLLM) comes from the engine's own frames and op
-  names, and its release from the python frames the profile recorded. Set
-  `--graph_engine_version` when the trace does not say; without either, the
-  newest release is read.
+  names. Its source version is `--graph_engine_version` when you set it, else
+  the version the trace's metadata records (a development build names its
+  commit, which is the source read), else the release the trace's Python frames
+  agree with, else the newest release.
 - Each `hipGraphLaunch` or `cudaGraphLaunch` takes its batch size, sequence
   length, and cached length from the `step[...]` annotation that contains it.
   A graph the engine annotates without a batch (a speculative draft step) uses
-  the latest step annotation before it.
+  the latest step annotation before it. A batch the engine captured no graph
+  for runs the graph of the next captured size up, padded.
 
-The report reads the checkpoint, the engine at that release, and the kernel
-libraries at the commits the engine's own build pins. It follows one forward
-from the model down to each kernel launch, in launch order, with the tensors
-each launch is called with. Kernels are paired with that list in order: a
-launch whose source names its device kernel (a Triton function, a `__global__`
-function) pairs only with that kernel, and the rest are placed between them in
-order. A matched kernel is reported as the op that launched it, with that op's
-input shapes, dtypes, strides, and concrete scalars, which is what the roofline
-reads. No model is described by hand anywhere in this path.
+The report reads no weights: the checkpoint's files are listed by name and size
+only, and a parameter has its shape when the model is built. It reads the
+engine at that version and the kernel libraries at the commits the engine's
+own build pins. It starts one rank of the
+engine the way the engine starts it, interpreting the source rather than
+running it: GPU tensors are shape-only, the machine is the one the trace
+describes, and compiled libraries are read from their C++ source. Every graph
+the engine captures on the way is kept with each launch it made, in launch
+order, with the tensors each launch is called with. Kernels are paired with
+that list in order: a launch whose source names its device kernel (a Triton
+function, a `__global__` function) pairs only with that kernel, and the rest
+are placed between them in order. A matched kernel is reported as the op that
+launched it, with that op's input shapes, dtypes, strides, and concrete
+scalars, which is what the roofline reads. No model is described by hand
+anywhere in this path.
+
+Starting a large model this way takes minutes per start. Each start is cached
+under `~/.cache/tracelens/engine_runs`, keyed by everything that decides it.
+
+### Settings the trace does not record
 
 Environment variables and server arguments decide which kernels the forward
 launches, and a trace does not record them. Pass the ones you know with
-`--graph_setting NAME=VALUE` (repeatable). Each one left out keeps every arm it
-selects, and the replayed kernels decide between them.
+`--graph_setting NAME=VALUE` (repeatable; a name starting `--` is a server
+argument). The rest are decided by the trace, repeated until nothing changes:
+
+- **Python frames.** A function the trace shows running, that the engine's
+  start did not reach, was called behind a condition the run decided the other
+  way. Where every call of it needs a setting to have a value (directly, or
+  through a local, an attribute, a helper, or a parsed argument), the run had
+  that value.
+- **Replayed kernels.** Each launch knows the settings that decided the
+  branches it was made within. A launch naming a kernel its replay never ran
+  points at those settings; each is tried at the values the engine's own
+  launch recipes and its source give it, and kept when the start then explains
+  more of the replay and launches less of what the replay never ran.
+- **Captured graphs.** A replay that no captured graph could have run (a
+  prefill graph, when the start captures only decode graphs) points at the
+  graph settings the engine's recipes use for the model, such as
+  `--cuda-graph-backend-prefill`; these are tried first.
+- **Checkpoint entries.** A weight loader that makes state of its own from a
+  named entry (an EAGLE3 draft's `d2t` token map) runs no step, because no
+  weights are read. Whether the checkpoint holds that entry is a setting,
+  `checkpoint:<file>:<loader>:<entry>`, decided by the replay's kernels like
+  any other. Its value is the entry's length, which the trace does not record:
+  pass it, for example
+  `--graph_setting checkpoint:llama_eagle3.py:load_weights:d2t=32000`, when a
+  launch's shape depends on it.
+- **Sizes.** The trace's eager calls show sizes a graph launch shares with
+  them. A size every eager call agrees on that the start got otherwise (a
+  request pool's rows) is fitted through the setting its launch's arguments
+  were computed from; a size the free device memory decided (a KV pool's rows)
+  is fitted through the memory the run held outside its tensors. A trace
+  whose eager calls never show that size (a decode-only split) cannot fit it:
+  pass the memory as `--graph_setting reserved_memory=<bytes>`, for example
+  the value a fuller split of the same run was fitted to.
+
+A setting you pass is never changed.
 
 A kernel no launch pairs with stays a synthetic `hipGraphLaunch-><kernel>` row
 and has no input shapes. The report still warns that no capture folder was

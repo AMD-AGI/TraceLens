@@ -1944,27 +1944,19 @@ def _config_moe_layer(layer_idx: int, config: dict[str, Any]) -> bool:
 
 
 def _infer_norm(config: dict[str, Any], spec: ArchitectureSpec) -> None:
-    model_type = (spec.model_type or "").lower()
+    """The norm the config's own epsilon names; where it sits is the code's.
 
+    The decoder's forward says where each norm is applied (see
+    :func:`_merge_code_analysis`); a config only says which norm by the
+    epsilon it carries for it.
+    """
     if _get(config, "rms_norm_eps") is not None:
         spec.norm_type = "RMSNorm"
-    elif _get(config, "layer_norm_eps") is not None or model_type in {
-        "gpt2",
-        "gpt_neox",
-        "opt",
-        "bloom",
-    }:
-        spec.norm_type = "LayerNorm"
-
-    if any(
-        token in model_type
-        for token in ("gpt2", "gpt_neox", "bloom", "opt", "llama", "mistral", "qwen")
+    elif (
+        _get(config, "layer_norm_eps") is not None
+        or _get(config, "layer_norm_epsilon") is not None
     ):
-        spec.norm_placement = "Pre-Norm"
-
-    if "olmo" in model_type:
-        spec.norm_placement = "Post-Norm (inside residual)"
-        spec.norm_notes.append("Sandwich / post-norm variant")
+        spec.norm_type = "LayerNorm"
 
     if _get(config, "post_norm") is True:
         spec.norm_placement = "Post-Norm"

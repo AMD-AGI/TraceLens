@@ -121,12 +121,13 @@ def test_layer_types_counter_and_gelu_gated():
     assert "2 full" in spec.layer_mix
 
 
-def test_norm_placement_olmo_and_post_norm():
+def test_norm_type_and_placement_come_from_the_config_not_its_model_type():
+    # A model type names no norm and no placement; the epsilon names the norm.
     olmo = parse_architecture(
         {"model_type": "olmo2", "layer_norm_eps": 1e-5}, "fixture"
     )
-    assert olmo.norm_placement.startswith("Post-Norm")
-    assert "Sandwich / post-norm variant" in olmo.norm_notes
+    assert olmo.norm_type == "LayerNorm"
+    assert not olmo.norm_notes
 
     post = parse_architecture(
         {"model_type": "custom", "post_norm": True, "rms_norm_eps": 1e-6}, "fixture"

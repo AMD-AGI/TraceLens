@@ -14,6 +14,7 @@ from TraceLens.TreePerf.graph_schedule import (
     align_kernels,
     group_stopped_ops,
     invocation_from_annotation,
+    kernel_is,
     launch_arguments,
     tp_from_trace,
 )
@@ -124,9 +125,32 @@ def test_a_named_kernel_anchors_and_unnamed_launches_fill_between_in_order():
         "void gemm_kernel<2>()",
     ]
     assigned = align_kernels(names, [norm, cast, gemm])
+    # The unclaimed kernel is no second kernel of the copy: another library's.
     assert assigned == [norm, cast, None, gemm, gemm]
-    # A named launch never takes a kernel that is not one of its own.
-    assert align_kernels(["other_kernel"], [norm]) == [None]
+    # A named launch whose kernels ran never takes one that is not its own.
+    assert align_kernels(["void lib::rmsnorm_kernel<f>()", "other_kernel"], [norm]) == [
+        norm,
+        None,
+    ]
+
+
+def test_an_unnamed_launch_takes_a_second_kernel_only_where_no_launch_would():
+    gemm = Launch("aten::mm", ((4, 8), (8, 16)))
+    add = Launch("aten::add", ((4, 16),))
+    # A split reduction after the GEMM: the GEMM's second kernel.
+    names = ["Cijk_gemm", "Cijk_post_gsu_reduce", "elementwise_add"]
+    assert align_kernels(names, [gemm, add]) == [gemm, gemm, add]
+    # As many kernels as launches: one each.
+    assert align_kernels(names[:1] + names[2:], [gemm, add]) == [gemm, add]
+    # An extra kernel of another library is not the GEMM's.
+    embed = Launch("aten::embedding", ((4,),))
+    kernels = [
+        "void at::native::gather_kernel<4>()",
+        "Cijk_gemm",
+        "Cijk_post_gsu_reduce",
+        "elementwise_add",
+    ]
+    assert align_kernels(kernels, [embed, gemm, add]) == [embed, gemm, gemm, add]
 
 
 def test_an_unnamed_launch_does_not_take_a_kernel_a_named_launch_claims():
@@ -169,7 +193,7 @@ def test_graph_launch_rows_take_the_shapes_of_the_launch_they_pair_with(
         kernels=("_vocab_parallel_embedding_kernel",),
     )
 
-    def launches(model, invocation, kernel_names):
+    def launches(model, invocation, kernel_names, op_families=None):
         seen["invocation"] = invocation
         seen["kernels"] = kernel_names
         return [embed]
@@ -242,7 +266,7 @@ def test_a_graph_without_a_batch_annotation_takes_the_latest_step_before_it(
 ):
     seen = {}
 
-    def launches(model, invocation, kernel_names):
+    def launches(model, invocation, kernel_names, op_families=None):
         seen["invocation"] = invocation
 
     monkeypatch.setattr(graph_launches_module, "graph_launches", launches)
@@ -281,3 +305,77 @@ def test_a_graph_without_a_batch_annotation_takes_the_latest_step_before_it(
     analyzer.collect_unified_perf_events()
     assert seen["invocation"].tokens == 128
     assert seen["invocation"].scope == ("draft_extend",)
+
+
+def test_a_mangled_kernel_name_is_its_symbol():
+    mangled = "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li256EEEvPT0_"
+    assert kernel_is(mangled, ("dynamic_per_group_scaled_quant_kernel",))
+    # A longer name sharing the prefix is spelled with its own length.
+    assert not kernel_is(mangled, ("dynamic_per_group_scaled_quant",))
+
+
+def test_an_op_seen_outside_a_graph_takes_only_kernels_of_the_families_it_ran():
+    embed = Launch("aten::embedding", ((4,),))
+    norm = Launch("lib::norm", ((4,),))
+    gemm = Launch("aten::mm", ((4, 8), (8, 16)))
+    kernels = [
+        "void at::native::gather_kernel<4>()",
+        "Cijk_gemm",
+        "Cijk_post_gsu",
+        "void lib::norm_kernel<1>()",
+    ]
+    families = {"aten::embedding": {"at"}, "aten::mm": {"Cijk"}, "lib::norm": {"lib"}}
+    assert align_kernels(kernels, [embed, gemm, norm], families) == [
+        embed,
+        gemm,
+        gemm,
+        norm,
+    ]
+    # Out of order, a GEMM kernel never goes to the norm or the embedding.
+    assert align_kernels(kernels, [embed, norm, gemm], families) == [
+        embed,
+        gemm,
+        gemm,
+        None,
+    ]
+    # Without the families, the copy-like launch could take a GEMM kernel.
+    assert align_kernels(kernels[:2], [embed, norm]) == [embed, norm]
+
+
+def test_equal_pairings_prefer_a_kernel_named_like_the_op():
+    embed = Launch("aten::embedding", ((4,),))
+    norm = Launch("aiter::rmsnorm", ((4,),))
+    cat = Launch("aten::cat", ((4,),))
+    kernels = [
+        "void at::native::gather_kernel<4>()",
+        "void aiter::add_rmsnorm_quant_kernel<1>()",
+        "void aiter::add_rmsnorm_quant_kernel<1>()",
+        "void at::native::CatArrayBatchedCopy<4>()",
+    ]
+    # One kernel too many: the second norm kernel is the norm's, not the cat's.
+    assert align_kernels(kernels, [embed, norm, cat]) == [embed, norm, norm, cat]
+
+
+def test_a_launch_whose_symbols_the_replay_never_ran_pairs_as_unnamed():
+    norm = Launch("lib::norm", ((4,),), kernels=("norm_kernel",))
+    attention = Launch("lib::attention", ((4,),), kernels=("dropout_state_kernel",))
+    kernels = ["void norm_kernel<1>()", "void ck::fmha_kernel<2>()"]
+    assigned = align_kernels(kernels, [norm, attention])
+    assert assigned[0] is norm
+    assert assigned[1].op_name == "lib::attention" and assigned[1].kernels == ()
+
+
+def test_a_pairing_repeated_is_the_same_and_its_copy_is_the_caller_s():
+    from TraceLens.ModelUtils.graph_launches import Launch
+    from TraceLens.TreePerf.graph_schedule import align_kernels
+
+    launches = [
+        Launch("lib::norm", ((4, 8),), kernels=("norm",)),
+        Launch("aten::add", ((4, 8),)),
+    ]
+    first = align_kernels(["void norm<1>()", "add_kernel"], launches)
+    first[0] = None
+    assert align_kernels(["void norm<1>()", "add_kernel"], launches) == [
+        launches[0],
+        launches[1],
+    ]
