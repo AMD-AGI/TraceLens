@@ -10,6 +10,8 @@ import gzip
 import json
 from pathlib import Path
 
+import pytest
+
 from TraceLens.Agent.Analysis.triage.checks import _load_trace_json
 from TraceLens.Agent.Analysis.triage.verify_kernel_candidates import (
     check_candidate_kernels,
@@ -22,6 +24,7 @@ from TraceLens.Agent.Analysis.triage.verify_kernel_candidates import (
     kernel_detail_totals,
     load_unified_rows,
     main,
+    resolve_mixed_steady_state_trace,
     scan_trace_kernels,
 )
 
@@ -172,3 +175,101 @@ def test_prefers_mixed_split_next_to_a_recorded_decode_trace(tmp_path):
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["trace"].endswith("mixed_steady_state_case.json.gz")
     assert report["recorded_trace"].endswith("decode_only_steady_state_case.json.gz")
+
+
+def test_ranked_kernels_flag_each_disagreement():
+    trace_kernels = {
+        name: {"count": 1, "dur_us": 100.0}
+        for name in ("kern_a", "kern_b", "kern_c", "kern_d")
+    }
+    csv_kernels = {
+        "kern_b": {"count": 1, "dur_us": 100.0},
+        "kern_c": {"count": 1, "dur_us": 10.0},
+        "kern_d": {"count": 1, "dur_us": 100.0},
+    }
+    by_device = {
+        "kern_a": [{"gpu_pct": 10.0}],
+        "kern_c": [{"gpu_pct": 10.0}],
+        "kern_d": [{"gpu_pct": 50.0}],
+    }
+    ranked = check_ranked_kernels(
+        trace_kernels,
+        csv_kernels,
+        by_device,
+        busy_us=1000.0,
+        candidates_present=True,
+    )
+    assert ranked["status"] == "fail"
+    assert ranked["top_kernel_count"] == 4
+    assert ranked["missing_from_csv"] == 1
+    assert ranked["missing_from_candidates"] == 1
+    assert ranked["sum_pct_mismatches"] == 1
+    assert ranked["exposed_pct_warnings"] == 1
+
+
+@pytest.mark.parametrize(
+    "candidate_shape, status, missing_shapes",
+    [("(4, 8) bf16", "pass", []), ("(16, 8) bf16", "fail", ["(4,8)"])],
+)
+def test_top_rows_check_candidate_shapes_and_stop_at_95_percent(
+    candidate_shape, status, missing_shapes
+):
+    rows = [
+        {"name": "op_a", "Input Dims": "((4, 8), ())", "k_sum": "960"},
+        {"name": "op_tail", "Input Dims": "((2, 2),)", "k_sum": "40"},
+    ]
+    by_op = {"op_a": [{"name": "op_a", "shapes": [candidate_shape]}]}
+    top = check_top_rows(rows, "k_sum", by_op, candidates_present=True)
+    assert top["status"] == status
+    assert [item["name"] for item in top["rows"]] == ["op_a"]
+    assert top["rows"][0]["missing_shapes"] == missing_shapes
+
+
+def test_recorded_trace_falls_back_to_perf_report_log(tmp_path):
+    _write_analysis(tmp_path)
+    mixed = tmp_path / "mixed_steady_state_case.json.gz"
+    (tmp_path / "category_data" / "category_manifest.json").unlink()
+    assert resolve_mixed_steady_state_trace(tmp_path) == (None, None)
+    log = tmp_path / "perf_report.log"
+    log.write_text("no trace flag here\n", encoding="utf-8")
+    assert resolve_mixed_steady_state_trace(tmp_path) == (None, None)
+    log.write_text(f"run --profile_json_path {mixed} --x\n", encoding="utf-8")
+    assert resolve_mixed_steady_state_trace(tmp_path) == (mixed, mixed)
+
+
+def test_mixed_split_is_found_in_trace_split_beside_the_analysis(tmp_path):
+    _write_analysis(tmp_path)
+    mixed = tmp_path / "mixed_steady_state_case.json.gz"
+    decode = tmp_path / "decode_only_steady_state_case.json.gz"
+    decode.write_bytes(mixed.read_bytes())
+    moved = tmp_path / "trace_split" / mixed.name
+    moved.parent.mkdir()
+    mixed.rename(moved)
+    (tmp_path / "category_data" / "category_manifest.json").write_text(
+        json.dumps({"trace_path": str(decode)}),
+        encoding="utf-8",
+    )
+    assert resolve_mixed_steady_state_trace(tmp_path) == (moved, decode)
+
+
+def test_cli_writes_one_report_per_analysis_dir(tmp_path):
+    for run in ("run1", "run2"):
+        analysis = tmp_path / run / "analysis"
+        analysis.mkdir(parents=True)
+        _write_analysis(analysis)
+    out = tmp_path / "reports"
+    rc = main(
+        [
+            "--analysis-dir",
+            str(tmp_path / "run1" / "analysis"),
+            "--analysis-dir",
+            str(tmp_path / "run2" / "analysis"),
+            "--json-out",
+            str(out),
+        ]
+    )
+    assert rc == 1
+    assert sorted(path.name for path in out.iterdir()) == [
+        "run1__analysis.json",
+        "run2__analysis.json",
+    ]

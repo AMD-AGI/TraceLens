@@ -110,6 +110,13 @@ from TraceLens.Agent.Analysis.triage.postprocess import (
     write_aggregated_csv,
     write_summary_report,
 )
+from TraceLens.Agent.Analysis.triage.profile_checks import (
+    check_benchmark_report,
+    check_split,
+    check_trace,
+    detect_framework,
+    detect_speculative,
+)
 from TraceLens.Agent.Analysis.triage.runner import (
     _auto_detect_log,
     _auto_detect_stream,
@@ -3007,3 +3014,196 @@ def test_profile_checks_flag_split_stack_and_steps(tmp_path):
     bench = _make_bench(tmp_path, steps=1, stacks=False, aborted=True)
     found = {f.sublabel for f in run_triage(bench, specs=PROFILE_CHECKS)}
     assert found == {"2d", "2k", "2l"}
+
+
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        ("", None),
+        ("args: --speculative-algorithm eagle", True),
+        ("SPEC_NUM_TOKENS_OVERRIDE: '0'\nargs: --speculative-algorithm eagle", False),
+        ("args: --max-num-seqs 8", False),
+    ],
+)
+def test_detect_speculative(config, expected):
+    assert detect_speculative(config) is expected
+
+
+@pytest.mark.parametrize(
+    "config, files, expected",
+    [
+        ("framework: Atom\n", [], "atom"),
+        ("", ["trace_TP-0.json.gz"], "sglang"),
+        ("", ["rank_0/trace.json.gz"], "atom"),
+        ("", ["trace.json.gz"], "vllm"),
+    ],
+)
+def test_detect_framework(tmp_path, config, files, expected):
+    for name in files:
+        write_json_gz(tmp_path / name, {})
+    assert detect_framework(config, tmp_path) == expected
+
+
+@pytest.mark.parametrize(
+    "speculative, drafter, status",
+    [
+        (True, True, "PASS"),
+        (True, False, "FAIL"),
+        (None, True, "PASS"),
+        (None, False, "SKIP"),
+    ],
+)
+def test_check_trace_drafter_captures(tmp_path, speculative, drafter, status):
+    torch_trace = tmp_path / "torch_trace"
+    write_json_gz(torch_trace / "capture_traces" / "graph_capture_rank_0.json.gz", {})
+    if drafter:
+        write_json_gz(torch_trace / "capture_traces" / "draft_step_bs_1.json.gz", {})
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", speculative, 1)}
+    assert by_name["drafter capture traces"].status == status
+
+
+@pytest.mark.parametrize(
+    "files, detail",
+    [
+        ([], "no rank-0 serving trace"),
+        (["merged_rank0.json.gz"], "no rank-0 serving trace"),
+        (
+            ["TP-0-DECODE.trace.json.gz", "TP-0-EXTEND.trace.json.gz"],
+            "expected one rank-0 capture, found "
+            "TP-0-DECODE.trace.json.gz, TP-0-EXTEND.trace.json.gz",
+        ),
+    ],
+)
+def test_check_trace_needs_a_single_rank0_trace(tmp_path, files, detail):
+    torch_trace = tmp_path / "torch_trace"
+    torch_trace.mkdir()
+    for name in files:
+        write_json_gz(torch_trace / name, {})
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", None, 1)}
+    assert by_name["single rank-0 trace"].status == "FAIL"
+    assert by_name["single rank-0 trace"].detail == detail
+    assert by_name["gpu kernels"].detail == "no single rank-0 trace to scan"
+
+
+@pytest.mark.parametrize(
+    "names, status, detail",
+    [
+        (
+            ["step[DECODE bs=4 g_sqsq=16]"] * 2 + ["step[EXTEND bs=1 c_sqsq=4]"],
+            "PASS",
+            "3 detailed user annotation(s) in rank0.json.gz; DECODE 2, EXTEND 1",
+        ),
+        (
+            ["step[DECODE bs=4]"],
+            "FAIL",
+            "rank0.json.gz has 1 native annotation(s) and no sqsq/sqsk aggregates",
+        ),
+    ],
+)
+def test_check_trace_requires_detailed_annotations(tmp_path, names, status, detail):
+    torch_trace = tmp_path / "torch_trace"
+    events = [{"ph": "X", "cat": "user_annotation", "name": n} for n in names]
+    write_json_gz(torch_trace / "rank0.json.gz", {"traceEvents": events})
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", None, 1)}
+    assert by_name["detailed annotations"].status == status
+    assert detail in by_name["detailed annotations"].detail
+
+
+def test_check_trace_flags_truncated_gzip(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    events = [{"ph": "X", "cat": "kernel", "name": "k"}] * 50
+    trace = Path(write_json_gz(torch_trace / "rank0.json.gz", {"traceEvents": events}))
+    trace.write_bytes(trace.read_bytes()[:-20])
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", None, 1)}
+    assert by_name["trace readable"].status == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "op_args, status, detail",
+    [
+        (
+            {"Input Dims": [[2, 2]]},
+            "PASS",
+            "1 sglang_profiler cpu_op(s) with Input Dims",
+        ),
+        ({}, "FAIL", "1 sglang_profiler cpu_op(s) but none have Input Dims"),
+        (None, "FAIL", "no sglang_profiler:: cpu_op events"),
+    ],
+    ids=["with_shape", "without_shape", "absent"],
+)
+def test_check_trace_sglang_shape_profiler(tmp_path, op_args, status, detail):
+    torch_trace = tmp_path / "torch_trace"
+    events = []
+    if op_args is not None:
+        events.append(
+            {"ph": "X", "cat": "cpu_op", "name": "sglang_profiler::op", "args": op_args}
+        )
+    events.append({"ph": "X", "cat": "kernel", "name": "k"})
+    write_json_gz(torch_trace / "rank0.json.gz", {"traceEvents": events})
+    by_name = {c.name: c for c in check_trace(torch_trace, "sglang", None, 1)}
+    assert by_name["kernel shape profiler"].status == status
+    assert detail in by_name["kernel shape profiler"].detail
+
+
+@pytest.mark.parametrize(
+    "report, status, detail",
+    [
+        (None, "SKIP", "no benchmark_report.json"),
+        (
+            {
+                "success": True,
+                "throughput": {"output_throughput": 100},
+                "latency": {"ttft": {"median_ms": 5}, "tpot": {"median_ms": 2}},
+            },
+            "PASS",
+            "output 100 tok/s, TTFT 5 ms, TPOT 2 ms (median)",
+        ),
+        (
+            {
+                "success": False,
+                "errors": [
+                    "+ echo 'Error: early'\n+ echo 'Error: out of memory'\ndone"
+                ],
+            },
+            "WARN",
+            "marked failed: Error: out of memory",
+        ),
+        (
+            {"success": False, "errors": ["first line\nsecond"]},
+            "WARN",
+            "marked failed: first line",
+        ),
+        ({"success": False}, "WARN", "marked failed: no error recorded"),
+    ],
+)
+def test_check_benchmark_report(tmp_path, report, status, detail):
+    if report is not None:
+        write_json(tmp_path / "benchmark_report.json", report)
+    check = check_benchmark_report(tmp_path)
+    assert (check.status, check.detail) == (status, detail)
+
+
+def test_check_split_reports_every_manifest_problem(tmp_path):
+    split = tmp_path / "trace_split"
+    write_json(
+        split / "split_manifest.json",
+        {
+            "aborted": True,
+            "status": 1,
+            "phase_confidence": "low",
+            "suspiciously_few_roots": True,
+            "coverage_selected_roots": 0.5,
+            "root_span_share": 0.1,
+        },
+    )
+    write_json_gz(
+        split / "mixed_steady_state_prefill_1_prefilldecode_0_decode_0_bs4_x.json.gz",
+        {},
+    )
+    traces, quality = check_split(tmp_path)
+    assert traces.status == "PASS"
+    assert quality.status == "FAIL"
+    assert quality.detail == (
+        "split aborted; status 1; phase confidence low; suspiciously few roots; "
+        "mixed split has no decode steps (coverage 0.5, root span share 0.1)"
+    )
