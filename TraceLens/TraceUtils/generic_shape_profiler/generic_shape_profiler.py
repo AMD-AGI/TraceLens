@@ -9,23 +9,26 @@ Operand shapes for GPU kernels that bypass the PyTorch dispatcher.
 
 JIT-compiled kernels (Triton, FlyDSL, TileLang, tvm-ffi, aiter ctypes/hsaco)
 launch straight from Python, so profiler traces show them with no operand
-metadata. Each hooked launch calls a no-op dispatcher op with one Tensor
-parameter per operand, so the profiler records its shapes, strides and dtypes:
+metadata. Each hooked launch calls a no-op dispatcher op whose arguments are
+the launch's, so the profiler records their shapes, strides, dtypes and scalar
+values:
 
 ``kernel_shapes::<kernel>``    named after the kernel
 ``launcher_shapes::<caller>``  named after the Python function that launched it
 
 Both carry the same work; pick one granularity when summing FLOPs.
-See README.md for the hooked paths and design.
+Each parameter has a fixed slot in signature order; names are in the trace
+metadata under ``SCHEMA_METADATA_KEY``. See README.md for the design.
 
 Public API: ``install_hooks()``, ``enable()`` / ``disable()``,
-``mark_launch(name, tensors)``.
+``mark_launch(name, tensors)``, ``schema_table()``.
 """
 
 from __future__ import annotations
 
 import functools
 import inspect
+import json
 import logging
 import os
 import re
@@ -46,6 +49,8 @@ LAUNCHER_NAMESPACE = "launcher_shapes"
 
 SPAN_PREFIX = "jit::"
 
+SCHEMA_METADATA_KEY = "generic_shape_profiler_schemas"
+
 
 def _env_on(name: str, default: str = "1") -> bool:
     return os.environ.get(name, default).strip().lower() not in (
@@ -60,6 +65,7 @@ _SPANS_ON = _env_on("TRACELENS_SHAPE_SPANS")
 _LAUNCHER_OPS_ON = _env_on("TRACELENS_SHAPE_LAUNCHER_OPS")
 # Run discovered launchers inside their op, so it encloses all their kernels.
 _PROMOTE_ON = _env_on("TRACELENS_SHAPE_LAUNCHER_PROMOTE")
+_SCALARS_ON = _env_on("TRACELENS_SHAPE_SCALARS")
 
 # Debug: breakpoint() at hooked launches ("1"/"all" or hook-id prefixes),
 # optionally on one rank only.
@@ -89,15 +95,38 @@ _CO_NO_PROMOTE = (
     inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
 )
 
-_MAX_TENSORS = 32
+_MAX_SLOTS = 64
+_MAX_LIST = 64
+
+_T, _S, _D, _L, _I, _X = "T", "S", "D", "L", "I", "X"
+_SCHEMA_TYPE = {
+    _T: "Tensor?",
+    _S: "Scalar?",
+    _D: "ScalarType?",
+    _L: "Tensor[]?",
+    _I: "int[]?",
+}
+
+# Membership tests add no with_stack events; isinstance() would.
+_TENSOR_TYPES = {torch.Tensor, torch.nn.Parameter}
+_SCALAR_TYPES = {int, float, bool}
+_SEQ_TYPES = {list, tuple}
+_I64 = 1 << 63
+
+_UNSET = object()  # parameter neither passed nor defaulted
+
+_POS_NAMES = tuple(f"a{i}" for i in range(_MAX_SLOTS))
 
 _lock = threading.RLock()
 _tls = threading.local()
 
 _enabled = False
 _libs: Dict[str, Library] = {}  # namespace -> Library
-_ops: Dict[tuple, Any] = {}  # (namespace, name, arity) -> op callable / _BROKEN
+_ops: Dict[tuple, Any] = {}  # (namespace, name, spec) -> op callable / _BROKEN
 _taken: Dict[str, Set[str]] = {}  # namespace -> op names already defined
+_schemas: Dict[str, List[List[str]]] = {}  # "ns::op" -> [[param, schema type], ...]
+_layouts: Dict[Any, "_Layout"] = {}  # code object -> layout
+_obj_layouts: Dict[int, tuple] = {}  # id(obj) -> (obj, layout) when obj has no __dict__
 _installed: Dict[str, str] = {}  # hook id -> what was patched
 _break_hooks: Set[str] = set()  # hook ids that call breakpoint(); clear() to stop
 _promoted: Dict[Any, "_Promoted"] = {}  # launcher code object -> promotion
@@ -163,14 +192,33 @@ def stats() -> Dict[str, Any]:
     }
 
 
+def schema_table() -> Dict[str, List[List[str]]]:
+    """``{"ns::op": [[param name, schema type], ...]}`` for every op defined."""
+    with _lock:
+        return {op: [list(p) for p in params] for op, params in _schemas.items()}
+
+
+def add_schema_metadata(prof: Any) -> bool:
+    """Write ``schema_table()`` into ``prof``'s trace; call before it stops."""
+    if not _schemas:
+        return False
+    try:
+        prof.add_metadata_json(SCHEMA_METADATA_KEY, json.dumps(schema_table()))
+        return True
+    except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
+        logger.debug("could not add schema metadata: %s", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
-# Dispatcher ops: <namespace>::<name>(Tensor a0, Tensor a1, ...) -> ()
+# Dispatcher ops. A record is (spec, values); spec ((param, kind), ...) fixes
+# the op's schema.
 # ---------------------------------------------------------------------------
-def _noop(*args: torch.Tensor) -> None:
+def _noop(*args: Any) -> None:
     return None
 
 
-def _launcher_impl(*args: torch.Tensor) -> None:
+def _launcher_impl(*args: Any) -> None:
     """Run the launcher call queued by _call_launcher, nesting it under the op."""
     run = getattr(_tls, "pending", None)
     if run is not None:
@@ -188,25 +236,21 @@ def _sanitize(name: str) -> str:
     return out[:200]
 
 
-def _op_for(namespace: str, name: str, arity: int):
-    key = (namespace, name, arity)
-    op = _ops.get(key)
-    if op is not None:
-        return op
-
+def _define_op(namespace: str, name: str, spec: tuple):
     with _lock:
-        op = _ops.get(key)
-        if op is not None:
-            return op
+        key = (namespace, name, spec)
+        if key in _ops:
+            return _ops[key]
 
-        # Schemas have fixed arity: other arities get a "__<N>t" suffix.
+        # Another spec under the same name gets a "__<N>t" suffix.
         taken = _taken.setdefault(namespace, set())
         base = _sanitize(name)
-        op_name = base if base not in taken else f"{base}__{arity}t"
+        n = len(spec)
+        op_name = base if base not in taken else f"{base}__{n}t"
         suffix = 1
         while op_name in taken:
             suffix += 1
-            op_name = f"{base}__{arity}t_{suffix}"
+            op_name = f"{base}__{n}t_{suffix}"
 
         try:
             lib = _libs.get(namespace)
@@ -214,11 +258,16 @@ def _op_for(namespace: str, name: str, arity: int):
                 # Never torn down: wrappers on hot paths may still call its ops.
                 lib = Library(namespace, "FRAGMENT")
                 _libs[namespace] = lib
-            params = ", ".join(f"Tensor a{i}" for i in range(arity))
+            params = ", ".join(
+                f"{_SCHEMA_TYPE[kind]} a{i}" for i, (_, kind) in enumerate(spec)
+            )
             lib.define(f"{op_name}({params}) -> ()")
             impl = _launcher_impl if namespace == LAUNCHER_NAMESPACE else _noop
             lib.impl(op_name, impl, "CompositeExplicitAutograd")
             op = getattr(getattr(torch.ops, namespace), op_name)
+            _schemas[f"{namespace}::{op_name}"] = [
+                [param, _SCHEMA_TYPE[kind]] for param, kind in spec
+            ]
         except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
             logger.debug("could not define %s::%s: %s", namespace, name, exc)
             op = _BROKEN
@@ -228,17 +277,27 @@ def _op_for(namespace: str, name: str, arity: int):
         return op
 
 
-def _emit(namespace: str, name: str, tensors: Sequence[torch.Tensor]) -> bool:
-    key = (namespace, name, len(tensors))
-    op = _op_for(*key)
+def _op_for(namespace: str, name: str, spec: tuple):
+    try:
+        return _ops[(namespace, name, spec)]
+    except KeyError:
+        return _define_op(namespace, name, spec)
+
+
+def _emit(namespace: str, name: str, record: tuple) -> bool:
+    spec, values = record
+    try:
+        op = _ops[(namespace, name, spec)]
+    except KeyError:
+        op = _define_op(namespace, name, spec)
     if op is _BROKEN:
         return False
     try:
-        op(*tensors)
+        op(*values)
         return True
     except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
         logger.debug("%s::%s failed, disabling it: %s", namespace, name, exc)
-        _ops[key] = _BROKEN
+        _ops[(namespace, name, spec)] = _BROKEN
         return False
 
 
@@ -247,61 +306,331 @@ def mark_launch(kernel_name: str, tensors: Sequence[torch.Tensor]) -> None:
     global _launches
     if not _enabled or not tensors:
         return
-    if _emit(NAMESPACE, kernel_name, tensors):
+    record = _positional_record(tuple(tensors), {})
+    if record is not None and _emit(NAMESPACE, kernel_name, record):
         _launches += 1
 
 
 def _record_launch(
     kernel_name: str,
+    record: tuple,
     launcher_name: Optional[str],
-    tensors: Sequence[torch.Tensor],
+    launcher_record: Optional[tuple],
 ) -> None:
     global _launches
-    if launcher_name:
-        _emit(LAUNCHER_NAMESPACE, launcher_name, tensors)
-    if _emit(NAMESPACE, kernel_name, tensors):
+    if launcher_name and launcher_record is not None:
+        _emit(LAUNCHER_NAMESPACE, launcher_name, launcher_record)
+    if _emit(NAMESPACE, kernel_name, record):
         _launches += 1
 
 
 # ---------------------------------------------------------------------------
-# Launch introspection.
+# Argument binding. Builtin calls are with_stack events too, so the per-call
+# paths avoid them.
 # ---------------------------------------------------------------------------
-def _collect_tensors(args: Sequence[Any], kwargs: Dict[str, Any]) -> List[torch.Tensor]:
-    """Tensors in the arguments, up to two list/tuple levels deep, in call order.
+class _Layout:
+    """A function's parameter slots; kinds are fixed by the first call."""
 
-    One loop over an explicit stack: under ``with_stack`` every Python call
-    here is a trace event, so no helpers or comprehensions.
-    """
-    found: List[torch.Tensor] = []
-    seq = (list, tuple)
-    stack = []
-    for value in reversed((*args, *kwargs.values())):
-        stack.append((value, 0))
-    while stack:
-        value, depth = stack.pop()
-        if isinstance(value, torch.Tensor):
-            found.append(value)
-        elif depth < 2 and isinstance(value, seq):
-            for item in reversed(value):
-                stack.append((item, depth + 1))
-    return found[:_MAX_TENSORS]
+    __slots__ = (
+        "names",
+        "npos",
+        "index",
+        "defaults",
+        "varargs",
+        "varkw",
+        "hints",
+        "slots",
+        "spec",
+    )
+
+    def __init__(self, code: types.CodeType) -> None:
+        n = code.co_argcount + code.co_kwonlyargcount
+        self.names = code.co_varnames[:n]
+        self.npos = code.co_argcount
+        self.index = {name: i for i, name in enumerate(self.names)}
+        flags = code.co_flags
+        self.varargs = code.co_varnames[n] if flags & inspect.CO_VARARGS else None
+        k = n + (self.varargs is not None)
+        self.varkw = code.co_varnames[k] if flags & inspect.CO_VARKEYWORDS else None
+        self.defaults = [_UNSET] * n
+        self.hints: Dict[str, str] = {}
+        self.slots: Optional[tuple] = None  # ((param index, kind), ...)
+        self.spec: Optional[tuple] = None
+
+    def add_function(self, func: types.FunctionType) -> None:
+        defaults = func.__defaults__ or ()
+        first = self.npos - len(defaults)
+        for i, value in enumerate(defaults):
+            self.defaults[first + i] = value
+        for name, value in (func.__kwdefaults__ or {}).items():
+            if name in self.index:
+                self.defaults[self.index[name]] = value
+        for name, hint in (getattr(func, "__annotations__", None) or {}).items():
+            self.hints[name] = hint if isinstance(hint, str) else repr(hint)
 
 
-def _frame_tensors(frame) -> List[torch.Tensor]:
-    """Tensor parameters of the function in ``frame``, for pointer-only launches."""
+def _layout_for(code: types.CodeType, func: Optional[types.FunctionType] = None):
+    layout = _layouts.get(code)
+    if layout is None:
+        with _lock:
+            layout = _layouts.get(code)
+            if layout is None:
+                layout = _layouts[code] = _Layout(code)
+                if func is not None:
+                    layout.add_function(func)
+    return layout
+
+
+def _new_frame_layout(frame) -> _Layout:
+    try:
+        func = _function_for(frame)
+    except Exception:  # noqa: BLE001 - annotations are only hints
+        func = None
+    return _layout_for(frame.f_code, func)
+
+
+def _function_of(obj: Any) -> Optional[types.FunctionType]:
+    """Innermost function behind ``obj`` via ``__wrapped__`` / ``fn`` / ``func``."""
+    cur = obj
+    for _ in range(8):
+        inner = getattr(cur, "__wrapped__", None)
+        if inner is None and not isinstance(cur, types.FunctionType):
+            inner = getattr(cur, "fn", None) or getattr(cur, "func", None)
+        if inner is None or inner is cur:
+            return cur if isinstance(cur, types.FunctionType) else None
+        cur = inner
+    return None
+
+
+def _callable_layout(obj: Any) -> Optional[_Layout]:
+    """None means bind positionally, as for a bare ``(*args, **kwargs)`` wrapper."""
+    func = _function_of(obj)
+    if func is None:
+        return None
+    code = func.__code__
+    if code.co_argcount + code.co_kwonlyargcount == 0:
+        return None
+    return _layout_for(code, func)
+
+
+def _object_layout(obj: Any) -> Optional[_Layout]:
+    entry = _obj_layouts.get(id(obj))
+    if entry is not None and entry[0] is obj:
+        return entry[1]
+    layout = _callable_layout(obj)
+    try:
+        obj._gsp_layout = layout
+    except Exception:  # noqa: BLE001 - no instance __dict__; keep obj alive instead
+        _obj_layouts[id(obj)] = (obj, layout)
+    return layout
+
+
+def _hint_kind(hint: Optional[str]) -> str:
+    """Kind for a parameter first seen as None: unannotated is a tensor, other types no slot."""
+    h = hint or ""
+    if not h or "Any" in h:
+        return _T
+    seq = any(s in h for s in ("List[", "list[", "Sequence[", "Tuple[", "tuple["))
+    if "Tensor" in h:
+        return _L if seq else _T
+    scalar = "int" in h or "float" in h or "bool" in h
+    if seq:
+        return _I if scalar and _SCALARS_ON else _X
+    if scalar:
+        return _S if _SCALARS_ON else _X
+    return _D if "dtype" in h and _SCALARS_ON else _X
+
+
+def _seq_kind(value: Any) -> str:
+    if all(v is None or isinstance(v, torch.Tensor) for v in value):
+        return _L
+    if all(isinstance(v, int) for v in value):
+        return _I if _SCALARS_ON else _X
+    return _X
+
+
+def _kind_of(value: Any, hint: Optional[str] = None) -> str:
+    if value is None or value is _UNSET:
+        return _hint_kind(hint)
+    if isinstance(value, torch.Tensor):
+        return _T
+    if isinstance(value, (bool, int, float)):
+        return _S if _SCALARS_ON else _X
+    if isinstance(value, torch.dtype):
+        return _D if _SCALARS_ON else _X
+    if isinstance(value, (list, tuple)):
+        return _seq_kind(value)
+    return _X
+
+
+def _decide_slots(layout: _Layout, vals: list) -> None:
+    with _lock:
+        if layout.slots is not None:
+            return
+        slots = []
+        for i, name in enumerate(layout.names):
+            kind = _kind_of(vals[i], layout.hints.get(name))
+            if kind != _X:
+                slots.append((i, kind))
+        if layout.varargs is not None:
+            slots.append((-1, _L))
+        if layout.varkw is not None:
+            slots.append((-2, _L))
+        slots = tuple(slots[:_MAX_SLOTS])
+        names = []
+        for i, _ in slots:
+            if i >= 0:
+                names.append(layout.names[i])
+            else:
+                names.append("*" + layout.varargs if i == -1 else "**" + layout.varkw)
+        layout.spec = tuple(zip(names, (kind for _, kind in slots)))
+        layout.slots = slots
+
+
+def _convert(
+    layout: _Layout, vals: list, extra_args: tuple, extra_kwargs
+) -> Optional[tuple]:
+    """One value per slot, or None when no tensor was passed."""
+    out = [None] * _MAX_SLOTS
+    has_tensor = False
+    s = 0
+    for i, kind in layout.slots:
+        v = vals[i] if i >= 0 else _extra_value(i, extra_args, extra_kwargs)
+        if v is None or v is _UNSET:
+            pass
+        elif kind is _T:
+            if type(v) in _TENSOR_TYPES or isinstance(v, torch.Tensor):
+                out[s] = v
+                has_tensor = True
+        elif kind is _S:
+            out[s] = v if type(v) in _SCALAR_TYPES else _plain_number(v)
+            # Scalar? only takes int64-range values (nan fails this too).
+            if out[s] is not None and not -_I64 <= out[s] < _I64:
+                out[s] = None
+        elif kind is _D:
+            if type(v) is torch.dtype:
+                out[s] = v
+        elif type(v) in _SEQ_TYPES:
+            out[s] = _seq_value(kind, v)
+            has_tensor = has_tensor or (kind is _L and out[s] is not None)
+        s += 1
+    if not has_tensor:
+        return None
+    return layout.spec, out[:s]
+
+
+def _plain_number(value: Any) -> Optional[Any]:
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    return None
+
+
+def _extra_value(i: int, extra_args: tuple, extra_kwargs) -> tuple:
+    """Slot -1 is ``*args``, slot -2 is ``**kwargs``."""
+    if i == -1:
+        return extra_args
+    if not extra_kwargs:
+        return ()
+    return tuple(extra_kwargs[k] for k in sorted(extra_kwargs))
+
+
+def _seq_value(kind: str, value: Any) -> Optional[list]:
+    items = []
+    for item in value[:_MAX_LIST]:
+        if kind is _L:
+            if type(item) in _TENSOR_TYPES or isinstance(item, torch.Tensor):
+                items += (item,)
+        elif type(item) is int or type(item) is bool:
+            items += (item,)
+        else:
+            return None
+    return items or None
+
+
+def _bind_record(layout: _Layout, args: tuple, kwargs: dict) -> Optional[tuple]:
+    vals = layout.defaults[:]
+    npos = layout.npos
+    extra_args = ()
+    i = 0
+    for a in args:
+        if i == npos:
+            extra_args = args[i:]
+            break
+        vals[i] = a
+        i += 1
+    extra_kwargs = None
+    index = layout.index
+    for k in kwargs:
+        if k in index:
+            vals[index[k]] = kwargs[k]
+        else:
+            if extra_kwargs is None:
+                extra_kwargs = {}
+            extra_kwargs[k] = kwargs[k]
+    if layout.slots is None:
+        _decide_slots(layout, vals)
+    return _convert(layout, vals, extra_args, extra_kwargs)
+
+
+def _frame_record(frame) -> Optional[tuple]:
     code = frame.f_code
-    flags = code.co_flags
-    count = code.co_argcount + code.co_kwonlyargcount
-    count += bool(flags & inspect.CO_VARARGS)
-    names = code.co_varnames[:count]
+    layout = _layouts[code] if code in _layouts else _new_frame_layout(frame)
     local_vars = frame.f_locals
-    values = [local_vars[n] for n in names if n in local_vars]
-    kwargs: Dict[str, Any] = {}
-    if flags & inspect.CO_VARKEYWORDS:
-        extra = local_vars.get(code.co_varnames[count])
-        if isinstance(extra, dict):
-            kwargs = extra
-    return _collect_tensors(values, kwargs)
+    vals = layout.defaults[:]
+    i = 0
+    for name in layout.names:
+        if name in local_vars:
+            vals[i] = local_vars[name]
+        i += 1
+    extra_args = ()
+    if layout.varargs is not None and layout.varargs in local_vars:
+        extra_args = local_vars[layout.varargs]
+    extra_kwargs = None
+    if layout.varkw is not None and layout.varkw in local_vars:
+        extra_kwargs = local_vars[layout.varkw]
+    if layout.slots is None:
+        _decide_slots(layout, vals)
+    return _convert(layout, vals, extra_args, extra_kwargs)
+
+
+def _positional_record(args: tuple, kwargs: dict) -> Optional[tuple]:
+    """For callees with no Python signature: call order, then kwargs by name."""
+    vals = args
+    if kwargs:
+        vals = args + tuple(kwargs[k] for k in sorted(kwargs))
+    out = [None] * _MAX_SLOTS
+    kinds = [_T] * _MAX_SLOTS
+    has_tensor = False
+    s = 0
+    for v in vals:
+        if s == _MAX_SLOTS:
+            break
+        t = type(v)
+        if v is None:
+            pass
+        elif t in _TENSOR_TYPES or isinstance(v, torch.Tensor):
+            out[s] = v
+            has_tensor = True
+        elif t in _SEQ_TYPES:
+            kinds[s] = _seq_kind(v)
+            out[s] = _seq_value(kinds[s], v) if kinds[s] in (_L, _I) else None
+            if out[s] is None:
+                kinds[s] = _T
+            has_tensor = has_tensor or kinds[s] is _L
+        elif not _SCALARS_ON:
+            pass
+        elif t in _SCALAR_TYPES and -_I64 <= v < _I64:
+            out[s] = v
+            kinds[s] = _S
+        elif t is torch.dtype:
+            out[s] = v
+            kinds[s] = _D
+        s += 1
+    if not has_tensor:
+        return None
+    return tuple(zip(_POS_NAMES[:s], kinds[:s])), out[:s]
 
 
 def _name_of(*candidates: Any) -> Optional[str]:
@@ -374,6 +703,9 @@ class _Promoted:
         orig.__kwdefaults__ = self.kwdefaults
         orig.__qualname__ = func.__qualname__
         self.orig = orig
+        self.layout = _layout_for(self.code)
+        # orig, rebuilt from the code, has no annotations.
+        self.layout.add_function(func)
         try:
             self.signature = inspect.signature(orig)
         except (TypeError, ValueError):  # pragma: no cover - exotic signatures
@@ -496,16 +828,17 @@ def _call_launcher(key: int, args: tuple, kwargs: dict) -> Any:
     if not _enabled or _is_compiling():
         return orig(*args, **kwargs)
     try:
-        tensors = _collect_tensors(args, kwargs)
+        record = _bind_record(entry.layout, args, kwargs)
         op = (
-            _op_for(LAUNCHER_NAMESPACE, entry.name, len(tensors))
-            if tensors
+            _op_for(LAUNCHER_NAMESPACE, entry.name, record[0])
+            if record is not None
             else _BROKEN
         )
     except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
         op = _BROKEN
     if op is _BROKEN:
         return orig(*args, **kwargs)
+    values = record[1]
 
     box: Dict[str, Any] = {}
 
@@ -520,7 +853,7 @@ def _call_launcher(key: int, args: tuple, kwargs: dict) -> Any:
     stack.append(entry.code)
     _tls.pending = run
     try:
-        op(*tensors)
+        op(*values)
     except Exception as exc:
         if "ran" in box:
             raise
@@ -539,25 +872,27 @@ def _call_launcher(key: int, args: tuple, kwargs: dict) -> Any:
 def _trace_launch(
     hook_id: str,
     name: str,
-    tensors: Optional[List[torch.Tensor]],
+    record: Optional[tuple],
     launch: Callable[[], Any],
 ) -> Any:
     """Annotate one launch and perform it with ``launch()``.
 
-    ``tensors=None`` (pointer-only launch) records the launcher's tensor
-    arguments instead. Only the outermost hooked launch on a thread is
-    recorded, so ``Autotuner.run`` -> ``JITFunction.run`` counts once.
+    ``record=None`` (pointer-only launch) records the launcher's parameters
+    instead. Only the outermost hooked launch on a thread is recorded, so
+    ``Autotuner.run`` -> ``JITFunction.run`` counts once.
     """
     if getattr(_tls, "depth", 0):
         return launch()
     _tls.depth = 1
     try:
-        frame = _calling_launcher() if _LAUNCHER_OPS_ON or tensors is None else None
-        if tensors is None:
-            tensors = _frame_tensors(frame) if frame is not None else []
-            if not tensors:
+        frame = _calling_launcher() if _LAUNCHER_OPS_ON or record is None else None
+        frame_record = None
+        if record is None:
+            frame_record = record = _frame_record(frame) if frame is not None else None
+            if record is None:
                 return launch()
         launcher = None
+        launcher_record = None
         if frame is not None and _LAUNCHER_OPS_ON:
             # Promoted launchers get their own enclosing op, including on the
             # call that promotes them, so no leaf op here.
@@ -565,17 +900,22 @@ def _trace_launch(
                 launcher_name = _launcher_name(frame.f_code)
                 if not _maybe_promote(frame, launcher_name):
                     launcher = launcher_name
+                    launcher_record = (
+                        frame_record
+                        if frame_record is not None
+                        else _frame_record(frame)
+                    )
         frame = None
         if hook_id in _break_hooks and _break_rank_matches():
-            # Inspect: hook_id, name, launcher, tensors; `up` for the hooked
+            # Inspect: hook_id, name, launcher, record; `up` for the hooked
             # call's args, kwargs and self.
             breakpoint()
         if not _SPANS_ON:
-            _record_launch(name, launcher, tensors)
+            _record_launch(name, record, launcher, launcher_record)
             return launch()
         # The GPU kernel launches inside the span, so it nests under it.
         with torch.profiler.record_function(SPAN_PREFIX + name):
-            _record_launch(name, launcher, tensors)
+            _record_launch(name, record, launcher, launcher_record)
             return launch()
     finally:
         _tls.depth = 0
@@ -590,6 +930,7 @@ def _wrap_launch(
     name_of: Callable[[Any], Optional[str]],
     fallback_name: str,
     hook_id: str,
+    named: bool = True,
 ) -> bool:
     original = getattr(cls, method, None)
     if original is None:
@@ -604,14 +945,23 @@ def _wrap_launch(
         if not _enabled:
             return original(self, *args, **kwargs)
         try:
-            tensors = _collect_tensors(args, kwargs)
-            if not tensors:
+            layout = None
+            if named:
+                try:
+                    layout = self._gsp_layout
+                except AttributeError:
+                    layout = _object_layout(self)
+            if layout is None:
+                record = _positional_record(args, kwargs)
+            else:
+                record = _bind_record(layout, args, kwargs)
+            if record is None:
                 return original(self, *args, **kwargs)
             name = name_of(self) or fallback_name
         except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
             return original(self, *args, **kwargs)
         return _trace_launch(
-            hook_id, name, tensors, lambda: original(self, *args, **kwargs)
+            hook_id, name, record, lambda: original(self, *args, **kwargs)
         )
 
     setattr(cls, method, traced)
@@ -697,14 +1047,17 @@ class _TracedForeignCall:
         func = self._func
         if not _enabled:
             return func(*args, **kwargs)
-        try:
-            tensors = None if self._pointer_args else _collect_tensors(args, kwargs)
-        except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
-            return func(*args, **kwargs)
-        if tensors is not None and not tensors:
-            return func(*args, **kwargs)
+        if self._pointer_args:
+            record = None
+        else:
+            try:
+                record = _positional_record(args, kwargs)
+            except Exception:  # noqa: BLE001  # pragma: no cover
+                return func(*args, **kwargs)
+            if record is None:
+                return func(*args, **kwargs)
         return _trace_launch(
-            self._hook_id, self._name, tensors, lambda: func(*args, **kwargs)
+            self._hook_id, self._name, record, lambda: func(*args, **kwargs)
         )
 
     def __getattr__(self, attr: str) -> Any:
@@ -793,15 +1146,15 @@ def install_aiter_cpp_itfs_hooks() -> bool:
             if not _enabled:
                 return run_hsaco(func_name, *args, **kwargs)
             try:
-                tensors = _collect_tensors(args, {})
+                record = _positional_record(args, {})
             except Exception:  # noqa: BLE001  # pragma: no cover
-                tensors = []
-            if not tensors:
+                record = None
+            if record is None:
                 return run_hsaco(func_name, *args, **kwargs)
             return _trace_launch(
                 "aiter.hsaco",
                 str(func_name),
-                tensors,
+                record,
                 lambda: run_hsaco(func_name, *args, **kwargs),
             )
 
@@ -815,20 +1168,26 @@ def install_aiter_cpp_itfs_hooks() -> bool:
     return callable(run_lib) and callable(run_hsaco)
 
 
-def _traced_tensor_call(func: Callable, name: str, hook_id: str) -> Callable:
-    """Wrap a launcher whose arguments carry the operand tensors."""
+def _traced_tensor_call(
+    func: Callable, name: str, hook_id: str, named: bool = True
+) -> Callable:
+    """Wrap a launcher whose arguments carry the operands."""
+    layout = _callable_layout(func) if named else None
 
     @functools.wraps(func)
     def traced(*args, **kwargs):
         if not _enabled:
             return func(*args, **kwargs)
         try:
-            tensors = _collect_tensors(args, kwargs)
+            if layout is None:
+                record = _positional_record(args, kwargs)
+            else:
+                record = _bind_record(layout, args, kwargs)
         except Exception:  # pragma: no cover - never break the workload  # noqa: BLE001
             return func(*args, **kwargs)
-        if not tensors:
+        if record is None:
             return func(*args, **kwargs)
-        return _trace_launch(hook_id, name, tensors, lambda: func(*args, **kwargs))
+        return _trace_launch(hook_id, name, record, lambda: func(*args, **kwargs))
 
     traced._jit_shape_traced = True
     return traced
@@ -855,7 +1214,10 @@ def install_triton_compiled_hooks() -> bool:
         if not _enabled:
             return runner
         return _traced_tensor_call(
-            runner, getattr(self, "name", None) or "triton_kernel", "triton.compiled"
+            runner,
+            getattr(self, "name", None) or "triton_kernel",
+            "triton.compiled",
+            named=False,
         )
 
     cls.__getitem__ = __getitem__
@@ -980,7 +1342,12 @@ def install_tilelang_kernel_hooks() -> bool:
     if not isinstance(cls, type):
         return False
     return _wrap_launch(
-        cls, "__call__", _tilelang_name, "tilelang_kernel", "tilelang.jit"
+        cls,
+        "__call__",
+        _tilelang_name,
+        "tilelang_kernel",
+        "tilelang.jit",
+        named=False,
     )
 
 

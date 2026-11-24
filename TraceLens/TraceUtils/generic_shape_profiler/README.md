@@ -29,9 +29,10 @@ as bare GPU kernels with no operand information, which makes them impossible to
 roofline.
 
 This tool closes exactly that gap: it hooks the JIT launch entry points and, for
-each launch, calls a no-op dispatcher op named after the kernel with one `Tensor`
-parameter per operand. The profiler records that op like any other, so the
-kernel's shapes, strides and dtypes land in the trace.
+each launch, calls a no-op dispatcher op named after the kernel whose arguments
+are the launch's, bound to the kernel's signature. The profiler records that op
+like any other, so the kernel's shapes, strides, dtypes and scalar arguments land
+in the trace.
 
 | Launch path | Hooked at | Example kernels |
 |-------------|-----------|-----------------|
@@ -47,7 +48,7 @@ kernel's shapes, strides and dtypes land in the trace.
 Every other aiter `compile_ops` op is registered as a `torch.ops.aiter.*`
 dispatcher op, so those kernels are already shaped natively and are left
 alone. A `cpp_itfs` entry point or an aiter FlyDSL executable is called with
-raw pointers, so its operands are read from the calling Python wrapper's tensor
+raw pointers, so its operands are read from the calling Python wrapper's
 arguments instead.
 
 TileLang needs its own hook even though it is built on TVM: it compiles TIR to a
@@ -108,9 +109,55 @@ ancestor of every GPU kernel the launcher issues, so a trace tree attributes
 those kernels to it. The `jit::` span gives the exact kernel-level association,
 and the kernel op name matches the kernel name for name-based lookup.
 
-A dispatcher schema has a fixed arity, so a kernel or launcher that is called
-with a different number of tensors (optional operands) gets a second op with an
-`__<N>t` suffix, e.g. `launcher_shapes::fused_append_shared_experts__2t`.
+### Argument slots
+
+Every call is bound to the function's signature the way Python binds it
+(positionally, by keyword, or from the default), so each parameter has one fixed
+slot, in signature order, whatever the call site does. This is the same rule the
+dispatcher applies to native ops, so the slots of `aiter::*` and
+`launcher_shapes::*` ops read the same way:
+
+| Parameter value | Slot type | `Input Dims` / `Input type` / `Concrete Inputs` |
+|---|---|---|
+| tensor | `Tensor?` | its shape / its dtype / `""` |
+| `None` or not passed (optional tensor) | `Tensor?` | `[]` / `""` / `""` |
+| `int`, `float`, `bool` (incl. Triton `constexpr`s) | `Scalar?` | `[]` / `Scalar` / the value |
+| `torch.dtype` | `ScalarType?` | `[]` / `Scalar` / the dtype's enum value (`15` = bf16) |
+| list or tuple of tensors | `Tensor[]?` | the shapes / `TensorList` / `""` |
+| list or tuple of ints | `int[]?` | `[]` / `ScalarList` / e.g. `[2, 3]` |
+| anything else (`self`, configs, strings) | no slot | – |
+
+For `axpy(x, y, bias=None, out=None, alpha=1.0, *, block=1024)`, the calls
+`axpy(X, Y)`, `axpy(X, Y, out=O, bias=B, alpha=2.0)` and
+`axpy(y=Y, x=X, block=512)` all record `launcher_shapes::axpy` with the slots
+`x, y, bias, out, alpha, block`; absent tensors are `[]` and the scalars appear in
+`Concrete Inputs`. Triton kernels bind to the `@triton.jit` function's own
+parameters, so `kernel_shapes::<kernel>` records every pointer, size and
+`constexpr` passed to the launch (autotuned `constexpr`s are not arguments and
+stay empty).
+
+The parameter names are written once into the trace's top-level metadata under
+`generic_shape_profiler_schemas` when the profiler stops:
+
+```json
+"generic_shape_profiler_schemas": {
+  "launcher_shapes::axpy": [["x", "Tensor?"], ["y", "Tensor?"], ["bias", "Tensor?"],
+                            ["out", "Tensor?"], ["alpha", "Scalar?"], ["block", "Scalar?"]]
+}
+```
+
+so a perf model can address operands by name: slot *i* of an op is
+`schemas[op][i]`. `*args` and `**kwargs` parameters become one trailing
+`Tensor[]?` slot each.
+
+A parameter's slot type is fixed by the first value it is seen with (or its
+annotation when that value is `None`); a later value of another type records as
+empty rather than changing the op. Launch paths with no Python signature —
+tvm-ffi functions, `run_hsaco`, `compiled[grid](...)` relaunches, TileLang
+kernels and `mark_launch` — record their arguments in call order instead
+(keywords sorted by name), with the same slot types; their slots are named
+`a0, a1, ...`. A second function with the same name, or a positional call of
+another shape, gets a separate op with an `__<N>t` suffix (`N` slots).
 
 ### Two granularities
 
@@ -137,13 +184,15 @@ source scanning, and no matching on function names. Methods are named by
 
 That first launch is also how the launcher is *promoted*: its frame yields the
 function object, whose code object is swapped for a trampoline. Every later
-call goes through `launcher_shapes::<launcher>(<launcher's tensor args>)`,
+call goes through `launcher_shapes::<launcher>(<launcher's arguments>)`,
 whose implementation runs the original function, so the op encloses the
 launcher's whole body. Swapping `__code__` changes the one function object in
 place, so all references to it are covered without patching modules. The call
 that discovers a launcher carries only the kernel-level op. Closures,
 generators and `torch` internals are never swapped and keep a leaf
-`launcher_shapes` op next to the launch, carrying the kernel's operands.
+`launcher_shapes` op next to the launch, carrying the launcher's own arguments
+read from its frame (so a parameter the launcher reassigned before the launch
+records its new value).
 
 > The two levels describe the same work, so pick one granularity when summing
 > FLOPs or bytes — don't add them. Set `TRACELENS_SHAPE_LAUNCHER_OPS=0` to emit
@@ -158,7 +207,8 @@ generators and `torch` internals are never swapped and keep a leaf
 | `TRACELENS_SHAPE_SPANS` | `1` | Emit the enclosing `jit::<kernel>` span. Set `0` for shape ops only (marginally lower overhead, association by name only). |
 | `TRACELENS_SHAPE_LAUNCHER_OPS` | `1` | Also annotate the calling Python launcher as `launcher_shapes::<caller>`. Set `0` for kernel-level annotations only. |
 | `TRACELENS_SHAPE_LAUNCHER_PROMOTE` | `1` | Run discovered launchers inside their `launcher_shapes` op, so it encloses the whole launcher. Set `0` to keep the launcher op as a leaf next to the launch. |
-| `TRACELENS_SHAPE_BREAK` | unset | Debug only. Drop into `breakpoint()` at each hooked launch: `1` / `all` for every hook, or a comma-separated list of hook-id prefixes (`triton`, `flydsl`, `tilelang`, `tvm_ffi`, `aiter.cpp_itfs`, `aiter.hsaco`, `aiter.flydsl`, `aiter.compile_ops`). Honours `PYTHONBREAKPOINT`. |
+| `TRACELENS_SHAPE_SCALARS` | `1` | Also record `int` / `float` / `bool` / `dtype` / int-list arguments. Set `0` for tensor slots only (smaller traces; the tensor slots stay in signature order). |
+| `TRACELENS_SHAPE_BREAK` | unset | Debug only. Drop into `breakpoint()` at each hooked launch: `1` / `all` for every hook, or a comma-separated list of hook-id prefixes (`triton`, `flydsl`, `tilelang`, `tvm_ffi`, `aiter.cpp_itfs`, `aiter.hsaco`, `aiter.flydsl`, `aiter.flydsl.moe`, `aiter.compile_ops`). Honours `PYTHONBREAKPOINT`. |
 | `TRACELENS_SHAPE_BREAK_RANK` | unset | Debug only. Restrict `TRACELENS_SHAPE_BREAK` to one `torch.distributed` rank, so a TP=N server stops in one process instead of N. |
 
 ## Profiling serving frameworks
@@ -198,7 +248,8 @@ import generic_shape_profiler
 generic_shape_profiler.mark_launch("my_fused_kernel", [q, k, v, out])
 ```
 
-It is a no-op unless tracing is enabled.
+It is a no-op unless tracing is enabled. With no signature to bind to, the
+list is recorded in the order given, as slots `a0, a1, ...`.
 
 ## Design
 
@@ -229,8 +280,11 @@ It is a no-op unless tracing is enabled.
   All patches are idempotent and wrapped in `try/except`, so they can never
   break the workload.
 - **Few Python calls per launch.** With `with_stack`, every Python call made
-  inside a profiler window is a trace event, so the per-launch path (tensor
-  collection, the outermost-launch check) uses flat loops and no helper frames.
+  inside a profiler window is a trace event — builtins such as `isinstance`,
+  `len` and `list.append` included — so the per-launch path (argument binding,
+  the outermost-launch check) uses flat loops, indexing, membership tests and
+  exact-type lookups. A function's parameter layout is worked out once and
+  cached on its code object.
 - **Lazy core import.** `generic_shape_profiler` (and thus `torch`) is only
   imported once a hook needs it and `torch` is already loaded, so the shim adds
   no measurable startup cost and never drags torch into a process that avoids
