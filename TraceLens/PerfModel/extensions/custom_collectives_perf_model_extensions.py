@@ -9,7 +9,6 @@ Performance models for custom collective operation extensions.
 """
 
 from math import prod
-from TraceLens.PerfModel.kernel_name_parser import dda_all_reduce_params
 from TraceLens.PerfModel.perf_model import RMSNorm
 from TraceLens.PerfModel.utils import dense_counted_tensor, name2bpe
 
@@ -440,63 +439,7 @@ class sgl_kernel_reg_all_gather_into_tensor(CustomCollective):
         return (self.num_elems + self.num_elems_out) * self.bpe_in
 
 
-class _DdaAllReduceBase(CustomCollective):
-    """
-    Shared FLOPs and bytes for meta::comms DDA all-reduce kernels, per GPU.
-
-    The algorithm and W (number of ranks) come from the kernel name, e.g.
-    ddaAllReduceFlatIpc<__hip_bfloat16, 8, false>. Formulas match rocprofv3
-    counters on MI355X with W=8; reads from peer ranks are included.
-
-    ddaAllReduceFlatIpc (one-shot): stage the local input into the IPC buffer, read
-        the full tensor from all W ranks, W adds per element, write the output.
-        FLOPs: W * num_elems.
-        Bytes: reads (W + 1) * num_elems + writes 2 * num_elems.
-    ddaAllReduceTreeIpc (two-phase): reduce this GPU's 1/W slice from all W ranks,
-        write it, then read all W reduced slices and write the full output.
-        FLOPs: num_elems (1/W slice * W adds).
-        Bytes: reads 2 * num_elems + writes (1 + 1/W) * num_elems.
-    Other kernels raise NotImplementedError, which the report treats as unmodeled.
-    """
-
-    def __init__(self, event, arch=None):
-        self.event = event
-        self.arch = arch
-        self.param_details = self.get_param_details(event)
-        self.num_elems = self.param_details["num_elems"]
-        self.bpe_in = name2bpe(self.param_details["dtype_in"])
-        self.algorithm, self.num_ranks = self._dda_kernel(event)
-
-    @staticmethod
-    def _dda_kernel(event):
-        for kernel in event["kernel_details"]:
-            params = dda_all_reduce_params(kernel["name"])
-            if params is not None:
-                return params
-        return None, None
-
-    def flops(self):
-        if self.algorithm == "Flat":
-            return self.num_ranks * self.num_elems
-        if self.algorithm == "Tree":
-            return self.num_elems
-        raise NotImplementedError(
-            f"No DDA all-reduce kernel under {self.event['name']}"
-        )
-
-    def bytes(self):
-        if self.algorithm == "Flat":
-            elems_moved = (self.num_ranks + 3) * self.num_elems
-        elif self.algorithm == "Tree":
-            elems_moved = 3 * self.num_elems + self.num_elems // self.num_ranks
-        else:
-            raise NotImplementedError(
-                f"No DDA all-reduce kernel under {self.event['name']}"
-            )
-        return elems_moved * self.bpe_in
-
-
-class record_param_comms_all_reduce(_DdaAllReduceBase):
+class record_param_comms_all_reduce(custom_ar_all_reduce):
     """
     Performance model for record_param_comms (torch.distributed collective wrapper).
 
@@ -508,60 +451,30 @@ class record_param_comms_all_reduce(_DdaAllReduceBase):
         {"Collective name": "allreduce", "dtype": "BFloat16",
          "In msg nelems": 5242880, ...}
 
-    FLOPs and bytes: see _DdaAllReduceBase.
+    flops/bytes inherited from custom_ar_all_reduce (FLOPs=0; bytes per GPU =
+    2 * num_elems * bpe_in for the local read+write).
     """
-
-    def __init__(self, event, arch=None):
-        super().__init__(event, arch)
-        self.is_all_reduce = self.param_details["collective"] == "allreduce"
 
     @staticmethod
     def get_param_details(event):
         args = event["args"]
         return {
             "collective": args.get("Collective name"),
+            "op_shape": (args.get("In msg nelems"),),
             "dtype_in": args.get("dtype"),
-            "num_elems": args.get("In msg nelems"),
+            "stride_input": (),
         }
 
-    def flops(self):
-        if not self.is_all_reduce:
+    def _check_all_reduce(self):
+        if self.param_details["collective"] != "allreduce":
             raise NotImplementedError(
                 f"{self.param_details['collective']} is not modeled"
             )
+
+    def flops(self):
+        self._check_all_reduce()
         return super().flops()
 
     def bytes(self):
-        if not self.is_all_reduce:
-            raise NotImplementedError(
-                f"{self.param_details['collective']} is not modeled"
-            )
+        self._check_all_reduce()
         return super().bytes()
-
-
-class sglang_inplace_all_reduce(_DdaAllReduceBase):
-    """
-    Performance model for sglang::inplace_all_reduce.
-
-    Signature: inplace_all_reduce(tensor, group_name) -> None
-        tensor     - shape [M, N], dtype BFloat16 (reduced in place)
-        group_name - str
-
-    Expected Input Dims from trace:
-        [(M, N), ()]
-        e.g. [(32, 2560), ()]   # decode, batch 32, hidden 2560
-
-    Expected Input type from trace:
-        ['c10::BFloat16', '']
-
-    FLOPs and bytes: see _DdaAllReduceBase.
-    """
-
-    @staticmethod
-    def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in": event["args"]["Input type"][0],
-            "num_elems": prod(op_shape),
-        }

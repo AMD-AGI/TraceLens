@@ -152,7 +152,7 @@ def get_pseudo_op_mappings():
         "sgl_kernel::qr_all_reduce": custom_collectives_perf_model_extensions.sgl_kernel_qr_all_reduce,
         "sglang::reg_all_gather_into_tensor": custom_collectives_perf_model_extensions.sgl_kernel_reg_all_gather_into_tensor,
         "record_param_comms": custom_collectives_perf_model_extensions.record_param_comms_all_reduce,
-        "sglang::inplace_all_reduce": custom_collectives_perf_model_extensions.sglang_inplace_all_reduce,
+        "sglang::inplace_all_reduce": custom_collectives_perf_model_extensions.vllm_all_reduce,
         "_C_custom_ar::qr_all_reduce": custom_collectives_perf_model_extensions.custom_ar_qr_all_reduce,
         ## GDN attention ops
         "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
