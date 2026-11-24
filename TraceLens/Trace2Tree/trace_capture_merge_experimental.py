@@ -27,13 +27,14 @@ UID = TraceLens.util.TraceEventUtils.TraceKeys.UID
 from .trace_to_tree import TraceToTree
 from ..util import GPU_KERNEL_CATEGORIES, extract_rank
 from ..TraceUtils.utils.annotation_utils import (
-    ANNOTATION_CAT,
     SGLANG_RUNNER_BS_PATTERN,
     SPEC_ROLE_DRAFTER,
     SPEC_ROLE_DRAFTER_EXTEND,
     SPEC_ROLE_TARGET,
     find_known_annotations,
+    find_step_annotations,
     find_step_label,
+    innermost_extend_steps,
     parse_draft_prefill_tokens,
     find_spec_decode_annotations,
     parse_annotation,
@@ -582,35 +583,6 @@ def find_execution_roots(graph_tree):
     return sorted(roots.values(), key=lambda e: e.get("ts", 0))
 
 
-def _step_annotations(events):
-    """CPU ``step[...]`` annotations; GPU-side copies (``gpu_user_annotation``) are skipped."""
-    return [
-        e
-        for e in events
-        if e.get("cat") == ANNOTATION_CAT and e.get("name", "").startswith("step[")
-    ]
-
-
-def innermost_extend_steps(events):
-    """``step[EXTEND ...]`` spans that contain no other ``step[EXTEND ...]``."""
-    steps = sorted(
-        (
-            e
-            for e in _step_annotations(events)
-            if e["name"].startswith("step[EXTEND") and "dur" in e
-        ),
-        key=lambda e: (e.get("ts", 0), -e.get("dur", 0)),
-    )
-    inner = []
-    for i, e in enumerate(steps):
-        end = e["ts"] + e["dur"]
-        nxt = steps[i + 1] if i + 1 < len(steps) else None
-        if nxt is not None and nxt["ts"] + nxt["dur"] <= end:
-            continue
-        inner.append(e)
-    return inner
-
-
 def find_graph_roots_under_execution(execution_root, graphlaunch_events):
     """Return all ``graphlaunch`` events that fall within *execution_root*'s time range.
 
@@ -1094,7 +1066,7 @@ def merge_capture_trace_into_graph(
 
     # ── Per-execution-root merge loop ──
     step_events = sorted(
-        _step_annotations(graph_tree.events), key=lambda e: e.get("ts", 0)
+        find_step_annotations(graph_tree.events), key=lambda e: e.get("ts", 0)
     )
     merge_failed = False
     for (execution_root, graph_roots), spec_batch_size in zip(

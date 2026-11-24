@@ -582,6 +582,35 @@ def spec_decode_batch_sizes(
     return sizes
 
 
+def find_step_annotations(events: List[dict]) -> List[dict]:
+    """CPU ``step[...]`` annotations; GPU-side copies (``gpu_user_annotation``) are skipped."""
+    return [
+        e
+        for e in events
+        if e.get("cat") == ANNOTATION_CAT and e.get("name", "").startswith("step[")
+    ]
+
+
+def innermost_extend_steps(events: List[dict]) -> List[dict]:
+    """``step[EXTEND ...]`` spans that contain no other ``step[EXTEND ...]``."""
+    steps = sorted(
+        (
+            e
+            for e in find_step_annotations(events)
+            if e["name"].startswith("step[EXTEND") and "dur" in e
+        ),
+        key=lambda e: (e.get("ts", 0), -e.get("dur", 0)),
+    )
+    inner = []
+    for i, e in enumerate(steps):
+        end = e["ts"] + e["dur"]
+        nxt = steps[i + 1] if i + 1 < len(steps) else None
+        if nxt is not None and nxt["ts"] + nxt["dur"] <= end:
+            continue
+        inner.append(e)
+    return inner
+
+
 def find_step_label(step_events: List[dict], root: dict) -> Optional[str]:
     """The SGLang ``step[...]`` label of an execution root.
 

@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 from TraceLens.TraceUtils.utils.annotation_utils import (
     IterationAnnotation,
+    find_step_annotations,
     find_step_label,
+    innermost_extend_steps,
     parse_draft_prefill_tokens,
     spec_decode_role,
 )
@@ -23,9 +25,7 @@ from TraceLens.Trace2Tree.trace_capture_merge_experimental import (
     _pair_capture_roots,
     _preferred_target_mode,
     _resolve_capture_query,
-    _step_annotations,
     find_execution_roots,
-    innermost_extend_steps,
 )
 
 
@@ -92,7 +92,7 @@ def test_step_annotations_keep_only_cpu_labels():
     cpu = _span(1, "step[VERIFY bs=8 forward_id=4]", 0, 100)
     gpu = dict(cpu, **{UID: 2, "cat": "gpu_user_annotation"})
     other = _span(3, "scheduler.run_batch", 0, 100)
-    assert [e[UID] for e in _step_annotations([gpu, cpu, other])] == [1]
+    assert [e[UID] for e in find_step_annotations([gpu, cpu, other])] == [1]
 
 
 def test_step_label_finds_draft_label_inside_draft_extend():
