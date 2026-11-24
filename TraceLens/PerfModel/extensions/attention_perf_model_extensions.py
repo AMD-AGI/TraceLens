@@ -104,6 +104,14 @@ class InferenceAttention:
         return IterationAnnotation(annotation).chunk_stats()
 
     @staticmethod
+    def _causal_kv_pairs(stats):
+        """(query, key) pairs a causal scorer visits, from the sq/sk aggregates."""
+        return sum(
+            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
+            for p in ("c", "g")
+        )
+
+    @staticmethod
     def get_param_details(event):
         try:
             annotation = str(event.get("annotation"))
@@ -1211,6 +1219,60 @@ class mla_decode_v4_asm(InferenceAttention):
         return super().get_maf_type()
 
 
+class mla_decode_v4_stage2_asm(mla_decode_v4_asm):
+    """
+    Performance model for AITER's _fwd_kernel_stage2_asm.
+
+    Merges the FP32 split partials and LSEs written by mla_decode_v4_asm
+    into the BF16 output. For each query, head, and split the kernel
+    rescales the accumulator (D multiplies), blends in the partial
+    (D multiplies and D adds), and updates the running maximum and LSE
+    (2 exp, 2 sub, 1 max, 2 flops). It then divides the accumulator by
+    the LSE sum (D divides). The loop runs once per launched split.
+
+        _fwd_kernel_stage2_asm(partial, lse, out, ..., num_kv_splits)
+
+    Roofline calculation -- FLOPs:
+        FLOPs = Q * H * (splits * (3 * D + 7) + D)
+
+    Roofline calculation -- Bytes:
+        bytes_partial = numel(partial) * 4
+        bytes_lse     = numel(lse) * 4
+        bytes_output  = numel(output) * 2
+        Total         = bytes_partial + bytes_lse + bytes_output
+    """
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        q, h, d, splits = p["q_tokens"], p["H_Q"], p["d_h_v"], p["num_kv_splits"]
+        return q * h * (splits * (3 * d + 7) + d)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        base = p["buffer_base"]
+        if not dense_counted_tensor(self.event, (base, base + 1, base + 2)):
+            return None
+        return (
+            math.prod(p["split_shape"]) * 4
+            + math.prod(p["lse_shape"]) * 4
+            + math.prod(p["out_shape"]) * 2
+        )
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "fp32"
+
+    def get_maf_type(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        return "vector"
+
+
 class sgl_kernel_fast_topk_transform_fused:
     """
     Performance model for sgl_kernel::fast_topk_transform_fused (DSA indexer
@@ -1249,10 +1311,7 @@ class sgl_kernel_fast_topk_transform_fused:
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return {"_no_perf": True}
         params.update(stats)
-        params["valid_scores"] = sum(
-            stats[f"{p}_sqsk"] - (stats[f"{p}_sqsq"] - stats[f"{p}_sq"]) // 2
-            for p in ("c", "g")
-        )
+        params["valid_scores"] = InferenceAttention._causal_kv_pairs(stats)
         return params
 
     def flops(self):
@@ -1286,6 +1345,84 @@ class sgl_kernel_fast_topk_transform_fused:
 
     def get_maf_type(self):
         return "vector"
+
+
+class pa_mqa_logits_mxfp4:
+    """HBM bytes of the MXFP4 query, its e8m0 scales and per-head BF16 weights, and per scored key its MXFP4 row, scale, page id share and FP32 logit.
+
+    Each row scores ``out[r, k] = sum_h relu(q[r, h] . K[k]) * w[r, h]`` over its
+    CSA-compressed context. The cache and logits buffers are sized for the
+    longest context, so the scored keys come from the step annotation: the
+    causal (query, key) pairs over the CSA compression stride. The
+    ``q_per_block`` rows of a CTA share each KV tile they load.
+
+    Expected Input Dims (aiter::_fwd_sched_raw):
+        [1] q (T, H, D/2) uint8          [2] q_scale (T, H, D/32) uint8
+        [3] kv_cache (pages, P, D/2)     [4] kv_scale (pages, P, D/32)
+        [6] weights (T, H) bf16          Concrete Inputs[16] = q_per_block
+    """
+
+    category = "InferenceAttention"
+    bwd_category = None
+
+    _PAGE_ID_BYTES = 4
+    _LOGIT_BYTES = 4
+
+    def __init__(self, event, arch=None):
+        self.event = event
+        self.arch = arch
+        self.param_details = self.get_param_details(event)
+
+    @staticmethod
+    def get_param_details(event):
+        try:
+            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            dims = event["args"]["Input Dims"]
+            rows, heads, q_row = dims[1]
+            params = {
+                "rows": min(stats["c_sq"] + stats["g_sq"], rows),
+                "heads": heads,
+                "head_dim": 2 * q_row,
+                "q_row_bytes": q_row + dims[2][2],
+                "kv_row_bytes": dims[3][2] + dims[4][2],
+                "page_size": dims[3][1],
+                "weight_bytes": name2bpe(event["args"]["Input type"][6]),
+                "q_per_block": max(int(event["args"]["Concrete Inputs"][16]), 1),
+            }
+        except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
+            return {"_no_perf": True}
+        params["keys"] = (
+            InferenceAttention._causal_kv_pairs(stats)
+            // _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+        )
+        return params
+
+    def flops(self):
+        p = self.param_details
+        if p.get("_no_perf"):
+            return None
+        # Per head: a head_dim dot product, then the ReLU-weighted head sum.
+        return p["keys"] * p["heads"] * (2 * p["head_dim"] + 2)
+
+    def bytes(self):
+        p = self.param_details
+        if p.get("_no_perf") or p["weight_bytes"] is None:
+            return None
+        query = p["rows"] * p["heads"] * (p["q_row_bytes"] + p["weight_bytes"])
+        kv_per_key = p["kv_row_bytes"] + self._PAGE_ID_BYTES / p["page_size"]
+        return query + p["keys"] * (kv_per_key / p["q_per_block"] + self._LOGIT_BYTES)
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def get_compute_precision(self):
+        return None if self.param_details.get("_no_perf") else torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return None if self.param_details.get("_no_perf") else "matrix"
 
 
 class rocm_aiter_sparse_attn_indexer(InferenceAttention):

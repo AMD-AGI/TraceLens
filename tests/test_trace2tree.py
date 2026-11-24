@@ -49,8 +49,8 @@ from TraceLens.Trace2Tree.extensions.pseudo_ops_registry import (
     apply_pseudo_op_extensions,
 )
 from TraceLens.Trace2Tree.extensions.pseudo_ops_utils import (
-    inject_pseudo_op,
-    inject_pseudo_op_above_event,
+    inject_pseudo_op_above_launcher,
+    inject_pseudo_op_above_cpu_op,
     inject_pseudo_op_wrap_children,
     normalize_sglang_profiler_op_names,
 )
@@ -291,7 +291,7 @@ class TestPseudoOpsUtils:
         tree = _build_tree(events)
 
         kernel = next(e for e in tree.events if e["cat"] == "kernel")
-        inject_pseudo_op(tree, kernel, "pseudo::gemm", seq_num=99)
+        inject_pseudo_op_above_launcher(tree, kernel, "pseudo::gemm", seq_num=99)
 
         pseudo_ops = [
             e for e in tree.events if e.get("args", {}).get("Pseudo op") is True
@@ -348,7 +348,7 @@ class TestPseudoOpsUtils:
         assert len(pseudo_ops) == 1
         assert tree.get_children_events(parent_evt)[0]["name"] == "pseudo::wrapped"
 
-    def test_inject_pseudo_op_above_event(self):
+    def test_inject_pseudo_op_above_cpu_op(self):
         events = [
             _mk_event("cpu_op", "grandparent", ts=0, dur=500, pid=1, tid=1, args={}),
             _mk_event(
@@ -365,7 +365,7 @@ class TestPseudoOpsUtils:
         stage_evt = next(
             e for e in tree.events if e.get("name", "").endswith(": stage")
         )
-        result = inject_pseudo_op_above_event(tree, stage_evt, "pseudo::above")
+        result = inject_pseudo_op_above_cpu_op(tree, stage_evt, "pseudo::above")
         assert result is not None
         assert result["name"] == "pseudo::above"
         assert tree.get_parent_event(stage_evt)["UID"] == result["UID"]

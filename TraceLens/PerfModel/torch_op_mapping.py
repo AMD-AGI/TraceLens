@@ -66,6 +66,12 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
     (re.compile(r".*gsplat::projection_ewa_3dgs_packed_fwd"), "GaussianSplat"),
     (re.compile(r".*gsplat::intersect_(tile|offset)_kernel"), "GaussianSplat"),
+    (
+        re.compile(
+            r".*->(fused_compress_attn|hca_compress_forward)_\w+ \(Synthetic Op\)"
+        ),
+        "InferenceAttention",
+    ),
 ]
 
 
@@ -292,7 +298,18 @@ unary_elemwise_ops = [
     "aten::sigmoid",
     "aten::silu",
     "aten::neg",
-    "aten::pow",
+    "aten::abs",
+    "aten::exp",
+    "aten::exp_",
+    "aten::log",
+    "aten::tanh",
+    "aten::tanh_",
+    "aten::rsqrt",
+    "aten::rsqrt_",
+    "aten::sqrt",
+    "aten::sqrt_",
+    "aten::reciprocal",
+    "aten::reciprocal_",
 ]
 
 binary_elemwise_ops = [
@@ -302,6 +319,8 @@ binary_elemwise_ops = [
     "aten::mul_",
     "aten::add",
     "aten::add_",
+    "aten::sub",
+    "aten::sub_",
     "aten::sigmoid_backward",
     "aten::threshold_backward",
 ]
@@ -393,18 +412,18 @@ bilinear_upsample_ops = [
 
 for op in unary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_unary_elementwise
-for op in ("aten::rsqrt", "aten::rsqrt_"):
-    op_to_perf_model_class_map[op] = perf_model.aten_rsqrt
-for op in ("aten::sqrt", "aten::sqrt_"):
-    op_to_perf_model_class_map[op] = perf_model.aten_sqrt
-for op in ("aten::reciprocal", "aten::reciprocal_"):
-    op_to_perf_model_class_map[op] = perf_model.aten_reciprocal
+for op in ("aten::pow", "aten::pow_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_pow
+for op in ("aten::gelu", "aten::gelu_"):
+    op_to_perf_model_class_map[op] = perf_model.aten_gelu
 for op in ("aten::to", "aten::_to_copy"):
     op_to_perf_model_class_map[op] = perf_model.aten_to
 for op in ("aten::pad",):
     op_to_perf_model_class_map[op] = perf_model.aten_pad
 for op in binary_elemwise_ops:
     op_to_perf_model_class_map[op] = perf_model.aten_binary_elementwise
+for op in ("aten::eq", "aten::ne", "aten::lt", "aten::gt"):
+    op_to_perf_model_class_map[op] = perf_model.aten_comparison
 for op_name, op_class in norm_ops.items():
     op_to_perf_model_class_map[op_name] = op_class
 for op in reduce_ops:
@@ -468,6 +487,12 @@ def _match_triton_compiled(name):
         )
 
         return TritonCompiledPerfModel
+    if name.startswith("triton_tem_"):
+        from TraceLens.PerfModel.triton_compiled_perf_model import (
+            TritonTemplateGemmPerfModel,
+        )
+
+        return TritonTemplateGemmPerfModel
     return None
 
 

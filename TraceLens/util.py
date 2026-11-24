@@ -461,7 +461,10 @@ class DataLoader:
             _restore_streaming_device_ids(parsed)
             _attach_xplane_event_args(parsed, filename_path)
         if save_preprocessed:
-            out_path = filename_path.replace("pb", "processed.json")
+            for suffix in ("pb", "json.gz", "json"):
+                if filename_path.endswith(suffix):
+                    out_path = filename_path.removesuffix(suffix) + "processed.json"
+                    break
             with open(out_path, "w") as writefile:
                 json.dump(parsed, writefile)
         return parsed
@@ -1566,3 +1569,35 @@ def most_common_first_dim(
     if not first_dims:
         return None
     return Counter(first_dims).most_common(1)[0][0]
+
+
+def optional_int(value, default=None):
+    """Parse *value* as int, returning *default* when conversion fails."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def optional_float(value, default=0.0):
+    """Parse *value* as float, returning *default* when conversion fails."""
+    if value in ("", "None", None):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_bool(input):
+    if isinstance(input, bool):
+        return input
+    if input is None:
+        return False
+    if isinstance(input, str):
+        value = input.strip().lower()
+        if value in {"true", "1"}:
+            return True
+        if value in {"false", "0", ""}:
+            return False
+    return bool(input)

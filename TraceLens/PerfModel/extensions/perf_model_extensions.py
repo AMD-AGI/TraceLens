@@ -17,6 +17,7 @@ from TraceLens.PerfModel.perf_model import (
     FusedRoPE,
     UnaryElementwise,
 )
+from TraceLens.PerfModel.op_flops import op_flops_per_elem
 from TraceLens.PerfModel.utils import (
     dense_counted_tensor,
     name2bpe,
@@ -1146,7 +1147,12 @@ class aiter_silu_and_mul(UnaryElementwise):
 
     Expected Input type from trace:
         [dtype_out, dtype_input]  (note: reversed — out is arg 0, input is arg 1)
+
+    FLOPs: the activation's ``OP_FLOPS_PER_ELEM`` cost plus the gate multiply,
+    per output element.
     """
+
+    activation = "silu"
 
     @staticmethod
     def get_param_details(event):
@@ -1165,7 +1171,8 @@ class aiter_silu_and_mul(UnaryElementwise):
         }
 
     def flops(self):
-        return 5 * prod(self.param_details["op_shape"])
+        per_elem = op_flops_per_elem(self.activation) + op_flops_per_elem("mul")
+        return per_elem * prod(self.param_details["op_shape"])
 
     def bytes(self):
         return 2 * self.nelems * self.bpe_in + self.nelems * self.bpe_out
@@ -1212,12 +1219,10 @@ class aiter_gelu_and_mul(aiter_silu_and_mul):
     Expected Input Dims from trace:
         [out_shape, input_shape]
 
-    FLOPs: ~8 per output element (erf-based GELU: div, erf, add, mul, mul; then gate mul).
-    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    FLOPs and bytes: as aiter_silu_and_mul, with the erf GELU.
     """
 
-    def flops(self):
-        return 8 * prod(self.param_details["op_shape"])
+    activation = "gelu"
 
 
 class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
@@ -1234,12 +1239,10 @@ class aiter_gelu_tanh_and_mul(aiter_silu_and_mul):
     Expected Input Dims from trace:
         [out_shape, input_shape]
 
-    FLOPs: ~10 per output element (tanh GELU: x^3, coefficients, tanh, scale; then gate mul).
-    Bytes: identical to aiter_silu_and_mul (read gate+up, write out).
+    FLOPs and bytes: as aiter_silu_and_mul, with the tanh GELU.
     """
 
-    def flops(self):
-        return 10 * prod(self.param_details["op_shape"])
+    activation = "gelu_tanh"
 
 
 class gemm_afp4wfp4(GEMM):
@@ -2326,6 +2329,90 @@ class mhc_fused_post_pre_gemm_sqrsum(_MHCBase):
         )
 
 
+class sglang_hc_combine_split(_MHCBase):
+    """
+    Performance model for sglang_profiler::hc_combine_hc_combine_split.
+
+    Reference implementation:
+        sglang/python/sglang/kernels/jit/csrc/elementwise/hc_combine.cuh
+        (HcCombineSplitKernel: hc_combine_gate_kernel + hc_combine_apply_kernel)
+        sglang/python/sglang/kernels/ops/elementwise/hc_combine.py (hc_combine_split)
+
+    Per token, one gate per residual stream scales the block output, which is
+    added onto that stream:
+
+        a[c] = 2 * sigmoid(dot(normed, weight[c]) / n)
+        out[c] = residual[c] + a[c] * block_output
+
+    FLOPs: 2 * M * n * C * (n + 1). The sigmoid is left out.
+    Bytes: each tensor once, plus fp32 partials (M * 8 * n * 4 B) written
+    by the gate and read by the apply.
+
+    Expected Input Dims from trace:
+        [0] block_output    (M, C)
+        [1] residual        (M, n*C)
+        [2] normed_residual (M, n*C)
+        [3] inject_weight   (n, n*C)
+    """
+
+    _PARTIAL_SPLITS = 8
+
+    @staticmethod
+    def get_param_details(event):
+        dims = (event.get("args") or {}).get("Input Dims") or []
+        types = (event.get("args") or {}).get("Input type") or []
+        blank = {"M": None, "n": None, "C": None, "dtype_in": None}
+        if len(dims) < 4:
+            return blank
+        block_output, residual, weight = dims[0], dims[1], dims[3]
+        if len(block_output) != 2 or len(residual) != 2 or len(weight) != 2:
+            return blank
+        M, C = block_output
+        n = weight[0]
+        if (
+            not M
+            or not n
+            or not C
+            or residual[0] != M
+            or residual[1] != n * C
+            or weight[1] != n * C
+        ):
+            return blank
+        return {
+            "M": M,
+            "n": n,
+            "C": C,
+            "dtype_in": types[0] if types else "c10::BFloat16",
+        }
+
+    def flops(self):
+        if not self.M or not self.n or not self.C:
+            return None
+        return 2 * self.M * self.n * self.C * (self.n + 1)
+
+    def bytes(self):
+        if self.bpe_in is None or not self.M:
+            return None
+        if not dense_counted_tensor(self.event, (0, 1, 2, 3)):
+            return None
+        row = self.n * self.C * self.bpe_in
+        read_block_output = self.M * self.C * self.bpe_in
+        read_residual = self.M * row
+        read_normed = self.M * row
+        read_weight = self.n * row
+        write_out = self.M * row
+        partial_elems = self.M * self._PARTIAL_SPLITS * self.n
+        partials = 2 * partial_elems * 4
+        return (
+            read_block_output
+            + read_residual
+            + read_normed
+            + read_weight
+            + write_out
+            + partials
+        )
+
+
 class topk_softplus(_MHCBase):
     """
     Performance model for aiter::topk_softplus.
@@ -2360,7 +2447,7 @@ class topk_softplus(_MHCBase):
         }
 
     def flops(self):
-        return 6 * self.M * self.param_details["E"]
+        return _SQRTSOFTPLUS_FLOPS * self.M * self.param_details["E"]
 
     def bytes(self):
         if self.bpe_in is None:
@@ -2374,12 +2461,20 @@ class topk_softplus(_MHCBase):
         return read_gating + read_bias + write_w + write_idx
 
 
-_SQRTSOFTPLUS_FLOPS = 6  # mul, exp2, add, log2, mul, sqrt
-_SIGMOID_FLOPS = 5  # mul, neg, exp2, add, rcp
+# Fast score formulas, each term priced from OP_FLOPS_PER_ELEM.
+# sqrt(softplus): scale, exp2, add, log2, scale, sqrt.
+_SQRTSOFTPLUS_FLOPS = (
+    op_flops_per_elem("mul")
+    + op_flops_per_elem("exp")
+    + op_flops_per_elem("add")
+    + op_flops_per_elem("log")
+    + op_flops_per_elem("mul")
+    + op_flops_per_elem("sqrt")
+)
 _SCORE_FLOPS = {
     "sqrtsoftplus": _SQRTSOFTPLUS_FLOPS,
-    "sigmoid": _SIGMOID_FLOPS,
-    "softmax": 0,
+    "sigmoid": op_flops_per_elem("sigmoid"),
+    "softmax": op_flops_per_elem("softmax"),
 }
 # Comparator counts in topk_gating_kernels.cu sort_network_desc.
 _SORT_NETWORK_COMPARATORS = {1: 0, 2: 1, 3: 3, 4: 5, 6: 12, 8: 19}

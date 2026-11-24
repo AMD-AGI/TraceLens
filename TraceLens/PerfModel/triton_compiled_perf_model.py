@@ -1,12 +1,13 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 """
 Perf model for torch.compile-generated Triton kernels (triton_poi_*, triton_red_*,
-triton_per_*).
+triton_per_*), plus TritonTemplateGemmPerfModel for Inductor GEMM templates
+(triton_tem_*mm*) launched directly, with their fused epilogue.
 
 Two strategies, tried in order:
 
@@ -32,45 +33,16 @@ import os
 import re
 from math import prod
 
+from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem
+from .perf_model import GEMM
 from .utils import name2bpe, torch_dtype_map
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# FLOPs per element for ATen ops that commonly appear in fused Triton kernels.
-# Counts arithmetic operations; memory-only ops are 0.
-# ---------------------------------------------------------------------------
-_FLOPS_PER_ELEM: dict[str, int] = {
-    "aten.add": 1,
-    "aten.sub": 1,
-    "aten.mul": 1,
-    "aten.div": 1,
-    "aten.pow": 2,
-    "aten.sqrt": 2,
-    "aten.rsqrt": 2,
-    "aten.exp": 4,
-    "aten.log": 4,
-    "aten.sigmoid": 4,
-    "aten.tanh": 4,
-    "aten.relu": 1,
-    "aten.silu": 4,
-    "aten.gelu": 8,
-    "aten.mean": 1,
-    "aten.sum": 1,
-    "aten.var": 2,
-    "aten.abs": 1,
-    "aten.neg": 1,
-    "aten.reciprocal": 2,
-    "aten.ne": 1,
-    "aten.eq": 1,
-    "aten.lt": 1,
-    "aten.gt": 1,
-    # memory-only
-    "aten._to_copy": 0,
-    "aten.copy_": 0,
-    "aten.clone": 0,
-    "aten.embedding": 0,
-}
+# The template GEMM op; every other op in a triton_tem_ name is epilogue (or a
+# layout-only op such as aten.t, which costs 0 FLOPs). Inductor passes the mm
+# operands first (A[M,K], then B as [K,N] or its transpose [N,K]).
+_TEMPLATE_GEMM_OP = "aten.mm"
 
 _PTR_DTYPE_BYTES: dict[str, int] = {
     "*bf16": 2,
@@ -119,14 +91,16 @@ def _parse_kernel_name(name: str) -> list[str]:
     against the full PyTorch op registry.  Falls back to a simple split
     if the registry is unavailable.
     """
-    m = re.match(r"triton_(?:poi|red|per)_fused_(.+)_(\d+)$", name)
+    m = re.match(r"triton_(?:poi|red|per|tem)_fused_(.+)_(\d+)$", name)
     if not m:
         return []
     tokens = m.group(1).split("_")
     n = len(tokens)
 
     if not _ALL_KNOWN_OPS:
-        return [f"aten.{t}" for t in tokens if f"aten.{t}" in _FLOPS_PER_ELEM]
+        return [
+            f"aten.{t}" for t in tokens if t in OP_FLOPS_PER_ELEM or t in {"mm", "t"}
+        ]
 
     # dp[i] = list of (op_name, prev_index) for valid segmentations ending
     # at token i.  dp[0] = True is the base case (empty prefix).
@@ -378,7 +352,7 @@ class TritonCompiledPerfModel:
         if self._meta is None:
             raise NotImplementedError(f"No Inductor artifacts found for {self.name}")
         total = self._meta["xnumel"] * self._meta["rnumel"]
-        fpe = sum(_FLOPS_PER_ELEM.get(op, 0) for op in self._meta["aten_ops"])
+        fpe = sum(op_flops_per_elem(op) for op in self._meta["aten_ops"])
         return float(fpe * total)
 
     def bytes(self) -> float:
@@ -408,10 +382,7 @@ class TritonCompiledPerfModel:
         return "vector" if self._meta is not None else None
 
     def get_compute_precision(self):
-        # The two metadata paths disagree on vocabulary: kernel-signature
-        # parsing yields Triton pointer names ("bf16") while Input type
-        # parsing yields c10 names with the namespace stripped ("bfloat16").
-        # Normalise so the compute spec matches the arch spec keys either way.
+        # Map "bf16" (kernel signature) and "bfloat16" (Input type) to arch spec keys.
         if self._meta is None:
             return None
         return torch_dtype_map(self._meta.get("dtype"))
@@ -421,3 +392,72 @@ class TritonCompiledPerfModel:
 
     def bytes_bwd(self) -> float:
         raise NotImplementedError
+
+
+class TritonTemplateGemmPerfModel(GEMM):
+    """
+    Perf model for Inductor mm templates with a fused epilogue
+    (e.g. triton_tem_fused_div_mm_silu_t_0), launched as their own op.
+
+    FLOPs = 2*M*N*K + sum(flops_per_elem[op] for op in epilogue_ops) * M*N
+    Bytes = sum(prod(shape_i) * bpe_i) over every tensor argument
+            (A, B, output, and any epilogue inputs), each moved once.
+    """
+
+    def __init__(self, event, arch=None):
+        super().__init__(event, arch)
+
+    @staticmethod
+    def get_param_details(event):
+        tensors = _tensor_args(event)
+        (a_shape, a_dtype), (b_shape, b_dtype) = tensors[0], tensors[1]
+        M, K = a_shape
+        N = b_shape[0] if b_shape[1] == K else b_shape[1]
+        epilogue_ops = [
+            op for op in _parse_kernel_name(event["name"]) if op != _TEMPLATE_GEMM_OP
+        ]
+        return {
+            "M": M,
+            "N": N,
+            "K": K,
+            "bias": False,
+            "dtype_A_B": (a_dtype, b_dtype),
+            "fused_epilogue": ", ".join(epilogue_ops),
+            "tensor_bytes": float(
+                sum(prod(dims) * (name2bpe(dt) or 0) for dims, dt in tensors)
+            ),
+        }
+
+    def flops(self) -> float:
+        epilogue_ops = self.param_details["fused_epilogue"].split(", ")
+        fpe = sum(op_flops_per_elem(op) for op in epilogue_ops)
+        return float(super().flops() + fpe * self.M * self.N)
+
+    def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
+        return self.param_details["tensor_bytes"]
+
+    @staticmethod
+    def can_model(event):
+        if _TEMPLATE_GEMM_OP not in _parse_kernel_name(event.get("name", "")):
+            return False
+        tensors = _tensor_args(event)
+        if len(tensors) < 2:
+            return False
+        (a_shape, _), (b_shape, _) = tensors[0], tensors[1]
+        return len(a_shape) == 2 and len(b_shape) == 2 and a_shape[1] in b_shape
+
+    def flops_bwd(self):
+        raise NotImplementedError
+
+    def bytes_bwd(self, bytes_per_element=None):
+        raise NotImplementedError
+
+
+def _tensor_args(event: dict) -> list[tuple[list[int], str]]:
+    """(shape, c10 dtype) for each tensor argument of a Triton launch."""
+    args = event.get("args", {})
+    return [
+        (dims, dt)
+        for dims, dt in zip(args.get("Input Dims", []), args.get("Input type", []))
+        if dt != "Scalar" and dims
+    ]
