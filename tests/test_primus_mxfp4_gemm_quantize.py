@@ -7,12 +7,14 @@
 """
 Tests for primus_turbo and aiter MXFP4 ops (#637, #644):
   - primus_turbo_cpp_extension::hipblaslt_gemm_fp4 -> GEMM
+  - primus_turbo::gemm_fp4_impl -> GEMM (Flux trace leaf)
   - primus_turbo_cpp_extension::quantize_mxfp4_dual -> UnaryElementwise
   - aiter::gemm_a4w4 / aiter::_gemm_a4w4_asm -> GEMM (AITER FP4 backend)
 """
 
 from TraceLens.PerfModel.perf_model import (
     aiter_gemm_a4w4,
+    gemm_fp4_impl,
     hipblaslt_gemm_fp4,
     primus_turbo_quantize_mxfp4_dual,
     GEMM,
@@ -22,7 +24,7 @@ from TraceLens.PerfModel.torch_op_mapping import (
     categorize_torch_op,
     op_to_perf_model_class_map,
 )
-from TraceLens.PerfModel.utils import name2bpe
+from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,8 +104,10 @@ def _mxfp4_quantize_event(M=16384, N=12288, dtype_in="c10::BFloat16"):
 
 
 def test_name2bpe_float4_e2m1fn_x2():
-    # Packed FP4 pair: 1 byte per element of the traced tensor.
+    # Packed FP4 pair: one byte per element of the traced tensor.
     assert name2bpe("c10::Float4_e2m1fn_x2") == 1
+    # One logical value, for callers that have already unpacked K.
+    assert name2bpe("fp4") == 0.5
 
 
 def test_name2bpe_e8m0_scale():
@@ -170,8 +174,9 @@ def test_hipblaslt_gemm_fp4_bytes_includes_block_scales():
             scaleB_shape=(N, K // 32),
         )
     )
-    bytes_A = M * (K // 2)  # FP4 packed, bpe=1 over K_packed
-    bytes_B = N * (K // 2)
+    bpe = name2bpe("c10::Float4_e2m1fn_x2")
+    bytes_A = M * (K // 2) * bpe
+    bytes_B = N * (K // 2) * bpe
     bytes_scaleA = M * (K // 32)
     bytes_scaleB = N * (K // 32)
     bytes_out = M * N * 2  # BF16 output
@@ -614,3 +619,124 @@ def test_aiter_gemm_a4w4_nt_layout_assumption():
             )
         )
         assert (model.M, model.N, model.K) == (M, N, K)
+
+
+def _gemm_fp4_impl_event(M=3072, N=3072, K=3072, has_bias=False):
+    """Build a primus_turbo::gemm_fp4_impl event matching the Flux trace layout.
+    In Flux traces this op is the leaf (no inner hipblaslt/aiter children)."""
+    K_packed = K // 2
+    K_scale = K // MXFP4_GROUP_SIZE
+    dims = [
+        [M, K_packed],  # A (FP4 packed)
+        [M, K_scale],  # A scales (E8M0)
+        [],  # Scalar
+        [N, K_packed],  # B (FP4 packed)
+        [N, K_scale],  # B scales (E8M0)
+        [],  # Scalar
+        [],  # out_dtype
+        [],  # bias_flag
+        [],  # granularity
+        [],  # backend
+        [],  # preshuffled
+        [N] if has_bias else [],  # bias
+        [],  # out_scale_A (optional)
+        [],  # out_scale_B (optional)
+    ]
+    types = [
+        "c10::Float4_e2m1fn_x2",
+        "c10::Float8_e8m0fnu",
+        "Scalar",
+        "c10::Float4_e2m1fn_x2",
+        "c10::Float8_e8m0fnu",
+        "Scalar",
+        "Scalar",
+        "Scalar",
+        "Scalar",
+        "Scalar",
+        "Scalar",
+        "c10::BFloat16" if has_bias else "",
+        "",
+        "",
+    ]
+    return {
+        "name": "primus_turbo::gemm_fp4_impl",
+        "args": {
+            "Input Dims": dims,
+            "Input type": types,
+            "Input Strides": [[] for _ in dims],
+            "Concrete Inputs": ["", "", "", "", "", "", "15"] + [""] * (len(dims) - 7),
+        },
+    }
+
+
+def test_gemm_fp4_impl_registered():
+    assert "primus_turbo::gemm_fp4_impl" in op_to_perf_model_class_map
+    assert op_to_perf_model_class_map["primus_turbo::gemm_fp4_impl"] is gemm_fp4_impl
+
+
+def test_gemm_fp4_impl_inherits_gemm():
+    assert issubclass(gemm_fp4_impl, GEMM)
+
+
+def test_gemm_fp4_impl_flops():
+    M, N, K = 3072, 3072, 3072
+    model = gemm_fp4_impl(_gemm_fp4_impl_event(M, N, K))
+    assert model.flops() == 2 * M * N * K
+
+
+def test_gemm_fp4_impl_param_details():
+    M, N, K = 4096, 3072, 6144
+    model = gemm_fp4_impl(_gemm_fp4_impl_event(M, N, K))
+    assert (model.M, model.N, model.K) == (M, N, K)
+
+
+def test_gemm_fp4_impl_k_unpacked_from_packed_dim():
+    """K_logical = K_packed * 2 (Float4_e2m1fn_x2 packs two values per byte)."""
+    M, N, K = 1024, 2048, 4096
+    model = gemm_fp4_impl(_gemm_fp4_impl_event(M, N, K))
+    assert model.K == K
+    assert model.K == model.param_details["a_scale_shape"][1] * MXFP4_GROUP_SIZE
+
+
+def test_gemm_fp4_impl_bytes_includes_scales():
+    M, N, K = 3072, 3072, 3072
+    model = gemm_fp4_impl(_gemm_fp4_impl_event(M, N, K))
+    bpe_fp4_packed = 1  # c10::Float4_e2m1fn_x2 = 1 byte per packed pair
+    bpe_scale = 1
+    bpe_out = 2
+    K_packed = K // 2
+    K_scale = K // MXFP4_GROUP_SIZE
+    expected = (
+        M * K_packed * bpe_fp4_packed  # A
+        + N * K_packed * bpe_fp4_packed  # B
+        + M * N * bpe_out  # Y
+        + M * K_scale * bpe_scale  # A scales
+        + N * K_scale * bpe_scale  # B scales
+    )
+    assert model.bytes() == expected
+
+
+def test_gemm_fp4_impl_bytes_with_bias():
+    M, N, K = 3072, 3072, 3072
+    model = gemm_fp4_impl(_gemm_fp4_impl_event(M, N, K, has_bias=True))
+    bpe_fp4_packed = 1
+    bpe_scale = 1
+    bpe_out = 2
+    K_packed = K // 2
+    K_scale = K // MXFP4_GROUP_SIZE
+    expected = (
+        M * K_packed * bpe_fp4_packed
+        + N * K_packed * bpe_fp4_packed
+        + M * N * bpe_out
+        + N * bpe_out  # bias (BF16)
+        + M * K_scale * bpe_scale  # A scales
+        + N * K_scale * bpe_scale  # B scales
+    )
+    assert model.bytes() == expected
+
+
+def test_gemm_fp4_impl_compute_precision():
+    from TraceLens.PerfModel.utils import torch_dtype_map
+
+    model = gemm_fp4_impl(_gemm_fp4_impl_event())
+    assert model.get_compute_precision() == torch_dtype_map("mxfp4")

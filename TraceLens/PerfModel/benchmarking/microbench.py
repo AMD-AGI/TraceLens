@@ -9,7 +9,11 @@
 
 Measures matrix TFLOPS (PyTorch GEMM), vector TFLOPS (Triton FMA chain), and
 memory bandwidth. Writes JSON in the ``results/MI300X.json`` shape. Methodology:
-do_bench, L2 clear, warmup=30 rep=200, normal-distributed inputs, median ms.
+do_bench, L2 clear, warmup 30 ms, rep 200 ms, normal-distributed inputs, mean ms
+per call. RDNA targets (gfx11, gfx12) run the protocol of :mod:`microbench_rdna`
+instead: a warm-up of a few seconds per section, then a window of at least 1 s
+reported as the median, with the clocks of each window recorded in the JSON
+(see the README).
 
 Examples:
     # Default run on device 0; writes gpu_microbench_results.json
@@ -44,16 +48,22 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from triton.testing import do_bench
 
 from ..utils import gemm_tflops
+from . import microbench_rdna
 from .microbench_utils import (
+    MeasurementError,
     check_gpu_idle,
+    cu_tiled_sweep_shapes,
     gfx_target,
     mx_peak_without_native_support,
+    rdna_family,
+    resolve_rdna_window,
+    vector_fma_block,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +105,9 @@ except Exception:  # pragma: no cover
 
 WARMUP = 30
 REP = 200
+
+# Unroll depth of the vector FMA chain's inner loop.
+VECTOR_FMA_UNROLL = 16
 
 # Resolved once per process by :func:`_resolve_fp8_dtype` (mutable container avoids
 # module-level global reassignment).
@@ -179,6 +192,19 @@ def _arch_product_name(gpu_name: str, mem_gb: float) -> str:
     match = re.search(r"\bRadeon\s+(.+?)\s+Graphics\b", gpu_name, re.IGNORECASE)
     if match:
         return "_".join(["Radeon", *match.group(1).split()])
+    # Workstation parts: "AMD Radeon PRO W7900 Dual Slot", "AMD Radeon AI PRO
+    # R9700". The model follows PRO; words after it name the board, not the GPU.
+    match = re.search(
+        r"\bRadeon\s+(?:AI\s+)?PRO\s+([A-Z]+\d+[A-Z]*)\b", gpu_name, re.IGNORECASE
+    )
+    if match:
+        return match.group(1).upper()
+
+    # Workstation parts report e.g. "AMD Radeon PRO W7900 Dual Slot" or
+    # "AMD Radeon AI PRO R9700": the model follows "PRO".
+    match = re.search(r"\bRadeon\s+(?:AI\s+)?Pro\s+(\w+)", gpu_name, re.IGNORECASE)
+    if match:
+        return match.group(1)
 
     # ROCm containers often report a generic device string; use memory tier as hint.
     mem = int(round(mem_gb))
@@ -196,10 +222,14 @@ def _build_measured_arch_json(
     read_bw_gbps: float,
     matrix_results: Dict[str, float],
     vector_results: Dict[str, float],
+    gfx_arch: Optional[str] = None,
+    extras: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     """
     One object shaped like `MI300X.json`: only `name`, `mem_bw_gbps`, `memory_gb`,
     and `max_achievable_tflops` with the canonical TFLOPS keys (no extras).
+    An RDNA target (see :func:`rdna_family`) also records `gfx_arch`, and the
+    top-level *extras* of :func:`microbench_rdna.run_rdna_protocol` after `source`.
     """
     maf: Dict[str, float] = {}
     for key in ARCH_TLOPS_KEYS:
@@ -207,13 +237,19 @@ def _build_measured_arch_json(
             maf[key] = round(float(matrix_results.get(key, 0.0)), 1)
         else:
             maf[key] = round(float(vector_results.get(key, 0.0)), 1)
-    return {
-        "name": _arch_product_name(gpu_name, mem_gb),
-        "mem_bw_gbps": round(float(read_bw_gbps), 1),
-        "memory_gb": round(float(mem_gb), 1),
-        "max_achievable_tflops": maf,
-        "source": "These are benchmark derived peak flops and bw",
-    }
+    payload: Dict[str, Any] = {"name": _arch_product_name(gpu_name, mem_gb)}
+    if gfx_arch and rdna_family(gfx_arch):
+        payload["gfx_arch"] = gfx_arch
+    payload.update(
+        {
+            "mem_bw_gbps": round(float(read_bw_gbps), 1),
+            "memory_gb": round(float(mem_gb), 1),
+            "max_achievable_tflops": maf,
+            "source": "These are benchmark derived peak flops and bw",
+        }
+    )
+    payload.update(extras or {})
+    return payload
 
 
 # ── Matrix TFLOPS benchmarks ─────────────────────────────────────────
@@ -485,6 +521,12 @@ if triton is None or tl is None:
 else:
 
     @triton.jit
+    def _pin_to_vgpr(v):
+        return tl.inline_asm_elementwise(
+            "v_mov_b32 $0, $1", "=v,v", [v], dtype=tl.float32, is_pure=True, pack=1
+        )
+
+    @triton.jit
     def _fma_chain_kernel(
         x_ptr,
         y_ptr,
@@ -494,24 +536,34 @@ else:
         BLOCK_SIZE: tl.constexpr,
         REPEAT: tl.constexpr,
         ACC_FP32: tl.constexpr,
+        UNROLL: tl.constexpr,
+        PIN_VGPR: tl.constexpr,
     ):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < n_elements
 
-        # Load once, then reuse in registers to raise arithmetic intensity.
-        x = tl.load(x_ptr + offs, mask=mask, other=0)
-        y = tl.load(y_ptr + offs, mask=mask, other=0)
+        # Uniform multiplier and addend: per-element operands put several FMA
+        # sources in one VGPR bank on RDNA and stall the issue.
+        x = tl.load(x_ptr)
+        y = tl.load(y_ptr)
         acc = tl.load(z_ptr + offs, mask=mask, other=0)
         if ACC_FP32:
             x = x.to(tl.float32)
             y = y.to(tl.float32)
             acc = acc.to(tl.float32)
+            if PIN_VGPR:
+                # A VALU op reading two SGPRs issues at half rate on gfx11.
+                x = _pin_to_vgpr(x + tl.zeros_like(acc))
+                y = _pin_to_vgpr(y + tl.zeros_like(acc))
 
         # Dependency chain prevents the compiler from collapsing the loop into
-        # a single multiply-by-constant.
-        for _ in tl.static_range(REPEAT):
-            acc = tl.math.fma(acc, x, y)  # acc = acc * x + y
+        # a single multiply-by-constant. The rolled outer loop bounds code size.
+        for _ in range(REPEAT // UNROLL):
+            for _ in tl.static_range(UNROLL):
+                acc = tl.math.fma(acc, x, y)  # acc = acc * x + y
+        for _ in tl.static_range(REPEAT % UNROLL):
+            acc = tl.math.fma(acc, x, y)
 
         tl.store(out_ptr + offs, acc, mask=mask)
 
@@ -581,6 +633,8 @@ else:
                 BLOCK_SIZE=block,
                 REPEAT=repeat,
                 ACC_FP32=(1 if acc_fp32 else 0),
+                UNROLL=VECTOR_FMA_UNROLL,
+                PIN_VGPR=torch.version.hip is not None,
                 num_warps=8,
             ),
             warmup=WARMUP,
@@ -629,7 +683,7 @@ else:
         n_elements: int,
         repeat: int,
         device: int = 0,
-        block: int = 1024,
+        block: Optional[int] = None,
         mem_every: int = 0,
         acc_fp32: bool = False,
     ) -> Dict[str, float]:
@@ -637,8 +691,16 @@ else:
         Returns:
           - tflops: achieved TFLOPS for the FMA chain
           - stream_bw_gbps: achieved GB/s for the streaming loads (0 if disabled)
+
+        ``block`` defaults to the per-target size from :func:`vector_fma_block`.
         """
         dev = f"cuda:{device}"
+        if block is None:
+            block = vector_fma_block(
+                gfx_target(
+                    getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
+                )
+            )
 
         x = torch.randn(n_elements, device=dev, dtype=dtype)
         y = torch.randn(n_elements, device=dev, dtype=dtype)
@@ -988,10 +1050,14 @@ def run_shape_sweep(
     include_tile304: bool = True,
     include_mem: bool = True,
     include_production: bool = True,
+    tile_shapes: Optional[List[Tuple[int, int, int]]] = None,
 ) -> Dict[str, object]:
     """
     Sweep candidate GEMM shapes and optional memory bandwidth sizes; compare to production ``GEMM_SHAPES``.
+    *tile_shapes* replaces ``GEMM_SHAPES_SWEEP_TILE304`` (RDNA: :func:`cu_tiled_sweep_shapes`).
     """
+    tile_label = "tile-304 sweet shapes" if tile_shapes is None else "CU-tiled shapes"
+    tile_shapes = tile_shapes or GEMM_SHAPES_SWEEP_TILE304
     _FP8_DTYPE_CACHE[0] = None
 
     prod_rows: List[Dict[str, object]] = []
@@ -1012,7 +1078,7 @@ def run_shape_sweep(
     tile304_best: Dict[str, Dict[str, object]] = {}
     if include_tile304:
         tile304_rows, tile304_best = _sweep_shapes_on_list(
-            GEMM_SHAPES_SWEEP_TILE304, device, "tile-304 sweet shapes"
+            tile_shapes, device, tile_label
         )
 
     mem_rows: List[Dict[str, object]] = []
@@ -1061,7 +1127,7 @@ def run_shape_sweep(
         "rep": REP,
         "production_gemm_shapes": [list(s) for s in GEMM_SHAPES],
         "large_gemm_shapes": [list(s) for s in GEMM_SHAPES_SWEEP_LARGE],
-        "tile304_gemm_shapes": [list(s) for s in GEMM_SHAPES_SWEEP_TILE304],
+        "tile304_gemm_shapes": [list(s) for s in tile_shapes],
         "large_bw_sizes_gb": [n / 1024**3 for n in BW_SIZES_SWEEP_LARGE],
         "production_gemm_rows": prod_rows,
         "production_gemm_best": prod_best,
@@ -1105,6 +1171,89 @@ def run_shape_sweep(
 # ── Main ──────────────────────────────────────────────────────────────
 
 
+def _run_suite(args, device: int, gpu_name: str, mem_gb: float):
+    """The suite's sections, on targets other than RDNA. Returns the arch JSON
+    and the matrix, vector and bandwidth results."""
+    # Matrix TFLOPS
+    print("\n── Matrix TFLOPS (MFMA Units & Tensor Cores) ──")
+    matrix_results = bench_matrix_tflops(device)
+
+    # Vector TFLOPS (Triton)
+    if not args.skip_vector:
+        vector_results = bench_vector_tflops(
+            device,
+            repeat=args.triton_repeat,
+            mem_every=args.triton_mem_every,
+        )
+    else:
+        vector_results = {}
+
+    # Memory Bandwidth
+    if not args.skip_bandwidth:
+        print("\n── Memory Bandwidth ──")
+        bw_results = bench_mem_bandwidth(device)
+    else:
+        bw_results = {}
+
+    read_bw = float(bw_results.get("read_bw_gbps", 0.0))
+    write_bw = float(bw_results.get("write_bw_gbps", 0.0))
+    mem_bw = max(read_bw, write_bw)
+    arch_json = _build_measured_arch_json(
+        gpu_name, mem_gb, mem_bw, matrix_results, vector_results
+    )
+    return arch_json, matrix_results, vector_results, bw_results
+
+
+def _rdna_suite_parts() -> microbench_rdna.SuiteParts:
+    """The suite's shapes, chain kernel with the arguments its launch passes,
+    and FP8 dtype probe, for :func:`microbench_rdna.run_rdna_protocol`."""
+    return microbench_rdna.SuiteParts(
+        gemm_shapes=GEMM_SHAPES,
+        chain_kernel=_fma_chain_kernel if triton is not None else None,
+        resolve_fp8_dtype=_resolve_fp8_dtype,
+        chain_args={
+            "UNROLL": VECTOR_FMA_UNROLL,
+            "PIN_VGPR": torch.version.hip is not None,
+        },
+    )
+
+
+def _run_rdna(args, device: int, gfx: str, props, gpu_name: str, mem_gb: float, window):
+    """The RDNA protocol (:func:`microbench_rdna.run_rdna_protocol`) with the
+    suite's shapes, chain kernel and FP8 dtype probe. A zero or failed key the
+    target has a path for exits with code 3 and writes no JSON."""
+    warm_s, window_ms, notes = window
+    if args.triton_mem_every:
+        print("Note: --triton-mem-every is not used on RDNA targets.")
+    suite = _rdna_suite_parts()
+    try:
+        matrix, vector, mem_bw, extras = microbench_rdna.run_rdna_protocol(
+            device,
+            gfx,
+            props,
+            suite,
+            warm_s=warm_s,
+            window_ms=window_ms,
+            repeat=args.triton_repeat,
+            skip_vector=args.skip_vector,
+            skip_bandwidth=args.skip_bandwidth,
+            skip_burst=args.skip_burst,
+            skip_back_to_back=args.skip_back_to_back,
+            cli_overrides=notes,
+        )
+    except MeasurementError as e:
+        print(f"\nERROR: {e}. No arch JSON written.")
+        raise SystemExit(3)
+    print(f"\n── Keys {gfx} has no path for ──")
+    for key, src in extras["max_achievable_tflops_source"].items():
+        if src["source"] == "derived":
+            print(f"  [{key}] = {src['from']}: {src['reason']}")
+    arch_json = _build_measured_arch_json(
+        gpu_name, mem_gb, mem_bw, matrix, vector, gfx_arch=gfx, extras=extras
+    )
+    return arch_json, matrix, vector, {"mem_bw_gbps": mem_bw}
+
+
 def main():
     global WARMUP, REP
 
@@ -1140,13 +1289,15 @@ def main():
         "--warmup",
         type=int,
         default=None,
-        help="Override do_bench warmup iterations (default: 30)",
+        help="Override do_bench warmup time in milliseconds (default: 30); on "
+        "RDNA targets it can only lengthen --warm-s",
     )
     parser.add_argument(
         "--rep",
         type=int,
         default=None,
-        help="Override do_bench timing repetitions (default: 200)",
+        help="Override do_bench timing window in milliseconds (default: 200); "
+        "on RDNA targets it can only lengthen --window-ms",
     )
     parser.add_argument(
         "--shape-sweep",
@@ -1175,6 +1326,7 @@ def main():
         default=5,
         help="Max GPU utilization %% considered idle for the pre-flight check (default: 5)",
     )
+    microbench_rdna.add_arguments(parser)
     args = parser.parse_args()
 
     if args.warmup is not None:
@@ -1197,10 +1349,20 @@ def main():
     print(f"Memory:    {mem_gb} GB")
     print(f"PyTorch:   {torch.__version__}")
     print(f"ROCm/HIP:  {torch.version.hip}")
-    print(f"Warmup:    {WARMUP}  |  Repetitions: {REP}")
+    gfx = gfx_target(getattr(props, "gcnArchName", ""))
+    rdna = rdna_family(gfx) is not None and not args.shape_sweep
+    if rdna:
+        window = resolve_rdna_window(args.warm_s, args.window_ms, args.warmup, args.rep)
+        print(
+            f"Protocol:  {gfx}: {window[0]:g} s warm-up per section, "
+            f"{window[1]} ms window (median), sysfs clocks"
+        )
+        idle, msg = microbench_rdna.check_idle(props, args.idle_util_threshold)
+    else:
+        print(f"Warmup:    {WARMUP}  |  Repetitions: {REP}")
+        idle, msg = check_gpu_idle(device, util_threshold=args.idle_util_threshold)
     print("=" * 60)
 
-    idle, msg = check_gpu_idle(device, util_threshold=args.idle_util_threshold)
     print(f"Idle check: {msg}")
     if not idle:
         if args.allow_busy:
@@ -1231,36 +1393,23 @@ def main():
             include_tile304=True,
             include_mem=not args.shape_sweep_tile304_only,
             include_production=True,
+            # HIP reports RDNA work-group processors, 2 CUs each.
+            tile_shapes=(
+                cu_tiled_sweep_shapes(2 * props.multi_processor_count)
+                if rdna_family(gfx) is not None
+                else None
+            ),
         )
         return
 
-    # Matrix TFLOPS
-    print("\n── Matrix TFLOPS (MFMA Units & Tensor Cores) ──")
-    matrix_results = bench_matrix_tflops(device)
-
-    # Vector TFLOPS (Triton)
-    if not args.skip_vector:
-        vector_results = bench_vector_tflops(
-            device,
-            repeat=args.triton_repeat,
-            mem_every=args.triton_mem_every,
+    if rdna:
+        arch_json, matrix_results, vector_results, bw_results = _run_rdna(
+            args, device, gfx, props, gpu_name, mem_gb, window
         )
     else:
-        vector_results = {}
-
-    # Memory Bandwidth
-    if not args.skip_bandwidth:
-        print("\n── Memory Bandwidth ──")
-        bw_results = bench_mem_bandwidth(device)
-    else:
-        bw_results = {}
-
-    read_bw = float(bw_results.get("read_bw_gbps", 0.0))
-    write_bw = float(bw_results.get("write_bw_gbps", 0.0))
-    mem_bw = max(read_bw, write_bw)
-    arch_json = _build_measured_arch_json(
-        gpu_name, mem_gb, mem_bw, matrix_results, vector_results
-    )
+        arch_json, matrix_results, vector_results, bw_results = _run_suite(
+            args, device, gpu_name, mem_gb
+        )
 
     # JSON: same shape as `results/MI300X.json`.
     out_path = Path(args.output)

@@ -6,12 +6,13 @@
 
 """Tests for GPU arch resolution in Reporting scripts."""
 
-import json, os, tempfile, pytest, pandas as pd
+import json, logging, os, tempfile, pytest, pandas as pd
 from TraceLens.Agent.Analysis.utils.arch_utils import load_arch
 from TraceLens.Reporting.reporting_utils import resolve_gpu_arch
 from TraceLens.Reporting.generate_perf_report_pytorch import (
     generate_perf_report_pytorch,
 )
+from tests.fixtures.reporting import _build_synthetic_trace
 
 TRACE_PATH = os.path.join(
     "tests",
@@ -25,6 +26,23 @@ VALID_BOUND_VALUES = {"COMPUTE_BOUND", "MEMORY_BOUND"}
 
 def test_resolve_gpu_arch_returns_none_by_default():
     assert resolve_gpu_arch() is None
+
+
+NO_SPEC_WARNING = "No GPU architecture spec given"
+
+
+def test_resolve_gpu_arch_warns_when_no_spec_given(caplog):
+    with caplog.at_level(logging.WARNING, logger="TraceLens.Reporting.reporting_utils"):
+        assert resolve_gpu_arch() is None
+    assert NO_SPEC_WARNING in caplog.text
+    assert "no default spec is assumed" in caplog.text
+
+
+def test_resolve_gpu_arch_with_spec_does_not_warn(caplog):
+    with caplog.at_level(logging.WARNING, logger="TraceLens.Reporting.reporting_utils"):
+        resolve_gpu_arch(gpu_arch_platform="MI300X")
+        resolve_gpu_arch(gpu_arch={"name": "inline"})
+    assert NO_SPEC_WARNING not in caplog.text
 
 
 def test_resolve_gpu_arch_from_json_path():
@@ -98,3 +116,47 @@ def test_roofline_bound_with_gpu_arch_platform(perf_report_from_platform):
     assert bound_col is not None
     bound_vals = set(df[bound_col].dropna().unique())
     assert bound_vals <= VALID_BOUND_VALUES, f"Unexpected values: {bound_vals}"
+
+
+GEMM_DIM = 4096
+
+
+def _matmul_trace(path):
+    """A single fp16 aten::mm."""
+    trace = _build_synthetic_trace([("aten::mm", "Cijk_f16_gemm.kd", 4000.0)])
+    cpu_op = next(e for e in trace["traceEvents"] if e["cat"] == "cpu_op")
+    cpu_op["args"].update(
+        {
+            "Input Dims": [[GEMM_DIM, GEMM_DIM], [GEMM_DIM, GEMM_DIM]],
+            "Input Strides": [[GEMM_DIM, 1], [GEMM_DIM, 1]],
+            "Input type": ["c10::Half", "c10::Half"],
+        }
+    )
+    path.write_text(json.dumps(trace), encoding="utf-8")
+    return str(path)
+
+
+def _unified_summary(tmp_path, **arch_kwargs):
+    csv_dir = tmp_path / "csvs"
+    generate_perf_report_pytorch(
+        profile_json_path=_matmul_trace(tmp_path / "mm.json"),
+        output_xlsx_path=None,
+        output_csvs_dir=str(csv_dir),
+        **arch_kwargs,
+    )
+    return pd.read_csv(csv_dir / "unified_perf_summary.csv")
+
+
+def test_report_without_spec_warns_and_borrows_none(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="TraceLens.Reporting.reporting_utils"):
+        df = _unified_summary(tmp_path)
+    assert _find_col(df, "Compute Spec") is not None
+    assert _find_col(df, "Roofline") is None
+    assert NO_SPEC_WARNING in caplog.text
+
+
+def test_report_with_spec_has_roofline_and_no_warning(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="TraceLens.Reporting.reporting_utils"):
+        df = _unified_summary(tmp_path, gpu_arch_platform="MI300X")
+    assert _find_col(df, "Roofline Time") is not None
+    assert NO_SPEC_WARNING not in caplog.text

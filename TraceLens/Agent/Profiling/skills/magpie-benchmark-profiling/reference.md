@@ -658,7 +658,7 @@ ssh <node> "<tracelens_activate> && \
 
 For AgentX, keep `--num-steps 32` (the analysis window, not the capture length) and use `--OSL 1024 --R 0.2`. AgentX has no fixed output length, so these are representative values for choosing the mixed window. The AgentX trace is under `torch_trace/<capture_id>/`, so write the split next to it.
 
-Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [Inference_analysis.md](../../docs/Inference_analysis.md) for details.
+Replace `<conc>`, `<osl>`, and `<r>` with the benchmark parameters (e.g. `--CONC 32 --OSL 1024 --R 0.5`). These are used to derive the ideal prefill-decode ratio for mixed-window selection; see [inference-analysis.md](../../../../../docs/conceptual/inference-analysis.md#steady-state-region) for details.
 
 This produces up to 3 trace files plus metadata in `trace_split/` (a window may be skipped if no matching run exists in the largest steady-state region):
 - `mixed_steady_state_*.json.gz` — representative DO:PD mix (closest to the reference or `--CONC/--OSL/--R`-derived ideal ratio). **Use this for analysis.**

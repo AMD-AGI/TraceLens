@@ -12,7 +12,7 @@ See LICENSE for license information.
 
 TraceLens can estimate simulated GEMM and SDPA kernel times using *Origami*
 (ROCm's performance modeling library) when you provide a GPU architecture
-description and explicitly opt in. This is optional: `pip install TraceLens`
+description and explicitly opt in. This is optional: `pip install git+https://github.com/AMD-AGI/TraceLens.git`
 doesn't install Origami.
 
 ## What Origami does in TraceLens
@@ -75,6 +75,14 @@ Pass the same JSON file you use for roofline analysis with
 `--gpu_arch_json_path`. It must include fields Origami expects (for example GPU
 name, frequency, memory bandwidth, and CU count), as consumed by
 `OrigamiHelper.get_hardware` in `TraceLens/PerfModel/origami_helper.py`.
+
+Origami's Python bindings model gfx942 (MI300X, MI325X) and gfx950 (MI350X,
+MI355X) only. TraceLens takes the target from the JSON's `gfx_arch` field
+when it has one, and otherwise from its `name`; a JSON with neither is
+modeled as an MI300X. For any other target, for example a JSON with
+`"gfx_arch": "gfx1100"`, TraceLens prints "Origami simulation skipped: Origami
+is unavailable on gfx1100; ..." once and adds no Origami or SDPA Tile Origami
+columns. The roofline columns are unaffected.
 
 See [Generate a PyTorch performance report](./generate-perf-report-pytorch.md)
 for the general format of the architecture JSON and its use in roofline
@@ -163,6 +171,7 @@ Use the following table to diagnose common problems when enabling Origami in Tra
 |---------|---------------|
 | No Origami columns in CSVs | Confirm `--enable-origami-gemm` (or API `enable_origami_gemm=True`) and `--gpu_arch_json_path`. |
 | Message on stderr about `origami` import | Install `rocm-origami` and fix ROCm/library paths. |
+| "Origami simulation skipped: Origami is unavailable on ..." | The architecture JSON names a GPU Origami doesn't model (anything but gfx942 and gfx950). Roofline analysis still works. |
 | Unsupported dtype warning | The Origami path supports a fixed set of dtypes (for example fp16, bf16, fp32, fp64, fp8); others skip simulation. |
 
 ## Related topics

@@ -13,14 +13,13 @@ Tests verify that:
 3. Parent pointers are properly rewired (pseudo ops are in parent chain)
 """
 
-import sys, os, json, pytest, gzip
+import os, json, pytest, gzip
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
 from typing import Dict, List
 from copy import deepcopy
 from TraceLens.Trace2Tree.trace_to_tree import TraceToTree
 from TraceLens.TreePerf.tree_perf import TreePerfAnalyzer
-from example_megatron_extension import (
+from TraceLens.PerfModel.extensions.megatron_perf_model_extensions import (
     _link_checkpoint_fwd_bwd,
     op_category_extension,
     perf_model_extension,
@@ -71,6 +70,9 @@ from TraceLens.Trace2Tree.extensions.mla_prefill_pseudo_ops import (
     _find_mla_prefill_python_funcs,
     _find_prefill_cpu_op_child,
     create_pseudo_ops_mla_prefill,
+)
+from TraceLens.Trace2Tree.extensions.v4_paged_decode_pseudo_ops import (
+    V4_ATTN_OP_NAME,
 )
 
 # Add examples to path to import extension
@@ -1283,6 +1285,17 @@ class TestMlaPrefillPseudoOps:
         matched = _find_mla_prefill_python_funcs(tree)
         assert len(matched) == 1
         assert _find_prefill_cpu_op_child(tree, py_evt) is cpu_evt
+
+
+class TestV4CompressKernelCategory:
+    @pytest.mark.parametrize("launcher", [V4_ATTN_OP_NAME, "hipGraphLaunch"])
+    def test_compress_kernels_classify_as_attention(self, launcher):
+        for kernel in (
+            "fused_compress_attn_w32_D128_RD64_R4_OVL_SS8_KB64_KS4_Q_fp4nat_v3_rmsbf16_flydsl",
+            "hca_compress_forward_w32_D512_R128_NW16_SL32_S128_flydsl",
+        ):
+            row = {"name": f"{launcher}->{kernel} (Synthetic Op)"}
+            assert categorize_torch_op(row) == "InferenceAttention"
 
 
 class TestPseudoOpsRegistryMla:

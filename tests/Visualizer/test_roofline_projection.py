@@ -16,6 +16,7 @@ import pytest
 from TraceLens.ModelUtils.basic_ops import BasicOpFilter
 from TraceLens.ModelUtils.blocks import BlockComponent, LayerVariant
 from TraceLens.ModelUtils.extract import load_architecture
+from TraceLens.PerfModel.op_flops import OP_FLOPS_PER_ELEM
 from TraceLens.Visualizer.model_explorer_export.merge import (
     _stamp_variant_ffn_identity,
 )
@@ -24,7 +25,11 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
     DimResolutionError,
     RooflineOp,
     RooflineProjection,
+    _BINARY_POINTWISE_COMPUTATIONS,
+    _LABEL_TO_OP_FLOPS_ROW,
+    _REDUCTION_COMPUTATIONS,
     _RT,
+    _UNARY_POINTWISE_COMPUTATIONS,
     _attention_boundary_cost,
     _attention_extra_ops,
     _dense_ffn_cost,
@@ -460,7 +465,58 @@ def test_dispatch_unary_elementwise():
         "Silu", [(2, 10, 4096)], (2, 10, 4096), 2
     )
     assert category == "UnaryElementwise"
-    assert flops == 2 * 10 * 4096
+    assert flops == 14 * 2 * 10 * 4096
+    assert bytes_moved == 2 * 2 * 10 * 4096 * 2
+
+
+@pytest.mark.parametrize(
+    "label,per_elem",
+    [
+        ("sqrt", 4),
+        ("rsqrt", 4),
+        ("Reciprocal sqrt", 4),
+        ("reciprocal", 4),
+        ("exp", 8),
+        ("gelu", 12),
+        ("erf", 8),
+        ("Cosine", 8),
+        ("clamp", 2),
+        ("cast", 0),
+    ],
+)
+def test_dispatch_unary_flops_follow_the_op_table(label, per_elem):
+    category, _, flops, bytes_moved = _dispatch_op_cost(label, [(4, 256)], (4, 256), 2)
+    assert category == "UnaryElementwise"
+    assert flops == per_elem * 4 * 256
+    assert bytes_moved == 2 * 4 * 256 * 2
+
+
+def test_every_pointwise_and_reduction_label_has_an_op_table_row():
+    labels = (
+        _UNARY_POINTWISE_COMPUTATIONS
+        | _BINARY_POINTWISE_COMPUTATIONS
+        | _REDUCTION_COMPUTATIONS
+    )
+    missing = {
+        label
+        for label in labels
+        if _LABEL_TO_OP_FLOPS_ROW.get(label, label) not in OP_FLOPS_PER_ELEM
+    }
+    assert not missing
+
+
+@pytest.mark.parametrize(
+    "label,per_elem", [("divide", 4), ("power", 1), ("subtract", 1)]
+)
+def test_dispatch_binary_flops_follow_the_op_table(label, per_elem):
+    _, _, flops, _ = _dispatch_op_cost(label, [(4, 256), (4, 256)], (4, 256), 2)
+    assert flops == per_elem * 4 * 256
+
+
+@pytest.mark.parametrize("label,per_elem", [("sum", 1), ("variance", 4), ("norm", 2)])
+def test_dispatch_reduce_flops_follow_the_op_table(label, per_elem):
+    _, _, flops, _ = _dispatch_op_cost(label, [(4, 256)], (4,), 2)
+    assert flops == per_elem * 4 * 256
 
 
 def test_dispatch_unary_elementwise_without_output_shape_is_unmodeled():
