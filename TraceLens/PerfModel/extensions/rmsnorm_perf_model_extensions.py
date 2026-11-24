@@ -8,6 +8,7 @@
 Performance models for RMSNorm pseudo-op extensions.
 """
 
+from TraceLens.PerfModel.kernel_name_parser import grouped_rmsnorm_group_size
 from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
 
 
@@ -681,3 +682,79 @@ class vllm_rocm_aiter_triton_add_rmsnorm_pad(RMSNorm):
         bytes_write_out = M * self.n_out * self.bpe_in
         bytes_write_res = M * N * self.bpe_in
         return bytes_read + bytes_write_out + bytes_write_res
+
+
+class GroupedGemmaRMSNorm(RMSNorm):
+    """
+    Performance model for SGLang's grouped_gemma_rmsnorm
+    (surfaced in traces as sglang_profiler::grouped_gemma_rmsnorm_grouped_gemma_rmsnorm).
+
+    Gemma-style RMSNorm with the variance taken over each contiguous group of
+    group_size elements of the last dim:
+        out = input * rsqrt(mean(input^2) + eps) * (1 + weight)
+
+    Reference implementation:
+        sglang/python/sglang/kernels/ops/layernorm/grouped_gemma_rmsnorm.py
+
+    Signature: grouped_gemma_rmsnorm(input, weight, group_size, eps=1e-6, out=None) -> out
+        input      — shape [..., hidden_size], dtype BFloat16 or Float16
+        weight     — shape [hidden_size],      dtype same as input (scale, applied as 1 + weight)
+        group_size — int scalar (elements per variance group, divides hidden_size)
+        eps        — float scalar
+        out        — shape [..., hidden_size], dtype same as input (optional pre-allocated
+                     output; None allocates a new tensor)
+
+    The trace records only the tensor arguments, so group_size and eps are absent.
+
+    Expected Input Dims from trace:
+        [input_shape, weight_shape, out_shape]
+        e.g. [(2048, 10240), (10240,), ()]  (out not passed)
+
+    Expected Input type from trace:
+        [dtype_input, dtype_weight, dtype_out]
+        e.g. ['c10::BFloat16', 'c10::BFloat16', '']
+
+    group_size is read from the kernel template instead:
+        grouped_gemma_rmsnorm_kernel<2560l, false, __hip_bfloat16> -> group_size = 2560
+
+    FLOPs: RMSNorm (inherited) with each group as the normalized row, plus one add
+        per element for (1 + weight).
+    Bytes: read input, write out, read the full [hidden_size] weight once.
+
+    get_param_details uses input at index [0]; num_channels is group_size and
+    hidden_size is the last dim of input.
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        op_shape = tuple(event["args"]["Input Dims"][0])  # input: [..., hidden_size]
+        return {
+            "op_shape": op_shape,
+            "dtype_in_out": (event["args"]["Input type"][0], None),
+            "stride_input": tuple(event["args"]["Input Strides"][0]),
+            "stride_output": None,
+            "num_channels": GroupedGemmaRMSNorm._group_size(event),
+            "hidden_size": op_shape[-1],
+            "has_bias": False,
+            "is_affine": True,
+            "is_training": False,
+        }
+
+    def flops(self):
+        # RMSNorm's per-group reduction, plus one extra add per element for (1 + w).
+        return super().flops() + self.num_elems
+
+    def bytes(self):
+        # The weight spans the full hidden size, not one group.
+        return (
+            self.num_elems * (self.bpe_in + self.bpe_out)
+            + self.param_details["hidden_size"] * self.bpe_in
+        )
+
+    @staticmethod
+    def _group_size(event):
+        for kernel in event["kernel_details"]:
+            group_size = grouped_rmsnorm_group_size(kernel["name"])
+            if group_size is not None:
+                return group_size
+        raise ValueError(f"No grouped RMSNorm kernel under {event['name']}")
