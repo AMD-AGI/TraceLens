@@ -17,7 +17,6 @@ from . import (
     rmsnorm_perf_model_extensions,
     custom_collectives_perf_model_extensions,
     gsplat_perf_model_extensions,
-    megatron_perf_model_extensions,
 )
 
 
@@ -127,8 +126,6 @@ def _get_gemm_mappings():
         "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
         "sglang_profiler::batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant": perf_model_extensions.batched_gemm_a8w8,
         "primus_turbo::gemm_fp4_impl": _core_perf_model.gemm_fp4_impl,
-        "FP4GemmMXFunction": _core_perf_model.FP4GemmMXFunction,
-        "FP4GemmMXFunctionBackward": _core_perf_model.FP4GemmMXFunctionBackward,
         # FP4 MoE-MLP grouped GEMM leaf ops (the FP4GroupedMLPMXFunc autograd parent
         # is not modelled; each grouped GEMM cpu_op is priced from its trace shapes).
         "primus_turbo::grouped_gemm_fp4_glu_impl": _core_perf_model.primus_turbo_grouped_gemm_fp4_glu,
@@ -136,8 +133,6 @@ def _get_gemm_mappings():
         "primus_turbo::grouped_gemm_fp4_dglu_impl": _core_perf_model.primus_turbo_grouped_gemm_fp4_dglu,
         "primus_turbo::grouped_gemm_fp4_variable_k_impl": _core_perf_model.primus_turbo_grouped_gemm_variable_k_fp4,
         "primus_turbo::grouped_gemm_fp4_variable_k_accum_impl": _core_perf_model.primus_turbo_grouped_gemm_variable_k_accum_fp4,
-        "LinearWithGradAccumulationAndAsyncCommunication": megatron_perf_model_extensions.LinearWithGradAccumulationAndAsyncCommunication,
-        "LinearWithGradAccumulationAndAsyncCommunicationBackward": megatron_perf_model_extensions.LinearWithGradAccumulationAndAsyncCommunicationBackward,
         "primus_flux::a6w4_mm_qa": primus_flux_perf_model_extensions.a6w4_mm_qa,
         "primus_flux::a6w4_mm_qa_prequant_w": primus_flux_perf_model_extensions.a6w4_mm_qa_prequant_w,
     }

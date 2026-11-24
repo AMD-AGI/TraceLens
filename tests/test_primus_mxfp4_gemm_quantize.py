@@ -21,8 +21,6 @@ from TraceLens.PerfModel.perf_model import (
     primus_turbo_quantize_mxfp4_dual,
     GEMM,
     UnaryElementwise,
-    FP4GemmMXFunction,
-    FP4GemmMXFunctionBackward,
     primus_turbo_grouped_gemm_fp4,
     primus_turbo_grouped_gemm_fp4_glu,
     primus_turbo_grouped_gemm_fp4_dglu,
@@ -35,7 +33,6 @@ from TraceLens.PerfModel.torch_op_mapping import (
 )
 from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
 
-BF16 = "c10::BFloat16"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -753,109 +750,6 @@ def test_gemm_fp4_impl_compute_precision():
     assert model.get_compute_precision() == torch_dtype_map("mxfp4")
 
 
-# =========================================================================== #
-# gpt-oss / primus-megatron MXFP4 composite autograd ops
-#   FP4GemmMXFunction / FP4GemmMXFunctionBackward
-#   FP4GroupedMLPMXFunc / FP4GroupedMLPMXFuncBackward
-# Covers get_param_details, flops()/bytes(), the Sequence-number fwd/bwd cache
-# (hit + miss -> None), the two-GEMM backward roll-up, get_compute_precision,
-# and the NotImplementedError guards on the forward GEMM class.
-# =========================================================================== #
-def _fp4mx_gemm_event(M, N, K, seq=None, dtypes=(BF16, BF16)):
-    args = {
-        "Input Dims": [(M, K), (N, K), (), (), (), ()],
-        "Input type": [dtypes[0], dtypes[1], "", "", "", ""],
-    }
-    if seq is not None:
-        args["Sequence number"] = seq
-    return {"name": "FP4GemmMXFunction", "args": args}
-
-
-def _fp4mx_gemm_bwd_event(M, N, seq=None, dtype=BF16):
-    args = {"Input Dims": [(M, N)], "Input type": [dtype]}
-    if seq is not None:
-        args["Sequence number"] = seq
-    return {"name": "FP4GemmMXFunctionBackward", "args": args}
-
-
-# --------------------------------------------------------------------------- #
-# FP4GemmMXFunction (forward)
-# --------------------------------------------------------------------------- #
-def test_fp4mx_gemm_param_details_and_flops():
-    M, N, K = 32768, 2880, 4096
-    m = FP4GemmMXFunction(_fp4mx_gemm_event(M, N, K))
-    assert (m.M, m.N, m.K) == (M, N, K)
-    assert m.param_details["bias"] is False
-    assert m.param_details["dtype_A_B"] == (BF16, BF16, "c10::BFloat16")
-    assert m.flops() == 2 * M * N * K
-
-
-def test_fp4mx_gemm_bytes_is_bf16_roofline():
-    M, N, K = 64, 128, 256
-    m = FP4GemmMXFunction(_fp4mx_gemm_event(M, N, K))
-    bpe = name2bpe(BF16)
-    assert m.bytes() == (M * K + N * K + M * N) * bpe
-
-
-def test_fp4mx_gemm_compute_precision_is_mxfp4():
-    m = FP4GemmMXFunction(_fp4mx_gemm_event(16, 16, 32))
-    assert m.get_compute_precision() == torch_dtype_map("mxfp4")
-
-
-def test_fp4mx_gemm_backward_methods_raise_not_implemented():
-    m = FP4GemmMXFunction(_fp4mx_gemm_event(16, 16, 32))
-    with pytest.raises(NotImplementedError):
-        m.flops_bwd()
-    with pytest.raises(NotImplementedError):
-        m.bytes_bwd()
-
-
-def test_fp4mx_gemm_caches_by_sequence_number():
-    FP4GemmMXFunction.fwd_pass_cache.clear()
-    FP4GemmMXFunction(_fp4mx_gemm_event(100, 200, 300, seq=42))
-    assert FP4GemmMXFunction.fwd_pass_cache[42]["K"] == 300
-
-
-def test_fp4mx_gemm_without_sequence_number_not_cached():
-    FP4GemmMXFunction.fwd_pass_cache.clear()
-    FP4GemmMXFunction(_fp4mx_gemm_event(10, 20, 30))
-    assert FP4GemmMXFunction.fwd_pass_cache == {}
-
-
-# --------------------------------------------------------------------------- #
-# FP4GemmMXFunctionBackward
-# --------------------------------------------------------------------------- #
-def test_fp4mx_gemm_backward_linked_recovers_dims():
-    FP4GemmMXFunction.fwd_pass_cache.clear()
-    M, N, K = 32768, 5120, 2880
-    FP4GemmMXFunction(_fp4mx_gemm_event(M, N, K, seq=7))
-    b = FP4GemmMXFunctionBackward(_fp4mx_gemm_bwd_event(M, N, seq=7))
-    assert b.param_details["linked_fwd"] is True
-    assert (b.M, b.N, b.K) == (M, N, K)
-    assert b.flops() == 4 * M * N * K
-    assert b.bytes() is not None and b.bytes() > 0
-    assert b.get_compute_precision() == torch_dtype_map("mxfp4")
-
-
-def test_fp4mx_gemm_backward_cache_miss_returns_none():
-    FP4GemmMXFunction.fwd_pass_cache.clear()
-    b = FP4GemmMXFunctionBackward(_fp4mx_gemm_bwd_event(32768, 5120, seq=999))
-    assert b.param_details["linked_fwd"] is False
-    assert b.K is None
-    assert b.flops() is None
-    assert b.bytes() is None
-
-
-def test_fp4mx_gemm_backward_scalar_grad_out_gives_none_n():
-    FP4GemmMXFunction.fwd_pass_cache.clear()
-    b = FP4GemmMXFunctionBackward(
-        {"args": {"Input Dims": [(4096,)], "Input type": [BF16]}}
-    )
-    assert b.param_details["N"] is None
-    assert b.flops() is None
-    assert b.bytes() is None
-
-
 # --------------------------------------------------------------------------- #
 # FP4 MoE-MLP grouped GEMM leaf ops (primus_turbo::grouped_gemm_fp4_*_impl)
 # Expected byte counts are hand-written from the trace slot shapes and the
@@ -907,8 +801,16 @@ def test_fp4_grouped_ops_map_to_fp4_subclasses():
         m["primus_turbo::grouped_gemm_fp4_variable_k_accum_impl"]
         is primus_turbo_grouped_gemm_variable_k_accum_fp4
     )
-    assert "FP4GroupedMLPMXFunc" not in m
-    assert "FP4GroupedMLPMXFuncBackward" not in m
+    # autograd-level wrappers are not modelled; their leaf cpu_ops are
+    for dropped in (
+        "FP4GemmMXFunction",
+        "FP4GemmMXFunctionBackward",
+        "FP4GroupedMLPMXFunc",
+        "FP4GroupedMLPMXFuncBackward",
+        "LinearWithGradAccumulationAndAsyncCommunication",
+        "LinearWithGradAccumulationAndAsyncCommunicationBackward",
+    ):
+        assert dropped not in m
 
 
 def test_fp4_grouped_gemm_impl_flops_and_bytes():
