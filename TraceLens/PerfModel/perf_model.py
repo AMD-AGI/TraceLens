@@ -13,6 +13,7 @@ from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem, pow_flops_per_elem
 from .utils import (
     name2bpe,
     optional_float,
+    optional_tensor_passed,
     parse_bool,
     scalar_type_bpe,
     torch_dtype_map,
@@ -823,7 +824,8 @@ class CONV:
             out_shape, x_shape, w_shape, False, bytes_per_element
         )
         # for bias we read the output gradient and write the bias gradient
-        bytes_bias_grad = prod(out_shape) + out_shape[1] if bias else 0
+        elems_bias_grad = prod(out_shape) + out_shape[1] if bias else 0
+        bytes_bias_grad = elems_bias_grad * bytes_per_element
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     def bytes_bwd(self, bytes_per_element):
@@ -970,8 +972,12 @@ class aten_conv_bwd(CONV):
         ndims = len(input_shape) - 2
         filter_shape = tuple(input_dims[2])
 
-        # Check if bias gradient is computed (from output_mask)
-        bias = len(input_dims) > 3 and input_dims[3] and len(input_dims[3]) > 0
+        # Check if bias gradient is computed (from output_mask).
+        # bias_sizes and output_mask are int/bool lists, so the profiler
+        # records them in Concrete Inputs and leaves Input Dims empty.
+        output_mask_arg = concrete_inputs[10] if len(concrete_inputs) > 10 else ""
+        output_mask = [x.strip() for x in output_mask_arg.strip("[]").split(",")]
+        bias = len(output_mask) == 3 and output_mask[2] == "True"
 
         stride_arg = concrete_inputs[4]
         stride = (
@@ -4973,8 +4979,8 @@ class BatchNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
-        is_training = bool(event["args"]["Concrete Inputs"][5])
+        is_affine = optional_tensor_passed(args_input_dims[2])
+        is_training = parse_bool(event["args"]["Concrete Inputs"][5])
         dtype_out = None
         stride_output = None
         # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
@@ -5022,14 +5028,14 @@ class BatchNormBwd(Normalization):
             has_output = True
             is_training = False  # by assertion
         else:
-            is_training = bool(event["args"]["Concrete Inputs"][7])
+            is_training = parse_bool(event["args"]["Concrete Inputs"][7])
         op_shape = tuple(args_input_dims[input_index])
         # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
         num_channels = op_shape[1]
         dtype_in = event["args"]["Input type"][input_index]
         stride_input = tuple(event["args"]["Input Strides"][input_index])
         output_mask = [has_output]
-        is_affine = args_input_dims[is_affine_index] is not None
+        is_affine = optional_tensor_passed(args_input_dims[is_affine_index])
         dtype_out = None
         stride_output = None
         return {
@@ -5083,10 +5089,10 @@ class LayerNorm(Normalization):
         # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
         num_channels = prod(parse_list(concrete_inputs[1], int))
-        has_bias = args_input_dims[3] is not None
+        has_bias = optional_tensor_passed(args_input_dims[3])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5185,7 +5191,7 @@ class GroupNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5222,7 +5228,7 @@ class GroupNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = args_input_dims[5] is not None
+        is_affine = optional_tensor_passed(args_input_dims[4])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5275,11 +5281,11 @@ class InstanceNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         # The "use_input_stats" argument means that we need to calculate stats from the batch,
         # effectively the same as how we use training in other cases
         # layernorm actually calls batchnorm and sets is_training to use_input_stats
-        is_training = bool(concrete_inputs[5])
+        is_training = parse_bool(concrete_inputs[5])
         dtype_out = None
         stride_output = None
         return {
@@ -5332,7 +5338,7 @@ class RMSNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[1], int))
@@ -5394,7 +5400,7 @@ class RMSNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = args_input_dims[4] is not None
+        is_affine = optional_tensor_passed(args_input_dims[4])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[2], int))
@@ -6471,7 +6477,7 @@ class gemm_fp4_impl(GEMM):
         K_packed = dims[0][1]
         K = K_packed * 2  # Float4_e2m1fn_x2 packs two FP4 values per byte
         N = dims[3][0]
-        has_bias = len(dims[11]) > 0
+        has_bias = len(dims) > 11 and len(dims[11]) > 0
         return {
             "B": 1,
             "M": M,

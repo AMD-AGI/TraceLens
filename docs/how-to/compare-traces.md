@@ -175,7 +175,7 @@ df_args  = td.diff_stats_unique_args_summary_df    # per op name + unique args
 
 # Find the tree2 UID corresponding to a tree1 UID (-1 if no match)
 uid1 = next(iter(td.baseline.cpu_root_nodes))
-uid2 = td.get_corresponding_uid(1, uid1)
+uid2 = td.merged_uid_map[(1, uid1)]
 ```
 
 ### Inline diff during report generation

@@ -207,6 +207,10 @@ class TestPseudoOpsPerfUtils:
         )
         assert mappings["sgl_kernel::fast_topk"] is sgl_kernel_fast_topk
         assert mappings["fused_k_norm_rope_q_flashmla"] is fused_k_norm_rope_q_flashmla
+        assert (
+            mappings["hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)"]
+            is aext.mla_decode_v4_stage2_asm
+        )
 
     def test_get_pseudo_op_category_only_mappings(self):
         category_only = get_pseudo_op_category_only_mappings()
@@ -217,10 +221,8 @@ class TestPseudoOpsPerfUtils:
         )
         assert category_only["aiter::indexer_score_topk"] == "InferenceAttention"
         assert (
-            category_only[
-                "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)"
-            ]
-            == "InferenceAttention"
+            "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)"
+            not in category_only
         )
         assert (
             category_only["sglang_profiler::topk_topk_transform_paged_v2"]
@@ -978,12 +980,38 @@ class TestPerfModelExtensions:
         assert new.flops() == old.flops()
         assert new.bytes() == old.bytes()
 
+    def test_mla_decode_v4_stage2_merges_launched_splits(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        model = aext.mla_decode_v4_stage2_asm(event)
+        assert model.param_details["num_kv_splits"] == 16
+        assert model.get_compute_precision() == "fp32"
+        assert model.get_maf_type() == "vector"
+        # 8 queries, 16 heads, 16 splits, D=512.
+        assert model.flops() == 8 * 16 * (16 * (3 * 512 + 7) + 512)
+        assert model.bytes() == (
+            8 * 16 * 16 * 512 * 4 + 8 * 16 * 16 * 4 + 8 * 16 * 512 * 2
+        )
+
     def test_mla_decode_v4_unknown_layout_is_no_perf(self):
         event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
         event["args"]["Input Dims"] = event["args"]["Input Dims"][:13]
         model = aext.mla_decode_v4_asm(event)
+        stage2 = aext.mla_decode_v4_stage2_asm(event)
         assert model.param_details["_no_perf"] is True
         assert model.flops() is None
+        assert model.bytes() is None
+        assert stage2.flops() is None
+        assert stage2.bytes() is None
+        assert stage2.get_compute_precision() is None
+        assert stage2.get_maf_type() is None
+
+    def test_mla_decode_v4_stage2_skips_bytes_when_partial_is_not_dense(self):
+        event = self._mla_v4_capacity_event(67072, self._decode_annotation(8, 32768))
+        strides = [[]] * 17
+        strides[13] = [1, 1, 1, 1]
+        event["args"]["Input Strides"] = strides
+        model = aext.mla_decode_v4_stage2_asm(event)
+        assert model.flops() is not None
         assert model.bytes() is None
 
     @staticmethod

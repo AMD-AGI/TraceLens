@@ -770,6 +770,31 @@ def test_dataloader_save_preprocessed_json(tmp_path):
     DataLoader.load_data(str(trace_path), save_preprocessed=True)
 
     assert json.loads(trace_path.read_text()) == payload
+    assert json.loads((tmp_path / "trace.processed.json").read_text()) == payload
+
+
+def test_dataloader_save_preprocessed_json_gz_keeps_input(tmp_path):
+    payload = {"events": [1, 2, 3]}
+    trace_path = tmp_path / "trace.json.gz"
+    with gzip.open(trace_path, "wt") as f:
+        json.dump(payload, f)
+
+    DataLoader.load_data(str(trace_path), save_preprocessed=True)
+
+    assert DataLoader.load_data(str(trace_path)) == payload
+    assert json.loads((tmp_path / "trace.processed.json").read_text()) == payload
+
+
+def test_dataloader_save_preprocessed_pb_in_directory_name(tmp_path):
+    payload = {"events": [1, 2, 3]}
+    trace_dir = tmp_path / "pbs_job"
+    trace_dir.mkdir()
+    trace_path = trace_dir / "trace.json"
+    trace_path.write_text(json.dumps(payload))
+
+    DataLoader.load_data(str(trace_path), save_preprocessed=True)
+
+    assert json.loads((trace_dir / "trace.processed.json").read_text()) == payload
 
 
 @patch("TraceLens.util.suppress_native_hlo_logs")
