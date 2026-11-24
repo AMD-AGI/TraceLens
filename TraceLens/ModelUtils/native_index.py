@@ -380,6 +380,7 @@ def _launch_names(body: str) -> list[str]:
     return [name for _, name in sorted(found)]
 
 
+@functools.lru_cache(maxsize=4096)
 def launch_sequences(text: str) -> dict[str, list[str]]:
     """Host function -> the kernels it launches, for each function in ``text``."""
     sequences: dict[str, list[str]] = {}
@@ -710,7 +711,7 @@ def _file_exports(text: str, macros: dict[str, str]) -> set[str]:
     names |= {name for _, name, _ in _ENUM_BINDING.findall(text)}
     names |= set(_CLASS_BINDING.findall(text))
     names |= set(_EXTERN_C.findall(text)) | set(_C_ITFS.findall(text))
-    used = [macro for macro in macros if _invokes(text, macro)]
+    used = [macro for macro in macros if macro in text and _invokes(text, macro)]
     seen: set[str] = set()
     while used:
         macro = used.pop()

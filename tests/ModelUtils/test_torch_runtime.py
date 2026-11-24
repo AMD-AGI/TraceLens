@@ -539,3 +539,97 @@ def test_indexing_by_an_int32_tensor_first_copies_it_to_int64(runtime):
         :2
     ] == ("long int", "int")
     assert stretched.record.types[:2] == ("long int", "long int")
+
+
+def test_a_triton_launch_that_cannot_be_emulated_is_not_tried_again(
+    runtime, tmp_path, monkeypatch
+):
+    import triton.runtime.interpreter as interpreter_module
+
+    from TraceLens.ModelUtils.source_interpreter import Environment, SourceInterpreter
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "kern.py").write_text(textwrap.dedent("""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def broken(x_ptr, out_ptr, BLOCK: tl.constexpr):
+            offsets = tl.arange(0, BLOCK)
+            tl.store(out_ptr + offsets, not_a_function(tl.load(x_ptr + offsets)))
+
+        def run():
+            x = torch.arange(8, device="cuda")
+            for _ in range(3):
+                # A part of a buffer: its writes are emulated as launched.
+                out = torch.zeros(16, dtype=x.dtype, device="cuda")[:8]
+                broken[(1,)](x, out, BLOCK=8)
+    """))
+    runs = []
+    original = interpreter_module.GridExecutor.__call__
+    monkeypatch.setattr(
+        interpreter_module.GridExecutor,
+        "__call__",
+        lambda self, *a, **k: (runs.append(1), original(self, *a, **k))[1],
+    )
+    interpreter = SourceInterpreter(
+        {"pkg": tmp_path}, Environment(), host_modules=runtime.modules
+    )
+    with interpreter, runtime:
+        interpreter.import_module("pkg.kern").run()
+    assert len(runs) == 1
+
+
+def test_a_triton_launch_whose_writes_nothing_reads_is_never_emulated(
+    runtime, tmp_path, monkeypatch
+):
+    import triton.runtime.interpreter as interpreter_module
+
+    from TraceLens.ModelUtils.source_interpreter import Environment, SourceInterpreter
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "kern.py").write_text(textwrap.dedent("""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def double(x_ptr, out_ptr, BLOCK: tl.constexpr):
+            offsets = tl.arange(0, BLOCK)
+            tl.store(out_ptr + offsets, tl.load(x_ptr + offsets) * 2)
+
+        def run():
+            x = torch.arange(8, device="cuda")
+            unread = torch.zeros(8, dtype=x.dtype, device="cuda")
+            double[(1,)](x, unread, BLOCK=8)
+            read = torch.zeros(8, dtype=x.dtype, device="cuda")
+            double[(1,)](x + 1, read, BLOCK=8)
+            # Changed after the launch: the launch saw it as it was.
+            x.add_(100)
+            return read.cpu().tolist()
+    """))
+    runs = []
+    original = interpreter_module.GridExecutor.__call__
+    monkeypatch.setattr(
+        interpreter_module.GridExecutor,
+        "__call__",
+        lambda self, *a, **k: (runs.append(1), original(self, *a, **k))[1],
+    )
+    interpreter = SourceInterpreter(
+        {"pkg": tmp_path}, Environment(), host_modules=runtime.modules
+    )
+    with interpreter, runtime:
+        assert interpreter.import_module("pkg.kern").run() == [
+            2,
+            4,
+            6,
+            8,
+            10,
+            12,
+            14,
+            16,
+        ]
+    assert len(runs) == 1

@@ -719,6 +719,27 @@ class Shadows:
             self._lazy.pop(id(tensor), None)
             tensor = tensor._base
 
+    def defer_write(self, tensor, write) -> None:
+        """``tensor``, all of its storage, is written by ``write(region)`` when read.
+
+        What was known of the storage is replaced: every copy of it (by any
+        tensor over it) goes, and its contents are the write's.
+        """
+        key = self._track(tensor)
+        self._logs[key] = (
+            tensor.untyped_storage().nbytes(),
+            [(self._geometry(tensor), write)],
+        )
+        self._by_storage.pop(key, None)
+        self._unknown.discard(key)
+        for table in (self._copies, self._lazy):
+            for entry_key, (ref, _value) in list(table.items()):
+                other = ref()
+                if other is None or (
+                    isinstance(other, torch.Tensor) and self._storage_key(other) == key
+                ):
+                    table.pop(entry_key, None)
+
     def forget(self, tensor) -> None:
         """``tensor`` is replaced wholesale: what was known of it no longer applies."""
         self._copies.pop(id(tensor), None)
@@ -2682,6 +2703,13 @@ _TRITON_LOOPS = frozenset({"range", "static_range"})
 
 
 def content_controlled_parameters(node) -> frozenset[str] | None:
+    """See :func:`_content_controlled_parameters`; read once per kernel's source."""
+    if not hasattr(node, "_tracelens_steering"):
+        node._tracelens_steering = _content_controlled_parameters(node)
+    return node._tracelens_steering
+
+
+def _content_controlled_parameters(node) -> frozenset[str] | None:
     """Parameters of Triton kernel ``node`` whose loaded contents steer it.
 
     The values loaded through a parameter's pointer are its contents. They
@@ -3050,6 +3078,16 @@ def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
     ]
     key = _emulation_key(kernel, shape, args, kwargs, shadows)
     memo = shadows.__dict__.setdefault("_emulated", {})
+    # A launch the emulator could not run fails alike for the same kernel,
+    # sizes and dtypes: it is not tried again.
+    failures = shadows.__dict__.setdefault("_not_emulable", set())
+    failing = (
+        id(kernel.fn),
+        tuple(_launch_form(value) for value in args),
+        tuple(sorted((name, _launch_form(value)) for name, value in kwargs.items())),
+    )
+    if failing in failures:
+        return None
     if key is not None and key in memo:
         left_unknown = []
         for tensor, result in zip(written, memo[key], strict=False):
@@ -3110,26 +3148,48 @@ def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
     def call_helper(self, *call_args, **call_kwargs):
         return self.fn(*call_args, **call_kwargs)
 
-    original_call = JITFunction.__call__
-    module.update({key: real[value.__name__] for key, value in swapped.items()})
-    JITFunction.__call__ = call_helper
-    _EMULATING[0] = True
+    def execute(*fillings):
+        """Run the launch over each filling of its arguments, in the Triton interpreter."""
+        original_call = JITFunction.__call__
+        module.update({key: real[value.__name__] for key, value in swapped.items()})
+        JITFunction.__call__ = call_helper
+        _EMULATING[0] = True
+        try:
+            for call_args, call_kwargs in fillings:
+                GridExecutor(stub, names, shape)(*call_args, **call_kwargs)
+        finally:
+            _EMULATING[0] = False
+            JITFunction.__call__ = original_call
+            module.update(swapped)
+
+    if not unknown and written and all(_whole_storage(tensor) for tensor in written):
+        # Run when its writes are first read, on its arguments as they are
+        # now: a launch whose results only other kernels read is never run.
+        return _deferred_emulation(
+            kernel,
+            execute,
+            args,
+            kwargs,
+            written,
+            shadows,
+            failures,
+            failing,
+            memo,
+            key,
+        )
     try:
-        GridExecutor(stub, names, shape)(*first_args, **first_kwargs)
         if not unknown:
+            execute((first_args, first_kwargs))
             # The launch wrote the copies themselves.
             if key is not None:
                 memo[key] = [shadows.get(tensor).clone() for tensor in written]
             return []
         second_args, second_kwargs = place(1, second_bases := {})
-        GridExecutor(stub, names, shape)(*second_args, **second_kwargs)
+        execute((first_args, first_kwargs), (second_args, second_kwargs))
     except Exception as error:  # noqa: BLE001 - anything it cannot run is left unknown
         logger.debug("%s: not emulated: %s", kernel.__name__, error)
+        failures.add(failing)
         return None
-    finally:
-        _EMULATING[0] = False
-        JITFunction.__call__ = original_call
-        module.update(swapped)
 
     # A written tensor that came out the same from both fillings is known.
     left_unknown, results = [], []
@@ -3146,6 +3206,93 @@ def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
     if key is not None:
         memo[key] = results
     return left_unknown
+
+
+def _whole_storage(tensor) -> bool:
+    """Whether ``tensor`` is all of its storage, laid out in order."""
+    return (
+        tensor.storage_offset() == 0
+        and tensor.is_contiguous()
+        and tensor.numel() * tensor.element_size() == tensor.untyped_storage().nbytes()
+    )
+
+
+def _deferred_emulation(
+    kernel, execute, args, kwargs, written, shadows, failures, failing, memo, key
+) -> list:
+    """Defer a Triton launch until something reads what it writes.
+
+    Its arguments' contents are snapshotted now (views of one storage keep
+    sharing the snapshot), and each written storage is given the write,
+    which runs the launch once, on the snapshots, when first read; a launch
+    on the same contents run before gives its writes instead.
+    """
+    bases: dict = {}
+
+    def snapshot(value):
+        if isinstance(value, torch.Tensor) and value.is_meta:
+            copy = shadows.get(value)
+            storage = copy.untyped_storage()
+            if storage._cdata not in bases:
+                bases[storage._cdata] = storage.clone()
+            return torch.empty(0, dtype=copy.dtype).set_(
+                bases[storage._cdata], copy.storage_offset(), copy.size(), copy.stride()
+            )
+        if isinstance(value, tuple | list):
+            return type(value)(snapshot(item) for item in value)
+        return value
+
+    snapshot_args = [snapshot(value) for value in args]
+    snapshot_kwargs = {name: snapshot(value) for name, value in kwargs.items()}
+    targets: dict[int, torch.Tensor] = {}
+
+    def pair(value, copied):
+        if isinstance(value, torch.Tensor):
+            targets.setdefault(id(value), copied)
+        elif isinstance(value, tuple | list):
+            for item, copied_item in zip(value, copied, strict=False):
+                pair(item, copied_item)
+
+    for value, copied in zip(args, snapshot_args, strict=False):
+        pair(value, copied)
+    for name, value in kwargs.items():
+        pair(value, snapshot_kwargs[name])
+    results: list = []
+
+    def written_contents(position):
+        if not results:
+            if key is not None and key in memo:
+                results.extend(memo[key])
+            else:
+                try:
+                    execute((snapshot_args, snapshot_kwargs))
+                except Exception as error:
+                    failures.add(failing)
+                    raise RuntimeError(
+                        f"{kernel.__name__} could not be emulated: {error}"
+                    ) from error
+                results.extend(targets[id(tensor)].clone() for tensor in written)
+                if key is not None:
+                    memo[key] = list(results)
+        return results[position].clone()
+
+    for position, tensor in enumerate(written):
+        shadows.defer_write(
+            tensor, lambda region, position=position: written_contents(position)
+        )
+    return []
+
+
+def _launch_form(value):
+    """What of a launch argument decides how its kernel runs: a tensor's dtype
+    and rank, a scalar's value."""
+    if isinstance(value, torch.Tensor):
+        return ("tensor", str(value.dtype), value.dim())
+    if isinstance(value, tuple | list):
+        return tuple(_launch_form(item) for item in value)
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    return type(value).__name__
 
 
 def _emulation_key(kernel, grid, args, kwargs, shadows):

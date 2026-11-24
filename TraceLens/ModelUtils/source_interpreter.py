@@ -1134,6 +1134,15 @@ def _interpreted(function) -> bool:
 def _contains_yield(node) -> bool:
     if isinstance(node, ast.Lambda):
         return False
+    # A function defined in a body is made again on each call: its source
+    # is read once.
+    cached = getattr(node, "_tracelens_yields", None)
+    if cached is None:
+        cached = node._tracelens_yields = _walks_to_yield(node)
+    return cached
+
+
+def _walks_to_yield(node) -> bool:
 
     def walk(children):
         for child in children:

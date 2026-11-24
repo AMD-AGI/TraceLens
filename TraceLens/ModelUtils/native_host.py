@@ -17,6 +17,7 @@ interpreter; any other body is left alone and its value stays unknown.
 from __future__ import annotations
 
 import builtins
+import functools
 import re
 from dataclasses import dataclass
 
@@ -735,6 +736,7 @@ class TensorHostFunction:
     body: str
 
 
+@functools.lru_cache(maxsize=4096)
 def tensor_host_functions(text: str) -> dict[str, TensorHostFunction]:
     """Tensor-returning host functions defined in ``text``."""
     found = {}
