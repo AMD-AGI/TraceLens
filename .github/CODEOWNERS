@@ -16,6 +16,8 @@
 /TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/ @Ahmedhasssan-aig @tsrikris
 /TraceLens/Agent/Analysis/skills/analysis-orchestrator/evals/partial_tests/ @amoskvic @tsrikris
 /TraceLens/Agent/Analysis/semantic_analyses/ @amoskvic @tsrikris
+/TraceLens/Agent/PerfModel/    @devalshahamd
+/TraceLens/Agent/ModelBringup/ @devalshahamd @tsrikris
 
 # TraceDiff module and docs require Spandan review
 /TraceLens/TraceDiff/         @spandoesai
