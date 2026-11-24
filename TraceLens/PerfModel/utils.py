@@ -8,6 +8,8 @@
 Utils. for perf. model.
 """
 
+from math import prod
+
 
 def optional_int(value, default=None):
     """Parse *value* as int, returning *default* when conversion fails."""
@@ -342,3 +344,15 @@ def parse_bool(input):
         if value in {"false", "0", ""}:
             return False
     return bool(input)
+
+
+def optional_tensor_passed(dims):
+    """Return True if an optional tensor argument was passed to the op.
+
+    *dims* is the op's entry in the trace's "Input Dims". The profiler
+    records an optional tensor that was not passed as ``[]``. A tensor with
+    zero elements is treated the same way.
+    """
+    if dims is None or len(dims) == 0:
+        return False
+    return prod(dims) != 0

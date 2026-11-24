@@ -12,6 +12,7 @@ More cases (V1 wrapper-parsing, multi-word ops, fallback) in follow-ups.
 
 import pytest
 
+import TraceLens.PerfModel.triton_compiled_perf_model as triton_model
 from TraceLens.PerfModel.torch_op_mapping import resolve_perf_model_class
 from TraceLens.PerfModel.triton_compiled_perf_model import (
     TritonCompiledPerfModel,
@@ -76,9 +77,8 @@ def test_meta_from_trace_args_missing_fields():
 
 def test_flops_rmsnorm():
     model = TritonCompiledPerfModel(_RMSNORM_EVENT)
-    # add=1, mean=1, mul=1, pow=2, rsqrt=2 => 7 flops/elem
-    # 7 * 32768 * 2048 = 469,762,048
-    assert model.flops() == 7 * 32768 * 2048
+    # add=1, mean=1, mul=1, pow=1 (the square), rsqrt=4 => 8 flops/elem
+    assert model.flops() == 8 * 32768 * 2048
 
 
 def test_bytes_rmsnorm():
@@ -110,6 +110,18 @@ def test_parse_kernel_name_template():
     assert ops == ["aten.div", "aten.mm", "aten.silu", "aten.t"]
 
 
+def test_parse_kernel_name_template_without_registry(monkeypatch):
+    monkeypatch.setattr(triton_model, "_ALL_KNOWN_OPS", set())
+    event = _mm_silu_event(32, ["20"])
+    assert _parse_kernel_name(event["name"]) == [
+        "aten.div",
+        "aten.mm",
+        "aten.silu",
+        "aten.t",
+    ]
+    assert TritonTemplateGemmPerfModel.can_model(event)
+
+
 def test_resolve_template_gemm():
     assert (
         resolve_perf_model_class("triton_tem_fused_div_mm_silu_t_0")
@@ -125,8 +137,8 @@ def test_template_gemm_mm_silu(m, scalars):
     assert TritonTemplateGemmPerfModel.can_model(event)
     model = TritonTemplateGemmPerfModel(event)
     assert (model.M, model.N, model.K) == (m, 320, 10240)
-    # mm: 2*M*N*K; epilogue: div=1 + silu=4 flops per output element
-    assert model.flops() == 2 * m * 320 * 10240 + 5 * m * 320
+    # mm: 2*M*N*K; epilogue: div=4 + silu=14 flops per output element
+    assert model.flops() == 2 * m * 320 * 10240 + 18 * m * 320
     assert model.bytes() == (m * 10240 + 320 * 10240 + m * 320) * 2
     assert model.get_maf_type() == "matrix"
     assert model.get_compute_precision() == "bf16"

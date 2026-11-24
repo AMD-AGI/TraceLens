@@ -9,9 +9,11 @@ import warnings
 from math import prod
 
 from .kernel_name_parser import gemm_name_parser
+from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem, pow_flops_per_elem
 from .utils import (
     name2bpe,
     optional_float,
+    optional_tensor_passed,
     parse_bool,
     scalar_type_bpe,
     torch_dtype_map,
@@ -822,7 +824,8 @@ class CONV:
             out_shape, x_shape, w_shape, False, bytes_per_element
         )
         # for bias we read the output gradient and write the bias gradient
-        bytes_bias_grad = prod(out_shape) + out_shape[1] if bias else 0
+        elems_bias_grad = prod(out_shape) + out_shape[1] if bias else 0
+        bytes_bias_grad = elems_bias_grad * bytes_per_element
         return bytes_input_grad + bytes_weight_grad + bytes_bias_grad
 
     def bytes_bwd(self, bytes_per_element):
@@ -969,8 +972,12 @@ class aten_conv_bwd(CONV):
         ndims = len(input_shape) - 2
         filter_shape = tuple(input_dims[2])
 
-        # Check if bias gradient is computed (from output_mask)
-        bias = len(input_dims) > 3 and input_dims[3] and len(input_dims[3]) > 0
+        # Check if bias gradient is computed (from output_mask).
+        # bias_sizes and output_mask are int/bool lists, so the profiler
+        # records them in Concrete Inputs and leaves Input Dims empty.
+        output_mask_arg = concrete_inputs[10] if len(concrete_inputs) > 10 else ""
+        output_mask = [x.strip() for x in output_mask_arg.strip("[]").split(",")]
+        bias = len(output_mask) == 3 and output_mask[2] == "True"
 
         stride_arg = concrete_inputs[4]
         stride = (
@@ -1485,11 +1492,7 @@ class Softmax:
 
     @staticmethod
     def flops_func(M, N, B=1):
-        # softmax is O(N) for each element, so total is O(N^2)
-        # 3 ops : Exponent, Division and Addition
-        # Let's assume for now exponent and division are implement by LUT and hence
-        # take 1 cycle
-        return B * M * (3 * N)
+        return B * M * N * OP_FLOPS_PER_ELEM["softmax"]
 
     @staticmethod
     def bytes_func(M, N, bytes_per_element, B=1):
@@ -3546,8 +3549,8 @@ class UnaryElementwise:
             self.bpe_out = self.bpe_in
 
     @staticmethod
-    def flops_func(nelems):
-        return nelems
+    def flops_func(nelems, flops_per_elem=1):
+        return flops_per_elem * nelems
 
     def flops(self):
         return self.flops_func(self.nelems)
@@ -3572,6 +3575,10 @@ class UnaryElementwise:
 
 
 class aten_unary_elementwise(UnaryElementwise):
+    """A traced unary ATen op, priced per element from ``OP_FLOPS_PER_ELEM``."""
+
+    def flops(self):
+        return self.flops_func(self.nelems, op_flops_per_elem(self.event["name"]))
 
     @staticmethod
     def get_param_details(event):
@@ -3593,28 +3600,30 @@ class aten_unary_elementwise(UnaryElementwise):
         }
 
 
-class _TwoFlopUnary(aten_unary_elementwise):
-    """One special function per element, counted as two flops.
+class aten_pow(aten_unary_elementwise):
+    """``aten::pow`` and ``aten::pow_``.
 
-    The fused-kernel table records that cost for ``aten.sqrt``,
-    ``aten.rsqrt``, and ``aten.reciprocal``. Bytes stay one read and one write.
+    ``Concrete Inputs[1]`` holds a scalar exponent. Tensor exponents leave it
+    empty and pay the general ``exp(y * log(x))`` cost.
     """
 
-    @staticmethod
-    def flops_func(nelems):
-        return 2 * nelems
+    def flops(self):
+        concrete = self.event["args"].get("Concrete Inputs") or ()
+        try:
+            exponent = float(concrete[1])
+        except (IndexError, TypeError, ValueError):
+            exponent = None
+        return self.flops_func(self.nelems, pow_flops_per_elem(exponent))
 
 
-class aten_rsqrt(_TwoFlopUnary):
-    """``aten::rsqrt`` and ``aten::rsqrt_``."""
+class aten_gelu(aten_unary_elementwise):
+    """``aten::gelu`` and ``aten::gelu_``; ``Concrete Inputs[1]`` is ``approximate``."""
 
-
-class aten_sqrt(_TwoFlopUnary):
-    """``aten::sqrt`` and ``aten::sqrt_``."""
-
-
-class aten_reciprocal(_TwoFlopUnary):
-    """``aten::reciprocal`` and ``aten::reciprocal_``."""
+    def flops(self):
+        concrete = self.event["args"].get("Concrete Inputs") or ()
+        approximate = concrete[1] if len(concrete) > 1 else ""
+        op = "gelu_tanh" if "tanh" in str(approximate) else "gelu"
+        return self.flops_func(self.nelems, op_flops_per_elem(op))
 
 
 class aten_to(aten_unary_elementwise):
@@ -3632,10 +3641,6 @@ class aten_to(aten_unary_elementwise):
         dest = scalar_type_bpe(concrete[1] if len(concrete) > 1 else None)
         if dest is not None:
             self.bpe_out = dest
-
-    @staticmethod
-    def flops_func(nelems):
-        return 0
 
 
 class aten_replication_pad(UnaryElementwise):
@@ -3786,8 +3791,8 @@ class BinaryElementwise:
         return bpe_in1
 
     @staticmethod
-    def flops_func(nelems_out):
-        return nelems_out
+    def flops_func(nelems_out, flops_per_elem=1):
+        return flops_per_elem * nelems_out
 
     def flops(self):
         return self.flops_func(self.nelems_out)
@@ -3835,6 +3840,10 @@ class BinaryElementwise:
 
 
 class aten_binary_elementwise(BinaryElementwise):
+    """A traced binary ATen op, priced per output from ``OP_FLOPS_PER_ELEM``."""
+
+    def flops(self):
+        return self.flops_func(self.nelems_out, op_flops_per_elem(self.event["name"]))
 
     @staticmethod
     def get_param_details(event):
@@ -3862,10 +3871,22 @@ class aten_binary_elementwise(BinaryElementwise):
         }
 
 
+class aten_comparison(aten_binary_elementwise):
+    """``aten::eq``, ``ne``, ``lt``, and ``gt``: the output is a bool tensor."""
+
+    def __init__(self, event, arch=None, **kwargs):
+        super().__init__(event, arch, **kwargs)
+        self.bpe_out = name2bpe("bool")
+
+
 class liger_silu_mul_function(BinaryElementwise):
     # LigerSiLUMulFunction(a, b)  — from linkedin/Liger-Kernel (swiglu.py)
     # Fused Triton kernel: output = SiLU(a) * b
     # a, b: same shape; output has the same shape and dtype.
+
+    def flops(self):
+        per_elem = op_flops_per_elem("silu") + op_flops_per_elem("mul")
+        return self.flops_func(self.nelems_out, per_elem)
 
     @staticmethod
     def get_param_details(event):
@@ -3924,18 +3945,14 @@ class Reduce:
             self.bpe_out = self.bpe_in
 
     @staticmethod
-    def flops_func(num_input_elems, num_output_elems, reduce_type="sum"):
-        # Each input element is read and combined: ~1 op per input element.
-        # Sum/mean: N-1 adds (and 1 div for mean) over reduced dimension(s).
-        # Max/min: N-1 comparisons. Norm: N muls + N-1 adds + 1 sqrt.
-        # Use num_input_elems as the dominant term for roofline modeling.
-        return num_input_elems
+    def flops_func(num_input_elems, flops_per_elem=1):
+        # Per-output finishing work (the mean's divide, the norm's sqrt) is one
+        # op per reduced row and is left out.
+        return flops_per_elem * num_input_elems
 
     def flops(self):
         return self.flops_func(
-            self.num_input_elems,
-            self.num_output_elems,
-            self.param_details.get("reduce_type", "sum"),
+            self.num_input_elems, op_flops_per_elem(self.event.get("name", ""))
         )
 
     def get_compute_precision(self):
@@ -4798,9 +4815,10 @@ class Normalization:
             # could potentially be log_n for sum-reduce but is not
             param_compute += num_elems * 3
 
-        # compute 1/std = inverse(sqrt(running_var + eps))
-        # for non-training this is called in native_batch_norm etc and for training this is computed once and saved for several uses
-        param_compute += num_channels * 3
+        # 1/std = rsqrt(running_var + eps), once per channel.
+        param_compute += num_channels * (
+            op_flops_per_elem("add") + op_flops_per_elem("rsqrt")
+        )
 
         actual_compute = 2 * num_elems
         return param_compute + actual_compute
@@ -4961,8 +4979,8 @@ class BatchNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
-        is_training = bool(event["args"]["Concrete Inputs"][5])
+        is_affine = optional_tensor_passed(args_input_dims[2])
+        is_training = parse_bool(event["args"]["Concrete Inputs"][5])
         dtype_out = None
         stride_output = None
         # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
@@ -5010,14 +5028,14 @@ class BatchNormBwd(Normalization):
             has_output = True
             is_training = False  # by assertion
         else:
-            is_training = bool(event["args"]["Concrete Inputs"][7])
+            is_training = parse_bool(event["args"]["Concrete Inputs"][7])
         op_shape = tuple(args_input_dims[input_index])
         # batch norm is defined to have exactly 1 batch dimension and the num_channels is dimension 1
         num_channels = op_shape[1]
         dtype_in = event["args"]["Input type"][input_index]
         stride_input = tuple(event["args"]["Input Strides"][input_index])
         output_mask = [has_output]
-        is_affine = args_input_dims[is_affine_index] is not None
+        is_affine = optional_tensor_passed(args_input_dims[is_affine_index])
         dtype_out = None
         stride_output = None
         return {
@@ -5071,10 +5089,10 @@ class LayerNorm(Normalization):
         # concrete_inputs[2] is a string containg [a, b, c, d]... where a,b,c,d are ints
         # could use ast or json.reads but this is simpler
         num_channels = prod(parse_list(concrete_inputs[1], int))
-        has_bias = args_input_dims[3] is not None
+        has_bias = optional_tensor_passed(args_input_dims[3])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5173,7 +5191,7 @@ class GroupNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5210,7 +5228,7 @@ class GroupNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = args_input_dims[5] is not None
+        is_affine = optional_tensor_passed(args_input_dims[4])
         is_training = True
         dtype_out = None
         stride_output = None
@@ -5263,11 +5281,11 @@ class InstanceNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         # The "use_input_stats" argument means that we need to calculate stats from the batch,
         # effectively the same as how we use training in other cases
         # layernorm actually calls batchnorm and sets is_training to use_input_stats
-        is_training = bool(concrete_inputs[5])
+        is_training = parse_bool(concrete_inputs[5])
         dtype_out = None
         stride_output = None
         return {
@@ -5320,7 +5338,7 @@ class RMSNorm(Normalization):
         op_shape = tuple(args_input_dims[0])
         dtype_in = event["args"]["Input type"][0]
         stride_input = tuple(event["args"]["Input Strides"][0])
-        is_affine = args_input_dims[2] is not None
+        is_affine = optional_tensor_passed(args_input_dims[2])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[1], int))
@@ -5335,17 +5353,23 @@ class RMSNorm(Normalization):
             "is_training": False,
         }
 
-    # RMS norm is different enough from everything else that we are not using the base implementation
-    # flops is prod(dims that are not part of normalized_shape) * (2 * num_channels + 2) to compute rsqt
-    # multiply rsqt by each elem, then if weight is not null multiply weight by each elem
-    # sample code: https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    # x^2, mean, rsqrt(variance + eps), scale, and the weight multiply when affine.
+    # https://github.com/pytorch/pytorch/blob/9f1d4f078298856a78e2ef4692061fada6cf567b/torch/_decomp/decompositions.py#L1808
+    @staticmethod
+    def flops_func(num_elems, num_channels, is_affine):
+        rows = num_elems / num_channels
+        per_row = num_channels * (
+            op_flops_per_elem("pow")
+            + op_flops_per_elem("mean")
+            + op_flops_per_elem("mul")
+        )
+        per_row += op_flops_per_elem("add") + op_flops_per_elem("rsqrt")
+        if is_affine:
+            per_row += num_channels * op_flops_per_elem("mul")
+        return rows * per_row
+
     def flops(self):
-        non_normalized_elems = self.num_elems / self.num_channels
-        flops = non_normalized_elems * (2 * self.num_channels + 2)  # compute rsqt
-        flops += self.num_elems * (
-            2 if self.is_affine else 1
-        )  # apply weight if affine, apply rms in any case
-        return flops
+        return self.flops_func(self.num_elems, self.num_channels, self.is_affine)
 
     def bytes(self):
         # assume caching works, read input, write output, read weight if affine
@@ -5376,7 +5400,7 @@ class RMSNormBwd(Normalization):
         op_shape = tuple(args_input_dims[1])
         dtype_in = event["args"]["Input type"][1]
         stride_input = tuple(event["args"]["Input Strides"][1])
-        is_affine = args_input_dims[4] is not None
+        is_affine = optional_tensor_passed(args_input_dims[4])
         dtype_out = None
         stride_output = None
         num_channels = prod(parse_list(concrete_inputs[2], int))
@@ -5664,7 +5688,8 @@ class CrossEntropy:
       Input Dims[0] = (batch, 1, vocab_size)  — logits
       Input Dims[1] = (batch, 1)              — targets
 
-    FLOPS ≈ 5 × batch × vocab_size (exp + sum + log + subtract + lookup per element).
+    FLOPS: exp, sum, log, and subtract per logit, from ``OP_FLOPS_PER_ELEM``.
+    The target lookup moves no arithmetic.
     """
 
     category = "CrossEntropy_fwd"
@@ -5693,7 +5718,13 @@ class CrossEntropy:
 
     def flops(self):
         p = self.param_details
-        return 5 * p["batch"] * p["vocab_size"]
+        per_logit = (
+            op_flops_per_elem("exp")
+            + op_flops_per_elem("sum")
+            + op_flops_per_elem("log")
+            + op_flops_per_elem("sub")
+        )
+        return per_logit * p["batch"] * p["vocab_size"]
 
     def bytes(self):
         if self.bpe is None:

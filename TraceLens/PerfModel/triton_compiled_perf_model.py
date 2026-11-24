@@ -33,6 +33,7 @@ import os
 import re
 from math import prod
 
+from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem
 from .perf_model import GEMM
 from .utils import name2bpe, torch_dtype_map
 
@@ -42,42 +43,6 @@ logger = logging.getLogger(__name__)
 # layout-only op such as aten.t, which costs 0 FLOPs). Inductor passes the mm
 # operands first (A[M,K], then B as [K,N] or its transpose [N,K]).
 _TEMPLATE_GEMM_OP = "aten.mm"
-
-# ---------------------------------------------------------------------------
-# FLOPs per element for ATen ops that commonly appear in fused Triton kernels.
-# Counts arithmetic operations; memory-only ops are 0.
-# ---------------------------------------------------------------------------
-_FLOPS_PER_ELEM: dict[str, int] = {
-    "aten.add": 1,
-    "aten.sub": 1,
-    "aten.mul": 1,
-    "aten.div": 1,
-    "aten.pow": 2,
-    "aten.sqrt": 2,
-    "aten.rsqrt": 2,
-    "aten.exp": 4,
-    "aten.log": 4,
-    "aten.sigmoid": 4,
-    "aten.tanh": 4,
-    "aten.relu": 1,
-    "aten.silu": 4,
-    "aten.gelu": 8,
-    "aten.mean": 1,
-    "aten.sum": 1,
-    "aten.var": 2,
-    "aten.abs": 1,
-    "aten.neg": 1,
-    "aten.reciprocal": 2,
-    "aten.ne": 1,
-    "aten.eq": 1,
-    "aten.lt": 1,
-    "aten.gt": 1,
-    # memory-only
-    "aten._to_copy": 0,
-    "aten.copy_": 0,
-    "aten.clone": 0,
-    "aten.embedding": 0,
-}
 
 _PTR_DTYPE_BYTES: dict[str, int] = {
     "*bf16": 2,
@@ -133,7 +98,9 @@ def _parse_kernel_name(name: str) -> list[str]:
     n = len(tokens)
 
     if not _ALL_KNOWN_OPS:
-        return [f"aten.{t}" for t in tokens if f"aten.{t}" in _FLOPS_PER_ELEM]
+        return [
+            f"aten.{t}" for t in tokens if t in OP_FLOPS_PER_ELEM or t in {"mm", "t"}
+        ]
 
     # dp[i] = list of (op_name, prev_index) for valid segmentations ending
     # at token i.  dp[0] = True is the base case (empty prefix).
@@ -385,7 +352,7 @@ class TritonCompiledPerfModel:
         if self._meta is None:
             raise NotImplementedError(f"No Inductor artifacts found for {self.name}")
         total = self._meta["xnumel"] * self._meta["rnumel"]
-        fpe = sum(_FLOPS_PER_ELEM.get(op, 0) for op in self._meta["aten_ops"])
+        fpe = sum(op_flops_per_elem(op) for op in self._meta["aten_ops"])
         return float(fpe * total)
 
     def bytes(self) -> float:
@@ -463,7 +430,7 @@ class TritonTemplateGemmPerfModel(GEMM):
 
     def flops(self) -> float:
         epilogue_ops = self.param_details["fused_epilogue"].split(", ")
-        fpe = sum(_FLOPS_PER_ELEM.get(op, 0) for op in epilogue_ops)
+        fpe = sum(op_flops_per_elem(op) for op in epilogue_ops)
         return float(super().flops() + fpe * self.M * self.N)
 
     def bytes(self, bpe_mat1=None, bpe_mat2=None, bpe_bias=None, bpe_output=None):
