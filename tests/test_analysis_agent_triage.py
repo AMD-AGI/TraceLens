@@ -33,6 +33,7 @@ import pytest
 
 from TraceLens.Agent.Analysis.triage import checks, postprocess, runner
 from TraceLens.Agent.Analysis.triage.checks import (
+    PROFILE_CHECKS,
     ALL_CHECKS,
     CheckSpec,
     Finding,
@@ -51,6 +52,7 @@ from TraceLens.Agent.Analysis.triage.checks import (
     _violator_evidence,
     check_capture_graph_merge_fail,
     check_capture_missing,
+    check_capture_rank_mismatch,
     check_corrupt_json,
     check_disk_full,
     check_docker_missing,
@@ -91,6 +93,7 @@ from TraceLens.Agent.Analysis.triage.checks import (
     stream_contains,
     stream_find,
     stream_lines,
+    summarize_graph_merge,
 )
 from TraceLens.Agent.Analysis.triage.postprocess import (
     TriageFinding,
@@ -106,6 +109,13 @@ from TraceLens.Agent.Analysis.triage.postprocess import (
     sanitize_filename,
     write_aggregated_csv,
     write_summary_report,
+)
+from TraceLens.Agent.Analysis.triage.profile_checks import (
+    check_benchmark_report,
+    check_split,
+    check_trace,
+    detect_framework,
+    detect_speculative,
 )
 from TraceLens.Agent.Analysis.triage.runner import (
     _auto_detect_log,
@@ -394,7 +404,7 @@ def make_triage_csv(run_dir, rows):
 
 # Registry size is load-bearing: the reserved-stub and sublabel checks below
 # depend on it not drifting silently.
-_EXPECTED_CHECK_COUNT = 35
+_EXPECTED_CHECK_COUNT = 36
 
 _PARSE_FLOAT_CASES = [
     (None, None),
@@ -537,12 +547,79 @@ def test_implies_failures_resolve_to_real_sublabels():
 
 
 def test_reserved_stubs_return_none(tmp_path):
-    # 2d / 3a / 3c are intentional reserved-slot stubs; deleting them would force
+    # 2d / 3a are intentional reserved-slot stubs; deleting them would force
     # a sublabel renumber. They must stay inert.
     run_dir = str(tmp_path)
     assert check_split_incorrect(run_dir, None) is None
     assert check_perf_report_command_incorrect(run_dir, None) is None
-    assert check_capture_graph_merge_fail(run_dir, None) is None
+
+
+# ---------------------------------------------------------------------------
+# Graph capture merge (3c / 3i)
+# ---------------------------------------------------------------------------
+
+
+def _merge_log(tmp_path, replay, root_lines):
+    lines = [f"[1/1] report: /traces/{replay} -> /out"]
+    for capture, tail in root_lines:
+        lines.append("Processing execution root: step[DECODE bs=12]")
+        if capture:
+            lines.append(
+                "Capture trace for execution root step[DECODE bs=12]: "
+                f"{capture} (12_FULL)"
+            )
+        lines.append(tail)
+    return write_stream(tmp_path / "step1_perf_report.log", lines)
+
+
+_PAIRED = "Found 1 capture roots and 1 graph roots"
+
+
+def test_graph_merge_clean_same_rank(tmp_path):
+    log = _merge_log(
+        tmp_path, "run-TP-0.trace.json.gz", [("bs_12_rank0.json.gz", _PAIRED)] * 2
+    )
+    summary = summarize_graph_merge(log)
+    assert summary["merged"] == 2 and summary["unmerged"] == 0
+    assert summary["mapping"][0]["roots"] == 2
+    assert summary["mapping"][0]["rank_mismatch"] is False
+    assert check_capture_graph_merge_fail(str(tmp_path), log) is None
+    assert check_capture_rank_mismatch(str(tmp_path), log) is None
+
+
+def test_graph_merge_rank_mismatch(tmp_path):
+    log = _merge_log(
+        tmp_path, "run-TP-0.trace.json.gz", [("bs_12_rank7.json.gz", _PAIRED)]
+    )
+    draft = check_capture_rank_mismatch(str(tmp_path), log)
+    assert draft is not None and "bs_12_rank7.json.gz" in draft.evidence
+    assert check_capture_graph_merge_fail(str(tmp_path), log) is None
+
+
+def test_graph_merge_failures_and_abort(tmp_path):
+    log = _merge_log(
+        tmp_path,
+        "run-TP-0.trace.json.gz",
+        [
+            (
+                "bs_12_rank0.json.gz",
+                "Graph capture merge failed: multistream graph root has "
+                "capture kernel names are absent",
+            ),
+            (None, "Warning: could not determine batch size for root"),
+        ],
+    )
+    write_stream(log, [*open(log), "Graph capture merge failed; returning None"])
+    summary = summarize_graph_merge(log)
+    assert summary["merge_aborted"] is True
+    assert summary["unmerged"] == 2
+    draft = check_capture_graph_merge_fail(str(tmp_path), log)
+    assert draft is not None and "merge aborted" in draft.evidence
+
+
+def test_graph_merge_absent_log(tmp_path):
+    assert summarize_graph_merge(None) is None
+    assert check_capture_graph_merge_fail(str(tmp_path), None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2884,3 +2961,249 @@ def test_main_no_findings_healthy(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["triage", "--session-dir", str(session)])
     main()
     assert "No failures detected" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Profile mode (--bench-dir)
+# ---------------------------------------------------------------------------
+
+_STEP = "execute_1_context_1(sq1sk1sqsq1sqsk1)_generation_1(sq1sk1sqsq1sqsk1)"
+
+
+def _make_bench(tmp_path, *, steps=2, stacks=True, aborted=False):
+    bench = tmp_path / "benchmark_vllm_1"
+    events = [{"ph": "X", "cat": "user_annotation", "name": _STEP}] * steps
+    events += [
+        {
+            "ph": "X",
+            "cat": "cpu_op",
+            "name": "aten::mm",
+            "args": {"Input Dims": [[2, 2]]},
+        },
+        {"ph": "X", "cat": "kernel", "name": "k"},
+        {"ph": "X", "cat": "cuda_runtime", "name": "hipGraphLaunch"},
+    ]
+    if stacks:
+        events.append({"ph": "X", "cat": "python_function", "name": "f"})
+    trace = bench / "torch_trace" / "dp0_pp0_tp0_dcp0_ep0_rank0.1.pt.trace.json.gz"
+    write_json_gz(trace, {"traceEvents": events})
+    write_json_gz(
+        bench / "torch_trace" / "capture_traces" / "graph_capture_rank_0.json.gz", {}
+    )
+    write_text(
+        bench / "config.yaml",
+        "framework: vllm\nagentx:\n  enabled: true\nprofiler:\n  torch_profiler:\n    num_steps: 2\n",
+    )
+    split = bench / "torch_trace" / "trace_split"
+    write_json(
+        split / "split_manifest.json",
+        {"status": 0, "phase_confidence": "high", "aborted": aborted},
+    )
+    write_json_gz(
+        split / "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs4_x.json.gz",
+        {},
+    )
+    return str(bench)
+
+
+def test_profile_checks_clean_bench(tmp_path):
+    assert run_triage(_make_bench(tmp_path), specs=PROFILE_CHECKS) == []
+
+
+def test_profile_checks_flag_split_stack_and_steps(tmp_path):
+    bench = _make_bench(tmp_path, steps=1, stacks=False, aborted=True)
+    found = {f.sublabel for f in run_triage(bench, specs=PROFILE_CHECKS)}
+    assert found == {"2d", "2k", "2l"}
+
+
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        ("", None),
+        ("args: --speculative-algorithm eagle", True),
+        ("SPEC_NUM_TOKENS_OVERRIDE: '0'\nargs: --speculative-algorithm eagle", False),
+        ("args: --max-num-seqs 8", False),
+    ],
+)
+def test_detect_speculative(config, expected):
+    assert detect_speculative(config) is expected
+
+
+@pytest.mark.parametrize(
+    "config, files, expected",
+    [
+        ("framework: Atom\n", [], "atom"),
+        ("", ["trace_TP-0.json.gz"], "sglang"),
+        ("", ["rank_0/trace.json.gz"], "atom"),
+        ("", ["trace.json.gz"], "vllm"),
+    ],
+)
+def test_detect_framework(tmp_path, config, files, expected):
+    for name in files:
+        write_json_gz(tmp_path / name, {})
+    assert detect_framework(config, tmp_path) == expected
+
+
+@pytest.mark.parametrize(
+    "speculative, drafter, status",
+    [
+        (True, True, "PASS"),
+        (True, False, "FAIL"),
+        (None, True, "PASS"),
+        (None, False, "SKIP"),
+    ],
+)
+def test_check_trace_drafter_captures(tmp_path, speculative, drafter, status):
+    torch_trace = tmp_path / "torch_trace"
+    write_json_gz(torch_trace / "capture_traces" / "graph_capture_rank_0.json.gz", {})
+    if drafter:
+        write_json_gz(torch_trace / "capture_traces" / "draft_step_bs_1.json.gz", {})
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", speculative, 1)}
+    assert by_name["drafter capture traces"].status == status
+
+
+@pytest.mark.parametrize(
+    "files, detail",
+    [
+        ([], "no rank-0 serving trace"),
+        (["merged_rank0.json.gz"], "no rank-0 serving trace"),
+        (
+            ["TP-0-DECODE.trace.json.gz", "TP-0-EXTEND.trace.json.gz"],
+            "expected one rank-0 capture, found "
+            "TP-0-DECODE.trace.json.gz, TP-0-EXTEND.trace.json.gz",
+        ),
+    ],
+)
+def test_check_trace_needs_a_single_rank0_trace(tmp_path, files, detail):
+    torch_trace = tmp_path / "torch_trace"
+    torch_trace.mkdir()
+    for name in files:
+        write_json_gz(torch_trace / name, {})
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", None, 1)}
+    assert by_name["single rank-0 trace"].status == "FAIL"
+    assert by_name["single rank-0 trace"].detail == detail
+    assert by_name["gpu kernels"].detail == "no single rank-0 trace to scan"
+
+
+@pytest.mark.parametrize(
+    "names, status, detail",
+    [
+        (
+            ["step[DECODE bs=4 g_sqsq=16]"] * 2 + ["step[EXTEND bs=1 c_sqsq=4]"],
+            "PASS",
+            "3 detailed user annotation(s) in rank0.json.gz; DECODE 2, EXTEND 1",
+        ),
+        (
+            ["step[DECODE bs=4]"],
+            "FAIL",
+            "rank0.json.gz has 1 native annotation(s) and no sqsq/sqsk aggregates",
+        ),
+    ],
+)
+def test_check_trace_requires_detailed_annotations(tmp_path, names, status, detail):
+    torch_trace = tmp_path / "torch_trace"
+    events = [{"ph": "X", "cat": "user_annotation", "name": n} for n in names]
+    write_json_gz(torch_trace / "rank0.json.gz", {"traceEvents": events})
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", None, 1)}
+    assert by_name["detailed annotations"].status == status
+    assert detail in by_name["detailed annotations"].detail
+
+
+def test_check_trace_flags_truncated_gzip(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    events = [{"ph": "X", "cat": "kernel", "name": "k"}] * 50
+    trace = Path(write_json_gz(torch_trace / "rank0.json.gz", {"traceEvents": events}))
+    trace.write_bytes(trace.read_bytes()[:-20])
+    by_name = {c.name: c for c in check_trace(torch_trace, "vllm", None, 1)}
+    assert by_name["trace readable"].status == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "op_args, status, detail",
+    [
+        (
+            {"Input Dims": [[2, 2]]},
+            "PASS",
+            "1 sglang_profiler cpu_op(s) with Input Dims",
+        ),
+        ({}, "FAIL", "1 sglang_profiler cpu_op(s) but none have Input Dims"),
+        (None, "FAIL", "no sglang_profiler:: cpu_op events"),
+    ],
+    ids=["with_shape", "without_shape", "absent"],
+)
+def test_check_trace_sglang_shape_profiler(tmp_path, op_args, status, detail):
+    torch_trace = tmp_path / "torch_trace"
+    events = []
+    if op_args is not None:
+        events.append(
+            {"ph": "X", "cat": "cpu_op", "name": "sglang_profiler::op", "args": op_args}
+        )
+    events.append({"ph": "X", "cat": "kernel", "name": "k"})
+    write_json_gz(torch_trace / "rank0.json.gz", {"traceEvents": events})
+    by_name = {c.name: c for c in check_trace(torch_trace, "sglang", None, 1)}
+    assert by_name["kernel shape profiler"].status == status
+    assert detail in by_name["kernel shape profiler"].detail
+
+
+@pytest.mark.parametrize(
+    "report, status, detail",
+    [
+        (None, "SKIP", "no benchmark_report.json"),
+        (
+            {
+                "success": True,
+                "throughput": {"output_throughput": 100},
+                "latency": {"ttft": {"median_ms": 5}, "tpot": {"median_ms": 2}},
+            },
+            "PASS",
+            "output 100 tok/s, TTFT 5 ms, TPOT 2 ms (median)",
+        ),
+        (
+            {
+                "success": False,
+                "errors": [
+                    "+ echo 'Error: early'\n+ echo 'Error: out of memory'\ndone"
+                ],
+            },
+            "WARN",
+            "marked failed: Error: out of memory",
+        ),
+        (
+            {"success": False, "errors": ["first line\nsecond"]},
+            "WARN",
+            "marked failed: first line",
+        ),
+        ({"success": False}, "WARN", "marked failed: no error recorded"),
+    ],
+)
+def test_check_benchmark_report(tmp_path, report, status, detail):
+    if report is not None:
+        write_json(tmp_path / "benchmark_report.json", report)
+    check = check_benchmark_report(tmp_path)
+    assert (check.status, check.detail) == (status, detail)
+
+
+def test_check_split_reports_every_manifest_problem(tmp_path):
+    split = tmp_path / "trace_split"
+    write_json(
+        split / "split_manifest.json",
+        {
+            "aborted": True,
+            "status": 1,
+            "phase_confidence": "low",
+            "suspiciously_few_roots": True,
+            "coverage_selected_roots": 0.5,
+            "root_span_share": 0.1,
+        },
+    )
+    write_json_gz(
+        split / "mixed_steady_state_prefill_1_prefilldecode_0_decode_0_bs4_x.json.gz",
+        {},
+    )
+    traces, quality = check_split(tmp_path)
+    assert traces.status == "PASS"
+    assert quality.status == "FAIL"
+    assert quality.detail == (
+        "split aborted; status 1; phase confidence low; suspiciously few roots; "
+        "mixed split has no decode steps (coverage 0.5, root span share 0.1)"
+    )
