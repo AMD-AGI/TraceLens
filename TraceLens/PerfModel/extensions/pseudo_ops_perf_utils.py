@@ -159,6 +159,7 @@ def _get_norm_mappings():
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
         "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
         "aiter::_fuse_rmsnorm_fp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
+        "sglang_profiler::grouped_gemma_rmsnorm_grouped_gemma_rmsnorm": rmsnorm_perf_model_extensions.GroupedGemmaRMSNorm,
         ## Fused RMSNorm + per-group dynamic FP8 quant.
         "aiter::rmsnorm_quant": rmsnorm_perf_model_extensions.aiter_rmsnorm_quant,
         "aiter::fused_add_rmsnorm_pad_": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
