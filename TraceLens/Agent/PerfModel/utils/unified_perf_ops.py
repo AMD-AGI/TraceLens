@@ -209,6 +209,29 @@ def unique_names(rows: Sequence[Row]) -> List[str]:
     )
 
 
+def _print_contributors(
+    picked: Sequence[Row], total_other: float, name_max: int
+) -> None:
+    print(
+        f"\nTop contributors toward Definition A (name truncated to {name_max} chars):"
+    )
+    print("-" * 72)
+    cum = 0.0
+    for r in picked:
+        cum += r["_us"]
+        print(
+            f"  {r['_us']:>14,.3f} µs  {_pct(r['_us'], total_other):5.2f}% of other  "
+            f"cum {_pct(cum, total_other):5.2f}% of other"
+        )
+        print(f"    name: {_trunc((r.get('name') or '').strip(), name_max)}")
+        kernel = (
+            r.get("kernel_details_summary") or r.get("trunc_kernel_details") or ""
+        ).strip()
+        if kernel:
+            print(f"    kernel hint: {_trunc(kernel, 120)}")
+        print()
+
+
 def report_other_bucket(
     path: Path, rows: List[Row], runtime_col: str, args
 ) -> List[str]:
@@ -248,24 +271,7 @@ def report_other_bucket(
             f"{len(picked_g)} row(s), sum {acc_g:,.3f} µs"
         )
 
-    print(
-        f"\nTop contributors toward Definition A (name truncated to {args.name_max} chars):"
-    )
-    print("-" * 72)
-    cum = 0.0
-    for r in picked:
-        cum += r["_us"]
-        print(
-            f"  {r['_us']:>14,.3f} µs  {_pct(r['_us'], total_other):5.2f}% of other  "
-            f"cum {_pct(cum, total_other):5.2f}% of other"
-        )
-        print(f"    name: {_trunc((r.get('name') or '').strip(), args.name_max)}")
-        kernel = (
-            r.get("kernel_details_summary") or r.get("trunc_kernel_details") or ""
-        ).strip()
-        if kernel:
-            print(f"    kernel hint: {_trunc(kernel, 120)}")
-        print()
+    _print_contributors(picked, total_other, args.name_max)
 
     names = unique_names(picked)
     print(f"Unique `name` values in Definition A set: {len(names)}")
@@ -396,7 +402,7 @@ def write_extension(
     )
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -450,7 +456,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         metavar="PATH",
         help="Output for --emit-extension (default: <csv_stem>_triage_extension.py next to the CSV)",
     )
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
 
     path = args.csv_path
     if not path.is_file():

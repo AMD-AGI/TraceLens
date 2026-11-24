@@ -168,7 +168,7 @@ def run_geak_triage(session_dir):
     return findings
 
 
-def main():
+def _build_parser():
     parser = argparse.ArgumentParser(description="TraceLens Analysis Triage Checker")
     parser.add_argument(
         "--run-dir", default=None, help="Path to analysis_output/ directory"
@@ -198,6 +198,11 @@ def main():
         action="store_true",
         help="Also run checks marked detailed_only (slower / noisier)",
     )
+    return parser
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
 
     if not (args.run_dir or args.bench_dir or args.session_dir):

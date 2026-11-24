@@ -45,7 +45,7 @@ def resolve_dtype(name):
 
     try:
         from aiter import dtypes as _aiter_dtypes
-    except Exception:
+    except ImportError:
         _aiter_dtypes = None
 
     if name is None:

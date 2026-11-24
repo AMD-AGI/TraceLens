@@ -173,7 +173,7 @@ def print_results(ops: List[Dict], name_max: int = 60) -> None:
     print(f"\nTotal ops found: {len(ops)}")
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -214,7 +214,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Only show ops without a built-in perf model (implies --check-mapping).",
     )
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
 
     ops: List[Dict] = []
     for fw in args.frameworks:

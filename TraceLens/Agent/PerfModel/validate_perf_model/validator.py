@@ -205,6 +205,18 @@ CSV_COLUMNS = [
     "comment",
 ]
 
+# Float format per CSV column; other float columns are written as integers.
+CSV_FLOAT_FORMATS = {
+    "kernel_runtime_us": ".3f",
+    "kernel_runtime_mean_us": ".3f",
+    "predicted_tflops_s": ".4f",
+    "measured_tflops_s": ".4f",
+    "predicted_tb_s": ".4f",
+    "measured_tb_s": ".4f",
+    "flops_ratio": ".4f",
+    "bytes_ratio": ".4f",
+}
+
 
 def _rocprof_env(out_dir):
     """Environment for a rocprofv3 launch whose working directory is ``out_dir``.
@@ -994,19 +1006,7 @@ def write_results_csv(results, output_path):
                 if val is None:
                     val = ""
                 elif isinstance(val, float):
-                    if col in ("flops_ratio", "bytes_ratio"):
-                        val = f"{val:.4f}"
-                    elif col in (
-                        "predicted_tflops_s",
-                        "measured_tflops_s",
-                        "predicted_tb_s",
-                        "measured_tb_s",
-                    ):
-                        val = f"{val:.4f}"
-                    elif col in ("kernel_runtime_us", "kernel_runtime_mean_us"):
-                        val = f"{val:.3f}"
-                    else:
-                        val = f"{val:.0f}"
+                    val = format(val, CSV_FLOAT_FORMATS.get(col, ".0f"))
                 row[col] = val
             writer.writerow(row)
     print(f"\nCSV report saved to: {output_path}")
@@ -1440,7 +1440,7 @@ def main():
             try:
                 result = run_csv_op_validation(entry, args, op_output_dir)
                 results.append(result)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  one failed op becomes a FAIL row
                 print(f'\n  FAILED: {entry["trace_name"]}: {e}')
                 results.append(_fail_row(entry["registry_key"], e, _case_fields(entry)))
         _enrich_results(results)
@@ -1479,7 +1479,7 @@ def main():
         try:
             result = run_single_op_validation(op_name, args, op_output_dir)
             results.append(result)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  one failed op becomes a FAIL row
             print(f"\n  FAILED: {op_name}: {e}")
             results.append(_fail_row(op_name, e, {}))
     _enrich_results(results)

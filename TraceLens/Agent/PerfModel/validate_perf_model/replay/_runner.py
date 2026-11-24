@@ -122,7 +122,7 @@ def measure(call, num_warmup):
     print("test: done", flush=True)
 
 
-def main():
+def _build_parser():
     p = argparse.ArgumentParser(
         description="Validate-perf-model test runner (rocprofv3 wraps this)."
     )
@@ -178,7 +178,11 @@ def main():
         dest="registry_key",
         help="Original OP_REGISTRY key (generic-CSV mode only).",
     )
-    args = p.parse_args()
+    return p
+
+
+def main():
+    args = _build_parser().parse_args()
 
     fn = find_test_fn(args.op)
     if fn is None:
