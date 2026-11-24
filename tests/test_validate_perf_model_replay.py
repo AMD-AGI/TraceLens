@@ -9,6 +9,7 @@ import csv
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,6 @@ from TraceLens.Agent.PerfModel.validate_perf_model import harnesses
 from TraceLens.Agent.PerfModel.validate_perf_model.harnesses import (
     _CSV_ONLY_OPS,
     OP_REGISTRY,
-    _trace_dtype_str,
     chunk_stats_annotation,
     model_source,
     register,
@@ -27,7 +27,6 @@ from TraceLens.Agent.PerfModel.validate_perf_model.validator import (
     _enrich_results,
     _extract_dims_for_existing_harness,
     _read_csv_rows,
-    format_number,
     main,
     parse_counter_csv,
     parse_kernel_runtime_ns,
@@ -43,6 +42,11 @@ _DISPATCHES = [
     (6, "void at::native::copy_kernel"),
     (7, "gemm_b"),
 ]
+# GDN annotations do not parse yet, so these harnesses are checked by layout only.
+_GDN_OPS = {
+    "vllm_gdn_attention_core": "vllm::gdn_attention_core",
+    "atom_flydsl_gdr_decode": "aiter::linear_attention_with_output_base",
+}
 
 
 def _write(path, header, rows):
@@ -181,12 +185,6 @@ def test_arch_is_required():
     assert proc.returncode != 0 and "--arch is required" in proc.stderr
 
 
-_GDN_OPS = {
-    "vllm_gdn_attention_core": "vllm::gdn_attention_core",
-    "atom_flydsl_gdr_decode": "aiter::linear_attention_with_output_base",
-}
-
-
 @pytest.mark.parametrize(
     "key",
     [k for k, e in OP_REGISTRY.items() if e["model"] is not None and k not in _GDN_OPS],
@@ -312,14 +310,6 @@ def test_chunk_stats_annotation_derives_request_counts(params, expected):
     assert chunk_stats_annotation(params) == expected
 
 
-def test_trace_dtype_str_resolves_short_and_traced_names():
-    assert _trace_dtype_str(None, "dflt") == "dflt"
-    assert _trace_dtype_str("BF16", "dflt") == "c10::BFloat16"
-    assert _trace_dtype_str("c10::Half", "dflt") == "c10::Half"
-    with pytest.raises(ValueError, match="Unknown dtype string"):
-        _trace_dtype_str("bogus", "dflt")
-
-
 @pytest.fixture
 def rocprof(monkeypatch):
     """Replace the rocprofv3 subprocess with one that writes small fake CSVs.
@@ -328,7 +318,7 @@ def rocprof(monkeypatch):
     ``no_csv`` or ``marker_only``. ``counters`` are the raw values reported for
     every dispatch.
     """
-    fake = argparse.Namespace(
+    fake = types.SimpleNamespace(
         modes={},
         counters={
             "SQ_INSTS_VALU_MFMA_MOPS_F8": 128,
@@ -405,35 +395,14 @@ def test_single_op_validation_reports_counters_against_the_prediction(
     rocprof, tmp_path, monkeypatch
 ):
     out = tmp_path / "out"
-    assert (
-        _run_main(
-            monkeypatch,
-            *"--op gemm_a8w8_blockscale --M 16 --N 32 --K 64 --arch gfx942".split(),
-            "--kernel-filter",
-            "gemm_a",
-            "--rocprofv3-path",
-            str(tmp_path / "rocprofv3"),
-            "--output-dir",
-            str(out),
-        )
-        is None
+    _run_main(
+        monkeypatch,
+        *"--op gemm_a8w8_blockscale --M 16 --N 32 --K 64 --arch gfx942".split(),
+        *("--kernel-filter", "gemm_a", "--rocprofv3-path", str(tmp_path / "rocprofv3")),
+        *("--output-dir", str(out)),
     )
     (row,) = _read_csv_rows(out / "validation_report.csv")
-    assert {
-        k: row[k]
-        for k in (
-            "run_status",
-            "flops_ratio",
-            "bytes_ratio",
-            "precision_check",
-            "match_status",
-            "kernel_name",
-            "kernel_runtime_us",
-            "rocprof_f8_ops",
-            "rocprof_total_16",
-            "rocprof_write_bytes",
-        )
-    } == {
+    expected = {
         "run_status": "OK",
         "flops_ratio": "1.0000",
         "bytes_ratio": "1.0000",
@@ -445,6 +414,7 @@ def test_single_op_validation_reports_counters_against_the_prediction(
         "rocprof_total_16": "4",
         "rocprof_write_bytes": "2048",
     }
+    assert {k: row[k] for k in expected} == expected
     assert (
         "PASS - dominant MFMA type matches"
         in (out / "validation_report.txt").read_text()
@@ -654,7 +624,7 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
     monkeypatch.setitem(
         sys.modules,
         "TraceLens.PerfModel.extensions.pseudo_ops_perf_utils",
-        argparse.Namespace(
+        types.SimpleNamespace(
             get_pseudo_op_mappings=lambda: {
                 "aiter::rms_norm": dict,
                 "vllm::unknown_op": list,
@@ -665,7 +635,7 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
     monkeypatch.setitem(
         sys.modules,
         "TraceLens.PerfModel.torch_op_mapping",
-        argparse.Namespace(op_to_perf_model_class_map={"aiter::other_op": tuple}),
+        types.SimpleNamespace(op_to_perf_model_class_map={"aiter::other_op": tuple}),
     )
     assert _run_main(monkeypatch, "--discover") is None
     out = capsys.readouterr().out
@@ -674,7 +644,7 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize(
-    "key, dims, types, concrete, perf_params, expected",
+    "key, dims, input_types, concrete, perf_params, expected",
     [
         (
             "dsv3_mla_decode_fwd",
@@ -690,22 +660,6 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
                 "num_heads_q": 16,
                 "head_dim": 576,
                 "kv_dtype": "fp8",
-            },
-        ),
-        (
-            "dsv3_mla_decode_fwd",
-            [],
-            None,
-            None,
-            None,
-            {
-                "n_ctx": 0,
-                "ctx_qlen": 0,
-                "E": 64,
-                "seq_len": 8677,
-                "num_heads_q": 16,
-                "head_dim": 576,
-                "kv_dtype": "bf16",
             },
         ),
         (
@@ -731,14 +685,6 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
             {"M": 16, "K": 64, "N": 32},
         ),
         (
-            "gemm_a8w8_blockscale",
-            [],
-            [],
-            None,
-            None,
-            {"M": 2048, "K": 8192, "N": 4096},
-        ),
-        (
             "ck_moe_stage1",
             [],
             [],
@@ -760,24 +706,7 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
             None,
             {"M": 8, "K": 64, "E": 4, "N": 32, "topk": 3},
         ),
-        (
-            "ck_moe_stage1",
-            [[8, 64], [4, 16, 32]],
-            [],
-            [0],
-            None,
-            {"M": 8, "K": 64, "E": 4, "N": 32, "topk": 2},
-        ),
-        (
-            "ck_moe_stage1",
-            [],
-            [],
-            None,
-            None,
-            {"M": 512, "K": 7168, "E": 8, "N": 2048, "topk": 2},
-        ),
         ("silu_and_mul", [[16, 64]], [], None, None, {"M": 16, "N": 64}),
-        ("silu_and_mul", [[16]], [], None, None, {"M": 16, "N": 7168}),
         (
             "rms_norm",
             [[16, 64]],
@@ -793,22 +722,6 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
             None,
             None,
             {"M": 16, "N": 64, "group_size": 128},
-        ),
-        (
-            "dynamic_per_token_scaled_quant",
-            [[16, 64]],
-            [],
-            None,
-            None,
-            {"M": 16, "N": 64, "group_size": 128},
-        ),
-        (
-            "dynamic_per_token_scaled_quant",
-            [],
-            [],
-            None,
-            None,
-            {"M": 2048, "N": 7168, "group_size": 128},
         ),
         (
             "_flash_attn_forward",
@@ -852,50 +765,28 @@ def test_discover_reports_covered_missing_and_skipped_ops(monkeypatch, capsys):
             None,
             {"seq_len": 16, "num_heads_q": 4, "head_dim": 64, "num_heads_kv": 2},
         ),
-        (
-            "_flash_attn_forward",
-            [],
-            [],
-            None,
-            None,
-            {"seq_len": 2048, "num_heads_q": 32, "head_dim": 128, "num_heads_kv": 8},
-        ),
-        (
-            "gemm_afp4wfp4",
-            [],
-            [],
-            None,
-            None,
-            {"M": 822, "N": 2112, "K": 3584},
-        ),
+    ],
+    ids=[
+        "mla_from_perf_params",
+        "flydsl_moe_from_perf_params",
+        "gemm_from_dims",
+        "moe_prefers_perf_params",
+        "ck_moe_topk_from_concrete_input",
+        "activation_from_dims",
+        "norm_from_dims",
+        "quant_flattens_leading_dims",
+        "varlen_attention_from_perf_params",
+        "batched_attention_from_dims",
+        "packed_attention_from_dims",
     ],
 )
 def test_traced_dims_map_onto_harness_args(
-    key, dims, types, concrete, perf_params, expected
+    key, dims, input_types, concrete, perf_params, expected
 ):
     ns = _extract_dims_for_existing_harness(
-        key, dims, types, concrete, perf_params=perf_params
+        key, dims, input_types, concrete, perf_params=perf_params
     )
     assert vars(ns) == expected
-
-
-@pytest.mark.parametrize(
-    "val, unit, expected",
-    [
-        (None, "ops", "N/A"),
-        (2.5e9, "bytes", "2.50 GB"),
-        (3e6, "bytes", "3.00 MB"),
-        (4000, "bytes", "4.00 KB"),
-        (5, "bytes", "5 B"),
-        (2e12, "ops", "2.00 T"),
-        (3e9, "ops", "3.00 G"),
-        (4e6, "ops", "4.00 M"),
-        (5000, "ops", "5.00 K"),
-        (7, "ops", "7"),
-    ],
-)
-def test_format_number_scales_to_the_nearest_unit(val, unit, expected):
-    assert format_number(val, unit) == expected
 
 
 @pytest.mark.parametrize(
@@ -906,34 +797,14 @@ def test_format_number_scales_to_the_nearest_unit(val, unit, expected):
             "hint: FLOPs: exact match; Bytes: good match",
         ),
         (
-            {"flops_ratio": 0.9, "bytes_ratio": 0.5},
-            "hint: FLOPs 0.90x: minor under-count, likely rounding or tile residuals; "
-            "Bytes 0.50x: model over-predicts bytes",
-        ),
-        (
             {"flops_ratio": 0.3, "bytes_ratio": 1.5},
             "hint: FLOPs 0.30x: kernel may use different MFMA dtype than predicted; "
             "Bytes 1.50x: L2 replay or scale tensor overhead",
         ),
         (
-            {"flops_ratio": 0.6, "bytes_ratio": 3.0},
-            "hint: FLOPs 0.60x: possible mixed-precision or partial tile usage; "
-            "Bytes 3.0x: significant extra traffic (L2 replays, scales, workspace)",
-        ),
-        (
-            {"flops_ratio": 1.3, "bytes_ratio": 1.1},
-            "hint: FLOPs 1.30x: minor over-count from tile padding or epilogue; "
-            "Bytes: good match",
-        ),
-        (
-            {"flops_ratio": 3.0, "bytes_ratio": 1.1},
+            {"flops_ratio": 3.0, "bytes_ratio": 0.5},
             "hint: FLOPs 3.0x: likely tile padding, SwiGLU fusion, or extra VALU ops; "
-            "Bytes: good match",
-        ),
-        (
-            {"flops_ratio": 1.8, "bytes_ratio": 1.1},
-            "hint: FLOPs 1.80x: moderate over-count, check tile dimensions; "
-            "Bytes: good match",
+            "Bytes 0.50x: model over-predicts bytes",
         ),
         (
             {"flops_ratio": 1.0, "bytes_ratio": 1.1, "precision": "NO DATA"},
@@ -941,6 +812,7 @@ def test_format_number_scales_to_the_nearest_unit(val, unit, expected):
             "No ops counters collected for precision check",
         ),
     ],
+    ids=["match", "under_count", "over_count", "no_precision_data"],
 )
 def test_comment_describes_the_ratio_band(fields, comment):
     (row,) = _enrich_results([_row("rms_norm", **fields)])

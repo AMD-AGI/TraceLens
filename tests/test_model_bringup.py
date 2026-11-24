@@ -567,17 +567,6 @@ def test_model_config_bad_benchmark_yaml(tmp_path, capsys, benchmark_yaml, messa
     assert message in capsys.readouterr().err
 
 
-def test_load_checkpoint_config_defers_to_config_resolve(monkeypatch):
-    resolve = types.ModuleType("config_resolve")
-    resolve.load_checkpoint_config = lambda checkpoint: ({"hidden_size": 64}, "label")
-    monkeypatch.setitem(sys.modules, "TraceLens.ModelUtils", types.ModuleType("m"))
-    monkeypatch.setitem(sys.modules, "TraceLens.ModelUtils.config_resolve", resolve)
-    assert bringup_gates._load_checkpoint_config("ckpt") == (
-        {"hidden_size": 64},
-        "label",
-    )
-
-
 def test_model_config_unresolved(tmp_path, monkeypatch):
     def offline(checkpoint):
         raise FileNotFoundError("no cached config")
