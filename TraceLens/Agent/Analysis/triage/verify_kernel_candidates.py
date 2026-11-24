@@ -35,7 +35,7 @@ from typing import Any
 
 from TraceLens.util import GPU_KERNEL_CATEGORIES, TraceEventUtils
 
-from .checks import _events_of, _load_trace_json, resolve_trace_path
+from .checks import _load_trace_json, resolve_trace_path
 
 # Constants
 TOP_RUNTIME_FRACTION = 0.95
@@ -629,7 +629,7 @@ def verify(
     """Run the six checks and return a JSON-serializable report."""
     rows, time_col = load_unified_rows(unified)
     timeline = load_gpu_timeline(timeline_path)
-    events = _events_of(_load_trace_json(str(trace)))
+    events, _ = _load_trace_json(str(trace))
     trace_kernels = scan_trace_kernels(events)
     csv_kernels = kernel_detail_totals(rows)
     payload = load_kernel_candidates(kernel_candidates)

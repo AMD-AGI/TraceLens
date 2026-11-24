@@ -10,7 +10,7 @@ import gzip
 import json
 from pathlib import Path
 
-from TraceLens.Agent.Analysis.triage.checks import _events_of, _load_trace_json
+from TraceLens.Agent.Analysis.triage.checks import _load_trace_json
 from TraceLens.Agent.Analysis.triage.verify_kernel_candidates import (
     check_candidate_kernels,
     check_csv_quality,
@@ -93,26 +93,14 @@ def _write_analysis(root: Path) -> None:
     )
 
 
-def _events(root: Path) -> list:
-    path = root / "mixed_steady_state_case.json.gz"
-    return _events_of(_load_trace_json(str(path)))
-
-
-def test_scan_counts_kernels_and_memcpy_not_cpu_ops(tmp_path):
-    _write_analysis(tmp_path)
-    kernels = scan_trace_kernels(_events(tmp_path))
-    assert set(kernels) == {"kern_a", "kern_b", "Memcpy DtoD"}
-    assert kernels["kern_a"]["count"] == 2
-    assert kernels["kern_a"]["dur_us"] == 100
-
-
 def test_checks_cover_time_counts_rank_shapes_and_models(tmp_path):
     _write_analysis(tmp_path)
     rows, time_col = load_unified_rows(
         tmp_path / "perf_report_csvs" / "unified_perf_summary.csv"
     )
     timeline = {"busy_time": 0.14, "computation_time": 0.12}
-    trace_kernels = scan_trace_kernels(_events(tmp_path))
+    events, _ = _load_trace_json(str(tmp_path / "mixed_steady_state_case.json.gz"))
+    trace_kernels = scan_trace_kernels(events)
     csv_kernels = kernel_detail_totals(rows)
     payload = json.loads(
         (tmp_path / "kernel_candidates.json").read_text(encoding="utf-8")

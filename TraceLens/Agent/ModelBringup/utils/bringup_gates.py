@@ -46,7 +46,6 @@ from TraceLens.Agent.PerfModel.validate_perf_model.ratio_bands import (
     DEVIATION_EXPLAINED,
     MATCH,
 )
-from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
 from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions import (
     CustomCollective,
 )
@@ -159,6 +158,13 @@ def prepare(args):
     return args.bringup.write_gate("prepare", bool(splits), **values)
 
 
+def _load_checkpoint_config(checkpoint):
+    # Imported here: the ModelUtils package imports torch, which only this gate needs.
+    from TraceLens.ModelUtils.config_resolve import load_checkpoint_config
+
+    return load_checkpoint_config(checkpoint)
+
+
 def model_config(args):
     """Write the model config, launch settings and paper link for op agents."""
     path = Path(args.profile_dir) / "benchmark.yaml"
@@ -179,7 +185,7 @@ def model_config(args):
     checkpoint = model_path if model_path and Path(model_path).is_dir() else model_id
     config = error = None
     try:
-        config, _ = load_checkpoint_config(checkpoint)
+        config, _ = _load_checkpoint_config(checkpoint)
     except (OSError, ValueError) as e:
         error = str(e)
     # HF_HUB_OFFLINE only pins the config read; the card lookup is plain urllib.

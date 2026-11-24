@@ -451,7 +451,8 @@ def test_model_config_resolves(tmp_path, monkeypatch):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     hf_config = {"model_type": "example_moe", "hidden_size": 64, "num_experts": 4}
-    (checkpoint / "config.json").write_text(json.dumps(hf_config))
+    configs = {str(checkpoint): (hf_config, "config.json")}
+    monkeypatch.setattr(bringup_gates, "_load_checkpoint_config", configs.__getitem__)
     envs = {
         "tp": 8,
         "CONC": 64,
@@ -465,7 +466,7 @@ def test_model_config_resolves(tmp_path, monkeypatch):
         "TP": 8,
         "EXTRA_SGLANG_ARGS": "--dp 8 --enable-dp-attention",
     }
-    assert out["config"].items() >= hf_config.items()
+    assert out["config"] == hf_config
     assert out["paper"] == paper
 
 
@@ -473,7 +474,7 @@ def test_model_config_unresolved(tmp_path, monkeypatch):
     def offline(checkpoint):
         raise FileNotFoundError("no cached config")
 
-    monkeypatch.setattr(bringup_gates, "load_checkpoint_config", offline)
+    monkeypatch.setattr(bringup_gates, "_load_checkpoint_config", offline)
     monkeypatch.setattr(bringup_gates, "_find_paper", lambda model_id: None)
     rc, out = _model_config(tmp_path, "sglang", {"TP": 4})
     assert rc == 1
