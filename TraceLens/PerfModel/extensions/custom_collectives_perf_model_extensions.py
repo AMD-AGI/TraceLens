@@ -9,6 +9,7 @@ Performance models for custom collective operation extensions.
 """
 
 from math import prod
+from TraceLens.PerfModel.perf_model import RMSNorm
 from TraceLens.PerfModel.utils import dense_counted_tensor, name2bpe
 
 
@@ -60,13 +61,10 @@ class aiter_fused_allreduce_rmsnorm(CustomCollective):
         }
 
     def flops(self):
-        # Residual add: num_elems (allreduced_inp + res_inp -> res_out)
-        add_flops = self.num_elems
-        # RMSNorm (affine=True, training=False) — same formula as RMSNorm.flops()
-        non_norm_elems = self.num_elems // self.num_channels
-        rms_flops = non_norm_elems * (2 * self.num_channels + 2)  # compute rsqrt
-        rms_flops += self.num_elems * 2  # apply weight
-        return add_flops + rms_flops
+        # Residual add, then the same affine RMSNorm the standalone model prices.
+        return self.num_elems + RMSNorm.flops_func(
+            self.num_elems, self.num_channels, True
+        )
 
     def bytes(self):
         # memory traffic per GPU (inter-GPU allreduce bandwidth is separate)
