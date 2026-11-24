@@ -11,6 +11,7 @@ from math import prod
 from .kernel_name_parser import gemm_name_parser
 from .op_flops import OP_FLOPS_PER_ELEM, op_flops_per_elem, pow_flops_per_elem
 from .utils import (
+    MXFP4_GROUP_SIZE,
     name2bpe,
     optional_float,
     optional_tensor_passed,
@@ -4456,9 +4457,6 @@ class primus_turbo_grouped_gemm_variable_k(GroupedGemm):
         )
 
 
-_MXFP4_BLOCK = 32  # elements per E8M0 scale
-
-
 def _mxfp4_act_buffer_bytes(M, I):
     """Bytes written for the row-wise and col-wise MXFP4 copies (+ E8M0 scales)
     of an [M, I] activation, as emitted by the fused GLU / dGLU quantisation
@@ -4469,7 +4467,7 @@ def _mxfp4_act_buffer_bytes(M, I):
 
     Kernel tile-alignment padding of the buffers is not modelled.
     """
-    return 2 * (M * I // 2 + M * I // _MXFP4_BLOCK)
+    return 2 * (M * I // 2 + M * I // MXFP4_GROUP_SIZE)
 
 
 class primus_turbo_grouped_gemm_fp4(primus_turbo_grouped_gemm):
@@ -4522,7 +4520,7 @@ class primus_turbo_grouped_gemm_fp4(primus_turbo_grouped_gemm):
         return pd
 
     def _scale_bytes(self):
-        return (self.M + self.G * self.N) * (self.K // _MXFP4_BLOCK)
+        return (self.M + self.G * self.N) * (self.K // MXFP4_GROUP_SIZE)
 
     def bytes(self):
         # GroupedGemm.bytes(): (M*K + G*N*K) * bpe_in + M*N * bpe_out
@@ -4637,7 +4635,6 @@ class primus_turbo_grouped_gemm_variable_k_fp4(primus_turbo_grouped_gemm_variabl
             (M + N) * K * 0.5            read lhs, rhs (FP4)
           + (M + N) * K/32               read lhs, rhs E8M0 scales
           + G * M * N * 2                write grad_W[G, M, N] BF16
-          + _extra_bytes()               op-specific traffic (0 here)
 
     Notes:
         GroupedGemm.bytes_func does not fit: it assumes one shared activation, G
@@ -4661,16 +4658,12 @@ class primus_turbo_grouped_gemm_variable_k_fp4(primus_turbo_grouped_gemm_variabl
     def flops(self):
         return 2 * self.M * self.K * self.N
 
-    def _extra_bytes(self):
-        return 0
-
     def bytes(self):
         M, N, K, G = self.M, self.N, self.K, self.G
         return (
             (M + N) * K * self.bpe_in
-            + (M + N) * (K // _MXFP4_BLOCK)
+            + (M + N) * (K // MXFP4_GROUP_SIZE)
             + G * M * N * self.bpe_out
-            + self._extra_bytes()
         )
 
 
@@ -4696,8 +4689,9 @@ class primus_turbo_grouped_gemm_variable_k_accum_fp4(
         + G * M * N * 2                  read grad_W[G, M, N] BF16 (accumulate)
     """
 
-    def _extra_bytes(self):
-        return self.G * self.M * self.N * self.bpe_out
+    def bytes(self):
+        # accumulate: grad_W is read as well as written
+        return super().bytes() + self.G * self.M * self.N * self.bpe_out
 
 
 # Jax Perf Models
