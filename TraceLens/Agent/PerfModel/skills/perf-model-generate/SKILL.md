@@ -63,6 +63,7 @@ The perf model for the op in the chosen depth and mode, the regenerated report's
 - `get_param_details` returns every value `flops()` and `bytes()` use, including annotation-derived ones; validation runs from them.
 - Every registered class has the docstring from the template.
 - No perf model class for a `(Synthetic Op)` name; categorize it only.
+- Model the op once, at the most stable name that carries its shapes, not per kernel or template variant ("Locate" in reference.md).
 
 ## Stop rules
 
