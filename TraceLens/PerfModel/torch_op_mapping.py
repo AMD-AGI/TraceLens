@@ -335,7 +335,6 @@ norm_ops = {
     "aten::miopen_instance_norm": perf_model.InstanceNorm,
     "aten::cudnn_instance_norm": perf_model.InstanceNorm,
     "aten::_fused_rms_norm": perf_model.RMSNorm,
-    "sglang_profiler::grouped_gemma_rmsnorm_grouped_gemma_rmsnorm": perf_model.GroupedGemmaRMSNorm,
     "aten::batch_norm_backward": perf_model.BatchNormBwd,
     "aten::native_batch_norm_backward": perf_model.BatchNormBwd,
     "aten::miopen_batch_norm_backward": perf_model.BatchNormBwd,

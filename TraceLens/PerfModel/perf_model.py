@@ -8,7 +8,7 @@ import ast
 import warnings
 from math import prod
 
-from .kernel_name_parser import gemm_name_parser, grouped_rmsnorm_group_size
+from .kernel_name_parser import gemm_name_parser
 from .utils import (
     name2bpe,
     optional_float,
@@ -5364,44 +5364,6 @@ class RMSNorm(Normalization):
         raise NotImplementedError(
             f"Backward pass for {self.__class__.__name__} is not defined."
         )
-
-
-class GroupedGemmaRMSNorm(RMSNorm):
-    # out = x * rsqrt(mean(x^2) + eps) * (1 + w), with the variance taken over each
-    # contiguous group of the last dim. The group size is only in the kernel template.
-    @staticmethod
-    def get_param_details(event):
-        op_shape = tuple(event["args"]["Input Dims"][0])
-        return {
-            "op_shape": op_shape,
-            "dtype_in_out": (event["args"]["Input type"][0], None),
-            "stride_input": tuple(event["args"]["Input Strides"][0]),
-            "stride_output": None,
-            "num_channels": GroupedGemmaRMSNorm._group_size(event),
-            "hidden_size": op_shape[-1],
-            "has_bias": False,
-            "is_affine": True,
-            "is_training": False,
-        }
-
-    def flops(self):
-        # RMSNorm's per-group reduction, plus one extra add per element for (1 + w).
-        return super().flops() + self.num_elems
-
-    def bytes(self):
-        # The weight spans the full hidden size, not one group.
-        return (
-            self.num_elems * (self.bpe_in + self.bpe_out)
-            + self.param_details["hidden_size"] * self.bpe_in
-        )
-
-    @staticmethod
-    def _group_size(event):
-        for kernel in event["kernel_details"]:
-            group_size = grouped_rmsnorm_group_size(kernel["name"])
-            if group_size is not None:
-                return group_size
-        raise ValueError(f"No grouped RMSNorm kernel under {event['name']}")
 
 
 class RMSNormBwd(Normalization):

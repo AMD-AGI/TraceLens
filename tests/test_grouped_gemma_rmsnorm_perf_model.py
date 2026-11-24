@@ -8,7 +8,9 @@
 
 import pytest
 
-from TraceLens.PerfModel import perf_model
+from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
+    GroupedGemmaRMSNorm,
+)
 from TraceLens.PerfModel.kernel_name_parser import grouped_rmsnorm_group_size
 from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
 
@@ -39,12 +41,12 @@ def test_group_size_from_kernel_name():
 
 
 def test_op_is_mapped():
-    assert op_to_perf_model_class_map[_OP_NAME] is perf_model.GroupedGemmaRMSNorm
+    assert op_to_perf_model_class_map[_OP_NAME] is GroupedGemmaRMSNorm
 
 
 @pytest.mark.parametrize("m", [8, 32, 2048])
 def test_flops_and_bytes(m):
-    model = perf_model.GroupedGemmaRMSNorm(_event(m))
+    model = GroupedGemmaRMSNorm(_event(m))
     elems = m * _HIDDEN
     groups = elems // _GROUP
     assert model.flops() == groups * (2 * _GROUP + 2) + 3 * elems
@@ -54,11 +56,11 @@ def test_flops_and_bytes(m):
 
 def test_missing_kernel_raises():
     with pytest.raises(ValueError):
-        perf_model.GroupedGemmaRMSNorm(_event(32, "void other_kernel<1>()"))
+        GroupedGemmaRMSNorm(_event(32, "void other_kernel<1>()"))
 
 
 def test_backward_not_implemented():
-    model = perf_model.GroupedGemmaRMSNorm(_event(32))
+    model = GroupedGemmaRMSNorm(_event(32))
     with pytest.raises(NotImplementedError):
         model.flops_bwd()
     with pytest.raises(NotImplementedError):

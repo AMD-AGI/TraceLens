@@ -140,6 +140,7 @@ def get_pseudo_op_mappings():
         "vllm::rocm_aiter_triton_add_rmsnorm_pad": rmsnorm_perf_model_extensions.vllm_rocm_aiter_triton_add_rmsnorm_pad,
         "sglang_profiler::fused_mxfp4_quant_fused_rms_mxfp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
         "aiter::_fuse_rmsnorm_fp4_quant": rmsnorm_perf_model_extensions.fused_rms_mxfp4_quant,
+        "sglang_profiler::grouped_gemma_rmsnorm_grouped_gemma_rmsnorm": rmsnorm_perf_model_extensions.GroupedGemmaRMSNorm,
         ## Collective ops
         "aiter::fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm,
         "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
