@@ -8,6 +8,8 @@
 Utils. for perf. model.
 """
 
+from math import prod
+
 from TraceLens.util import optional_float, optional_int, parse_bool  # noqa: F401
 
 
@@ -317,3 +319,15 @@ def torch_dtype_map(dtype):
     if dtype is None:
         return None
     return _DTYPE2SIMULATION.get(str(dtype).lower().split("::")[-1], None)
+
+
+def optional_tensor_passed(dims):
+    """Return True if an optional tensor argument was passed to the op.
+
+    *dims* is the op's entry in the trace's "Input Dims". The profiler
+    records an optional tensor that was not passed as ``[]``. A tensor with
+    zero elements is treated the same way.
+    """
+    if dims is None or len(dims) == 0:
+        return False
+    return prod(dims) != 0

@@ -73,6 +73,7 @@ def _get_attention_mappings():
         "pseudo_mla_prefill_fwd": attention_perf_model_extensions.pseudo_mla_prefill_fwd,
         "aiter::pa_decode_gluon": attention_perf_model_extensions.pa_decode_gluon,
         "aiter::mla_decode_v4_asm": attention_perf_model_extensions.mla_decode_v4_asm,
+        "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)": attention_perf_model_extensions.mla_decode_v4_stage2_asm,
         "pseudo_vllm_sparse_attn_decode": attention_perf_model_extensions.vllm_sparse_attn_decode,
         # DeepSeek-V4 sparse paged decode (mode-specific pseudo ops)
         "pseudo_v4_paged_decode_swa": attention_perf_model_extensions.pseudo_v4_paged_decode_swa,
@@ -88,6 +89,11 @@ def _get_attention_mappings():
         "sgl_kernel::deepseek_v4_topk_transform_512": attention_perf_model_extensions.sgl_kernel_deepseek_v4_topk_transform_512,
         "sgl_kernel::fast_topk": attention_perf_model_extensions.sgl_kernel_fast_topk,
         "fused_k_norm_rope_q_flashmla": attention_perf_model_extensions.fused_k_norm_rope_q_flashmla,
+        # FlydSL Flash Attention (Flux v26.7 training)
+        "flux_flydsl::attn_fwd": primus_flux_perf_model_extensions.flux_flydsl_attn_fwd,
+        "flux_flydsl::attn_fwd_split": primus_flux_perf_model_extensions.flux_flydsl_attn_fwd_split,
+        "flux_flydsl::attn_bwd": primus_flux_perf_model_extensions.flux_flydsl_attn_bwd,
+        "flux_flydsl::attn_bwd_split": primus_flux_perf_model_extensions.flux_flydsl_attn_bwd_split,
     }
 
 
@@ -266,8 +272,6 @@ def get_pseudo_op_category_only_mappings():
         "hipModuleLaunchKernel->_sparse_attn_decode_reduce_kernel.kd (Synthetic Op)": "InferenceAttention",
         "hipGraphLaunch->_sparse_attn_decode_gfx950_partial_kernel.kd (Synthetic Op)": "InferenceAttention",
         "hipGraphLaunch->_sparse_attn_decode_reduce_kernel.kd (Synthetic Op)": "InferenceAttention",
-        # Launched by mla_decode_fwd_v4_nm after mla_decode_v4_asm; merge trip count is device-side, so classify only (tensors copied from MLA parent).
-        "hipModuleLaunchKernel->_fwd_kernel_stage2_asm (Synthetic Op)": "InferenceAttention",
         # DeepSeek-V4 attention synthetic child ops with fixed names (no shape params).
         "aiter::v4_attention_with_output->_inverse_rope_gptj_kernel (Synthetic Op)": "FusedRoPE",
         "aiter::v4_attention_with_output->_update_compressor_states_kernel (Synthetic Op)": "InferenceAttention",
