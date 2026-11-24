@@ -33,7 +33,6 @@ from TraceLens.PerfModel.torch_op_mapping import (
 )
 from TraceLens.PerfModel.utils import MXFP4_GROUP_SIZE, name2bpe, torch_dtype_map
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -791,8 +790,14 @@ def test_fp4_grouped_ops_map_to_fp4_subclasses():
 
     m = get_pseudo_op_mappings()
     assert m["primus_turbo::grouped_gemm_fp4_impl"] is primus_turbo_grouped_gemm_fp4
-    assert m["primus_turbo::grouped_gemm_fp4_glu_impl"] is primus_turbo_grouped_gemm_fp4_glu
-    assert m["primus_turbo::grouped_gemm_fp4_dglu_impl"] is primus_turbo_grouped_gemm_fp4_dglu
+    assert (
+        m["primus_turbo::grouped_gemm_fp4_glu_impl"]
+        is primus_turbo_grouped_gemm_fp4_glu
+    )
+    assert (
+        m["primus_turbo::grouped_gemm_fp4_dglu_impl"]
+        is primus_turbo_grouped_gemm_fp4_dglu
+    )
     assert (
         m["primus_turbo::grouped_gemm_fp4_variable_k_impl"]
         is primus_turbo_grouped_gemm_variable_k_fp4
