@@ -12,6 +12,7 @@ from TraceLens.PerfModel.extensions.rmsnorm_perf_model_extensions import (
     GroupedGemmaRMSNorm,
 )
 from TraceLens.PerfModel.kernel_name_parser import grouped_rmsnorm_group_size
+from TraceLens.PerfModel.perf_model import RMSNorm as CoreRMSNorm
 from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map
 
 _OP_NAME = "sglang_profiler::grouped_gemma_rmsnorm_grouped_gemma_rmsnorm"
@@ -48,8 +49,8 @@ def test_op_is_mapped():
 def test_flops_and_bytes(m):
     model = GroupedGemmaRMSNorm(_event(m))
     elems = m * _HIDDEN
-    groups = elems // _GROUP
-    assert model.flops() == groups * (2 * _GROUP + 2) + 3 * elems
+    # Core RMSNorm with each group as the normalized row, plus the (1 + w) add.
+    assert model.flops() == CoreRMSNorm.flops(model) + elems
     assert model.bytes() == 2 * elems * 2 + _HIDDEN * 2
     assert model.param_details["num_channels"] == _GROUP
 
