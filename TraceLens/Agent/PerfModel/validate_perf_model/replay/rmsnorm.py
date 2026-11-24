@@ -183,7 +183,7 @@ def test_vllm_rmsnorm_fp8_group_quant(
     group_size : int (default 128).
     """
     import torch
-    import vllm._aiter_ops as vllm
+    import vllm._aiter_ops  # noqa: F401  registers torch.ops.vllm.rocm_aiter_*
 
     in_t = _resolve_dtype(in_dtype)
     w_t = _resolve_dtype(w_dtype)
@@ -219,7 +219,7 @@ def test_vllm_rmsnorm_add_fp8_group_quant(
 ):
     """``vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant``."""
     import torch
-    import vllm._aiter_ops as vllm
+    import vllm._aiter_ops  # noqa: F401  registers torch.ops.vllm.rocm_aiter_*
 
     in_t = _resolve_dtype(in_dtype)
     w_t = _resolve_dtype(w_dtype)

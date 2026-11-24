@@ -625,7 +625,6 @@ def test_dsv3_mla_decode_fwd(
     kv_indptr[1:] = torch.cumsum(
         torch.tensor(kv_lens, dtype=torch.int, device=device), 0
     )
-    total_kv = int(kv_indptr[-1].item())
 
     num_page = region_base + 128  # page_size == 1
     kv_indices = torch.cat(

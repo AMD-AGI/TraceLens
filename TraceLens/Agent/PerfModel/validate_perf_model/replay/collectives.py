@@ -182,7 +182,7 @@ def test_custom_ar_all_reduce(
     import torch
 
     try:
-        import vllm._C_custom_ar as _car  # registers torch.ops._C_custom_ar
+        import vllm._C_custom_ar  # noqa: F401  registers torch.ops._C_custom_ar
     except ImportError as exc:
         raise ImportError(
             "_C_custom_ar is not available. Ensure vLLM is installed."

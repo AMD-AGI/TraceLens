@@ -19,7 +19,6 @@ import functools
 import importlib
 import inspect
 import os
-import re
 from pathlib import Path
 
 from TraceLens.PerfModel.torch_op_mapping import op_to_perf_model_class_map

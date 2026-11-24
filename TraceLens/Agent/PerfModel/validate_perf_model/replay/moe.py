@@ -333,7 +333,6 @@ def test_moe_cktile2stages_gemm1_ck(
 
     torch.set_default_device("cuda")
     in_t = _resolve_dtype(in_dtype)
-    w_t = _resolve_dtype(w_dtype)
     out_t = _resolve_dtype(out_dtype)
     if w_dtype != "fp4x2":
         raise ValueError(
@@ -420,7 +419,6 @@ def test_moe_cktile2stages_gemm2_ck(
 
     torch.set_default_device("cuda")
     in_t = _resolve_dtype(in_dtype)
-    w_t = _resolve_dtype(w_dtype)
     out_t = _resolve_dtype(out_dtype)
     if w_dtype != "fp4x2":
         raise ValueError(
@@ -943,7 +941,7 @@ def test_dsv3_moe_flydsl_stage1(M=64, K=7168, N=256, E=257, topk=9, block_m=32, 
 
     if not is_flydsl_available():
         print("test: FlyDSL not available; skipping dsv3_moe_flydsl_stage1", flush=True)
-        return
+        return None
     from aiter.ops.flydsl.moe_kernels import flydsl_moe_stage1
 
     token, model_dim, inter_dim = M, K, N
@@ -1000,7 +998,7 @@ def test_dsv3_moe_flydsl_stage2(
 
     if not is_flydsl_available():
         print("test: FlyDSL not available; skipping dsv3_moe_flydsl_stage2", flush=True)
-        return
+        return None
     from aiter.ops.flydsl.moe_kernels import flydsl_moe_stage2
 
     token, model_dim, inter_dim = M, K, N
