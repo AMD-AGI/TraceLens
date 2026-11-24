@@ -95,7 +95,7 @@ def categorize_operation(name: str, kernel_name: str | None = None) -> str | Non
     ``categorize_torch_op`` is the report's op categorizer. It reads the op
     name and, for an ``at::native`` kernel, ``kernel_details``. When that
     returns no category, the kernel name is labeled with
-    ``JaxOpKeys.category_for_kernel_name``, the same match
+    ``KernelCategoryKeys.category_for_kernel_name``, the same match
     ``TraceToTree._categorize_gpu_kernel_ops`` uses. That is what puts a
     Tensile ``Cijk_`` kernel in GEMM. Attention and MoE report labels use the
     projection's names for those ops. Every other label is returned as the
@@ -109,7 +109,7 @@ def categorize_operation(name: str, kernel_name: str | None = None) -> str | Non
         {"name": op_name, "kernel_details": [{"name": kernel}]}
     )
     if not category or category.lower() in _UNCLASSIFIED:
-        category = TraceEventUtils.JaxOpKeys.category_for_kernel_name(kernel)
+        category = TraceEventUtils.KernelCategoryKeys.category_for_kernel_name(kernel)
     if not category or str(category).lower() in _UNCLASSIFIED:
         return None
     return _PROJECTION_CATEGORY.get(category, category)

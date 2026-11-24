@@ -13,7 +13,7 @@ The bug:
 
 - ``__amd_rocclr_fillBufferAligned.kd`` events have no TE substring in
   their name, so the name-keyword scan in
-  ``JaxOpKeys.ClassCategories`` misses them and they land in
+  ``KernelCategoryKeys.ClassCategories`` misses them and they land in
   ``Uncategorized Events``. Their ``args["hlo_op"]`` *does* identify
   the surrounding XLA op (``te_fused_attn_backward_ffi.*``).
 - ``te_fused_attn_{forward,backward}_ffi`` events themselves did not
@@ -75,7 +75,7 @@ def test_te_fused_attn_ffi_events_land_in_te(bucket_compute_events):
     leaked = [n for n in uncat if n.startswith("te_fused_attn_")]
     assert leaked == [], (
         f"te_fused_attn_* events leaked to uncategorized: {leaked}; "
-        "expected to be matched by JaxOpKeys.TEKeys substring"
+        "expected to be matched by KernelCategoryKeys.TEKeys substring"
     )
     assert "TE" in cat, "expected TE bucket to be populated"
 
@@ -105,7 +105,7 @@ def test_fillbuffer_aligned_routed_to_te_via_metadata(bucket_compute_events):
 def test_fillbuffer_substring_no_longer_routes_to_conv():
     """`"FillBuffer"` was removed from ConvKeys (issue #423 — those
     events come from XLA TE buffer-init fusions, not from real conv ops)."""
-    conv_keys = TraceEventUtils.JaxOpKeys.ConvKeys
+    conv_keys = TraceEventUtils.KernelCategoryKeys.ConvKeys
     assert (
         "FillBuffer" not in conv_keys
     ), f"FillBuffer should not be in ConvKeys anymore; got {conv_keys}"
@@ -113,7 +113,7 @@ def test_fillbuffer_substring_no_longer_routes_to_conv():
 
 def test_te_keys_include_te_fused_attn():
     """Bonus regression for #422: TEKeys must include `te_fused_attn`."""
-    te_keys = TraceEventUtils.JaxOpKeys.TEKeys
+    te_keys = TraceEventUtils.KernelCategoryKeys.TEKeys
     assert (
         "te_fused_attn" in te_keys
     ), f"expected 'te_fused_attn' in TEKeys; got {te_keys}"
@@ -129,7 +129,7 @@ def test_uncategorized_bucket_is_always_seeded():
         {"pid": 1, "tid": 1, "name": "Cijk_mm_fp16", "dur": 50.0},
     ]
     cat, _ = JaxAnalyses.breakdown_compute_events(events_all_te, group_by_gpu=False)
-    unc = TraceEventUtils.JaxOpKeys.UncategorizedEventKey
+    unc = TraceEventUtils.KernelCategoryKeys.UncategorizedEventKey
     assert (
         unc in cat
     ), f"Uncategorized bucket missing when all events match a category: {list(cat)}"
@@ -137,5 +137,5 @@ def test_uncategorized_bucket_is_always_seeded():
 
 
 def test_an_empty_kernel_name_has_no_category():
-    assert TraceEventUtils.JaxOpKeys.category_for_kernel_name("") is None
-    assert TraceEventUtils.JaxOpKeys.category_for_kernel_name(None) is None
+    assert TraceEventUtils.KernelCategoryKeys.category_for_kernel_name("") is None
+    assert TraceEventUtils.KernelCategoryKeys.category_for_kernel_name(None) is None

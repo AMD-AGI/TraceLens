@@ -109,8 +109,8 @@ def perf_analysis(
     # Generate & store perf-model specific DataFrames
     # There are different ways to categorize the events,
     # e.g. by perf model, i.e. by jax_op_mapping.jax_op_to_perf_model_class_map.keys()
-    # e.g. by op category i.e. by TraceEventUtils.JaxOpKeys.ClassCategories.keys()
-    for op_cat in TraceEventUtils.JaxOpKeys.ClassCategories.keys():
+    # e.g. by op category i.e. by TraceEventUtils.KernelCategoryKeys.ClassCategories.keys()
+    for op_cat in TraceEventUtils.KernelCategoryKeys.ClassCategories.keys():
         op_events = [
             event
             for event in perf_analyzer.tree.events
