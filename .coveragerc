@@ -5,6 +5,7 @@ omit =
     TraceLens/EventReplay/*
     TraceLens/PerfModel/benchmarking/*
     TraceLens/PerfModel/origami_helper.py
+    TraceLens/Agent/PerfModel/validate_perf_model/replay/*
     TraceLens/Agent/*/skills/*/evals/*
     TraceLens/TraceUtils/kernel_shape_tool/*
 

@@ -6,7 +6,9 @@
 
 import io
 import json
+import sys
 import time
+import types
 import urllib.error
 
 import pytest
@@ -14,6 +16,7 @@ import yaml
 
 from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms
 from TraceLens.Agent.ModelBringup.utils import bringup_gates
+from TraceLens.Agent.PerfModel.utils import scan_framework_ops, unified_perf_ops
 from TraceLens.Agent.PerfModel.utils.unified_perf_ops import (
     load_rows,
     missing_perf_model_share,
@@ -30,6 +33,14 @@ from TraceLens.Agent.PerfModel.validate_perf_model.validator import (
 _HEADER = "name,op category,Input Dims,Input type,Kernel Time (µs)_sum,has_perf_model,kernel_details_summary,GFLOPS\n"
 _BAND_HEADER = "run_status,flops_ratio,flops_band,bytes_ratio,bytes_band,match_status\n"
 _OK_ROW = "OK,1.0000,match,1.0000,match,match\n"
+_MAPPING_MODULE = "TraceLens.PerfModel.torch_op_mapping"
+_PERF_CSV = (
+    "name,op category,Kernel Time (µs)_sum,has_perf_model,call_stack,kernel_details_summary\n"
+    "aiter::gemm_a,other,50,False,vllm/x.py,kernel_a\n"
+    "aiter::gemm_a,other,30,False,vllm/x.py aiter/y.py,\n"
+    "op_b,GEMM,20,True,,\n"
+    ",other,5,False,,\n"
+)
 
 
 def _template_body(name):
@@ -299,6 +310,10 @@ def test_op_result_gates_outcomes(tmp_path):
     )
     assert bringup_gates.main(args) == 0
 
+    path.write_text("{")
+    assert bringup_gates.main(args) == 1
+    assert "invalid JSON" in _gate(tmp_path, "op_result_op_a")["problems"][0]
+
     path.unlink()
     assert bringup_gates.main(args) == 2
 
@@ -345,6 +360,11 @@ def test_op_result_requires_explained_deviations(tmp_path):
     assert bringup_gates.main(args) == 1
     draft.write_text(_DRAFT + "\n## Ratio Deviations\n\n- Bytes Ratio 2.3204: a.\n")
     assert bringup_gates.main(args) == 0
+    (op_dir / "validation.csv").write_text("run_status,match_status\nOK,match\n")
+    assert bringup_gates.main(args) == 1
+    assert _gate(tmp_path, "op_result_op_a")["problems"] == [
+        "validation CSV has no band columns"
+    ]
 
 
 def test_analysis_result_gates_outcome_and_outputs(tmp_path):
@@ -360,6 +380,10 @@ def test_analysis_result_gates_outcome_and_outputs(tmp_path):
     result.write_text(json.dumps({"outcome": "stop", "reason": "reason a"}))
     assert bringup_gates.main(args) == 1
     assert "reason a" in _gate(tmp_path, "analysis")["problems"][0]
+
+    result.write_text("[]")
+    assert bringup_gates.main(args) == 1
+    assert _gate(tmp_path, "analysis")["problems"] == ["result.json is not an object"]
 
     result.write_text(json.dumps({"outcome": "analyzed"}))
     assert bringup_gates.main(args) == 0
@@ -429,6 +453,61 @@ def test_excluded_and_skipped_ops(tmp_path):
     assert "Publish with" not in text
 
 
+def test_prepare_links_replay_rank_captures(tmp_path):
+    bringup = tmp_path / "bringup"
+    profile = tmp_path / "profile"
+    args = ["prepare", "--bringup-dir", str(bringup), "--profile-dir", str(profile)]
+    args += ["--platform", "platform_a"]
+    assert bringup_gates.main(args) == 1
+    assert "no torch_trace" in _gate(bringup, "prepare")["error"]
+
+    bench = profile / "bench_a"
+    for rel in (
+        "capture_traces/cap_rank0.json.gz",
+        "capture_traces/cap_rank1.json.gz",
+        "graph_capture_profile/cap_all.json",
+        "other.json",
+    ):
+        (bench / "torch_trace" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (bench / "torch_trace" / rel).write_text("{}")
+    for rank in (0, 1):
+        (bench / f"mixed_steady_state_rank{rank}.json.gz").write_text("{}")
+    assert bringup_gates.main(args) == 0
+    gate = _gate(bringup, "prepare")
+    folder = bringup / "capture_rank1"
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "cap_all.json",
+        "cap_rank1.json.gz",
+    ]
+    assert gate["replay_rank"] == 1 and gate["capture_folder"] == str(folder)
+    assert gate["bench_dir"] == str(bench) and gate["platform"] == "platform_a"
+    assert gate["mixed_split"].endswith("mixed_steady_state_rank1.json.gz")
+
+
+def test_cases_writes_json_with_attention_params(tmp_path, capsys):
+    _write_csv(
+        tmp_path / "unified_perf_summary.csv",
+        ['op_a,GEMM,"((4, 8),)",bf16,60,True,,2\n'],
+    )
+    (tmp_path / "InferenceAttention_fwd.csv").write_text(
+        'name,Input Dims_first,param: causal\nop_a,"((4, 8),)",True\n'
+    )
+    out = tmp_path / "cases.json"
+    args = ["cases", "--report-dir", str(tmp_path), "--out", str(out)]
+    assert bringup_gates.main(args) == 0
+    assert json.loads(out.read_text())[0]["attn_params"] == {"causal": "True"}
+    assert "1 case(s)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "extra", [["--step", "4"], ["--reason", "reason a"]], ids=["step", "reason"]
+)
+def test_summary_flags_go_together(tmp_path, extra):
+    with pytest.raises(SystemExit) as exc:
+        bringup_gates.main(["summary", "--bringup-dir", str(tmp_path), *extra])
+    assert exc.value.code == 2
+
+
 def _model_config(bringup, framework, envs):
     profile = bringup / "profile"
     profile.mkdir()
@@ -468,6 +547,35 @@ def test_model_config_resolves(tmp_path, monkeypatch):
     }
     assert out["config"] == hf_config
     assert out["paper"] == paper
+
+
+@pytest.mark.parametrize(
+    "benchmark_yaml, message",
+    [
+        (None, "missing"),
+        ("benchmark: [unclosed\n", "malformed"),
+        ("benchmark: {}\n", "no benchmark.model"),
+    ],
+)
+def test_model_config_bad_benchmark_yaml(tmp_path, capsys, benchmark_yaml, message):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    if benchmark_yaml is not None:
+        (profile / "benchmark.yaml").write_text(benchmark_yaml)
+    args = ["model-config", "--bringup-dir", str(tmp_path)]
+    assert bringup_gates.main(args + ["--profile-dir", str(profile)]) == 2
+    assert message in capsys.readouterr().err
+
+
+def test_load_checkpoint_config_defers_to_config_resolve(monkeypatch):
+    resolve = types.ModuleType("config_resolve")
+    resolve.load_checkpoint_config = lambda checkpoint: ({"hidden_size": 64}, "label")
+    monkeypatch.setitem(sys.modules, "TraceLens.ModelUtils", types.ModuleType("m"))
+    monkeypatch.setitem(sys.modules, "TraceLens.ModelUtils.config_resolve", resolve)
+    assert bringup_gates._load_checkpoint_config("ckpt") == (
+        {"hidden_size": 64},
+        "label",
+    )
 
 
 def test_model_config_unresolved(tmp_path, monkeypatch):
@@ -532,3 +640,149 @@ def test_find_paper_times_out(monkeypatch):
     monkeypatch.setattr(bringup_gates.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(bringup_gates, "PAPER_BUDGET_S", 0.05)
     assert bringup_gates._find_paper("org/Fam-1") is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        urllib.error.URLError("offline"),
+        urllib.error.HTTPError("url", 404, "not found", {}, None),
+    ],
+    ids=["unreachable", "no_card"],
+)
+def test_find_paper_none_when_lookup_fails(monkeypatch, error):
+    def urlopen(url, timeout):
+        raise error
+
+    monkeypatch.setattr(bringup_gates.urllib.request, "urlopen", urlopen)
+    assert bringup_gates._find_paper("org/Fam-1") is None
+
+
+@pytest.fixture
+def perf_model_map(monkeypatch):
+    mapping = {"aiter::gemm_a": object, "gemm_b": object}
+    module = types.ModuleType("torch_op_mapping")
+    module.op_to_perf_model_class_map = mapping
+    monkeypatch.setitem(sys.modules, _MAPPING_MODULE, module)
+    return mapping
+
+
+@pytest.fixture
+def aiter_repo(tmp_path):
+    ops = tmp_path / "aiter" / "ops"
+    ops.mkdir(parents=True)
+    (ops / "gemm.py").write_text(
+        '@compile_ops("aiter::gemm_a")\n'
+        "def gemm_a(x):\n"
+        "    return gemm_a_kernel(x)\n\n"
+        'torch.library.custom_op(op_name="aiter::gemm_b")\n'
+        'torch.library.custom_op("other::foreign")\n'
+    )
+    (ops / "test_gemm.py").write_text("")
+    (ops / "bench_gemm.py").write_text("")
+    (tmp_path / "aiter" / "norm").mkdir()
+    (tmp_path / "aiter" / "norm" / "norm.py").write_text(
+        'torch.library.define("norm_a", "(Tensor x) -> Tensor")\n'
+    )
+    (tmp_path / "aiter" / "build").mkdir()
+    (tmp_path / "aiter" / "build" / "ghost.py").write_text(
+        '@compile_ops("aiter::ghost")\n'
+    )
+    (tmp_path / "aiter" / "dangling.py").symlink_to(tmp_path / "absent.py")
+    return tmp_path
+
+
+def test_scan_lists_registered_ops(aiter_repo, capsys):
+    out = aiter_repo / "out" / "ops.json"
+    args = ["--repo-root", str(aiter_repo), "--output-json", str(out)]
+    args += ["--vllm", str(aiter_repo / "absent"), "--name-max", "12"]
+    assert scan_framework_ops.main(args) == 0
+    captured = capsys.readouterr()
+    assert "Warning: vllm dir not found" in captured.err
+    assert "aiter::ge..." in captured.out
+    ops = {op["op_name"]: op for op in json.loads(out.read_text())}
+    assert sorted(ops) == ["aiter::gemm_a", "aiter::gemm_b", "aiter::norm_a"]
+    assert ops["aiter::gemm_a"]["kernel_hints"] == ["gemm_a_kernel"]
+    assert ops["aiter::gemm_a"]["sibling_benchmarks"] == [
+        "bench_gemm.py",
+        "test_gemm.py",
+    ]
+    assert ops["aiter::norm_a"]["sibling_benchmarks"] == []
+
+    assert scan_framework_ops.main(args + ["--filter", "gemm"]) == 0
+    assert sorted(op["op_name"] for op in json.loads(out.read_text())) == [
+        "aiter::gemm_a",
+        "aiter::gemm_b",
+    ]
+
+
+def test_scan_tags_and_filters_by_perf_model(aiter_repo, capsys, perf_model_map):
+    args = ["--aiter", str(aiter_repo / "aiter"), "--check-mapping"]
+    assert scan_framework_ops.main(args) == 0
+    out = capsys.readouterr().out
+    assert "aiter::gemm_a [HAS MODEL]" in out and "aiter::gemm_b [HAS MODEL]" in out
+    assert "aiter::norm_a [NO MODEL]" in out
+
+    assert scan_framework_ops.main(args + ["--no-model-only"]) == 0
+    out = capsys.readouterr().out
+    assert "HAS MODEL" not in out and "Total ops found: 1" in out
+
+
+def test_scan_reports_no_ops(tmp_path, capsys):
+    assert scan_framework_ops.main(["--repo-root", str(tmp_path)]) == 0
+    assert "No ops found" in capsys.readouterr().err
+
+
+def test_builtin_perf_model_map(monkeypatch, capsys, perf_model_map):
+    assert scan_framework_ops.builtin_perf_model_map() is perf_model_map
+    monkeypatch.setitem(sys.modules, _MAPPING_MODULE, None)
+    assert scan_framework_ops.builtin_perf_model_map() is None
+    assert "Mapping check skipped" in capsys.readouterr().err
+
+
+def test_perf_ops_other_bucket_report(tmp_path, capsys, perf_model_map):
+    csv = tmp_path / "summary.csv"
+    csv.write_text(_PERF_CSV, encoding="utf-8")
+    extension = tmp_path / "extension.py"
+    args = [str(csv), "--fraction", "0.9", "--name-max", "8", "--also-global-pareto"]
+    args += ["--emit-extension", "--extension-out", str(extension), "--check-mapping"]
+    assert unified_perf_ops.main(args) == 0
+    out = capsys.readouterr().out
+    assert "Rows (other): 3" in out
+    assert "2 row(s), covering 80.000 µs (94.12% of other)" in out
+    assert "Definition B" in out and "3 row(s), sum 85.000 µs" in out
+    assert "name: aiter..." in out and "kernel hint: kernel_a" in out
+    assert out.index("[2 rows] vLLM") < out.index("[1 rows] AITER")
+    assert "'aiter::gemm_a'," in extension.read_text()
+    assert "True   aiter::gemm_a" in out
+
+    assert unified_perf_ops.main([str(csv), "--other-value", "absent"]) == 0
+    assert "Definition A: N/A" in capsys.readouterr().out
+
+
+def test_perf_ops_top_ops_report(tmp_path, capsys):
+    csv = tmp_path / "summary.csv"
+    csv.write_text(_PERF_CSV, encoding="utf-8")
+    args = [str(csv), "--mode", "top-ops", "--threshold", "0.1", "--name-max", "8"]
+    assert unified_perf_ops.main(args) == 0
+    out = capsys.readouterr().out
+    assert "aiter..." in out and "stack: vllm/x.py aiter/y.py" in out
+    assert "Total candidate ops: 1" in out
+
+    assert unified_perf_ops.main(args + ["--include-covered"]) == 0
+    assert "Total candidate ops: 2" in capsys.readouterr().out
+
+    args[args.index("0.1")] = "0.9"
+    assert unified_perf_ops.main(args) == 0
+    assert "No ops found above threshold" in capsys.readouterr().out
+
+
+def test_perf_ops_reject_bad_inputs(tmp_path, capsys):
+    assert unified_perf_ops.main([str(tmp_path / "absent.csv")]) == 1
+    assert "Not a file" in capsys.readouterr().err
+    csv = tmp_path / "summary.csv"
+    csv.write_text("name,GFLOPS\nop_a,1\n")
+    with pytest.raises(SystemExit, match="no runtime column"):
+        load_rows(csv)
+    csv.write_text("name,total_duration_us\nop_a,n/a\n")
+    assert load_rows(csv)[0][0]["_us"] == 0.0
