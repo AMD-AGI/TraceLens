@@ -409,7 +409,7 @@ class TestAttentionExtensions:
             },
         }
         model = aext.sparse_gqa(event)
-        assert model.param_details["selected"] == 2048
+        assert model.param_details["selected_keys"] == 32 * 2048
         assert model.get_compute_precision() == "bf16"
         assert model.get_maf_type() == "matrix"
         assert model.flops() == 4 * 32 * 16 * 256 * 2048
@@ -456,7 +456,48 @@ class TestAttentionExtensions:
                 "Input type": ["c10::BFloat16"] * 4 + ["int"],
             },
         }
-        assert aext.sparse_gqa(event).param_details["selected"] == 2048
+        assert aext.sparse_gqa(event).param_details["selected_keys"] == 32 * 2048
+
+    @pytest.mark.parametrize(
+        "annotation, selected_keys",
+        [
+            # Fresh 4096-token prefill: the first 2048 queries see 1..2048 keys.
+            (
+                "step[EXTEND bs=1 toks=4096 c_sq=4096 c_sk=4096"
+                " c_sqsq=16777216 c_sqsk=16777216]",
+                2048 * 2049 // 2 + 2048 * 2048,
+            ),
+            # 1024-token chunk at 32K context: every query is capped at topk.
+            (
+                "step[EXTEND bs=1 toks=1024 c_sq=1024 c_sk=32768"
+                " c_sqsq=1048576 c_sqsk=33554432]",
+                1024 * 2048,
+            ),
+            # Verify: 4 draft tokens per request on 96 prefix keys, requests
+            # counted as generation while the tokens are in c_*.
+            (
+                "step[VERIFY bs=4 c_sq=16 c_sk=400 c_sqsq=64 c_sqsk=1600]",
+                4 * (4 * 96 + 4 * 5 // 2),
+            ),
+        ],
+    )
+    def test_sparse_gqa_counts_causal_selection(self, annotation, selected_keys):
+        event = {
+            "annotation": annotation,
+            "args": {
+                "Input Dims": [
+                    [4096, 16, 256],
+                    [65536, 2, 256],
+                    [65536, 2, 256],
+                    [4096, 16, 256],
+                    [4096, 2048],
+                ],
+                "Input type": ["c10::BFloat16"] * 4 + ["int"],
+            },
+        }
+        model = aext.sparse_gqa(event)
+        assert model.param_details["selected_keys"] == selected_keys
+        assert model.flops() == 4 * 16 * 256 * selected_keys
 
     def test_sparse_gqa_skips_bytes_when_not_dense_or_dtype_unknown(self):
         event = {
