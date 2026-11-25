@@ -60,6 +60,7 @@ from .custom_collectives_perf_model_extensions import (
     sgl_kernel_all_reduce_reg,
     sgl_kernel_qr_all_reduce,
     sgl_kernel_reg_all_gather_into_tensor,
+    record_param_comms_all_reduce,
 )
 from .gsplat_perf_model_extensions import (
     gsplat_spherical_harmonics,
@@ -117,6 +118,7 @@ __all__ = [
     "sgl_kernel_all_reduce_reg",
     "sgl_kernel_qr_all_reduce",
     "sgl_kernel_reg_all_gather_into_tensor",
+    "record_param_comms_all_reduce",
     "custom_ar_qr_all_reduce",
     # gsplat 3DGS classes
     "gsplat_spherical_harmonics",

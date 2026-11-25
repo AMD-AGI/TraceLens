@@ -437,3 +437,44 @@ class sgl_kernel_reg_all_gather_into_tensor(CustomCollective):
 
     def bytes(self):
         return (self.num_elems + self.num_elems_out) * self.bpe_in
+
+
+class record_param_comms_all_reduce(custom_ar_all_reduce):
+    """
+    Performance model for record_param_comms (torch.distributed collective wrapper).
+
+    PyTorch records one such event for every c10d collective, with its metadata in
+    named args: "Collective name", "dtype", "In msg nelems". Only "allreduce" is
+    modeled; other collectives raise NotImplementedError.
+
+    Expected args from trace (allreduce):
+        {"Collective name": "allreduce", "dtype": "BFloat16",
+         "In msg nelems": 5242880, ...}
+
+    flops/bytes inherited from custom_ar_all_reduce (FLOPs=0; bytes per GPU =
+    2 * num_elems * bpe_in for the local read+write).
+    """
+
+    @staticmethod
+    def get_param_details(event):
+        args = event["args"]
+        return {
+            "collective": args.get("Collective name"),
+            "op_shape": (args.get("In msg nelems"),),
+            "dtype_in": args.get("dtype"),
+            "stride_input": (),
+        }
+
+    def _check_all_reduce(self):
+        if self.param_details["collective"] != "allreduce":
+            raise NotImplementedError(
+                f"{self.param_details['collective']} is not modeled"
+            )
+
+    def flops(self):
+        self._check_all_reduce()
+        return super().flops()
+
+    def bytes(self):
+        self._check_all_reduce()
+        return super().bytes()

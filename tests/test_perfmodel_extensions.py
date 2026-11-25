@@ -33,7 +33,9 @@ from TraceLens.PerfModel.extensions.custom_collectives_perf_model_extensions imp
     custom_ar_qr_all_reduce,
     sgl_kernel_all_reduce_reg,
     sgl_kernel_qr_all_reduce,
+    record_param_comms_all_reduce,
     sgl_kernel_reg_all_gather_into_tensor,
+    vllm_all_reduce,
 )
 from TraceLens.PerfModel.extensions.moe_perf_model_extensions import (
     BiasedGroupedTopk,
@@ -4432,6 +4434,51 @@ class TestCustomCollectivesPerfModels:
         model = sgl_kernel_reg_all_gather_into_tensor(event)
         assert model.flops() == 0
         assert model.bytes() > 0
+
+    @staticmethod
+    def _record_param_comms_event(collective, dtype, nelems):
+        return {
+            "args": {
+                "Collective name": collective,
+                "dtype": dtype,
+                "In msg nelems": nelems,
+                "Out msg nelems": nelems,
+            },
+        }
+
+    def test_record_param_comms_all_reduce(self):
+        elems = 2048 * 2560
+        model = record_param_comms_all_reduce(
+            self._record_param_comms_event("allreduce", "BFloat16", elems)
+        )
+        assert isinstance(model, custom_ar_all_reduce)
+        assert model.flops() == 0
+        assert model.bytes() == 2 * elems * 2
+        assert (
+            get_pseudo_op_mappings()["record_param_comms"]
+            is record_param_comms_all_reduce
+        )
+
+    def test_record_param_comms_other_collective_unmodeled(self):
+        model = record_param_comms_all_reduce(
+            self._record_param_comms_event("broadcast", "Int", 32)
+        )
+        with pytest.raises(NotImplementedError):
+            model.flops()
+        with pytest.raises(NotImplementedError):
+            model.bytes()
+
+    def test_sglang_inplace_all_reduce_maps_to_vllm_all_reduce(self):
+        event = {
+            "args": {
+                "Input Dims": [(32, 2560), ()],
+                "Input type": ["c10::BFloat16", ""],
+            },
+        }
+        assert get_pseudo_op_mappings()["sglang::inplace_all_reduce"] is vllm_all_reduce
+        model = vllm_all_reduce(event)
+        assert model.flops() == 0
+        assert model.bytes() == 2 * 32 * 2560 * 2
 
 
 class TestTreePerfInitKwargs:
