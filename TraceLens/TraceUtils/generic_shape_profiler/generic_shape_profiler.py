@@ -101,11 +101,7 @@ _MAX_LIST = 64
 
 
 class SlotKind(str, enum.Enum):
-    """A slot's kind; the value is the schema type its op declares.
-
-    The ``str`` base keeps hashing and comparison in C: a plain Enum's Python
-    ``__hash__`` would be a with_stack event per slot per launch.
-    """
+    """Value is the schema type; the str base keeps hashing out of with_stack."""
 
     TENSOR = "Tensor?"
     SCALAR = "Scalar?"
@@ -115,7 +111,6 @@ class SlotKind(str, enum.Enum):
     NONE = ""  # no slot
 
 
-# Membership tests add no with_stack events; isinstance() would.
 _TENSOR_TYPES = {torch.Tensor, torch.nn.Parameter}
 _SCALAR_TYPES = {int, float, bool}
 _SEQ_TYPES = {list, tuple}
@@ -219,8 +214,7 @@ def add_schema_metadata(prof: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher ops. A record is (spec, values); spec ((param, kind), ...) fixes
-# the op's schema.
+# Dispatcher ops. A record is (spec, values); spec fixes the op's schema.
 # ---------------------------------------------------------------------------
 def _noop(*args: Any) -> None:
     return None
@@ -396,7 +390,6 @@ def _new_frame_layout(frame) -> _Layout:
 
 
 def _function_of(obj: Any) -> Optional[types.FunctionType]:
-    """Innermost function behind ``obj`` via ``__wrapped__`` / ``fn`` / ``func``."""
     cur = obj
     for _ in range(8):
         inner = getattr(cur, "__wrapped__", None)
