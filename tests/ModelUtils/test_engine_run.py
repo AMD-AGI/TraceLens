@@ -28,3 +28,15 @@ def test_the_logging_an_engine_configures_is_undone_after_its_start():
         and ours.level == logging.INFO
         and logging.root.level == root_level
     )
+
+
+def test_a_cached_value_is_written_whole(tmp_path):
+    import pickle
+
+    from TraceLens.ModelUtils.engine_run import _write_cache
+
+    path = tmp_path / "cache" / "run.pkl"
+    _write_cache(path, {"graphs": [1, 2, 3]})
+    assert pickle.loads(path.read_bytes()) == {"graphs": [1, 2, 3]}
+    # Nothing half written is left beside it.
+    assert [entry.name for entry in path.parent.iterdir()] == ["run.pkl"]

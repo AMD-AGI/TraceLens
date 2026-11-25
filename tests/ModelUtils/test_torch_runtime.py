@@ -633,3 +633,103 @@ def test_a_triton_launch_whose_writes_nothing_reads_is_never_emulated(
             16,
         ]
     assert len(runs) == 1
+
+
+def test_a_triton_launch_on_unknown_contents_is_emulated_when_read(
+    runtime, tmp_path, monkeypatch
+):
+    import triton.runtime.interpreter as interpreter_module
+
+    from TraceLens.ModelUtils.source_interpreter import Environment, SourceInterpreter
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "kern.py").write_text(textwrap.dedent("""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def split(x_ptr, u_ptr, known_ptr, mixed_ptr, BLOCK: tl.constexpr):
+            offsets = tl.arange(0, BLOCK)
+            tl.store(known_ptr + offsets, tl.load(x_ptr + offsets) * 2)
+            tl.store(mixed_ptr + offsets, tl.load(u_ptr + offsets) + 1)
+
+        def run():
+            x = torch.arange(8, device="cuda")
+            unknown = torch.empty(8, dtype=x.dtype, device="cuda")
+            outputs = []
+            for _ in range(2):
+                # Made empty: the launch writes it whole.
+                known = torch.empty(8, dtype=x.dtype, device="cuda")
+                mixed = torch.zeros(8, dtype=x.dtype, device="cuda")
+                split[(1,)](x, unknown, known, mixed, BLOCK=8)
+                outputs.append((known, mixed))
+            # Only the second launch's writes are read.
+            known, mixed = outputs[1]
+            return known.cpu().tolist(), mixed
+    """))
+    runs = []
+    original = interpreter_module.GridExecutor.__call__
+    monkeypatch.setattr(
+        interpreter_module.GridExecutor,
+        "__call__",
+        lambda self, *a, **k: (runs.append(1), original(self, *a, **k))[1],
+    )
+    interpreter = SourceInterpreter(
+        {"pkg": tmp_path}, Environment(), host_modules=runtime.modules
+    )
+    with interpreter, runtime:
+        known, mixed = interpreter.import_module("pkg.kern").run()
+        # What the unknown contents decide stays unknown.
+        assert runtime.log.shadows.get(mixed) is None
+    assert known == [0, 2, 4, 6, 8, 10, 12, 14]
+    # The read launch ran over both fillings; the unread one never ran.
+    assert len(runs) == 2
+
+
+def test_a_triton_launch_reading_another_s_results_runs_neither(
+    runtime, tmp_path, monkeypatch
+):
+    import triton.runtime.interpreter as interpreter_module
+
+    from TraceLens.ModelUtils.source_interpreter import Environment, SourceInterpreter
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "kern.py").write_text(textwrap.dedent("""
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def double(x_ptr, out_ptr, BLOCK: tl.constexpr):
+            offsets = tl.arange(0, BLOCK)
+            tl.store(out_ptr + offsets, tl.load(x_ptr + offsets) * 2)
+
+        def run(read):
+            x = torch.arange(8, device="cuda")
+            first = torch.empty(8, dtype=x.dtype, device="cuda")
+            double[(1,)](x, first, BLOCK=8)
+            second = torch.empty(8, dtype=x.dtype, device="cuda")
+            double[(1,)](first, second, BLOCK=8)
+            return second.cpu().tolist() if read else None
+    """))
+    runs = []
+    original = interpreter_module.GridExecutor.__call__
+    monkeypatch.setattr(
+        interpreter_module.GridExecutor,
+        "__call__",
+        lambda self, *a, **k: (runs.append(1), original(self, *a, **k))[1],
+    )
+    interpreter = SourceInterpreter(
+        {"pkg": tmp_path}, Environment(), host_modules=runtime.modules
+    )
+    with interpreter, runtime:
+        module = interpreter.import_module("pkg.kern")
+        # Only kernels read the first launch's results: nothing runs.
+        assert module.run(False) is None
+        assert runs == []
+        # The host reads the second's: both run, once each.
+        assert module.run(True) == [0, 4, 8, 12, 16, 20, 24, 28]
+    assert len(runs) == 2

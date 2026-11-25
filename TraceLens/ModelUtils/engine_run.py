@@ -129,9 +129,25 @@ def engine_graphs(run: EngineRun, cache: Path = CACHE) -> EngineGraphs:
     if path.is_file():
         return pickle.loads(path.read_bytes())
     result = _start(run)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(pickle.dumps(result))
+    _write_cache(path, result)
     return result
+
+
+def _write_cache(path: Path, value) -> None:
+    """Cache ``value`` at ``path`` whole: a process reading it meanwhile (a
+    start run side by side) finds it absent, never half written."""
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, suffix=".partial")
+    try:
+        with os.fdopen(handle, "wb") as file:
+            file.write(pickle.dumps(value))
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 # The modules that model the run: a startup cached under other versions of
@@ -571,6 +587,5 @@ def _native_index(root: Path):
     if path.is_file():
         return pickle.loads(path.read_bytes())
     index = build_native_index([root], build_roots=[root])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(pickle.dumps(index))
+    _write_cache(path, index)
     return index

@@ -600,6 +600,10 @@ def _storage_of(tensor) -> int:
     return tensor.untyped_storage()._cdata
 
 
+class _UnknownContents(RuntimeError):
+    """Deferred contents turned out not to be known when read."""
+
+
 class Shadows:
     """CPU copies of the contents of small GPU tensors.
 
@@ -635,6 +639,8 @@ class Shadows:
         # storage -> {geometry: copy}: every tensor over a storage (a view, a
         # Parameter wrapping it, ``.data``) finds the copy of its geometry.
         self._by_storage: dict[int, dict[tuple, torch.Tensor]] = {}
+        # storage -> ids of the tensors over it with a copy or a lazy copy.
+        self._ids: dict[int, set[int]] = {}
 
     def _peek(self, tensor):
         entry = self._copies.get(id(tensor))
@@ -675,10 +681,19 @@ class Shadows:
             make = self._pending(tensor)
             if make is not None:
                 self._lazy.pop(id(tensor), None)
-                copy = make()
+                try:
+                    copy = make()
+                except _UnknownContents:
+                    self.drop(tensor)
+                    return None
                 self.set(tensor, copy)
             elif self._logged(tensor) is not None:
-                return self._reader(tensor)()
+                try:
+                    return self._reader(tensor)()
+                except _UnknownContents:
+                    # A deferred write left them unknown.
+                    self.drop(tensor)
+                    return None
         return copy
 
     def set_lazy(self, tensor, make) -> None:
@@ -692,6 +707,7 @@ class Shadows:
                 weakref.ref(tensor, lambda _ref, key=key: lazy.pop(key, None)),
                 make,
             )
+            self._ids.setdefault(self._track(tensor), set()).add(key)
 
     def set(self, tensor, value):
         import weakref
@@ -705,6 +721,7 @@ class Shadows:
             )
             storage = self._track(tensor)
             self._by_storage.setdefault(storage, {})[self._geometry(tensor)] = value
+            self._ids.setdefault(storage, set()).add(key)
 
     def drop(self, tensor):
         """``tensor``'s contents are unknown now: an unknown write reached them."""
@@ -732,13 +749,13 @@ class Shadows:
         )
         self._by_storage.pop(key, None)
         self._unknown.discard(key)
-        for table in (self._copies, self._lazy):
-            for entry_key, (ref, _value) in list(table.items()):
-                other = ref()
-                if other is None or (
-                    isinstance(other, torch.Tensor) and self._storage_key(other) == key
-                ):
-                    table.pop(entry_key, None)
+        for entry_key in self._ids.pop(key, ()):
+            for table in (self._copies, self._lazy):
+                entry = table.get(entry_key)
+                if entry is not None:
+                    other = entry[0]()
+                    if other is None or self._storage_key(other) == key:
+                        table.pop(entry_key, None)
 
     def forget(self, tensor) -> None:
         """``tensor`` is replaced wholesale: what was known of it no longer applies."""
@@ -763,11 +780,13 @@ class Shadows:
                 unknown=self._unknown,
                 tracked=self._tracked,
                 by_storage=self._by_storage,
+                ids=self._ids,
             ):
                 logs.pop(key, None)
                 unknown.discard(key)
                 tracked.discard(key)
                 by_storage.pop(key, None)
+                ids.pop(key, None)
 
             weakref.finalize(storage, release)
         return key
@@ -2605,6 +2624,12 @@ _TRITON_WRITES = frozenset(
 )
 
 
+# What reads through a pointer: atomics read what they update.
+_TRITON_READS = frozenset(
+    {"load", *(name for name in _TRITON_WRITES if name != "store")}
+)
+
+
 def stored_parameters(node) -> frozenset[str] | None:
     """The parameters of the Triton kernel ``node`` its body may write through.
 
@@ -2614,6 +2639,21 @@ def stored_parameters(node) -> frozenset[str] | None:
     other than a ``tl`` builtin (another kernel function may store). None
     when the body is not available.
     """
+    return _accessed_parameters(node, _TRITON_WRITES)
+
+
+def loaded_parameters(node) -> frozenset[str] | None:
+    """The parameters of the Triton kernel ``node`` its body may read through:
+    as :func:`stored_parameters`, for ``tl.load`` and the atomics (which read
+    what they update)."""
+    if not hasattr(node, "_tracelens_loaded"):
+        node._tracelens_loaded = _accessed_parameters(node, _TRITON_READS)
+    return node._tracelens_loaded
+
+
+def _accessed_parameters(node, operations) -> frozenset[str] | None:
+    """The parameters a pointer derived from reaches one of ``operations``
+    (or a call to anything other than a ``tl`` builtin)."""
     import ast
 
     if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -2666,12 +2706,12 @@ def stored_parameters(node) -> frozenset[str] | None:
                             sources[name.id] = after
                             changed = True
 
-    written: set[str] = set()
+    accessed: set[str] = set()
     for item in ast.walk(node):
         if not isinstance(item, ast.Call):
             continue
         function = item.func
-        if isinstance(function, ast.Attribute) and function.attr in _TRITON_WRITES:
+        if isinstance(function, ast.Attribute) and function.attr in operations:
             receiver = function.value
             if isinstance(receiver, ast.Name) and receiver.id not in sources:
                 # ``tl.store(pointer, ...)``: the pointer is the first argument.
@@ -2683,19 +2723,19 @@ def stored_parameters(node) -> frozenset[str] | None:
                     )
                 )
                 if pointer is not None:
-                    written |= origins(pointer)
+                    accessed |= origins(pointer)
             else:
-                written |= origins(receiver)
+                accessed |= origins(receiver)
         elif (
             isinstance(function, ast.Attribute)
             and isinstance(function.value, ast.Name)
             and function.value.id not in sources
         ):
-            continue  # a ``tl``/``libdevice`` builtin: computes, stores nothing
+            continue  # a ``tl``/``libdevice`` builtin: computes, accesses nothing
         else:
             for argument in (*item.args, *(kw.value for kw in item.keywords)):
-                written |= origins(argument)
-    return frozenset(written & set(params))
+                accessed |= origins(argument)
+    return frozenset(accessed & set(params))
 
 
 _TRITON_ACCESSES = frozenset({"load", "store", *_TRITON_WRITES})
@@ -2932,20 +2972,14 @@ class _NotEmulable(Exception):
 
 
 def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
-    """Run a Triton launch on its tensors' CPU copies.
+    """Make a Triton launch's writes computable on the CPU, when they are read.
 
-    Returns the tensors whose copies the launch leaves unknown, or None when
-    it did not run. Triton's own interpreter executes each program, with
-    ``triton.language`` replaced by its NumPy implementation; the kernel
-    body itself is run by the source interpreter (the stub below only
-    carries its signature).
-
-    A tensor without a copy whose contents are only data (see
-    :func:`content_controlled_parameters`) is filled twice, with different
-    values, and the launch run once per filling: a written tensor that comes
-    out the same both times does not depend on it. A tensor whose contents
-    steer the kernel, or holding device addresses the CPU cannot follow,
-    must have a copy.
+    Returns the tensors whose contents the launch leaves unknown, or None
+    when it cannot be run. Nothing runs at the launch: it keeps how to read
+    each argument's contents as they are now (see :class:`_TritonLaunch`),
+    never computing them, and runs when what it writes is first read. A
+    launch whose results only other kernels read never runs, nor do the
+    launches before it. A launch writing part of a storage runs at once.
     """
     shadows = kernel._log.shadows
     node = getattr(kernel.fn, "_node", None)
@@ -2955,105 +2989,34 @@ def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
         # Not the source interpreter's function: nothing runs its body.
         return None
     try:
-        import importlib
-
-        from triton.runtime.interpreter import GridExecutor
-        from triton.runtime.jit import JITFunction
+        from triton.runtime.interpreter import GridExecutor  # noqa: F401
     except ImportError:
         return None
     names = kernel.arg_names
     if not all(name.isidentifier() for name in names):
         return None
-    steering = content_controlled_parameters(node) or frozenset()
-    bound = dict(zip(names, args)) | dict(kwargs)
-
-    # Which device tensors have no copy, and may be filled in.
-    unknown: dict[int, torch.Tensor] = {}
-
-    def survey(name, value):
-        if isinstance(value, torch.Tensor):
-            if not value.is_meta:
-                return
-            copy = shadows.get(value)
-            if copy is None:
-                if name in steering or value.numel() > Shadows.LIMIT:
-                    raise _NotEmulable(f"{name} has no copy")
-                unknown[id(value)] = value
-            elif copy.dtype in (torch.int64, torch.uint64) and copy.numel():
-                signed = copy.view(torch.int64)
-                if bool(((signed >= DeviceMemory.BASE) | (signed < 0)).any()):
-                    raise _NotEmulable(f"{name} holds device addresses")
-        elif isinstance(value, tuple | list):
-            for item in value:
-                survey(name, item)
-
-    try:
-        for name, value in bound.items():
-            survey(name, value)
-    except _NotEmulable as reason:
-        logger.debug("%s: not emulated: %s", kernel.__name__, reason)
+    # A launch the emulator could not run fails alike for the same kernel,
+    # sizes and dtypes: it is not tried again.
+    failing = (
+        id(kernel.fn),
+        tuple(_launch_form(value) for value in args),
+        tuple(sorted((name, _launch_form(value)) for name, value in kwargs.items())),
+    )
+    if failing in shadows.__dict__.get("_not_emulable", ()):
         return None
-
-    def host(value, run, bases):
-        """``value`` on the CPU for filling ``run``; views of one base share it."""
-        if isinstance(value, torch.Tensor):
-            if not value.is_meta:
-                return value
-            copy = shadows.get(value)
-            if copy is None:
-                key = ("fill", id(value))
-                if key not in bases:
-                    generator = torch.Generator().manual_seed(run + 1)
-                    filler = torch.empty_strided(
-                        value.size(), value.stride(), dtype=value.dtype
-                    )
-                    if filler.dtype.is_floating_point or filler.dtype.is_complex:
-                        filler.copy_(
-                            torch.rand(value.size(), generator=generator) * 997
-                            + run * 13
-                        )
-                    elif filler.dtype == torch.bool:
-                        filler.copy_(
-                            torch.rand(value.size(), generator=generator) > 0.5
-                        )
-                    else:
-                        filler.copy_(
-                            torch.randint(0, 127, value.size(), generator=generator)
-                            + run * 3
-                        )
-                    bases[key] = filler
-                return bases[key]
-            if not unknown:
-                return copy
-            # Each filling works on its own copy of the storage; views of one
-            # storage keep sharing it.
-            storage = copy.untyped_storage()
-            if storage._cdata not in bases:
-                bases[storage._cdata] = storage.clone()
-            return torch.empty(0, dtype=copy.dtype).set_(
-                bases[storage._cdata], copy.storage_offset(), copy.size(), copy.stride()
-            )
-        if isinstance(value, tuple):
-            return tuple(host(item, run, bases) for item in value)
-        if isinstance(value, list):
-            return [host(item, run, bases) for item in value]
-        return value
-
-    def place(run, bases):
-        return [host(value, run, bases) for value in args], {
-            key: host(value, run, bases) for key, value in kwargs.items()
-        }
-
+    written = [
+        tensor
+        for value in kernel._written(args, kwargs) or ()
+        for tensor in (value if isinstance(value, tuple | list) else (value,))
+        if isinstance(tensor, torch.Tensor) and tensor.is_meta
+    ]
+    if not written:
+        return []
     try:
-        first_args, first_kwargs = place(0, first_bases := {})
-        shape = (
-            grid(dict(zip(names, first_args)) | first_kwargs)
-            if callable(grid)
-            else grid
-        )
+        shape = grid(dict(zip(names, args)) | dict(kwargs)) if callable(grid) else grid
     except (
         Exception
-    ) as error:  # noqa: BLE001 - anything it cannot place is left unknown
+    ) as error:  # noqa: BLE001 - a grid it cannot work out is left unknown
         logger.debug("%s: not emulated: %s", kernel.__name__, error)
         return None
     shape = tuple(shape) if isinstance(shape, tuple | list) else (shape,)
@@ -3065,38 +3028,307 @@ def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
     if programs > _EMULATED_PROGRAMS:
         logger.debug("%s: not emulated: %d programs", kernel.__name__, programs)
         return None
-
-    # The same launch on the same contents writes the same: a layer's
-    # repeat of the one before it is not run again.
-    written = [
-        tensor
-        for value in kernel._written(args, kwargs) or ()
-        for tensor in (value if isinstance(value, tuple | list) else (value,))
-        if isinstance(tensor, torch.Tensor)
-        and tensor.is_meta
-        and shadows.get(tensor) is not None
-    ]
-    key = _emulation_key(kernel, shape, args, kwargs, shadows)
-    memo = shadows.__dict__.setdefault("_emulated", {})
-    # A launch the emulator could not run fails alike for the same kernel,
-    # sizes and dtypes: it is not tried again.
-    failures = shadows.__dict__.setdefault("_not_emulable", set())
-    failing = (
-        id(kernel.fn),
-        tuple(_launch_form(value) for value in args),
-        tuple(sorted((name, _launch_form(value)) for name, value in kwargs.items())),
-    )
-    if failing in failures:
+    try:
+        launch = _TritonLaunch(kernel, shape, node, args, kwargs, written, shadows)
+    except _NotEmulable as reason:
+        logger.debug("%s: not emulated: %s", kernel.__name__, reason)
         return None
-    if key is not None and key in memo:
-        left_unknown = []
-        for tensor, result in zip(written, memo[key], strict=False):
-            if result is None:
-                left_unknown.append(tensor)
-            else:
-                shadows.get(tensor).copy_(result)
-        return left_unknown
+    if all(_whole_storage(tensor) for tensor in written):
+        for position, tensor in enumerate(written):
+            shadows.defer_write(
+                tensor, lambda region, position=position: launch.result(position)
+            )
+        return []
+    # Part of a storage: what it writes joins what is there now.
+    left_unknown = []
+    for position, tensor in enumerate(written):
+        try:
+            result = launch.result(position)
+        except _UnknownContents:
+            left_unknown.append(tensor)
+            continue
+        copy = shadows.get(tensor)
+        if copy is None:
+            shadows.set(tensor, result)
+        else:
+            copy.copy_(result)
+    return left_unknown
 
+
+def _whole_storage(tensor) -> bool:
+    """Whether ``tensor`` is all of its storage, laid out in order."""
+    return (
+        tensor.storage_offset() == 0
+        and tensor.is_contiguous()
+        and tensor.numel() * tensor.element_size() == tensor.untyped_storage().nbytes()
+    )
+
+
+def _over(storage, geometry) -> torch.Tensor:
+    """The tensor with ``geometry`` over a CPU storage."""
+    size, stride, offset, dtype = geometry
+    return torch.empty(0, dtype=dtype).set_(storage, offset, size, stride)
+
+
+class _Contents:
+    """A device tensor argument of a Triton launch: its geometry, and how to
+    read its contents as they were at the launch, never the tensor itself.
+
+    A copy is snapshotted (views of one storage keep sharing the snapshot);
+    lazy contents, or a storage's logged writes, are read when the launch
+    runs, so nothing is computed until then.
+    """
+
+    def __init__(self, name, tensor, shadows, storages):
+        self.name = name
+        self.geometry = Shadows._geometry(tensor)
+        self.numel = tensor.numel()
+        self._read = None
+        copy = shadows._peek(tensor)
+        if copy is not None:
+            storage = copy.untyped_storage()
+            key = ("copy", storage._cdata)
+            if key not in storages:
+                storages[key] = storage.clone()
+            snapshot, geometry = storages[key], Shadows._geometry(copy)
+            self._read = lambda: _over(snapshot, geometry)
+            return
+        make = shadows._pending(tensor)
+        if make is not None:
+            self._read = make
+            return
+        logged = shadows._logged(tensor)
+        if logged is not None:
+            key = ("log", shadows._storage_key(tensor))
+            if key not in storages:
+                nbytes, entries = logged
+                entries, whole = list(entries), []
+
+                def replayed(nbytes=nbytes, entries=entries, whole=whole):
+                    if not whole:
+                        whole.append(
+                            _replay(nbytes, entries, ((nbytes,), (1,), 0, torch.uint8))
+                        )
+                    return whole[0]
+
+                storages[key] = replayed
+            replayed, geometry = storages[key], self.geometry
+            self._read = lambda: _over(replayed().untyped_storage(), geometry)
+
+    @property
+    def readable(self) -> bool:
+        return self._read is not None
+
+    def read(self):
+        """The contents on the CPU, or None if they are unknown."""
+        if self._read is None:
+            return None
+        try:
+            return self._read()
+        except _UnknownContents:
+            return None
+
+
+class _TritonLaunch:
+    """A Triton launch, run on the CPU when what it writes is first read.
+
+    Triton's own interpreter executes each program, with ``triton.language``
+    replaced by its NumPy implementation; the kernel body itself is run by
+    the source interpreter (the stub below only carries its signature).
+
+    An argument without contents whose contents are only data (see
+    :func:`content_controlled_parameters`) is filled twice, with different
+    values, and the launch run once per filling: a written tensor that comes
+    out the same both times does not depend on it, so an output made by
+    ``torch.empty`` and written whole is known. An argument whose contents
+    steer the kernel, or holding device addresses the CPU cannot follow,
+    must have contents. The same launch on the same contents writes the
+    same: a layer's repeat of the one before it is not run again.
+    """
+
+    def __init__(self, kernel, shape, node, args, kwargs, written, shadows):
+        self.kernel, self.shape, self.node = kernel, shape, node
+        self.steering = content_controlled_parameters(node) or frozenset()
+        self.memo = shadows.__dict__.setdefault("_emulated", {})
+        self.failures = shadows.__dict__.setdefault("_not_emulable", set())
+        self.failing = (
+            id(kernel.fn),
+            tuple(_launch_form(value) for value in args),
+            tuple(
+                sorted((name, _launch_form(value)) for name, value in kwargs.items())
+            ),
+        )
+        contents: dict[int, _Contents] = {}
+        storages: dict = {}
+
+        def capture(name, value):
+            if isinstance(value, torch.Tensor) and value.is_meta:
+                if id(value) not in contents:
+                    contents[id(value)] = _Contents(name, value, shadows, storages)
+                return contents[id(value)]
+            if isinstance(value, tuple | list):
+                return type(value)(capture(name, item) for item in value)
+            return value
+
+        names = kernel.arg_names
+        self.args = [
+            capture(names[index] if index < len(names) else "", value)
+            for index, value in enumerate(args)
+        ]
+        self.kwargs = {name: capture(name, value) for name, value in kwargs.items()}
+        self.written = [contents[id(tensor)] for tensor in written]
+        self.arguments = list(contents.values())
+        for argument in self.arguments:
+            if not argument.readable and (
+                argument.name in self.steering or argument.numel > Shadows.LIMIT
+            ):
+                raise _NotEmulable(f"{argument.name} has no copy")
+        self._results: list | None = None
+
+    def result(self, position) -> torch.Tensor:
+        """What the launch writes into its ``position``-th written tensor."""
+        if self._results is None:
+            self._results = self._run()
+        if self._results[position] is None:
+            raise _UnknownContents(
+                f"{self.kernel.__name__} writes what its unknown arguments decide"
+            )
+        return self._results[position].clone()
+
+    def _run(self) -> list:
+        """What the launch writes into each written tensor, None where unknown."""
+        kernel = self.kernel
+        contents = {id(argument): argument.read() for argument in self.arguments}
+        unknown = {key for key, copy in contents.items() if copy is None}
+        for argument in self.arguments:
+            copy = contents[id(argument)]
+            if copy is None:
+                if argument.name in self.steering or argument.numel > Shadows.LIMIT:
+                    raise _UnknownContents(f"{argument.name} has no contents")
+            elif copy.dtype in (torch.int64, torch.uint64) and copy.numel():
+                signed = copy.view(torch.int64)
+                if bool(((signed >= DeviceMemory.BASE) | (signed < 0)).any()):
+                    raise _UnknownContents(f"{argument.name} holds device addresses")
+        key = _emulation_key(
+            kernel,
+            self.shape,
+            self.args,
+            self.kwargs,
+            lambda argument: contents[id(argument)],
+        )
+        if key is not None and key in self.memo:
+            return self.memo[key]
+
+        # An argument the kernel only stores to (an output made by
+        # ``torch.empty``) does not change what it writes: filled with values
+        # a write is unlikely to repeat, one run shows whether it is written
+        # whole, as an element still holding its filling was not written.
+        loaded = loaded_parameters(self.node)
+        outputs = {
+            id(argument)
+            for argument in self.arguments
+            if id(argument) in unknown
+            and loaded is not None
+            and argument.name not in loaded
+        }
+        inputs = unknown - outputs
+
+        def host(value, run, bases):
+            """``value`` on the CPU for filling ``run``; views of one base share it."""
+            if isinstance(value, _Contents):
+                copy = contents[id(value)]
+                if copy is None:
+                    fill = ("fill", id(value))
+                    if fill not in bases:
+                        bases[fill] = _made_up_contents(
+                            value.geometry, run, wide=id(value) in outputs
+                        )
+                    return bases[fill]
+                if not unknown:
+                    return copy
+                # Each filling works on its own copy of the storage; views of
+                # one storage keep sharing it.
+                storage = copy.untyped_storage()
+                if storage._cdata not in bases:
+                    bases[storage._cdata] = storage.clone()
+                return _over(bases[storage._cdata], Shadows._geometry(copy))
+            if isinstance(value, tuple | list):
+                return type(value)(host(item, run, bases) for item in value)
+            return value
+
+        bases: list[dict] = [{}, {}]
+
+        def filling(run):
+            return (
+                [host(value, run, bases[run]) for value in self.args],
+                {
+                    name: host(value, run, bases[run])
+                    for name, value in self.kwargs.items()
+                },
+            )
+
+        runs = [0, 1] if inputs else [0]
+        fillings = [filling(run) for run in runs]
+        filled = {key: bases[0][("fill", key)].clone() for key in outputs}
+        try:
+            _interpret(kernel, self.node, self.shape, fillings)
+            if not inputs and any(
+                bool((bases[0][("fill", key)] == filled[key]).any()) for key in outputs
+            ):
+                # Perhaps not written whole: run again on other fillings.
+                runs.append(1)
+                _interpret(kernel, self.node, self.shape, [filling(1)])
+        except Exception as error:  # noqa: BLE001 - what it cannot run is unknown
+            self.failures.add(self.failing)
+            raise _UnknownContents(
+                f"{kernel.__name__} could not be emulated: {error}"
+            ) from error
+        results = []
+        for argument in self.written:
+            first = host(argument, 0, bases[0])
+            if len(runs) == 2 and not torch.equal(first, host(argument, 1, bases[1])):
+                results.append(None)
+            else:
+                results.append(first.clone())
+        if key is not None:
+            self.memo[key] = results
+        return results
+
+
+def _made_up_contents(geometry, run, wide=False) -> torch.Tensor:
+    """Made-up contents for filling ``run`` of an argument without any; spread
+    over the dtype's whole range when ``wide``."""
+    size, stride, _offset, dtype = geometry
+    generator = torch.Generator().manual_seed(run + 1)
+    filler = torch.empty_strided(size, stride, dtype=dtype)
+    if wide and dtype.is_floating_point:
+        bound = min(torch.finfo(dtype).max / 2, 1e6)
+        filler.copy_(
+            (torch.rand(size, generator=generator, dtype=torch.float64) * 2 - 1) * bound
+        )
+    elif wide and dtype != torch.bool and not dtype.is_complex:
+        info = torch.iinfo(dtype)
+        low, high = max(info.min, -(1 << 63)), min(info.max, (1 << 63) - 1)
+        filler.copy_(
+            torch.randint(low, high, size, generator=generator, dtype=torch.int64)
+        )
+    elif dtype.is_floating_point or dtype.is_complex:
+        filler.copy_(torch.rand(size, generator=generator) * 997 + run * 13)
+    elif dtype == torch.bool:
+        filler.copy_(torch.rand(size, generator=generator) > 0.5)
+    else:
+        filler.copy_(torch.randint(0, 127, size, generator=generator) + run * 3)
+    return filler
+
+
+def _interpret(kernel, node, shape, fillings) -> None:
+    """Run a Triton launch over each filling of its arguments, in Triton's interpreter."""
+    import importlib
+
+    from triton.runtime.interpreter import GridExecutor
+    from triton.runtime.jit import JITFunction
+
+    names = kernel.arg_names
     real = {
         name: importlib.import_module(name)
         for name in (
@@ -3137,7 +3369,7 @@ def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
             for name in names
         )
     )
-    exec(  # noqa: S102 - names checked above
+    exec(  # noqa: S102 - names checked by the caller
         compile(code, "<triton signature stub>", "exec"), stub_globals
     )
     stub = stub_globals["stub"]
@@ -3148,139 +3380,17 @@ def _emulate_triton(kernel: TritonKernel, grid, args, kwargs) -> list | None:
     def call_helper(self, *call_args, **call_kwargs):
         return self.fn(*call_args, **call_kwargs)
 
-    def execute(*fillings):
-        """Run the launch over each filling of its arguments, in the Triton interpreter."""
-        original_call = JITFunction.__call__
-        module.update({key: real[value.__name__] for key, value in swapped.items()})
-        JITFunction.__call__ = call_helper
-        _EMULATING[0] = True
-        try:
-            for call_args, call_kwargs in fillings:
-                GridExecutor(stub, names, shape)(*call_args, **call_kwargs)
-        finally:
-            _EMULATING[0] = False
-            JITFunction.__call__ = original_call
-            module.update(swapped)
-
-    if not unknown and written and all(_whole_storage(tensor) for tensor in written):
-        # Run when its writes are first read, on its arguments as they are
-        # now: a launch whose results only other kernels read is never run.
-        return _deferred_emulation(
-            kernel,
-            execute,
-            args,
-            kwargs,
-            written,
-            shadows,
-            failures,
-            failing,
-            memo,
-            key,
-        )
+    original_call = JITFunction.__call__
+    module.update({key: real[value.__name__] for key, value in swapped.items()})
+    JITFunction.__call__ = call_helper
+    _EMULATING[0] = True
     try:
-        if not unknown:
-            execute((first_args, first_kwargs))
-            # The launch wrote the copies themselves.
-            if key is not None:
-                memo[key] = [shadows.get(tensor).clone() for tensor in written]
-            return []
-        second_args, second_kwargs = place(1, second_bases := {})
-        execute((first_args, first_kwargs), (second_args, second_kwargs))
-    except Exception as error:  # noqa: BLE001 - anything it cannot run is left unknown
-        logger.debug("%s: not emulated: %s", kernel.__name__, error)
-        failures.add(failing)
-        return None
-
-    # A written tensor that came out the same from both fillings is known.
-    left_unknown, results = [], []
-    for tensor in written:
-        copy = shadows.get(tensor)
-        first = host(tensor, 0, first_bases)
-        second = host(tensor, 1, second_bases)
-        if torch.equal(first, second):
-            copy.copy_(first)
-            results.append(first.clone())
-        else:
-            left_unknown.append(tensor)
-            results.append(None)
-    if key is not None:
-        memo[key] = results
-    return left_unknown
-
-
-def _whole_storage(tensor) -> bool:
-    """Whether ``tensor`` is all of its storage, laid out in order."""
-    return (
-        tensor.storage_offset() == 0
-        and tensor.is_contiguous()
-        and tensor.numel() * tensor.element_size() == tensor.untyped_storage().nbytes()
-    )
-
-
-def _deferred_emulation(
-    kernel, execute, args, kwargs, written, shadows, failures, failing, memo, key
-) -> list:
-    """Defer a Triton launch until something reads what it writes.
-
-    Its arguments' contents are snapshotted now (views of one storage keep
-    sharing the snapshot), and each written storage is given the write,
-    which runs the launch once, on the snapshots, when first read; a launch
-    on the same contents run before gives its writes instead.
-    """
-    bases: dict = {}
-
-    def snapshot(value):
-        if isinstance(value, torch.Tensor) and value.is_meta:
-            copy = shadows.get(value)
-            storage = copy.untyped_storage()
-            if storage._cdata not in bases:
-                bases[storage._cdata] = storage.clone()
-            return torch.empty(0, dtype=copy.dtype).set_(
-                bases[storage._cdata], copy.storage_offset(), copy.size(), copy.stride()
-            )
-        if isinstance(value, tuple | list):
-            return type(value)(snapshot(item) for item in value)
-        return value
-
-    snapshot_args = [snapshot(value) for value in args]
-    snapshot_kwargs = {name: snapshot(value) for name, value in kwargs.items()}
-    targets: dict[int, torch.Tensor] = {}
-
-    def pair(value, copied):
-        if isinstance(value, torch.Tensor):
-            targets.setdefault(id(value), copied)
-        elif isinstance(value, tuple | list):
-            for item, copied_item in zip(value, copied, strict=False):
-                pair(item, copied_item)
-
-    for value, copied in zip(args, snapshot_args, strict=False):
-        pair(value, copied)
-    for name, value in kwargs.items():
-        pair(value, snapshot_kwargs[name])
-    results: list = []
-
-    def written_contents(position):
-        if not results:
-            if key is not None and key in memo:
-                results.extend(memo[key])
-            else:
-                try:
-                    execute((snapshot_args, snapshot_kwargs))
-                except Exception as error:
-                    failures.add(failing)
-                    raise RuntimeError(
-                        f"{kernel.__name__} could not be emulated: {error}"
-                    ) from error
-                results.extend(targets[id(tensor)].clone() for tensor in written)
-                if key is not None:
-                    memo[key] = list(results)
-        return results[position].clone()
-
-    for position, tensor in enumerate(written):
-        shadows.defer_write(
-            tensor, lambda region, position=position: written_contents(position)
-        )
-    return []
+        for call_args, call_kwargs in fillings:
+            GridExecutor(stub, names, shape)(*call_args, **call_kwargs)
+    finally:
+        _EMULATING[0] = False
+        JITFunction.__call__ = original_call
+        module.update(swapped)
 
 
 def _launch_form(value):
@@ -3295,20 +3405,26 @@ def _launch_form(value):
     return type(value).__name__
 
 
-def _emulation_key(kernel, grid, args, kwargs, shadows):
+def _emulation_key(kernel, grid, args, kwargs, contents):
     """What decides a Triton launch's writes: the kernel, its grid, and each
-    argument (a tensor's geometry and its copy's contents), or None."""
+    argument (a tensor's geometry and its contents, as ``contents`` gives a
+    :class:`_Contents`), or None."""
     import hashlib
 
     def part(value):
-        if isinstance(value, torch.Tensor):
-            copy = shadows.get(value) if value.is_meta else value
-            geometry = (
-                str(value.dtype),
-                tuple(value.shape),
-                tuple(value.stride()),
-                value.storage_offset(),
-            )
+        if isinstance(value, _Contents | torch.Tensor):
+            if isinstance(value, _Contents):
+                copy = contents(value)
+                size, stride, offset, dtype = value.geometry
+                geometry = (str(dtype), size, stride, offset)
+            else:
+                copy = value
+                geometry = (
+                    str(value.dtype),
+                    tuple(value.shape),
+                    tuple(value.stride()),
+                    value.storage_offset(),
+                )
             if copy is None:
                 return ("unknown", *geometry)
             digest = hashlib.blake2b(
