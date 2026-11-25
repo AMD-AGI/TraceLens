@@ -132,11 +132,13 @@ GPU Event
    computation_time + exposed_comm_time + exposed_memcpy_time + idle_time = total_time
    ```
 
+   With `--micro_idle_thresh_us`, the sheet also has `micro_idle_time` and `macro_idle_time`. Those two add up to `idle_time`.
+
 ### Columns
 
 | Column | Description | Values |
 |--------|-------------|--------|
-| `type` | Category of GPU time | `computation_time`, `exposed_comm_time`, `exposed_memcpy_time`, `busy_time`, `idle_time` (or `micro_idle_time` and `macro_idle_time`), `total_comm_time`, `total_memcpy_time`, `total_time` |
+| `type` | Category of GPU time | `computation_time`, `exposed_comm_time`, `exposed_memcpy_time`, `busy_time`, `idle_time`, `micro_idle_time`, `macro_idle_time`, `total_comm_time`, `total_memcpy_time`, `total_time` |
 | `time ms` | Time in milliseconds | Actual duration for each category |
 | `percent` | Percentage of total time | `(time ms / total_time) * 100` |
 

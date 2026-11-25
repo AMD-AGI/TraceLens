@@ -208,6 +208,7 @@ class TestGPUEventAnalyserStatic:
         metrics = GPUEventAnalyser.compute_metrics_dict(events, micro_idle_thresh_us=30)
         assert metrics["micro_idle_time"] == pytest.approx(0.0)
         assert metrics["macro_idle_time"] == pytest.approx(50.0)
+        assert metrics["idle_time"] == pytest.approx(50.0)
 
     def test_verify_dict_gpu_event_lists_rejects_bad_keys(self):
         with pytest.raises(ValueError, match="Expected keys"):
