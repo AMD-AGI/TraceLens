@@ -46,6 +46,7 @@ flags:
     paths:
       - TraceLens/EventReplay/
       - TraceLens/PerfModel/benchmarking/
+      - TraceLens/Agent/PerfModel/validate_perf_model/replay/
     carryforward: true
 
 fixes:

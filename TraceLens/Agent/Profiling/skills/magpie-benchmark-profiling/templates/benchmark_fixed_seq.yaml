@@ -1,0 +1,32 @@
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+# Fixed-sequence benchmark: random prompts at a fixed ISL/OSL.
+# Step 2 and 2b add the framework profiler flags and the targeted window.
+
+benchmark:
+  framework: <vllm | sglang | atom>
+  model: <hf model id or absolute model dir>
+  precision: <bf16 | fp8 | fp4>
+  docker_image: <serving image; stock is fine, Step 1b patches it if needed>
+  hf_cache_path: <HF_HOME on the node, contains hub/>
+  timeout_seconds: 7200
+
+  envs:
+    TP: 8
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 0.8
+    MAX_MODEL_LEN: 131072
+
+  profiler:
+    torch_profiler:
+      enabled: true
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false # analysis runs in the TraceLens agent, not in Magpie

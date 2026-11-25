@@ -204,11 +204,13 @@ def _fill_vllm_native(ann, name):
 
 def _fill_sglang_native(ann, name):
     """Base SGLang label with no roofline suffix"""
-    m = re.match(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]", name)
+    # Trailing fields (e.g. ``forward_id=866``) may follow bs/toks; ignore them.
+    m = re.match(r"step\[(\w+)\s+bs=(\d+)([^\]]*)\]", name)
     if not m:
         return False
     kind_word, bs = m.group(1).upper(), int(m.group(2))
-    toks = int(m.group(3) or 0)
+    toks_m = re.search(r"\btoks=(\d+)", m.group(3))
+    toks = int(toks_m.group(1)) if toks_m else 0
     # VERIFY carries no per-request draft-token count, so g_sq is requests here.
     if kind_word in ("DECODE", "VERIFY", "TARGET_VERIFY"):
         ann.generation_requests = ann.generation_sum = ann.g_sq = bs
@@ -578,6 +580,62 @@ def spec_decode_batch_sizes(
         nearest = min(nearby, key=lambda v: gap(root, v))
         sizes.append((requests(nearest),))
     return sizes
+
+
+def find_step_annotations(events: List[dict]) -> List[dict]:
+    """CPU ``step[...]`` annotations; GPU-side copies (``gpu_user_annotation``) are skipped."""
+    return [
+        e
+        for e in events
+        if e.get("cat") == ANNOTATION_CAT and e.get("name", "").startswith("step[")
+    ]
+
+
+def innermost_extend_steps(events: List[dict]) -> List[dict]:
+    """``step[EXTEND ...]`` spans that contain no other ``step[EXTEND ...]``."""
+    steps = sorted(
+        (
+            e
+            for e in find_step_annotations(events)
+            if e["name"].startswith("step[EXTEND") and "dur" in e
+        ),
+        key=lambda e: (e.get("ts", 0), -e.get("dur", 0)),
+    )
+    inner = []
+    for i, e in enumerate(steps):
+        end = e["ts"] + e["dur"]
+        nxt = steps[i + 1] if i + 1 < len(steps) else None
+        if nxt is not None and nxt["ts"] + nxt["dur"] <= end:
+            continue
+        inner.append(e)
+    return inner
+
+
+def find_step_label(step_events: List[dict], root: dict) -> Optional[str]:
+    """The SGLang ``step[...]`` label of an execution root.
+
+    The root itself when it is a step label; otherwise the first of the
+    ts-sorted *step_events* that starts within the root's time span (SGLang
+    wraps each forward in ``scheduler.run_batch`` and emits the step label
+    alongside it).
+    """
+    name = root.get("name", "")
+    if name.startswith("step["):
+        return name
+    start = root.get("ts", 0)
+    end = start + root.get("dur", 0)
+    for e in step_events:
+        if start <= e.get("ts", -1) <= end:
+            return e["name"]
+    return None
+
+
+def parse_draft_prefill_tokens(step_label: Optional[str]) -> Optional[int]:
+    """Prompt tokens of an SGLang ``step[DRAFT ... toks=N]`` label, else None."""
+    if not step_label or not step_label.startswith("step[DRAFT"):
+        return None
+    m = re.search(r"\btoks=(\d+)", step_label)
+    return int(m.group(1)) if m else None
 
 
 # --- family keys ------------------------------------------------------------

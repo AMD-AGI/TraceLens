@@ -40,6 +40,19 @@ and prints one `[DIAG:...]` line per finding. The `--detailed` flag additionally
 runs the trace-loading checks, which are slower and more I/O-intensive; omit it
 for a faster pass.
 
+### Profile mode (CLI)
+
+```bash
+python -m TraceLens.Agent.Analysis.triage.runner \
+    --bench-dir /path/to/magpie/benchmark_dir --out-dir /path/to/profile_check
+```
+
+Runs only `PROFILE_CHECKS` on a Magpie benchmark directory, before any analysis exists.
+The checks live in `profile_checks.py` and stream each trace once. They reuse the
+sublabels of the matching run-dir checks, and add `1e` drafter captures, `1f` graph
+launches, `1g` benchmark report (informational), `2d` split quality from
+`split_manifest.json`, `2k` step count and `2l` CPU call stack.
+
 ### 2. General, single run (library)
 
 ```python
@@ -82,13 +95,19 @@ Every finding carries a DIAG tag of the form `DIAG:<category>:<sublabel>_<NAME>`
 |---|---|---|
 | 1x | `profiling` | Trace presence, size, GPU kernels, capture traces |
 | 2x | `trace_quality` | Shapes, inference annotations, split traces, idle, corruption, instability |
-| 3x | `perf_model` | Report correctness: synthetic and unclassified ops, missing TB/s or TFLOPs, roofline %, zero-pct ops |
+| 3x | `perf_model` | Report correctness: graph capture merge (`3c`) and capture rank (`3i`), synthetic and unclassified ops, missing TB/s or TFLOPs, roofline %, zero-pct ops |
 | 4x | `tracelens_agent_workflow` | Orchestrator and agent pipeline outputs (perf reports, manifests, analysis.md, subagent budget) |
 | 5x | `infra` | Host and environment: SSH, docker, disk, NFS, dependencies, context length |
 | 6x | `geak_interface` | Hyperloom session GEAK checks (kernel_candidates.json) |
 
 The trace-loading checks (`2a`, `2b`, `2c`, `2e`, `2f`) run only when
-`--detailed` is passed.
+`--detailed` is passed. `3c` and `3i` read the graph capture merge output, so
+pass the perf report log as `--stream-file`.
+
+`verify_kernel_candidates` checks `kernel_candidates.json` against the
+mixed steady-state trace and the perf CSVs: GPU time, launch counts, top
+kernels and rows, candidate kernels present in the trace with a resolved
+source file, and CSV shape and perf-model coverage.
 
 ## Environment variables
 
@@ -103,6 +122,7 @@ The trace-loading checks (`2a`, `2b`, `2c`, `2e`, `2f`) run only when
 |---|---|---|
 | `<run_dir>/triage_details.csv` | `runner` | One row per finding (tag, category, failure mode, evidence, remedy). |
 | `<run_dir>/triage_diags.txt` | `runner` | Human-readable DIAG lines. |
+| `<run_dir>/graph_merge_check.json` | `runner` | Merged and unmerged execution roots, failure reasons, and the annotation root to capture trace mapping. |
 | `<report_dir>/run_dirs.txt` | `run_triage.sh` | Discovered run directories. |
 | `<report_dir>/aggregated_triage.csv` | `postprocess` | All findings across the batch. |
 | `<report_dir>/summary_report.md` | `postprocess` | Funnel, top failure modes, action items, reproducers. |
