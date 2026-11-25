@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2024 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -73,30 +73,30 @@ Tokenization:
     matters: more specific patterns must precede general ones (e.g.
     ``fused_qk_rope_cat_and_cache_mla`` before generic ``rope``).
 
-Extension CLI arguments (parsed from sys.argv, transparent to the report
-generator):
-    ``--moe_only``        Keep only MoE-classified layers in kernel_timeline.
-    ``--first_n_layers N`` Keep only the first N decoder layers (after
-                          ``--moe_only`` filtering).
-    ``--mtp_scope SECTION`` Keep only kernels in the given MTP decode_section
-                          (e.g. ``verify``).
+Extension scope arguments (via environment variables, since the report CLI
+uses strict argparse and rejects unknown flags):
+    ``TRACELENS_EXT_MOE_ONLY=1``        Keep only MoE-classified layers.
+    ``TRACELENS_EXT_FIRST_N_LAYERS=N``  Keep only the first N decoder layers
+                                        (after MoE filtering).
+    ``TRACELENS_EXT_MTP_SCOPE=SECTION`` Keep only kernels in the given MTP
+                                        decode_section (e.g. ``verify``).
 
 Usage (recommended -- enables tree-based layer detection):
 
     TraceLens_generate_perf_report_pytorch_inference \\
         --profile_json_path trace.json.gz \\
-        --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown.py \\
+        --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py \\
         --output_xlsx_path report.xlsx \\
         --group_by_parent_module
 
-With scope filters:
+With scope filters (via environment variables):
 
+    TRACELENS_EXT_MOE_ONLY=1 TRACELENS_EXT_FIRST_N_LAYERS=1 \\
     TraceLens_generate_perf_report_pytorch_inference \\
         --profile_json_path trace.json.gz \\
-        --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown.py \\
+        --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py \\
         --output_xlsx_path report.xlsx \\
-        --group_by_parent_module \\
-        --moe_only --first_n_layers 1
+        --group_by_parent_module
 
 SGLang EAGLE/MTP traces use verify-section + rmsnorm step
 selection automatically when EAGLE markers are detected; ``--mtp_scope
@@ -114,9 +114,8 @@ Extension hooks used:
                                                scope filtering
 """
 
-import argparse
+import os
 import re
-import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from statistics import mean
@@ -126,31 +125,29 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
-# Extension CLI arguments (parsed from sys.argv via parse_known_args)
+# Extension scope arguments (via environment variables)
 # ---------------------------------------------------------------------------
-def _parse_ext_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument(
-        "--moe_only",
-        action="store_true",
-        help="Keep only MoE layers in the kernel_timeline output.",
+# The report CLI uses strict ``parser.parse_args()``, which rejects unknown
+# flags before extensions load.  Extension-specific scope options are
+# therefore read from environment variables instead of CLI flags:
+#
+#   TRACELENS_EXT_MOE_ONLY=1       -- keep only MoE-classified layers
+#   TRACELENS_EXT_FIRST_N_LAYERS=N -- keep only the first N decoder layers
+#   TRACELENS_EXT_MTP_SCOPE=verify -- keep only kernels in this MTP section
+#
+@dataclass
+class _ExtArgs:
+    moe_only: bool = False
+    first_n_layers: int = 0
+    mtp_scope: str = ""
+
+
+def _parse_ext_args() -> _ExtArgs:
+    return _ExtArgs(
+        moe_only=os.environ.get("TRACELENS_EXT_MOE_ONLY", "") in ("1", "true", "True"),
+        first_n_layers=int(os.environ.get("TRACELENS_EXT_FIRST_N_LAYERS", "0")),
+        mtp_scope=os.environ.get("TRACELENS_EXT_MTP_SCOPE", ""),
     )
-    p.add_argument(
-        "--first_n_layers",
-        type=int,
-        default=0,
-        help="Keep only the first N decoder layers (after --moe_only filter).",
-    )
-    p.add_argument(
-        "--mtp_scope",
-        type=str,
-        default="",
-        help="Keep only kernels in this MTP decode_section (e.g. 'verify'). "
-        "For SGLang EAGLE/MTP traces, verify is applied automatically when "
-        "selecting the decode step.",
-    )
-    args, _ = p.parse_known_args(sys.argv[1:])
-    return args
 
 
 _EXT_ARGS = _parse_ext_args()
@@ -159,7 +156,7 @@ _EXT_ARGS = _parse_ext_args()
 GPU_CATEGORIES = {"kernel", "gpu_memcpy", "gpu_memset"}
 
 # ---------------------------------------------------------------------------
-# Annotation patterns -- same as split_inference_trace_annotation.py
+# Annotation patterns for vLLM/SGLang iteration detection
 # ---------------------------------------------------------------------------
 ANNOTATION_PATTERNS = [
     re.compile(
@@ -1096,7 +1093,7 @@ def _infer_arch_name_from_fingerprint(
     distinctive = fingerprint - common
     if not distinctive:
         distinctive = fingerprint
-    blob = " ".join(distinctive)
+    blob = " ".join(str(x) for x in distinctive)
     if step_phase == "prefill" and re.search(r"reshape_and_cache", blob, re.I):
         return "reshape_and_cache_flash"
     if step_phase == "decode" and re.search(r"paged_attention", blob, re.I):
@@ -1464,7 +1461,7 @@ def _decompose_layers(
 
 
 # ---------------------------------------------------------------------------
-# Helpers ported from split_inference_trace_annotation.py
+# Annotation parsing helpers
 # ---------------------------------------------------------------------------
 def _get_iter_details_from_name(name: str) -> dict:
     """Parse iteration details (batch size, request counts) from a
@@ -1572,7 +1569,7 @@ def _infer_batch_size_for_interval(
     Collects the first dimension of every ``Input Dims`` tensor shape from
     all ``cpu_op`` events whose timestamp falls within ``[ts_start, ts_end]``
     and returns the **mode** (most frequent value).  This matches the approach
-    used by ``infer_batch_size_from_cpu_ops`` in the reporting pipeline.
+    used by the batch-size inference in the reporting pipeline.
 
     ``Input Dims`` is accessed as a native Python list (already parsed from
     JSON by the trace loader), e.g. ``[[128, 7168], [7168]]``.
@@ -2268,7 +2265,7 @@ def _find_best_step_batch_size(
 
     For each candidate, the batch size is inferred as the most frequent
     first dimension across all ``cpu_op`` ``Input Dims`` tensors within
-    that interval (matching ``infer_batch_size_from_cpu_ops`` in the
+    that interval (matching the batch-size inference approach in the
     reporting pipeline).  The caller is responsible for providing the
     appropriate candidate set (e.g. decode-only, prefill-only, or all).
     """
@@ -2576,6 +2573,22 @@ def tree_postprocess_extension(tree) -> None:
         print("[inference_ext] Could not determine a representative step.")
         return
 
+    # Determine the real phase of the primary selected step.  When the
+    # step is actually a prefill or mixed (prefilldecode) step that landed
+    # in ``decode_rb`` via the fallback path, we must label it correctly.
+    _primary_phase = phase_map.get(decode_rb.get("UID"), "")
+    if not _primary_phase:
+        # Annotation-based path: infer from the annotation name.
+        det = _get_iter_details_from_name(decode_rb.get("name", ""))
+        cr = det.get("context_requests", 0)
+        gr = det.get("generation_requests", 0)
+        if cr > 0 and gr > 0:
+            _primary_phase = "prefilldecode"
+        elif cr > 0:
+            _primary_phase = "prefill"
+        else:
+            _primary_phase = "decode"
+
     # Collect subtrees for selected steps
     decode_uids = _collect_subtree_uids(tree, decode_rb)
     if _is_sglang_mtp(tree):
@@ -2607,13 +2620,16 @@ def tree_postprocess_extension(tree) -> None:
         if "parent" in ev and ev["parent"] not in keep_uids:
             del ev["parent"]
 
-    # Tag every event with step_phase
+    # Tag every event with step_phase.  When both a decode and prefill step
+    # were selected, events are tagged by which subtree they belong to.
+    # When only a single step was selected (no prefill_rb), use the real
+    # phase of that step instead of hardcoding "decode".
     for ev in tree.events:
         uid = ev.get("UID")
         if uid in prefill_uids:
             ev["step_phase"] = "prefill"
         elif uid in decode_uids:
-            ev["step_phase"] = "decode"
+            ev["step_phase"] = _primary_phase if prefill_rb is None else "decode"
         else:
             ev["step_phase"] = ""
 
@@ -2627,7 +2643,7 @@ def tree_postprocess_extension(tree) -> None:
         f"({100 * len(kept) / max(1, original_count):.1f}%) "
         f"from run_batch subtree(s)"
     )
-    if prefill_rb is not None:
+    if prefill_rb is not None or _primary_phase != "decode":
         print(f"[inference_ext] Step phases: {phase_msg}")
 
     # --- MTP section detection & tagging ---

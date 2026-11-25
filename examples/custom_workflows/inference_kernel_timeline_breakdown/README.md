@@ -36,15 +36,15 @@ TraceLens_generate_perf_report_pytorch_inference \
 ```
 
 To output only the first N MoE layers (e.g. the first MoE layer in the
-MTP verify section):
+MTP verify section), use environment variables for the scope filters:
 
 ```bash
+TRACELENS_EXT_MOE_ONLY=1 TRACELENS_EXT_FIRST_N_LAYERS=1 TRACELENS_EXT_MTP_SCOPE=verify \
 TraceLens_generate_perf_report_pytorch_inference \
     --profile_json_path trace.json.gz \
     --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py \
     --group_by_parent_module \
-    --output_xlsx_path report.xlsx \
-    --moe_only --first_n_layers 1 --mtp_scope verify
+    --output_xlsx_path report.xlsx
 ```
 
 > **Note:** `--group_by_parent_module` enables tree-based layer decomposition
@@ -174,7 +174,7 @@ to fit Excel's 31-character sheet-name limit.
 | MiniMax AMD | `aiter_rms_norm_layer0`, `attention_v1_layer1` | `aiter_rms_norm_layer0`, `and_cache_flash_layer1` | 0, 1 |
 | DeepSeek R1 SGLang MTP | `DeepseekV2_layer4` | `DeepseekV2_layer4` | 4 (both phases) |
 
-Fingerprint rules (aligned with the legacy KernelBreakdown export):
+Fingerprint rules:
 
 1. Exclude anomalous layers whose kernel count exceeds `10×` the per-phase
    median (minimum threshold 200).
@@ -268,32 +268,32 @@ Only produced when MTP sections are detected. One row per section:
 | `Total kernel duration (us)` | Summed kernel duration |
 | `% of step duration` | Percentage of total step kernel time |
 
-### Scope Filters (CLI Arguments)
+### Scope Filters (Environment Variables)
 
-The extension accepts additional command-line arguments (parsed from
-`sys.argv` via `parse_known_args`).  They are passed alongside the normal
-report generator flags and do not require any changes to the generator.
+The report CLI uses strict `argparse.parse_args()`, which rejects unknown
+flags before extensions load.  Extension-specific scope options are therefore
+read from **environment variables**:
 
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--moe_only` | flag | off | Keep only MoE-classified layers in `kernel_timeline` and `layer_summary`. |
-| `--first_n_layers N` | int | `0` (all) | Keep only the first N decoder layers (applied after `--moe_only`). |
-| `--mtp_scope SECTION` | str | `""` (all) | Keep only kernels whose `decode_section` matches (e.g. `verify`). |
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `TRACELENS_EXT_MOE_ONLY` | `1` or empty | empty (off) | Keep only MoE-classified layers in `kernel_timeline` and `layer_summary`. |
+| `TRACELENS_EXT_FIRST_N_LAYERS` | int | `0` (all) | Keep only the first N decoder layers (applied after MoE filter). |
+| `TRACELENS_EXT_MTP_SCOPE` | string | `""` (all) | Keep only kernels whose `decode_section` matches (e.g. `verify`). |
 
 Example with scope filters:
 
 ```bash
+TRACELENS_EXT_MOE_ONLY=1 TRACELENS_EXT_FIRST_N_LAYERS=1 TRACELENS_EXT_MTP_SCOPE=verify \
 TraceLens_generate_perf_report_pytorch_inference \
     --profile_json_path trace.json.gz \
     --extension_file examples/custom_workflows/inference_kernel_timeline_breakdown/inference_kernel_timeline_breakdown.py \
     --group_by_parent_module \
-    --output_xlsx_path report.xlsx \
-    --moe_only --first_n_layers 1 --mtp_scope verify
+    --output_xlsx_path report.xlsx
 ```
 
 ### Extension Hooks Used
 
-The extension implements two of the four available hooks:
+The extension implements two of the available extension hooks:
 
 - **`tree_postprocess_extension(tree)`** -- classifies run_batch phases,
   selects the representative decode and prefill steps from the highest
@@ -312,8 +312,6 @@ The extension works with any report script that supports `--extension_file`:
 |--------------|-------|
 | `TraceLens_generate_perf_report_pytorch` | General training/inference report |
 | `TraceLens_generate_perf_report_pytorch_inference` | Inference-focused (supports `--capture_folder`) |
-| `python -m TraceLens.Reporting.generate_perf_report_pytorch_vllm` | vLLM eager mode |
-| `python -m TraceLens.Reporting.generate_perf_report_pytorch_vllm_graph` | vLLM graph mode |
 
 ---
 
