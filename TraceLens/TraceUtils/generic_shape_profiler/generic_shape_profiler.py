@@ -26,6 +26,7 @@ Public API: ``install_hooks()``, ``enable()`` / ``disable()``,
 
 from __future__ import annotations
 
+import enum
 import functools
 import inspect
 import json
@@ -98,14 +99,21 @@ _CO_NO_PROMOTE = (
 _MAX_SLOTS = 64
 _MAX_LIST = 64
 
-_T, _S, _D, _L, _I, _X = "T", "S", "D", "L", "I", "X"
-_SCHEMA_TYPE = {
-    _T: "Tensor?",
-    _S: "Scalar?",
-    _D: "ScalarType?",
-    _L: "Tensor[]?",
-    _I: "int[]?",
-}
+
+class SlotKind(str, enum.Enum):
+    """A slot's kind; the value is the schema type its op declares.
+
+    The ``str`` base keeps hashing and comparison in C: a plain Enum's Python
+    ``__hash__`` would be a with_stack event per slot per launch.
+    """
+
+    TENSOR = "Tensor?"
+    SCALAR = "Scalar?"
+    DTYPE = "ScalarType?"
+    TENSOR_LIST = "Tensor[]?"
+    INT_LIST = "int[]?"
+    NONE = ""  # no slot
+
 
 # Membership tests add no with_stack events; isinstance() would.
 _TENSOR_TYPES = {torch.Tensor, torch.nn.Parameter}
@@ -258,15 +266,13 @@ def _define_op(namespace: str, name: str, spec: tuple):
                 # Never torn down: wrappers on hot paths may still call its ops.
                 lib = Library(namespace, "FRAGMENT")
                 _libs[namespace] = lib
-            params = ", ".join(
-                f"{_SCHEMA_TYPE[kind]} a{i}" for i, (_, kind) in enumerate(spec)
-            )
+            params = ", ".join(f"{kind.value} a{i}" for i, (_, kind) in enumerate(spec))
             lib.define(f"{op_name}({params}) -> ()")
             impl = _launcher_impl if namespace == LAUNCHER_NAMESPACE else _noop
             lib.impl(op_name, impl, "CompositeExplicitAutograd")
             op = getattr(getattr(torch.ops, namespace), op_name)
             _schemas[f"{namespace}::{op_name}"] = [
-                [param, _SCHEMA_TYPE[kind]] for param, kind in spec
+                [param, kind.value] for param, kind in spec
             ]
         except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
             logger.debug("could not define %s::%s: %s", namespace, name, exc)
@@ -425,42 +431,42 @@ def _object_layout(obj: Any) -> Optional[_Layout]:
     return layout
 
 
-def _hint_kind(hint: Optional[str]) -> str:
+def _hint_kind(hint: Optional[str]) -> SlotKind:
     """Kind for a parameter first seen as None: unannotated is a tensor, other types no slot."""
     h = hint or ""
     if not h or "Any" in h:
-        return _T
+        return SlotKind.TENSOR
     seq = any(s in h for s in ("List[", "list[", "Sequence[", "Tuple[", "tuple["))
     if "Tensor" in h:
-        return _L if seq else _T
+        return SlotKind.TENSOR_LIST if seq else SlotKind.TENSOR
     scalar = "int" in h or "float" in h or "bool" in h
     if seq:
-        return _I if scalar and _SCALARS_ON else _X
+        return SlotKind.INT_LIST if scalar and _SCALARS_ON else SlotKind.NONE
     if scalar:
-        return _S if _SCALARS_ON else _X
-    return _D if "dtype" in h and _SCALARS_ON else _X
+        return SlotKind.SCALAR if _SCALARS_ON else SlotKind.NONE
+    return SlotKind.DTYPE if "dtype" in h and _SCALARS_ON else SlotKind.NONE
 
 
-def _seq_kind(value: Any) -> str:
+def _seq_kind(value: Any) -> SlotKind:
     if all(v is None or isinstance(v, torch.Tensor) for v in value):
-        return _L
+        return SlotKind.TENSOR_LIST
     if all(isinstance(v, int) for v in value):
-        return _I if _SCALARS_ON else _X
-    return _X
+        return SlotKind.INT_LIST if _SCALARS_ON else SlotKind.NONE
+    return SlotKind.NONE
 
 
-def _kind_of(value: Any, hint: Optional[str] = None) -> str:
+def _kind_of(value: Any, hint: Optional[str] = None) -> SlotKind:
     if value is None or value is _UNSET:
         return _hint_kind(hint)
     if isinstance(value, torch.Tensor):
-        return _T
+        return SlotKind.TENSOR
     if isinstance(value, (bool, int, float)):
-        return _S if _SCALARS_ON else _X
+        return SlotKind.SCALAR if _SCALARS_ON else SlotKind.NONE
     if isinstance(value, torch.dtype):
-        return _D if _SCALARS_ON else _X
+        return SlotKind.DTYPE if _SCALARS_ON else SlotKind.NONE
     if isinstance(value, (list, tuple)):
         return _seq_kind(value)
-    return _X
+    return SlotKind.NONE
 
 
 def _decide_slots(layout: _Layout, vals: list) -> None:
@@ -470,12 +476,12 @@ def _decide_slots(layout: _Layout, vals: list) -> None:
         slots = []
         for i, name in enumerate(layout.names):
             kind = _kind_of(vals[i], layout.hints.get(name))
-            if kind != _X:
+            if kind != SlotKind.NONE:
                 slots.append((i, kind))
         if layout.varargs is not None:
-            slots.append((-1, _L))
+            slots.append((-1, SlotKind.TENSOR_LIST))
         if layout.varkw is not None:
-            slots.append((-2, _L))
+            slots.append((-2, SlotKind.TENSOR_LIST))
         slots = tuple(slots[:_MAX_SLOTS])
         names = []
         for i, _ in slots:
@@ -498,21 +504,23 @@ def _convert(
         v = vals[i] if i >= 0 else _extra_value(i, extra_args, extra_kwargs)
         if v is None or v is _UNSET:
             pass
-        elif kind is _T:
+        elif kind is SlotKind.TENSOR:
             if type(v) in _TENSOR_TYPES or isinstance(v, torch.Tensor):
                 out[s] = v
                 has_tensor = True
-        elif kind is _S:
+        elif kind is SlotKind.SCALAR:
             out[s] = v if type(v) in _SCALAR_TYPES else _plain_number(v)
             # Scalar? only takes int64-range values (nan fails this too).
             if out[s] is not None and not -_I64 <= out[s] < _I64:
                 out[s] = None
-        elif kind is _D:
+        elif kind is SlotKind.DTYPE:
             if type(v) is torch.dtype:
                 out[s] = v
         elif type(v) in _SEQ_TYPES:
             out[s] = _seq_value(kind, v)
-            has_tensor = has_tensor or (kind is _L and out[s] is not None)
+            has_tensor = has_tensor or (
+                kind is SlotKind.TENSOR_LIST and out[s] is not None
+            )
         s += 1
     if not has_tensor:
         return None
@@ -536,10 +544,10 @@ def _extra_value(i: int, extra_args: tuple, extra_kwargs) -> tuple:
     return tuple(extra_kwargs[k] for k in sorted(extra_kwargs))
 
 
-def _seq_value(kind: str, value: Any) -> Optional[list]:
+def _seq_value(kind: SlotKind, value: Any) -> Optional[list]:
     items = []
     for item in value[:_MAX_LIST]:
-        if kind is _L:
+        if kind is SlotKind.TENSOR_LIST:
             if type(item) in _TENSOR_TYPES or isinstance(item, torch.Tensor):
                 items += (item,)
         elif type(item) is int or type(item) is bool:
@@ -601,7 +609,7 @@ def _positional_record(args: tuple, kwargs: dict) -> Optional[tuple]:
     if kwargs:
         vals = args + tuple(kwargs[k] for k in sorted(kwargs))
     out = [None] * _MAX_SLOTS
-    kinds = [_T] * _MAX_SLOTS
+    kinds = [SlotKind.TENSOR] * _MAX_SLOTS
     has_tensor = False
     s = 0
     for v in vals:
@@ -615,18 +623,22 @@ def _positional_record(args: tuple, kwargs: dict) -> Optional[tuple]:
             has_tensor = True
         elif t in _SEQ_TYPES:
             kinds[s] = _seq_kind(v)
-            out[s] = _seq_value(kinds[s], v) if kinds[s] in (_L, _I) else None
+            out[s] = (
+                _seq_value(kinds[s], v)
+                if kinds[s] in (SlotKind.TENSOR_LIST, SlotKind.INT_LIST)
+                else None
+            )
             if out[s] is None:
-                kinds[s] = _T
-            has_tensor = has_tensor or kinds[s] is _L
+                kinds[s] = SlotKind.TENSOR
+            has_tensor = has_tensor or kinds[s] is SlotKind.TENSOR_LIST
         elif not _SCALARS_ON:
             pass
         elif t in _SCALAR_TYPES and -_I64 <= v < _I64:
             out[s] = v
-            kinds[s] = _S
+            kinds[s] = SlotKind.SCALAR
         elif t is torch.dtype:
             out[s] = v
-            kinds[s] = _D
+            kinds[s] = SlotKind.DTYPE
         s += 1
     if not has_tensor:
         return None
