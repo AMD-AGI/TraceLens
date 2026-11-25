@@ -4,5 +4,6 @@ rocm-docs-core @ git+https://github.com/ROCm/rocm-docs-core.git@develop
 certifi>=2026.10.18
 gitpython>=3.2.1
 pyjwt>=2.15.0
+soupsieve>=4.0.0
 tornado>=6.6
 urllib3>=2.8.0
