@@ -151,6 +151,13 @@ their FLOPs against. In a mixed capture, pass `--kernels PHASE|Whole model|SUBST
 for the kernels whose names do not say which phase they ran. The printed
 `source` is `profile`, `export`, or `mixed`.
 
+```{figure} images/qwen3-27b-fp8-mi325x-prefill-roofline.png
+:alt: Roofline of a Qwen3.8-27B FP8 prefill on MI325X. Category markers for GEMM, GroupQuant, RMSNorm, elementwise, and reduce, plus end to end, against the bandwidth, bfloat16, and fp8 roofs.
+:align: center
+
+Qwen3.8-27B-FP8, tensor parallel 4, prefill on MI325X. Each marker is one category at concurrency 1, and end to end is the whole forward.
+```
+
 ## The longest-running kernels
 
 `--top-kernels` replaces the category markers with the kernels that have the
@@ -172,6 +179,13 @@ TraceLens_e2e_roofline_plot \
 ```
 
 `--top-kernels` needs a profile. `--model-only` keeps the category markers.
+
+```{figure} images/qwen3-27b-fp8-mi325x-prefill-top-kernels.png
+:alt: The same Qwen3.8-27B FP8 prefill with the longest-running kernels drawn instead of categories.
+:align: center
+
+The same prefill with `--top-kernels`. Each marker is one kernel, and end to end is still the whole forward.
+```
 
 ## A point above the roof is an error in the inputs
 
