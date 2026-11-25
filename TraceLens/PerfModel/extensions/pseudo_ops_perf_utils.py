@@ -82,6 +82,11 @@ def _get_attention_mappings():
         "aiter::pa_sparse_prefill_opus_fwd": attention_perf_model_extensions.pa_sparse_prefill_opus_fwd,
         "sglang_profiler::tilelang_kernel_tilelang_sparse_fwd": attention_perf_model_extensions.mla_tilelang_sparse_fwd,
         "sgl_kernel::fast_topk_transform_fused": attention_perf_model_extensions.sgl_kernel_fast_topk_transform_fused,
+        # SGLang DSA (GLM-5.2) launchers recorded by the generic shape profiler
+        "launcher_shapes::_triton_sparse_mla_fwd_splitk": attention_perf_model_extensions.sglang_triton_sparse_mla_fwd,
+        "launcher_shapes::triton_sparse_mla_decode_splitk__6t": attention_perf_model_extensions.sglang_triton_sparse_mla_fwd,
+        "launcher_shapes::fp8_mqa_logits": attention_perf_model_extensions.sglang_fp8_mqa_logits,
+        "launcher_shapes::Gfx950FusedIndexer_run": attention_perf_model_extensions.sglang_gfx950_fused_indexer,
         "vllm::gdn_attention_core": attention_perf_model_extensions.gdn_attention_core,
         "aiter::linear_attention_with_output_base": attention_perf_model_extensions.gdn_attention_core,
         # DeepSeek-V4 MXFP4 indexer logits
@@ -168,6 +173,7 @@ def _get_collective_mappings():
         "aiter::fused_allreduce_rmsnorm_": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "sglang_profiler::communication_op_tensor_model_parallel_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "vllm::rocm_aiter_fused_allreduce_rmsnorm": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
+        "launcher_shapes::CustomAllreduce_fused_ar_rms": custom_collectives_perf_model_extensions.aiter_fused_allreduce_rmsnorm_,
         "_C_custom_ar::all_reduce": custom_collectives_perf_model_extensions.custom_ar_all_reduce,
         "aiter::reduce_scatter": custom_collectives_perf_model_extensions.aiter_reduce_scatter,
         "aiter::all_gather_reg": custom_collectives_perf_model_extensions.aiter_all_gather_reg,
