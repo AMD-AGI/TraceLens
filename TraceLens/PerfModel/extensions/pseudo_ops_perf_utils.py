@@ -127,6 +127,7 @@ def _get_gemm_mappings():
         "aiter::fused_qk_rope_concat_and_cache_mla": perf_model_extensions.fused_qk_rope_concat_and_cache_mla,
         "aiter::gemm_a16w16_atomic_": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::_gemm_a16w16_asm": perf_model_extensions.gemm_a16w16_asm,
+        "aiter::_opus_gemm_a16w16_launch_raw": perf_model_extensions.gemm_a16w16_asm,
         "sglang_profiler::gemm_kernels_flydsl_hgemm": perf_model_extensions.gemm_a16w16_atomic_,
         "aiter::gemm_afp4wfp4_": perf_model_extensions.gemm_afp4wfp4,
         "aiter::_opus_bmm_a8w8_mxscale_raw": perf_model_extensions.opus_bmm_a8w8_mxscale_raw,
