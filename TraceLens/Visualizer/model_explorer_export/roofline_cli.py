@@ -39,6 +39,10 @@ from TraceLens.Visualizer.model_explorer_export.roofline_projection import (
 
 # Constants
 
+# Element width of a KV cache. Q and the attention output stay at the
+# activation dtype; only K and V move at this width.
+_KV_CACHE_BPE = {"bf16": 2.0, "fp16": 2.0, "fp8": 1.0, "fp4": 0.5}
+
 _TABLE_COLUMNS = (
     "section",
     "name",
@@ -53,18 +57,8 @@ _TABLE_COLUMNS = (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="TraceLens_model_roofline_projection",
-        description=(
-            "Project a kernel-by-kernel roofline for a model checkpoint from its "
-            "config and modeling source alone, with no trace or GPU run. Ops are "
-            "costed with TraceLens.PerfModel's analytical FLOPs/bytes formulas; "
-            "ops with no direct formula (embeddings, reshapes, a convolution with "
-            "no weight geometry) are reported as unmodeled rather than silently "
-            "dropped."
-        ),
-    )
+def _add_shape_arguments(parser: argparse.ArgumentParser) -> None:
+    """The model to project and the shape to project it at."""
     parser.add_argument(
         "source",
         nargs="?",
@@ -119,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
             "--batch-size/--seq-len for the same key."
         ),
     )
+
+
+def _add_report_arguments(parser: argparse.ArgumentParser) -> None:
+    """The GPU to bound against, how to time ops, and what to write."""
     parser.add_argument(
         "--gpu-arch-name",
         metavar="NAME",
@@ -136,6 +134,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a GPU arch JSON (same schema as --gpu-arch-name); takes precedence",
     )
     parser.add_argument(
+        "--enable-origami-gemm",
+        action="store_true",
+        default=False,
+        help=(
+            "Time GEMMs with Origami, and attention with TraceLens's SDPA tile "
+            "model using Origami for each tile GEMM, when a GPU arch is given."
+        ),
+    )
+    parser.add_argument(
         "--output-csv",
         type=Path,
         metavar="PATH",
@@ -148,15 +155,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the per-op table and rollup as JSON",
     )
     parser.add_argument(
+        "--kv-cache-dtype",
+        choices=("bf16", "fp16", "fp8", "fp4"),
+        default=None,
+        help=(
+            "Width of the KV cache attention reads. K and V move at this width; "
+            "Q and the output stay at the activation dtype. Default: the "
+            "activation dtype."
+        ),
+    )
+    parser.add_argument(
         "--top-n",
         type=int,
         default=20,
         metavar="N",
         help="Rows to print to stdout, ranked by total roofline time (default: 20; 0 for all)",
     )
-    add_model_source_arguments(parser)
-    add_runtime_regime_arguments(parser)
 
+
+def _add_partition_arguments(parser: argparse.ArgumentParser) -> None:
+    """The ``--engine``, ``--tp``, ``--pp`` and ``--ep`` device partitions."""
     partition_group = parser.add_argument_group(
         "device partitions",
         "How many ways to split the model before projecting its roofline. The "
@@ -189,6 +207,25 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Expert-parallel partitions (default: 1).",
     )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="TraceLens_model_roofline_projection",
+        description=(
+            "Project a kernel-by-kernel roofline for a model checkpoint from its "
+            "config and modeling source alone, with no trace or GPU run. Ops are "
+            "costed with TraceLens.PerfModel's analytical FLOPs/bytes formulas; "
+            "ops with no direct formula (embeddings, reshapes, a convolution with "
+            "no weight geometry) are reported as unmodeled rather than silently "
+            "dropped."
+        ),
+    )
+    _add_shape_arguments(parser)
+    _add_report_arguments(parser)
+    add_model_source_arguments(parser)
+    add_runtime_regime_arguments(parser)
+    _add_partition_arguments(parser)
     return parser
 
 
@@ -221,6 +258,8 @@ def _op_row(op: RooflineOp) -> dict[str, object]:
         "roofline_bound": op.roofline_bound,
         "roofline_time_us": op.roofline_time_us,
         "total_roofline_time_us": op.total_roofline_time_us,
+        "origami_time_us": op.origami_time_us,
+        "total_origami_time_us": op.total_origami_time_us,
         "reason": op.reason,
     }
 
@@ -313,6 +352,8 @@ def run_projection(args):
         gpu_arch=gpu_arch,
         num_predicted_tokens=args.num_predicted_tokens,
         checkpoint=checkpoint,
+        kv_cache_bpe=_KV_CACHE_BPE.get(getattr(args, "kv_cache_dtype", None)),
+        enable_origami_gemm=bool(getattr(args, "enable_origami_gemm", False)),
     )
     # Convolutional models: the graph draws one conv per stage (and the stem /
     # downsampling convs that lead those stages). Cost each live instance from a

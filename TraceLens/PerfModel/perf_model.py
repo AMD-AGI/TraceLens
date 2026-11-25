@@ -1608,16 +1608,91 @@ class SDPA:
         return "matrix"
 
     @staticmethod
-    def bytes_func(B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element):
+    def bytes_func(
+        B,
+        N_Q,
+        H_Q,
+        N_KV,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        causal,
+        bytes_per_element,
+        kv_bytes_per_element=None,
+    ):
+        # One attention moves
+        #   (Q + Out) * bytes_per_element + (K + V) * kv_bpe
+        # where
+        #   Q   = B * N_Q * H_Q * d_h_qk
+        #   Out = B * N_Q * H_Q * d_h_v
+        #   K   = B * N_KV * H_KV * d_h_qk
+        #   V   = B * N_KV * H_KV * d_h_v
+        # Q and the output use the activation width. K and V are the cache, so
+        # they use kv_bytes_per_element when it is set: an fp8 cache is 1 byte
+        # while a bfloat16 Q stays 2. Unset, K and V use bytes_per_element too.
+        kv_bpe = (
+            bytes_per_element if kv_bytes_per_element is None else kv_bytes_per_element
+        )
         elems_q_read = B * N_Q * H_Q * d_h_qk
         elems_k_read = B * N_KV * H_KV * d_h_qk
         elems_v_read = B * N_KV * H_KV * d_h_v
         elems_out_write = B * N_Q * H_Q * d_h_v
-        total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
-        return total_elems_moved * bytes_per_element
+        return (elems_q_read + elems_out_write) * bytes_per_element + (
+            elems_k_read + elems_v_read
+        ) * kv_bpe
 
-    # TODO make bytes_per_element based on profile info
-    def bytes(self, bytes_per_element=2):
+    # Where Q, K and V sit in the traced "Input type" list. A subclass whose op
+    # takes other tensors first (dout, out, a KV cache) overrides this.
+    qkv_input_idx = (0, 1, 2)
+    _DEFAULT_BYTES_PER_ELEMENT = 2
+
+    def traced_bytes_per_element(self):
+        """Element widths the trace records: ``(q_bpe, kv_bpe)``.
+
+        ``q_bpe`` is the width of Q. The output and, in backward, dout and dQ
+        share it. ``kv_bpe`` is the width of K and V, and of dK and dV. K and V
+        share one width in the byte formulas, so the wider of the two is used
+        if the trace gives them different dtypes. Either is ``None`` when the
+        trace does not say. A missing KV width is the Q width.
+        """
+        args = (self.event or {}).get("args") or {}
+        types = args.get("Input type") or []
+
+        def width(idx):
+            return name2bpe(types[idx]) if idx < len(types) else None
+
+        q_idx, k_idx, v_idx = self.qkv_input_idx
+        q_bpe = width(q_idx)
+        kv_widths = [w for w in (width(k_idx), width(v_idx)) if w is not None]
+        kv_bpe = max(kv_widths) if kv_widths else None
+        if q_bpe is None:
+            # Ops that record one dtype for the whole call.
+            dtypes = self.param_details.get("dtype_A_B") or [None]
+            q_bpe = name2bpe(dtypes[0])
+        if kv_bpe is None:
+            kv_bpe = q_bpe
+        return q_bpe, kv_bpe
+
+    def _resolve_bytes_per_element(self, bytes_per_element, kv_bytes_per_element):
+        """Fill in ``(bytes_per_element, kv_bytes_per_element)`` from the trace.
+
+        A caller who passes ``bytes_per_element`` and no KV width gets one
+        width for every tensor, as before. A caller who passes neither gets
+        the widths the trace records, or 2 bytes where it records none.
+        """
+        if bytes_per_element is not None:
+            return bytes_per_element, kv_bytes_per_element
+        q_bpe, kv_bpe = self.traced_bytes_per_element()
+        if q_bpe is None:
+            q_bpe = kv_bpe if kv_bpe is not None else self._DEFAULT_BYTES_PER_ELEMENT
+        if kv_bytes_per_element is not None:
+            kv_bpe = kv_bytes_per_element
+        return q_bpe, kv_bpe
+
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        bytes_per_element, kv_bytes_per_element = self._resolve_bytes_per_element(
+            bytes_per_element, kv_bytes_per_element
+        )
         return self.bytes_func(
             self.B,
             self.N_Q,
@@ -1628,6 +1703,7 @@ class SDPA:
             self.d_h_v,
             self.param_details["causal"],
             bytes_per_element,
+            kv_bytes_per_element,
         )
 
     @staticmethod
@@ -1669,9 +1745,31 @@ class SDPA:
 
     @staticmethod
     def bytes_bwd_func(
-        B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element
+        B,
+        N_Q,
+        H_Q,
+        N_KV,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        causal,
+        bytes_per_element,
+        kv_bytes_per_element=None,
     ):
-        # This will be done for recompute in flash attention
+        # One attention backward moves
+        #   (Q + dOut + dQ) * bytes_per_element + (K + V + dK + dV) * kv_bpe
+        # where
+        #   Q  = dQ = B * N_Q * H_Q * d_h_qk
+        #   dOut    = B * N_Q * H_Q * d_h_v
+        #   K  = dK = B * N_KV * H_KV * d_h_qk
+        #   V  = dV = B * N_KV * H_KV * d_h_v
+        # Q, dOut and dQ use the activation width. K, V and their gradients use
+        # kv_bytes_per_element when it is set. Unset, they use bytes_per_element.
+        # This is the recompute-in-flash-attention traffic: Q, K and V are read
+        # again and the probabilities are not stored.
+        kv_bpe = (
+            bytes_per_element if kv_bytes_per_element is None else kv_bytes_per_element
+        )
         elems_q_read = B * N_Q * H_Q * d_h_qk
         elems_k_read = B * N_KV * H_KV * d_h_qk
         elems_v_read = B * N_KV * H_KV * d_h_v
@@ -1682,16 +1780,11 @@ class SDPA:
         elems_k_grad_write = B * N_KV * H_KV * d_h_qk
         elems_v_grad_write = B * N_KV * H_KV * d_h_v
 
-        total_elems_moved = (
-            elems_q_read
-            + elems_k_read
-            + elems_v_read
-            + elems_o_grad_read
-            + elems_q_grad_write
-            + elems_k_grad_write
-            + elems_v_grad_write
+        q_side_elems = elems_q_read + elems_o_grad_read + elems_q_grad_write
+        kv_side_elems = (
+            elems_k_read + elems_v_read + elems_k_grad_write + elems_v_grad_write
         )
-        return total_elems_moved * bytes_per_element
+        return q_side_elems * bytes_per_element + kv_side_elems * kv_bpe
 
     def flops_bwd(self):
         return self.flops_bwd_func(
@@ -1708,8 +1801,10 @@ class SDPA:
 
     # @staticmethod
     # def bytes_bwd_func(B, N_Q, H, d_k, N_K, dropout, causal, flash_impl, bytes_per_element):
-    def bytes_bwd(self, bytes_per_element=2):
-        # Same as forward for now
+    def bytes_bwd(self, bytes_per_element=None, kv_bytes_per_element=None):
+        bytes_per_element, kv_bytes_per_element = self._resolve_bytes_per_element(
+            bytes_per_element, kv_bytes_per_element
+        )
         return self.bytes_bwd_func(
             self.B,
             self.N_Q,
@@ -1720,6 +1815,7 @@ class SDPA:
             self.d_h_v,
             self.param_details["causal"],
             bytes_per_element,
+            kv_bytes_per_element,
         )
 
 
@@ -1821,6 +1917,7 @@ class flash_attention_backward(SDPA):
     """Backward pass for flash_attn::_flash_attn_backward. Argument order: dout, q, k, v, ..."""
 
     category = "SDPA_bwd"
+    qkv_input_idx = (1, 2, 3)
 
     @staticmethod
     def get_param_details(event):
@@ -1869,10 +1966,8 @@ class flash_attention_backward(SDPA):
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element=None):
-        if bytes_per_element is None:
-            bytes_per_element = name2bpe(self.param_details["dtype_A_B"][0])
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 class flash_attention_varlen_forward(SDPA):
@@ -1980,6 +2075,7 @@ class flash_attention_varlen_forward(SDPA):
 
 class flash_attention_varlen_backward(SDPA):
     category = "SDPA_bwd"
+    qkv_input_idx = (1, 2, 3)
 
     def __init__(self, event, arch=None):
         super().__init__(event, arch)
@@ -2083,8 +2179,8 @@ class flash_attention_varlen_backward(SDPA):
             )
         return accum_flops
 
-    def bytes(self, bytes_per_element=2):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 class aten__scaled_dot_product_cudnn_attention(SDPA):
@@ -2331,8 +2427,8 @@ class aiter__flash_attn_backward(SDPA):
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element=2):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 class flash_attn_v3_forward(SDPA):
@@ -2370,6 +2466,7 @@ class flash_attn_v3_forward(SDPA):
 
 
 class aiter__fmha_v3_forward(SDPA):
+    qkv_input_idx = (1, 2, 3)
 
     @staticmethod
     def get_param_details(event):
@@ -2405,6 +2502,7 @@ class aiter__fmha_v3_forward(SDPA):
 
 class aiter__fmha_v3_backward(SDPA):
     category = "SDPA_bwd"
+    qkv_input_idx = (1, 2, 3)
 
     @staticmethod
     def get_param_details(event):
@@ -2440,8 +2538,8 @@ class aiter__fmha_v3_backward(SDPA):
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element=2):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 def _parse_aiter_mha_fwd_args(event):
@@ -2503,6 +2601,7 @@ class aiter__mha_bwd(SDPA):
     # q[1], k[2], v[3] — raw shape (B, N, H, d_h) in bnhd order; bhnd_idx=(0,2,1,3) extracts B,H,N,d_h.
 
     category = "SDPA_bwd"
+    qkv_input_idx = (1, 2, 3)
 
     @staticmethod
     def get_param_details(event):
@@ -2537,8 +2636,8 @@ class aiter__mha_bwd(SDPA):
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element=2):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 class aiter__fmha_v3_bwd(SDPA):
@@ -2552,6 +2651,7 @@ class aiter__fmha_v3_bwd(SDPA):
     """
 
     category = "SDPA_bwd"
+    qkv_input_idx = (1, 2, 3)
 
     @staticmethod
     def get_param_details(event):
@@ -2560,8 +2660,8 @@ class aiter__fmha_v3_bwd(SDPA):
     def flops(self):
         return self.flops_bwd()
 
-    def bytes(self, bytes_per_element=2):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 def _parse_aiter_fmha_v3_varlen_fwd_args(event, tensor_offset=0):
@@ -2805,6 +2905,8 @@ class aiter__fmha_v3_varlen_forward(SDPA):
     arg indices shift by +1.
     """
 
+    qkv_input_idx = (1, 2, 3)
+
     def __init__(self, event, arch=None):
         super().__init__(event, arch)
         self.num_seqs_q = self.param_details["num_seqs_q"]
@@ -2852,6 +2954,7 @@ class aiter__fmha_v3_varlen_bwd(SDPA):
     """
 
     category = "SDPA_bwd"
+    qkv_input_idx = (1, 2, 3)
 
     def __init__(self, event, arch=None):
         super().__init__(event, arch)
@@ -2894,8 +2997,8 @@ class aiter__fmha_v3_varlen_bwd(SDPA):
             )
         return accum_flops
 
-    def bytes(self, bytes_per_element=2):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 class aiter__fmha_v3_varlen_backward(SDPA):
@@ -2906,6 +3009,7 @@ class aiter__fmha_v3_varlen_backward(SDPA):
     """
 
     category = "SDPA_bwd"
+    qkv_input_idx = (2, 3, 4)
 
     def __init__(self, event, arch=None):
         super().__init__(event, arch)
@@ -2945,8 +3049,8 @@ class aiter__fmha_v3_varlen_backward(SDPA):
             )
         return accum_flops
 
-    def bytes(self, bytes_per_element=2):
-        return self.bytes_bwd(bytes_per_element)
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        return self.bytes_bwd(bytes_per_element, kv_bytes_per_element)
 
 
 class aten___flash_attention_forward(SDPA):
@@ -3071,14 +3175,31 @@ class vllm_unified_attention_with_output(SDPA):
         return ctx_flops_qk + ctx_flops_pv + gen_flops_qk + gen_flops_pv
 
     def bytes_func_vllm(
-        self, B, N_Q, H_Q, N_KV, H_KV, d_h_qk, d_h_v, causal, bytes_per_element
+        self,
+        B,
+        N_Q,
+        H_Q,
+        N_KV,
+        H_KV,
+        d_h_qk,
+        d_h_v,
+        causal,
+        bytes_per_element,
+        kv_bytes_per_element=None,
     ):
+        # Prefill moves (Q + Out) * bytes_per_element + (K + V) * kv_bpe, with
+        # Q, Out, K and V counted over the context tokens. See SDPA.bytes_func.
+        kv_bpe = (
+            bytes_per_element if kv_bytes_per_element is None else kv_bytes_per_element
+        )
         ## Prefill
         elems_q_read = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_qk
         elems_k_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_qk
         elems_v_read = B * self.param_details["sum_ctx_tokens"] * H_KV * d_h_v
         elems_out_write = B * self.param_details["sum_ctx_tokens"] * H_Q * d_h_v
-        total_elems_moved = elems_q_read + elems_k_read + elems_v_read + elems_out_write
+        total_bytes_moved = (elems_q_read + elems_out_write) * bytes_per_element + (
+            elems_k_read + elems_v_read
+        ) * kv_bpe
         # Decode - this will not be used as needs additional information from vLLM engine
 
         # elems_q_read = B * 1 * self.param_details["sum_gen_tokens"] * H_Q * d_h_qk
@@ -3086,11 +3207,12 @@ class vllm_unified_attention_with_output(SDPA):
         # elems_v_read = B * 1024 * self.param_details["sum_gen_tokens"] * H_KV * d_h_v
         # elems_out_write = B * 1 * self.param_details["sum_gen_tokens"]*  H_Q * d_h_v
         # total_elems_moved += elems_q_read + elems_k_read + elems_v_read + elems_out_write
-        return total_elems_moved * bytes_per_element
+        return total_bytes_moved
 
-    # TODO make bytes_per_element based on profile info
-    def bytes(self, bytes_per_element=2):
-
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
+        bytes_per_element, kv_bytes_per_element = self._resolve_bytes_per_element(
+            bytes_per_element, kv_bytes_per_element
+        )
         return self.bytes_func_vllm(
             self.B,
             self.N_Q,
@@ -3101,6 +3223,7 @@ class vllm_unified_attention_with_output(SDPA):
             self.d_h_v,
             self.param_details["causal"],
             bytes_per_element,
+            kv_bytes_per_element,
         )
 
 

@@ -912,8 +912,8 @@ class JaxProfileProcessor:
 # https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview?tab=t.0
 # This trace event format includes both Pytorch and Jax traces (and anything that can be viewed in Perfetto)
 #
-# Shared by TraceEventUtils and JaxOpKeys; cannot use TraceEventUtils.CommunicationKeys
-# inside the nested JaxOpKeys class (outer class name is not bound yet during nested exec).
+# Shared by TraceEventUtils and KernelCategoryKeys; cannot use TraceEventUtils.CommunicationKeys
+# inside the nested KernelCategoryKeys class (outer class name is not bound yet during nested exec).
 COMMUNICATION_KEYS = ["rccl", "nccl"]
 
 # (kernel-name regex fragment, canonical collective name for inference)
@@ -932,7 +932,7 @@ DEFAULT_CUSTOM_COLLECTIVE_REGEXES: List[re.Pattern] = [
 
 
 class TraceEventUtils:
-    class JaxOpKeys:
+    class KernelCategoryKeys:
 
         # keywords for splitting jax events
         GemmKeys = ["Cijk", "gemm", "nvjet", "cublasLt"]
@@ -967,6 +967,23 @@ class TraceEventUtils:
             "Communication rccl/nccl": CommunicationKeys,
         }
         UncategorizedEventKey = "Uncategorized Events"
+
+        @classmethod
+        def category_for_kernel_name(cls, name: str) -> Optional[str]:
+            """Category ``_categorize_gpu_kernel_ops`` assigns from the kernel name.
+
+            The first ``ClassCategories`` filter contained in ``name`` wins.
+            ``None`` when none match; the caller applies the HLO fallback.
+            """
+            if not name:
+                return None
+            for category, filters in cls.ClassCategories.items():
+                if any(token in name for token in filters):
+                    return category
+            return None
+
+    # Old name, kept so existing imports keep working.
+    JaxOpKeys = KernelCategoryKeys
 
     class TraceKeys(StrEnum):
         PID = "pid"

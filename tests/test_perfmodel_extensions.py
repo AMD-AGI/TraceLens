@@ -4138,7 +4138,9 @@ class TestSdpaExtendedCoverage:
         }
         model = perf_model.vllm_unified_attention_with_output(event)
         assert (
-            sdpa_tile.sdpa_tile_time_us(model, None, origami_helper.gemm_time_us)
+            sdpa_tile.inference_attention_time_us(
+                model, None, origami_helper.gemm_time_us
+            )
             is None
         )
 

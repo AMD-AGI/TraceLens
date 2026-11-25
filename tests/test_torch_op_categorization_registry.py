@@ -59,6 +59,28 @@ def _row(name, kernel_details=None):
         ("aten::sum", "reduce"),
         ("triton_per_token_quant_fp8", "triton"),
         ("record_param_comms_alltoall_base", "record_param_comms"),
+        ("wvSplitK_hf_sml_bf16", "GEMM"),
+        ("_fused_sconv_kernel", "CONV_fwd"),
+        ("_causal_conv1d_fwd_kernel", "CONV_fwd"),
+        ("_fused_post_conv_kernel", "CONV_fwd"),
+        ("_add_rmsnorm_fwd_kernel", "RMSNorm"),
+        ("_rmsnorm_fwd_kernel", "RMSNorm"),
+        ("triton_red_fused__to_copy_add_fused_add_rms_norm_2", "RMSNorm"),
+        ("vllm::rocm_aiter_act_mul_and_fp8_group_quant", "GroupQuant"),
+        ("vllm::rocm_aiter_rmsnorm_with_add_fp8_group_quant", "RMSNorm"),
+        (
+            "mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256",
+            "MoE_unfused",
+        ),
+        ("mfma_moe2_afp4_wfp4_bf16_cshuffle", "MoE_unfused"),
+        (
+            "void aiter::fused_mx_quant_moe_sort_kernel<bf16>(...) [clone .kd]",
+            "GroupQuant",
+        ),
+        (
+            "void aiter::opus_moe_sorting_entry<aiter::MoeSortingKernel>(...) [clone .kd]",
+            "MoE_aux",
+        ),
         ("completely::unknown::op", "other"),
     ],
 )

@@ -452,7 +452,7 @@ class JaxTraceToTree(BaseTraceToTree):
         Iterates through each event in `self.events` identified as a GPU event (process_name contains
         "/device:GPU"). For events categorized as 'kernel', attempts to assign a GPU kernel operation
         category by matching the event's name and, if available, its 'hlo_op' argument against
-        predefined category filters in `TraceEventUtils.JaxOpKeys.ClassCategories`. If no category is
+        predefined category filters in `TraceEventUtils.KernelCategoryKeys.ClassCategories`. If no category is
         matched, assigns a default 'Uncategorized/XLA' category.
 
         When the kernel name matches an FA category (FA FWD / FA BWD / FA V3), that label is kept
@@ -468,15 +468,9 @@ class JaxTraceToTree(BaseTraceToTree):
             if event.get("cat") != "kernel":
                 continue
             name = event.get("name", "")
-            name_category = None
-
-            for (
-                category,
-                filters,
-            ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                if any(f in name for f in filters):
-                    name_category = category
-                    break
+            name_category = TraceEventUtils.KernelCategoryKeys.category_for_kernel_name(
+                name
+            )
 
             gpu_kernel_op_cat_not_found = name_category is None
             if name_category is not None:
@@ -486,19 +480,19 @@ class JaxTraceToTree(BaseTraceToTree):
             if args and "hlo_op" in args:
                 hlo_op = args.get("hlo_op")
                 if hlo_op and name_category not in self._FA_KERNEL_NAME_CATEGORIES:
-                    for (
-                        category,
-                        filters,
-                    ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
-                        if any(f in hlo_op for f in filters):
-                            event["gpu_kernel_op_cat"] = category
-                            gpu_kernel_op_cat_not_found = False
-                            break
+                    hlo_category = (
+                        TraceEventUtils.KernelCategoryKeys.category_for_kernel_name(
+                            hlo_op
+                        )
+                    )
+                    if hlo_category is not None:
+                        event["gpu_kernel_op_cat"] = hlo_category
+                        gpu_kernel_op_cat_not_found = False
 
             # if still not found, set to Uncategorized/XLA
             if gpu_kernel_op_cat_not_found:
                 event["gpu_kernel_op_cat"] = (
-                    TraceEventUtils.JaxOpKeys.UncategorizedEventKey + "/XLA"
+                    TraceEventUtils.KernelCategoryKeys.UncategorizedEventKey + "/XLA"
                 )
 
     def _set_metadata(self, metadata: Dict) -> None:

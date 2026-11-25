@@ -61,6 +61,10 @@ CATEGORY_ONLY_OP_MAPPING: Dict[str, str] = {
 
 
 OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
+    # Fused Triton RMSNorm spells the op ``rms_norm``. This precedes the
+    # ``^triton`` catch-all, which would otherwise keep the kernel unlabeled
+    # for the RMSNorm series the projection costs.
+    (re.compile(r".*rms_norm", re.IGNORECASE), "RMSNorm"),
     (re.compile(r"^triton"), "triton"),
     (re.compile(r"^record_param_comms"), "record_param_comms"),
     # gsplat 3DGS kernels; ".*" matches the symbol behind a launcher/synthetic prefix (re.match).
@@ -72,6 +76,31 @@ OP_CATEGORY_PATTERNS: List[Tuple[Pattern, str]] = [
         ),
         "InferenceAttention",
     ),
+    # Device kernels of ops the registry keys by the launcher name. A graph
+    # launch keeps only the kernel symbol, so the exact op name never matches.
+    # rocBLAS skinny GEMM (vllm::rocm_unquantized_gemm dispatches wvSplitK).
+    (re.compile(r".*wvSplitK"), "GEMM"),
+    # Inkling short conv. The projection prices it as causal conv1d.
+    (re.compile(r".*sconv"), "CONV_fwd"),
+    # DaoAILab causal conv1d forward and single-token update, and the fused
+    # post-conv epilogue. The projection prices these as CONV_fwd. The trace
+    # key ``conv_`` labels the epilogue ``Conv``, which is not that series.
+    (re.compile(r".*causal_conv1d_(?:fwd|update)", re.IGNORECASE), "CONV_fwd"),
+    (re.compile(r".*post_conv", re.IGNORECASE), "CONV_fwd"),
+    # aiter add_rmsnorm / rmsnorm device kernels. Checked before group_quant
+    # so a norm fused with fp8 group quant stays a norm.
+    (re.compile(r".*rmsnorm", re.IGNORECASE), "RMSNorm"),
+    # moe_flydsl_stage1 / stage2. mfma_moe1 is the gated up GEMM (SiLU fused
+    # into the kernel); mfma_moe2 is the down GEMM. Both are A4W4 MFMA.
+    (re.compile(r".*mfma_moe"), "MoE_unfused"),
+    # fused_dynamic_mx_quant_moe_sort_hip. The sort indexes are not in the cost.
+    (re.compile(r".*fused_mx_quant_moe_sort"), "GroupQuant"),
+    # Act-mul fused with fp8 group quant, and the device symbol of
+    # dynamic_per_group_scaled_quant. The projection prices these as GroupQuant.
+    (re.compile(r".*group_quant", re.IGNORECASE), "GroupQuant"),
+    (re.compile(r".*per_group_scaled_quant", re.IGNORECASE), "GroupQuant"),
+    # moe_sorting_opus_fwd. The graph launch spells the device entry, not the op.
+    (re.compile(r".*(?:opus_moe_sorting|MoeSorting)"), "MoE_aux"),
 ]
 
 

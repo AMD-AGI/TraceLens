@@ -68,9 +68,10 @@ Known approximations, stated once here rather than scattered in comments:
     ``num_experts`` passes -- the router picks a subset per token, so costing
     every expert for every token would overstate FLOPs by
     ``num_experts / experts_per_tok``. The expert GEMMs use :class:`GroupedGemm`
-    over ``G = min(num_experts, active_tokens)`` distinct weight matrices, so the
-    weight-byte term reflects the experts actually streamed (``G`` falls back to
-    1, the prior single-weight cost, when ``num_experts`` is unknown). Tensor
+    over ``G`` distinct weight matrices, the experts the routed rows are expected
+    to reach (``num_experts * (1 - (1 - 1/num_experts) ** active_tokens)``), so
+    the weight-byte term reflects the experts actually streamed (``G`` falls back
+    to 1, the prior single-weight cost, when ``num_experts`` is unknown). Tensor
     parallel column-shards each expert's intermediate width; expert parallel
     gives one GPU ``1/EP`` of the routed rows and adds the dispatch/combine
     all-to-all as FLOPs-free data movement (:class:`MoEComm`). The router's
@@ -96,10 +97,11 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from pathlib import Path
 from dataclasses import dataclass, field, replace
 from math import prod
-from typing import Any
+from typing import Any, NamedTuple
 
 from TraceLens.ModelUtils.extract import ArchitectureSpec
 from TraceLens.ModelUtils.loader import build_roofline_basic_ops
@@ -123,9 +125,15 @@ from TraceLens.TreePerf.tree_perf import compute_roofline_time_and_bound
 from TraceLens.Visualizer.model_explorer_export.ast_build import (
     build_model_explorer_payload,
 )
+from TraceLens.Visualizer.model_explorer_export.computation_roles import (
+    ATTENTION_ROLE,
+    ROLE_BASIS_COMPUTATION,
+)
 from TraceLens.Visualizer.model_explorer_export.shapes import parse_shape_dims
 
 # Constants
+
+ATTENTION_CATEGORY = "Attention"
 
 # Bytes per element by torch_dtype_map's simulation-precision name.
 _BYTES_PER_ELEMENT: dict[str, float] = {
@@ -334,6 +342,9 @@ class RooflineOp:
     """Where the cost came from: graph leaf, parsed source, config, or fallback."""
     roofline_time_us: float | None = None
     roofline_bound: str | None = None
+    # Origami GEMM time, or the SDPA tile model timed with Origami. Set only
+    # with --enable-origami-gemm. The roofline time stays the roof.
+    origami_time_us: float | None = None
 
     @property
     def total_flops(self) -> float | None:
@@ -349,6 +360,14 @@ class RooflineOp:
             None
             if self.roofline_time_us is None
             else self.roofline_time_us * self.instances
+        )
+
+    @property
+    def total_origami_time_us(self) -> float | None:
+        return (
+            None
+            if self.origami_time_us is None
+            else self.origami_time_us * self.instances
         )
 
 
@@ -469,6 +488,8 @@ def project_roofline(
     gpu_arch: dict[str, Any] | None = None,
     num_predicted_tokens: int = 0,
     checkpoint: str | Path | None = None,
+    kv_cache_bpe: float | None = None,
+    enable_origami_gemm: bool = False,
 ) -> RooflineProjection:
     """Project a kernel-by-kernel roofline for *spec* at a concrete batch/seq length.
 
@@ -484,148 +505,25 @@ def project_roofline(
     dims = build_projection_dims(
         spec, batch_size=batch_size, seq_len=seq_len, extra_dims=extra_dims
     )
-    _populate_introspection(spec)
+    _begin_projection(spec, kv_cache_bpe, enable_origami_gemm)
     moe_top_k = spec.num_experts_per_tok
     moe_intermediate_size = spec.moe_intermediate_size or spec.intermediate_size
-    payload = build_model_explorer_payload(
-        spec,
-        basic_ops=build_roofline_basic_ops(),
-        include_shapes=True,
-        # The nested stage tree and the concrete spatial shapes are read off a
-        # meta-device module. Without the checkpoint the projection builds the
-        # uniform-stack graph and a CNN's stage body never appears.
-        meta_shapes_checkpoint=str(checkpoint) if checkpoint else None,
-    )
-    graphs = payload["graphCollections"][0]["graphs"]
-    nodes = graphs[0]["nodes"] if graphs else []
+    nodes = _projection_graph_nodes(spec, checkpoint)
 
     result = RooflineProjection(batch_size=batch_size, seq_len=seq_len)
+    run = _ProjectionRun(
+        nodes=nodes,
+        dims=dims,
+        gpu_arch=gpu_arch,
+        moe_top_k=moe_top_k,
+        moe_intermediate_size=moe_intermediate_size,
+        opaque_attention=_opaque_attention_scopes(nodes),
+        replaced_eager_attention=set(),
+    )
     for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        parsed = _parse_op_node(node)
-        if parsed is None:
-            continue
-        (
-            section,
-            computation,
-            class_name,
-            operation,
-            output_text,
-            input_texts,
-            role,
-            details,
-        ) = parsed
-        instances = _repeat_count(str(node.get("namespace") or ""), node)
-        node_id = str(node.get("id"))
-        op = _project_op(
-            node_id,
-            section,
-            computation,
-            class_name,
-            operation,
-            output_text,
-            input_texts,
-            dims,
-            instances,
-            gpu_arch,
-            moe_top_k,
-            moe_intermediate_size,
-            role,
-            details,
-        )
-        if _node_is_draft_container(node):
-            # The synthetic stack, or the container's own drawn children, costs
-            # this module. The container node itself is not a second copy.
-            continue
-        result.ops.append(op)
-        _dims_only, dtype = _split_shape_text(output_text)
-        bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
-        if (
-            role == "attention"
-            and op.modeled
-            and op.category == "Attention"
-            and _attention_variants_cover(op.instances)
-        ):
-            result.ops.pop()
-            result.ops.extend(
-                _attention_variant_rows(
-                    op, node_id, section, nodes, node, dims, bpe, dtype, gpu_arch
-                )
-            )
-        elif (
-            role == "attention"
-            and op.modeled
-            and op.category == "Attention"
-            and not _attention_has_projection_leaves(nodes, node)
-        ):
-            # A fused attention leaf is costed at only its SDPA core. Its packed
-            # projections, indexer, and norms live inside the opaque block.
-            result.ops.extend(
-                _attention_extra_ops(
-                    section,
-                    node_id,
-                    instances,
-                    dims,
-                    bpe,
-                    dtype,
-                    gpu_arch,
-                    owner_class=class_name,
-                )
-            )
-        if (
-            role in ("ffn", "moe")
-            and op.modeled
-            and op.category == "MoE"
-            and not _is_leaf_computation(computation)
-        ):
-            result.ops.extend(
-                _moe_extra_ops(
-                    section,
-                    node_id,
-                    instances,
-                    dims,
-                    bpe,
-                    dtype,
-                    gpu_arch,
-                    present=_moe_leaves_present(nodes, node),
-                )
-            )
-        if (
-            op.modeled
-            and op.category == "GEMM"
-            and computation in _GEMM_NN_MODULE_COMPUTATIONS
-            and _RT.weight_bpe is not None
-        ):
-            result.ops.extend(
-                _quant_side_ops(
-                    node_id,
-                    section,
-                    instances,
-                    input_texts,
-                    output_text,
-                    dims,
-                    bpe,
-                    dtype,
-                    gpu_arch,
-                )
-            )
-        elif (
-            op.modeled and op.category in ("GEMM", "MoE") and _RT.weight_bpe is not None
-        ):
-            result.ops.extend(
-                _formula_quant_rows(
-                    node_id,
-                    section,
-                    instances,
-                    op.category,
-                    role,
-                    dims,
-                    bpe,
-                    dtype,
-                    gpu_arch,
-                )
-            )
+        graph_op = _graph_op(node)
+        if graph_op is not None:
+            result.ops.extend(_graph_op_rows(run, graph_op))
     if num_predicted_tokens > 0:
         draft_nodes = _draft_graph_nodes(nodes, spec)
         result.ops.extend(
@@ -642,6 +540,292 @@ def project_roofline(
     if _RT.engine_miss:
         result.notes.append(_RT.engine_miss)
     return result
+
+
+def _begin_projection(
+    spec: ArchitectureSpec, kv_cache_bpe: float | None, enable_origami_gemm: bool
+) -> None:
+    """Reset the module-level state one :func:`project_roofline` call reads."""
+    global _origami_enabled, _origami_arch, _origami_arch_warned, _sim_note
+    _populate_introspection(spec)
+    # K and V are read from the cache. ``None`` keeps them at the activation width.
+    _RT.kv_cache_bpe = kv_cache_bpe
+    # One flag, matching the perf report's Origami GEMM switch: GEMMs call
+    # Origami, and attention calls the SDPA tile model with Origami timing
+    # each tile GEMM.
+    _origami_enabled = enable_origami_gemm
+    _origami_arch = None
+    _origami_arch_warned = False
+    _sim_note = None
+
+
+def _projection_graph_nodes(
+    spec: ArchitectureSpec, checkpoint: str | Path | None
+) -> list[Any]:
+    """Nodes of the merged graph, expanded only down to roofline-formula ops."""
+    payload = build_model_explorer_payload(
+        spec,
+        basic_ops=build_roofline_basic_ops(),
+        include_shapes=True,
+        # The nested stage tree and the concrete spatial shapes are read off a
+        # meta-device module. Without the checkpoint the projection builds the
+        # uniform-stack graph and a CNN's stage body never appears.
+        meta_shapes_checkpoint=str(checkpoint) if checkpoint else None,
+    )
+    graphs = payload["graphCollections"][0]["graphs"]
+    return graphs[0]["nodes"] if graphs else []
+
+
+class _ProjectionRun(NamedTuple):
+    """Inputs one :func:`project_roofline` call shares across its nodes."""
+
+    nodes: list[Any]
+    dims: dict[str, Any]
+    gpu_arch: dict[str, Any] | None
+    moe_top_k: int | None
+    moe_intermediate_size: int | None
+    opaque_attention: set[str]
+    # Scopes whose eager softmax chain is already priced as one SDPA row.
+    replaced_eager_attention: set[str]
+
+
+class _GraphOp(NamedTuple):
+    """A drawn compute node: its identity plus the :func:`_parse_op_node` fields."""
+
+    node: dict[str, Any]
+    node_id: str
+    namespace: str
+    instances: int
+    section: str
+    computation: str
+    class_name: str
+    operation: str
+    output_text: str
+    input_texts: list[list[str]]
+    role: str
+    details: str
+
+
+def _graph_op(node: Any) -> _GraphOp | None:
+    """*node* as a :class:`_GraphOp`, or ``None`` when it computes nothing."""
+    if not isinstance(node, dict):
+        return None
+    parsed = _parse_op_node(node)
+    if parsed is None:
+        return None
+    namespace = str(node.get("namespace") or "")
+    instances = _repeat_count(namespace, node)
+    return _GraphOp(node, str(node.get("id")), namespace, instances, *parsed)
+
+
+def _has_computation_role(node: dict[str, Any]) -> bool:
+    """The node's role was read from its own computation, not its module."""
+    return _attr_text(node.get("attrs"), "role_basis") == ROLE_BASIS_COMPUTATION
+
+
+def _opaque_attention_scopes(nodes: list[Any]) -> set[str]:
+    """Ids of the opaque attention blocks in *nodes*.
+
+    An opaque attention block (role attention, not one step of the softmax)
+    already prices the whole layer. The eager matmul chain under it must not
+    be priced again. A chain with no such block is the eager expansion of
+    softmax attention, whose shapes stop at S and miss the KV cache.
+    """
+    scopes: set[str] = set()
+    for node in nodes:
+        graph_op = _graph_op(node)
+        if graph_op is None or _has_computation_role(node):
+            continue
+        if graph_op.role == "attention" and not _is_gated_delta(graph_op.computation):
+            scopes.add(graph_op.node_id)
+    return scopes
+
+
+def _is_skipped_body(graph_op: _GraphOp) -> bool:
+    """A reference-body op whose work the kernel or a fused epilogue does."""
+    # The conv call is the kernel. Its reference body (slice, silu) is not
+    # a second pass over the activation.
+    if _RT.sconv_kernel and _is_expanded_conv_body(graph_op.node_id):
+        return True
+    # No attention mask is passed, so this function returns the activation
+    # unchanged. The multiply and the cast are inside that branch.
+    if _is_padding_mask_body(graph_op.node_id):
+        return True
+    # fp8 SwiGLU stores neither the SiLU result nor the bf16 product.
+    # down_proj's activation quant reads both branches.
+    return _RT.weight_bpe == 1 and _is_mlp_activation_interior(
+        graph_op.namespace, graph_op.node_id, graph_op.computation
+    )
+
+
+def _graph_op_rows(run: _ProjectionRun, graph_op: _GraphOp) -> list[RooflineOp]:
+    """The rows one drawn compute node adds to the projection."""
+    if _is_skipped_body(graph_op):
+        return []
+    # A leaf whose role was read from its own computation is one step of
+    # that computation (the score matmul, the softmax, the value matmul).
+    # Each is costed as the op it is. The boundary formulas below price a
+    # whole block, so handing a step the block's role would charge the full
+    # attention once per step.
+    role, computation_role = graph_op.role, ""
+    if _has_computation_role(graph_op.node):
+        computation_role, role = role, ""
+    op = _project_op(
+        graph_op.node_id,
+        graph_op.section,
+        graph_op.computation,
+        graph_op.class_name,
+        graph_op.operation,
+        graph_op.output_text,
+        graph_op.input_texts,
+        run.dims,
+        graph_op.instances,
+        run.gpu_arch,
+        run.moe_top_k,
+        run.moe_intermediate_size,
+        role,
+        graph_op.details,
+        computation_role=computation_role,
+    )
+    if _node_is_draft_container(graph_op.node):
+        # The synthetic stack, or the container's own drawn children, costs
+        # this module. The container node itself is not a second copy.
+        return []
+    if _is_eager_softmax_step(graph_op.node_id, graph_op.computation, computation_role):
+        return _eager_attention_rows(run, graph_op)
+    _dims_only, dtype, bpe = _output_dtype_bpe(graph_op.output_text)
+    rows = _attention_block_rows(run, graph_op, op, role, bpe, dtype)
+    rows.extend(_moe_block_rows(run, graph_op, op, role, bpe, dtype))
+    rows.extend(_weight_quant_rows(run, graph_op, op, role, bpe, dtype))
+    return rows
+
+
+def _eager_attention_rows(run: _ProjectionRun, graph_op: _GraphOp) -> list[RooflineOp]:
+    """One SDPA row for the first step of an eager attention chain, else none."""
+    scope = _attention_scope(graph_op.node_id)
+    if scope in run.opaque_attention or scope in run.replaced_eager_attention:
+        return []
+    run.replaced_eager_attention.add(scope)
+    _dims_only, dtype, bpe = _output_dtype_bpe(graph_op.output_text)
+    boundary = _softmax_attention_row(
+        scope,
+        graph_op.section,
+        graph_op.instances,
+        run.dims,
+        bpe,
+        dtype,
+        run.gpu_arch,
+        heads=_eager_qk_heads(graph_op.output_text, graph_op.input_texts, run.dims),
+    )
+    return [boundary] if boundary is not None else []
+
+
+def _attention_block_rows(
+    run: _ProjectionRun,
+    graph_op: _GraphOp,
+    op: RooflineOp,
+    role: str,
+    bpe: float | None,
+    dtype: str | None,
+) -> list[RooflineOp]:
+    """*op*, split per layer variant or followed by an opaque block's extra ops."""
+    if not (role == "attention" and op.modeled and op.category == "Attention"):
+        return [op]
+    if _attention_variants_cover(op.instances):
+        return _attention_variant_rows(
+            op,
+            graph_op.node_id,
+            graph_op.section,
+            run.nodes,
+            graph_op.node,
+            run.dims,
+            bpe,
+            dtype,
+            run.gpu_arch,
+        )
+    if _attention_has_projection_leaves(run.nodes, graph_op.node):
+        return [op]
+    # A fused attention leaf is costed at only its SDPA core. Its packed
+    # projections, indexer, and norms live inside the opaque block.
+    return [
+        op,
+        *_attention_extra_ops(
+            graph_op.section,
+            graph_op.node_id,
+            graph_op.instances,
+            run.dims,
+            bpe,
+            dtype,
+            run.gpu_arch,
+            owner_class=graph_op.class_name,
+        ),
+    ]
+
+
+def _moe_block_rows(
+    run: _ProjectionRun,
+    graph_op: _GraphOp,
+    op: RooflineOp,
+    role: str,
+    bpe: float | None,
+    dtype: str | None,
+) -> list[RooflineOp]:
+    """The router and shared-expert rows of an opaque MoE block."""
+    if not (
+        role in ("ffn", "moe")
+        and op.modeled
+        and op.category == "MoE"
+        and not _is_leaf_computation(graph_op.computation)
+    ):
+        return []
+    return _moe_extra_ops(
+        graph_op.section,
+        graph_op.node_id,
+        graph_op.instances,
+        run.dims,
+        bpe,
+        dtype,
+        run.gpu_arch,
+        present=_moe_leaves_present(run.nodes, graph_op.node),
+    )
+
+
+def _weight_quant_rows(
+    run: _ProjectionRun,
+    graph_op: _GraphOp,
+    op: RooflineOp,
+    role: str,
+    bpe: float | None,
+    dtype: str | None,
+) -> list[RooflineOp]:
+    """Quantization side rows of a modeled GEMM or MoE op with quantized weights."""
+    if not op.modeled or op.category not in ("GEMM", "MoE"):
+        return []
+    if _RT.weight_bpe is None:
+        return []
+    if op.category == "GEMM" and graph_op.computation in _GEMM_NN_MODULE_COMPUTATIONS:
+        return _quant_side_ops(
+            graph_op.node_id,
+            graph_op.section,
+            graph_op.instances,
+            graph_op.input_texts,
+            graph_op.output_text,
+            run.dims,
+            bpe,
+            dtype,
+            run.gpu_arch,
+        )
+    return _formula_quant_rows(
+        graph_op.node_id,
+        graph_op.section,
+        graph_op.instances,
+        op.category,
+        role,
+        run.dims,
+        bpe,
+        dtype,
+        run.gpu_arch,
+    )
 
 
 def _persistent_state_ops(
@@ -666,7 +850,9 @@ def _persistent_state_ops(
         if not output_text:
             continue
         shape_text, dtype = _split_shape_text(output_text)
-        bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+        bpe = (
+            _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+        ) or _RT.act_bpe
         if bpe is None:
             continue
         try:
@@ -1014,9 +1200,37 @@ def _quant_matrix_rows(
             )
         )
 
-    _unary("weight_dequant", weight_elements, _RT.weight_bpe, bpe)
+    # fp8 weights are read by the GEMM itself (aiter/ck block-scale). A separate
+    # dequant would materialize a bf16 copy that those kernels do not write.
+    # Narrower schemes (fp4, int4) still expand the weight before the multiply.
+    if _RT.weight_bpe != 1:
+        _unary("weight_dequant", weight_elements, _RT.weight_bpe, bpe)
     if _RT.weight_bpe == 1:
-        _unary("act_quant", act_elements, bpe, _RT.weight_bpe)
+        # SwiGLU's down projection consumes gate and up. The quant kernel
+        # reads both and writes the packed activation once.
+        reads = act_elements * (2 if _swiglu_down_projection(node_id) else 1)
+        op = RooflineOp(
+            name=f"{node_id}.act_quant",
+            section=section,
+            computation="act_quant",
+            operation="",
+            category=None,
+            modeled=False,
+            reason=None,
+            output_elements=act_elements,
+            instances=instances,
+        )
+        ops.append(
+            _finish_op(
+                op,
+                "UnaryElementwise",
+                "vector",
+                UnaryElementwise.flops_func(act_elements),
+                reads * bpe + act_elements * _RT.weight_bpe,
+                dtype,
+                gpu_arch,
+            )
+        )
     return ops
 
 
@@ -1118,9 +1332,35 @@ def _project_op(
     moe_intermediate_size: int | None,
     role: str = "",
     details: str = "",
+    computation_role: str = "",
 ) -> RooflineOp:
-    base = RooflineOp(
-        name=node_id,
+    base = _unmodeled_op(node_id, section, computation, operation, instances)
+    dims_only, dtype, bpe = _output_dtype_bpe(output_text)
+    ctx = _OpContext(base, dims, dims_only, dtype, bpe, gpu_arch)
+
+    # Introspective boundaries: the modeling source tags each module with a role
+    # ("attention"/"ffn") and the arch spec says whether the model is MoE, so we
+    # cost the custom attention and routed-expert blocks without matching names.
+    op = None
+    if role == "attention":
+        op = _attention_role_op(ctx, computation, input_texts)
+    elif role in ("ffn", "moe"):
+        op = _ffn_role_op(ctx, role, class_name, computation)
+    if op is None:
+        op = _module_boundary_op(
+            ctx, computation, class_name, moe_top_k, moe_intermediate_size
+        )
+    if op is not None:
+        return op
+    return _dispatch_leaf_op(ctx, computation, input_texts, details, computation_role)
+
+
+def _unmodeled_op(
+    name: str, section: str, computation: str, operation: str, instances: int
+) -> RooflineOp:
+    """A row with no cost yet, for a cost path to fill or explain."""
+    return RooflineOp(
+        name=name,
         section=section,
         computation=computation,
         operation=operation,
@@ -1130,32 +1370,90 @@ def _project_op(
         output_elements=None,
         instances=instances,
     )
-    _dims_only, dtype = _split_shape_text(output_text)
-    bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
 
-    # Introspective boundaries: the modeling source tags each module with a role
-    # ("attention"/"ffn") and the arch spec says whether the model is MoE, so we
-    # cost the custom attention and routed-expert blocks without matching names.
-    if role == "attention":
-        att = _attention_boundary_cost(dims, bpe)
-        if att is not None:
-            category, maf_type, flops, bytes_moved = att
-            try:
-                oshape = resolve_shape(_dims_only, dims)
-                base.output_elements = prod(oshape) if oshape else 1
-            except DimResolutionError:
-                base.output_elements = None
-            return _finish_op(
-                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
-            )
-    if role in ("ffn", "moe") and _RT.moe_top_k and _looks_like_moe(class_name):
-        moe = _moe_cost(dims, _RT.moe_top_k, _RT.moe_intermediate, bpe)
+
+def _output_dtype_bpe(output_text: str) -> tuple[list[str], str | None, float | None]:
+    """``(output dims, dtype, bytes per element)`` of a drawn output shape.
+
+    A shape without a dtype, or with one that has no known width, is costed at
+    the activation width.
+    """
+    dims_only, dtype = _split_shape_text(output_text)
+    bpe = (
+        _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    ) or _RT.act_bpe
+    return dims_only, dtype, bpe
+
+
+class _OpContext(NamedTuple):
+    """One node's unmodeled row and the inputs every cost path of
+    :func:`_project_op` shares."""
+
+    base: RooflineOp
+    dims: dict[str, Any]
+    dims_only: list[str]
+    dtype: str | None
+    bpe: float | None
+    gpu_arch: dict[str, Any] | None
+
+
+def _finish_drawn(
+    ctx: _OpContext, cost: tuple[str, str, float, float | None]
+) -> RooflineOp:
+    """Finish *cost*, counting output elements from the drawn output shape."""
+    category, maf_type, flops, bytes_moved = cost
+    try:
+        oshape = resolve_shape(ctx.dims_only, ctx.dims)
+        ctx.base.output_elements = prod(oshape) if oshape else 1
+    except DimResolutionError:
+        ctx.base.output_elements = None
+    return _finish_op(
+        ctx.base, category, maf_type, flops, bytes_moved, ctx.dtype, ctx.gpu_arch
+    )
+
+
+def _finish_counted(
+    ctx: _OpContext, cost: tuple[str, str, float, float | None, int]
+) -> RooflineOp:
+    """Finish a *cost* that carries its own output element count."""
+    category, maf_type, flops, bytes_moved, output_elements = cost
+    ctx.base.output_elements = output_elements
+    return _finish_op(
+        ctx.base, category, maf_type, flops, bytes_moved, ctx.dtype, ctx.gpu_arch
+    )
+
+
+def _attention_role_op(
+    ctx: _OpContext, computation: str, input_texts: list[list[str]]
+) -> RooflineOp | None:
+    """A whole attention block, or ``None`` to fall through to the other paths.
+
+    A gated-delta block always stops here, unmodeled unless it is the
+    recurrent update.
+    """
+    if _is_gated_delta(computation):
+        # gdn_attention_core prices the fused recurrent update. The chunked
+        # kernels are a different algorithm and have no performance model.
+        # The SDPA boundary below is the full-attention layer.
+        if _is_recurrent_gated_delta(computation):
+            gdn = _gated_delta_cost(input_texts, ctx.dims, ctx.bpe)
+            if gdn is not None:
+                return _finish_drawn(ctx, gdn)
+        return ctx.base
+    att = _attention_boundary_cost(ctx.dims, ctx.bpe)
+    if att is not None:
+        return _finish_drawn(ctx, att)
+    return None
+
+
+def _ffn_role_op(
+    ctx: _OpContext, role: str, class_name: str, computation: str
+) -> RooflineOp | None:
+    """A routed-expert or opaque dense FFN block, or ``None`` when neither fits."""
+    if _RT.moe_top_k and _looks_like_moe(class_name):
+        moe = _moe_cost(ctx.dims, _RT.moe_top_k, _RT.moe_intermediate, ctx.bpe)
         if moe is not None:
-            category, maf_type, flops, bytes_moved, output_elements = moe
-            base.output_elements = output_elements
-            return _finish_op(
-                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
-            )
+            return _finish_counted(ctx, moe)
     # A dense MLP that shares the MoE attribute but was not parsed (both classes
     # live outside the registry) is one opaque tile. Cost the SwiGLU at the dense
     # width over every token; the MoE formula above would charge the routed
@@ -1166,32 +1464,43 @@ def _project_op(
         and not _looks_like_moe(class_name)
         and not _is_leaf_computation(computation)
     ):
-        dense = _dense_ffn_cost(dims, bpe)
+        dense = _dense_ffn_cost(ctx.dims, ctx.bpe)
         if dense is not None:
-            category, maf_type, flops, bytes_moved, output_elements = dense
-            base.output_elements = output_elements
-            return _finish_op(
-                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
-            )
-    if _is_short_conv(computation, class_name):
-        conv = _short_conv_cost(dims, _dims_only, bpe)
-        if conv is not None:
-            category, maf_type, flops, bytes_moved, output_elements = conv
-            base.output_elements = output_elements
-            return _finish_op(
-                base, category, maf_type, flops, bytes_moved, dtype, gpu_arch
-            )
+            return _finish_counted(ctx, dense)
+    return None
 
+
+def _module_boundary_op(
+    ctx: _OpContext,
+    computation: str,
+    class_name: str,
+    moe_top_k: int | None,
+    moe_intermediate_size: int | None,
+) -> RooflineOp | None:
+    """A short conv or an engine (vLLM/SGLang) module, or ``None``."""
+    if _is_short_conv(computation, class_name):
+        conv = _short_conv_cost(ctx.dims, ctx.dims_only, ctx.bpe)
+        if conv is not None:
+            return _finish_counted(ctx, conv)
     engine_cost = _engine_boundary_cost(
-        class_name, dims, moe_top_k, moe_intermediate_size, bpe
+        class_name, ctx.dims, moe_top_k, moe_intermediate_size, ctx.bpe
     )
     if engine_cost is not None:
-        category, maf_type, flops, bytes_moved, output_elements = engine_cost
-        base.output_elements = output_elements
-        return _finish_op(base, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+        return _finish_counted(ctx, engine_cost)
+    return None
 
+
+def _dispatch_leaf_op(
+    ctx: _OpContext,
+    computation: str,
+    input_texts: list[list[str]],
+    details: str,
+    computation_role: str,
+) -> RooflineOp:
+    """Cost a leaf op from its resolved shapes through the PerfModel dispatch."""
+    base = ctx.base
     try:
-        output_shape = resolve_shape(_dims_only, dims)
+        output_shape = resolve_shape(ctx.dims_only, ctx.dims)
         base.output_elements = prod(output_shape) if output_shape else 1
     except DimResolutionError as exc:
         base.reason = f"unresolved output dim {exc}"
@@ -1199,13 +1508,13 @@ def _project_op(
 
     try:
         input_shapes = [
-            resolve_shape(shape, dims) if shape else None for shape in input_texts
+            resolve_shape(shape, ctx.dims) if shape else None for shape in input_texts
         ]
         cost = _dispatch_op_cost(
             computation,
             input_shapes,
             output_shape,
-            bpe,
+            ctx.bpe,
             details,
             weight_bpe=_RT.weight_bpe,
         )
@@ -1218,7 +1527,15 @@ def _project_op(
         return base
 
     category, maf_type, flops, bytes_moved = cost
-    return _finish_op(base, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+    if computation_role == ATTENTION_ROLE:
+        # The cost is the op's own; only its family changes. The score and value
+        # matmuls multiply two activations, so they run at the activation
+        # precision and need no weight-quantization side rows, which a GEMM
+        # label would have given them.
+        category = ATTENTION_CATEGORY
+    return _finish_op(
+        base, category, maf_type, flops, bytes_moved, ctx.dtype, ctx.gpu_arch
+    )
 
 
 def _finish_op(
@@ -1230,6 +1547,7 @@ def _finish_op(
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
 ) -> RooflineOp:
+    sim = _take_sim()
     base.category = category
     base.modeled = True
     base.flops = flops
@@ -1268,6 +1586,9 @@ def _finish_op(
         )
         base.roofline_time_us = roofline_time_us
         base.roofline_bound = roofline_bound
+    base.origami_time_us = _origami_time_us(
+        category, precision, dtype, bytes_moved, gpu_arch, sim
+    )
     return base
 
 
@@ -1379,6 +1700,11 @@ class _RuntimeIntrospection:
         "sconv_kernel",
         "dense_intermediate",
         "mtp_layers",
+        "config_attn_heads",
+        "config_attn_kv_heads",
+        "config_attn_head_dim",
+        "kv_cache_bpe",
+        "act_bpe",
     )
 
     def __init__(self):
@@ -1424,9 +1750,135 @@ class _RuntimeIntrospection:
         self.sconv_kernel = None
         self.dense_intermediate = None
         self.mtp_layers = None
+        self.config_attn_heads = None
+        self.config_attn_kv_heads = None
+        self.config_attn_head_dim = None
+        self.kv_cache_bpe = None
+        self.act_bpe = None
 
 
 _RT = _RuntimeIntrospection()
+
+# ``--enable-origami-gemm`` on the roofline projection. Times GEMMs with
+# Origami and attention with the SDPA tile model. Off unless the caller sets it.
+_origami_enabled = False
+# Shape note for the next ``_finish_op``. A list of ("gemm", (M, N, K, B))
+# or one ("sdpa", {B, H_Q, N_Q, N_KV, d_h, bytes}).
+_sim_note: list | None = None
+_origami_arch: dict[str, Any] | None = None
+_origami_arch_warned = False
+
+
+def _set_sim(note: list | None) -> None:
+    global _sim_note
+    _sim_note = note
+
+
+def _take_sim() -> list | None:
+    global _sim_note
+    note = _sim_note
+    _sim_note = None
+    return note
+
+
+def _origami_arch_for(gpu_arch: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Arch dict Origami and the SDPA tile model can time against.
+
+    Bundled specs name the peaks and the bandwidth. Origami also needs the
+    CU count, LDS, and clock, which a trace's deviceProperties would supply
+    to the perf report. With no trace, the installed GPU fills the gaps.
+    """
+    global _origami_arch, _origami_arch_warned
+    if gpu_arch is None:
+        return None
+    if _origami_arch is not None:
+        return _origami_arch
+    arch = dict(gpu_arch)
+    missing = [
+        key
+        for key in ("num_cus", "lds_capacity", "freq_mhz", "gemm_units_per_cu")
+        if not arch.get(key)
+    ]
+    if missing:
+        try:
+            import origami
+
+            hardware = origami.get_hardware_for_device(0)
+        except Exception as exc:  # noqa: BLE001
+            if not _origami_arch_warned:
+                warnings.warn(
+                    "Origami GEMM and SDPA times need num_cus, lds_capacity, "
+                    f"freq_mhz, and gemm_units_per_cu ({exc}).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _origami_arch_warned = True
+        else:
+            arch.setdefault("num_cus", int(hardware.N_CU))
+            arch.setdefault("lds_capacity", int(hardware.lds_capacity))
+            arch.setdefault(
+                "freq_mhz", int(round(float(hardware.compute_clock_ghz) * 1000))
+            )
+            parallel = getattr(hardware, "parallel_mi_cu", None)
+            if parallel:
+                arch.setdefault("gemm_units_per_cu", int(parallel))
+    _origami_arch = arch
+    return arch
+
+
+def _origami_time_us(
+    category: str,
+    precision: str | None,
+    dtype: str | None,
+    bytes_moved: float | None,
+    gpu_arch: dict[str, Any] | None,
+    sim: list | None,
+) -> float | None:
+    """Origami time for one launch, or None when the flag is off or it cannot time this op.
+
+    GEMM uses ``gemm_time_us``. Attention uses the SDPA tile model, which
+    times each tile GEMM with Origami. A sum of several GEMMs (a dense
+    SwiGLU tile) adds their times. Faster than the roofline is still
+    recorded; the plot keeps the roofline unless this time is slower.
+    """
+    if not _origami_enabled or not sim:
+        return None
+    arch = _origami_arch_for(gpu_arch)
+    if arch is None:
+        return None
+    from TraceLens.PerfModel import origami_helper, sdpa_tile
+
+    total = 0.0
+    timed = False
+    for kind, payload in sim:
+        try:
+            if kind == "gemm" and category == "GEMM" and precision:
+                m, n, k, batch = payload
+                part = origami_helper.gemm_time_us(
+                    arch, int(m), int(n), int(k), int(batch), precision
+                )
+            elif kind == "sdpa" and category in {ATTENTION_CATEGORY, "SDPA"}:
+                part = sdpa_tile.sdpa_fwd_time_us(
+                    arch,
+                    precision,
+                    dtype or precision,
+                    payload.get("bytes", bytes_moved),
+                    payload["B"],
+                    payload["H_Q"],
+                    payload["N_Q"],
+                    payload["N_KV"],
+                    payload["d_h"],
+                    fa="l1_bw_gbps" in arch,
+                    gemm_time=origami_helper.gemm_time_us,
+                )
+            else:
+                part = None
+        except (KeyError, ValueError, TypeError):
+            part = None
+        if part is not None:
+            total += float(part)
+            timed = True
+    return total if timed else None
 
 
 def _excluded_from_quant(name: str) -> bool:
@@ -1464,6 +1916,7 @@ def _populate_introspection(spec):
     tcfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else cfg
     quant = cfg.get("quantization_config")
     _RT.weight_bpe = _introspect_weight_bpe(quant)
+    _RT.act_bpe = _activation_bpe(spec)[0]
     excluded = ()
     if isinstance(quant, dict):
         raw = (
@@ -1514,6 +1967,12 @@ def _populate_introspection(spec):
     _RT.attention_bias = tcfg.get("attention_bias") is True
     _RT.mlp_bias = tcfg.get("mlp_bias") is True
     _RT.head_bias = tcfg.get("lm_head_bias", tcfg.get("head_bias")) is True
+    # Kept from the checkpoint. A hybrid model resolves a different head count
+    # in the linear-attention class, and that single constructor value must not
+    # become the softmax attention's width.
+    _RT.config_attn_heads = _RT.attn_heads
+    _RT.config_attn_kv_heads = _RT.attn_kv_heads
+    _RT.config_attn_head_dim = _RT.attn_head_dim
     _RT.variant_windows = _variant_windows(
         tcfg, _RT.sliding_window
     ) or _windows_from_variants(spec, tcfg, _RT.sliding_window)
@@ -1542,7 +2001,11 @@ def _populate_introspection(spec):
     _RT.tp = tp if isinstance(tp, int) and tp > 0 else 1
     _RT.ep = ep if isinstance(ep, int) and ep > 0 else 1
     _RT.sconv_kernel = _config_int(
-        tcfg, "sconv_kernel_size", "conv_kernel_size", "short_conv_kernel_size"
+        tcfg,
+        "sconv_kernel_size",
+        "conv_kernel_size",
+        "short_conv_kernel_size",
+        "linear_conv_kernel_dim",
     )
     # The dense MLP's width, when the checkpoint distinguishes it from the
     # routed experts' width. Absent, the model's intermediate size is the
@@ -1847,12 +2310,45 @@ def _looks_like_moe(class_name: str) -> bool:
 
 def _is_short_conv(computation: str, class_name: str) -> bool:
     """A depthwise 1D short / causal conv, not a spatial Conv2d/Conv3d."""
-    text = f"{computation} {class_name}".lower().replace("_", "")
+    text = f"{computation} {class_name}".lower().replace("_", "").replace(" ", "")
     if "conv2d" in text or "conv3d" in text:
         return False
     return any(
         token in text for token in ("shortconv", "sconv", "causalconv", "conv1d")
     )
+
+
+def _is_expanded_conv_body(node_id: str) -> bool:
+    """Reference body of ``causal_conv1d_fn``. The call site is the kernel."""
+    return "causal_conv1d_fn" in node_id
+
+
+def _is_padding_mask_body(node_id: str) -> bool:
+    """Body of ``apply_mask_to_padding_states``.
+
+    The function multiplies by the mask only when one is passed. A shape-only
+    projection has no mask, and that multiply is not HBM traffic.
+    """
+    return "apply_mask_to_padding_states" in node_id
+
+
+def _is_mlp_activation_interior(namespace: str, node_id: str, computation: str) -> bool:
+    """SiLU and the gate×up multiply inside an MLP.
+
+    With fp8 weights the activation quant on ``down_proj`` is that epilogue:
+    it reads both GEMM outputs and writes the packed activation. The SiLU
+    result and the bf16 product are not stored. The node id carries the
+    ``mlp`` segment; the namespace alone is the parent section.
+    """
+    text = f"{namespace}/{node_id}".lower()
+    if "/mlp/" not in text:
+        return False
+    return computation.lower() in {"silu", "gelu", "relu", "multiply", "mul"}
+
+
+def _swiglu_down_projection(node_id: str) -> bool:
+    """The third SwiGLU GEMM, whose input is the product of the two branches."""
+    return "down_proj" in node_id.lower()
 
 
 def _is_leaf_computation(computation: str) -> bool:
@@ -1910,11 +2406,222 @@ def _shard_heads(n: int, degree: int) -> int:
 _WINDOW_UNSET = object()
 
 
+def _is_gated_delta(computation: str) -> bool:
+    return "gated_delta" in (computation or "").lower()
+
+
+def _is_recurrent_gated_delta(computation: str) -> bool:
+    """The fused per-token update that ``gdn_attention_core`` models.
+
+    The chunked prefill kernels share the ``gated_delta`` name and run a
+    different algorithm, with no performance model of their own.
+    """
+    lowered = (computation or "").lower()
+    return "recurrent" in lowered and "gated_delta" in lowered
+
+
+def _attention_scope(node_id: str) -> str:
+    """The attention module a step belongs to.
+
+    Expanded steps are ``.../self_attn/seq:15:@attention:@op_...``. The marker
+    is ``@attention``, not a path segment, so every step of one module shares
+    one scope and is priced once.
+    """
+    head, sep, _tail = node_id.partition("@attention")
+    return head.rstrip("/:") if sep else node_id
+
+
+def _is_eager_softmax_step(
+    node_id: str, computation: str, computation_role: str
+) -> bool:
+    """A matmul/softmax that is one step of an expanded attention, not the block."""
+    return (
+        computation_role == ATTENTION_ROLE
+        and "@attention" in node_id
+        and not _is_gated_delta(computation)
+    )
+
+
+def _gated_delta_cost(
+    input_texts: list[list[str]],
+    dims: dict[str, Any],
+    bpe: float | None,
+) -> tuple[str, str, float, float | None] | None:
+    """One recurrent gated-delta layer from its own q/k/v shapes.
+
+    This is ``gdn_attention_core``: the fused update whose state stays in
+    registers, at ``7 · d_v · d_k`` FLOPs per token and value head. The stopped
+    kernel is called with q, k, v as ``[B, S, H, D]``, but the drawn node also
+    carries the packed projection and the per-head gates, so the value tensor
+    is the rank-4 input with the most heads. Projections are separate GEMMs.
+    """
+    from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+        gdn_attention_core,
+    )
+
+    try:
+        rank4 = [
+            shape
+            for text in input_texts
+            if text and (shape := resolve_shape(text, dims)) and len(shape) == 4
+        ]
+    except DimResolutionError:
+        return None
+    if not rank4:
+        return None
+    q = rank4[0]
+    v = max(rank4, key=lambda shape: shape[-2])
+    tokens = prod(q[:-2]) if len(q) > 2 else q[0]
+    h_v = v[-2]
+    d_v = v[-1]
+    d_k = q[-1]
+    if tokens <= 0 or h_v <= 0 or d_v <= 0 or d_k <= 0:
+        return None
+    flops = float(gdn_attention_core._gdn_flops_func(h_v, d_k, d_v, tokens))
+    bytes_moved = None
+    if bpe is not None:
+        bytes_moved = float(
+            gdn_attention_core._gdn_bytes_func(h_v, d_k, d_v, tokens, bpe)
+        )
+    return ATTENTION_CATEGORY, "matrix", flops, bytes_moved
+
+
+def _eager_qk_heads(
+    output_text: str,
+    input_texts: list[list[str]],
+    dims: dict[str, Any],
+) -> tuple[int, int] | None:
+    """``(query heads, head dim)`` from an expanded QK matmul, when it has them.
+
+    The query is ``[B, H, S, D]``. A hybrid checkpoint's linear attention
+    publishes a different head count, so the score matmul is the one that
+    says how wide this softmax layer is.
+    """
+    try:
+        shapes = [resolve_shape(text, dims) for text in input_texts[:2] if text]
+    except DimResolutionError:
+        return None
+    for shape in shapes:
+        if (
+            shape
+            and len(shape) == 4
+            and shape[-1] != shape[-2]
+            and shape[-1] > 1
+            and shape[-3] > 1
+        ):
+            return int(shape[-3]), int(shape[-1])
+    return None
+
+
+def _softmax_attention_row(
+    name: str,
+    section: str,
+    instances: int,
+    dims: dict[str, Any],
+    bpe: float | None,
+    dtype: str | None,
+    gpu_arch: dict[str, Any] | None,
+    heads: tuple[int, int] | None = None,
+) -> RooflineOp | None:
+    """One SDPA layer in place of the eager QK/softmax/AV chain.
+
+    That chain's key length is the query length, so a decode step (S=1) costs
+    nothing and a prefill is the full non-causal score matrix. These layers
+    are the full-attention variant, so the KV length is the whole cache and
+    the head count is this matmul's, not the linear attention's.
+    """
+    try:
+        b = resolve_dim(dims["B"], dims)
+        s = resolve_dim(dims["S"], dims)
+    except (KeyError, DimResolutionError):
+        return None
+    past = _resolve_past(dims)
+    n_kv = past + s
+    if heads is not None:
+        h_q, d_h = heads
+    else:
+        h_q = _RT.config_attn_heads or _RT.attn_heads
+        d_h = _RT.config_attn_head_dim or _RT.attn_head_dim
+    h_kv = _RT.config_attn_kv_heads or _RT.attn_kv_heads or h_q
+    if not h_q or not d_h or not h_kv:
+        att = _attention_boundary_cost(dims, bpe)
+        if att is None:
+            return None
+        category, maf_type, flops, bytes_moved = att
+    else:
+        h_q = _shard_heads(h_q, _RT.tp)
+        h_kv = _shard_heads(h_kv, _RT.tp)
+        causal = bool(_RT.causal_attention and past == 0 and s == n_kv)
+        flops, bytes_moved = _sdpa_flops_bytes(
+            b, s, h_q, n_kv, h_kv, d_h, d_h, causal, bpe
+        )
+        flops = float(flops)
+        bytes_moved = float(bytes_moved) if bpe is not None else None
+        category, maf_type = ATTENTION_CATEGORY, "matrix"
+        _set_sdpa_sim(b, h_q, s, n_kv, d_h, bytes_moved)
+    row = _unmodeled_op(name, section, "sdpa", "", instances)
+    return _finish_op(row, category, maf_type, flops, bytes_moved, dtype, gpu_arch)
+
+
+def _sdpa_flops_bytes(
+    b: int,
+    s: int,
+    h_q: int,
+    n_kv: float,
+    h_kv: int,
+    d_qk: int,
+    d_v: int,
+    causal: bool,
+    bpe: float | None,
+) -> tuple[Any, Any]:
+    """``SDPA`` FLOPs and bytes (``None`` without *bpe*), K/V at the cache width."""
+    flops = SDPA.flops_func(b, s, h_q, n_kv, h_kv, d_qk, d_v, causal)
+    bytes_moved = (
+        SDPA.bytes_func(
+            b,
+            s,
+            h_q,
+            n_kv,
+            h_kv,
+            d_qk,
+            d_v,
+            causal,
+            bpe,
+            kv_bytes_per_element=_RT.kv_cache_bpe,
+        )
+        if bpe is not None
+        else None
+    )
+    return flops, bytes_moved
+
+
+def _set_sdpa_sim(
+    b: int, h_q: int, n_q: int, n_kv: int, d_h: int, bytes_moved: float | None
+) -> None:
+    """Leave the SDPA tile shape for the next :func:`_finish_op`."""
+    _set_sim(
+        [
+            (
+                "sdpa",
+                {
+                    "B": b,
+                    "H_Q": h_q,
+                    "N_Q": n_q,
+                    "N_KV": n_kv,
+                    "d_h": d_h,
+                    "bytes": bytes_moved,
+                },
+            )
+        ]
+    )
+
+
 def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
     """Roofline cost of ONE attention layer, introspected from the arch spec
     (query/kv heads, head dim, sliding window, local/global layer mix). KV length
     is averaged across the local (windowed) and global layers so the per-layer
     cost times the layer-repeat count reproduces the true aggregate."""
+    _set_sim(None)
     if not (_RT.attn_heads and _RT.attn_head_dim):
         return None
     try:
@@ -1922,15 +2629,25 @@ def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
         s = resolve_dim(dims["S"], dims)
     except (KeyError, DimResolutionError):
         return None
-    past = 0
-    for key in ("past_len", "past_length", "cache_len", "kv_len"):
-        if key in dims:
-            try:
-                past = resolve_dim(dims[key], dims)
-                break
-            except DimResolutionError:
-                pass
+    past = _resolve_past(dims)
     ctx = past + s
+    h_q, h_kv, d_qk, d_v = _attention_widths()
+    eff_n_kv = _effective_kv_len(ctx, window)
+    # ``SDPA`` only accepts causal masking when query and key/value lengths
+    # agree.  During warm-cache decode Q is a suffix of KV and the engine
+    # applies the model's causal policy in its cache kernel; its FLOP count is
+    # unchanged by the mask.  Cold/prefill self-attention therefore takes the
+    # model-declared causal path instead of the historical forced ``False``.
+    causal = _RT.causal_attention and past == 0 and s == eff_n_kv
+    flops, bytes_moved = _sdpa_flops_bytes(
+        b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal, bpe
+    )
+    _set_sdpa_sim(b, h_q, s, int(round(eff_n_kv)), d_qk, bytes_moved)
+    return "Attention", "matrix", flops, bytes_moved
+
+
+def _attention_widths() -> tuple[int, int, int, int]:
+    """Per-GPU ``(h_q, h_kv, d_qk, d_v)`` of one attention layer."""
     # Attention heads are column-sharded across TP; one GPU owns its share (KV
     # heads too, the way vLLM replicates/shards GQA by the TP degree).
     h_q = _shard_heads(_RT.attn_heads, _RT.tp)
@@ -1948,45 +2665,51 @@ def _attention_boundary_cost(dims, bpe, window=_WINDOW_UNSET):
         # (kv_lora_rank + rope), which is not the query's nope+rope width.
         d_qk = _RT.kv_lora_rank + rope
         d_v = _RT.v_head_dim or _RT.kv_lora_rank
+    return h_q, h_kv, d_qk, d_v
+
+
+def _effective_kv_len(ctx: int, window: Any) -> float:
+    """KV length one layer attends to out of *ctx*.
+
+    An explicit *window* (``None`` for full attention) wins. Otherwise the
+    length is averaged over the layer variants, or over the local and global
+    layers.
+    """
     if window is not _WINDOW_UNSET:
-        eff_n_kv = min(ctx, window) if isinstance(window, int) and window > 0 else ctx
-    elif _RT.variant_windows:
-        total = sum(count for _label, count, _window in _RT.variant_windows) or 1
-        weighted = 0.0
-        for _label, count, variant_window in _RT.variant_windows:
-            length = (
-                min(ctx, variant_window)
-                if isinstance(variant_window, int) and variant_window > 0
-                else ctx
-            )
-            weighted += count * length
-        eff_n_kv = weighted / total
+        return min(ctx, window) if isinstance(window, int) and window > 0 else ctx
+    if _RT.variant_windows:
+        return _variant_mean_kv_len(ctx)
+    return _local_global_mean_kv_len(ctx)
+
+
+def _variant_mean_kv_len(ctx: int) -> float:
+    """KV length averaged over the per-variant windows, weighted by layer count."""
+    total = sum(count for _label, count, _window in _RT.variant_windows) or 1
+    weighted = 0.0
+    for _label, count, variant_window in _RT.variant_windows:
+        length = (
+            min(ctx, variant_window)
+            if isinstance(variant_window, int) and variant_window > 0
+            else ctx
+        )
+        weighted += count * length
+    return weighted / total
+
+
+def _local_global_mean_kv_len(ctx: int) -> float:
+    """KV length averaged over the sliding-window and global layers."""
+    n_layers = _RT.n_layers or 1
+    if _RT.n_local_layers is not None:
+        n_local = _RT.n_local_layers
     else:
-        n_layers = _RT.n_layers or 1
-        if _RT.n_local_layers is not None:
-            n_local = _RT.n_local_layers
-        else:
-            n_local = n_layers if _RT.sliding_window else 0
-        n_global = max(n_layers - n_local, 0)
-        # index_topk is the indexed-attention length. A per-layer window already
-        # says how far that layer attends, so the top-k does not replace it.
-        if _RT.index_topk and not _RT.sliding_window and n_local == 0:
-            ctx = min(ctx, _RT.index_topk)
-        kv_local = min(ctx, _RT.sliding_window) if _RT.sliding_window else ctx
-        eff_n_kv = (n_local * kv_local + n_global * ctx) / n_layers if n_layers else ctx
-    # ``SDPA`` only accepts causal masking when query and key/value lengths
-    # agree.  During warm-cache decode Q is a suffix of KV and the engine
-    # applies the model's causal policy in its cache kernel; its FLOP count is
-    # unchanged by the mask.  Cold/prefill self-attention therefore takes the
-    # model-declared causal path instead of the historical forced ``False``.
-    causal = _RT.causal_attention and past == 0 and s == eff_n_kv
-    flops = SDPA.flops_func(b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal)
-    bytes_moved = (
-        SDPA.bytes_func(b, s, h_q, eff_n_kv, h_kv, d_qk, d_v, causal, bpe)
-        if bpe is not None
-        else None
-    )
-    return "Attention", "matrix", flops, bytes_moved
+        n_local = n_layers if _RT.sliding_window else 0
+    n_global = max(n_layers - n_local, 0)
+    # index_topk is the indexed-attention length. A per-layer window already
+    # says how far that layer attends, so the top-k does not replace it.
+    if _RT.index_topk and not _RT.sliding_window and n_local == 0:
+        ctx = min(ctx, _RT.index_topk)
+    kv_local = min(ctx, _RT.sliding_window) if _RT.sliding_window else ctx
+    return (n_local * kv_local + n_global * ctx) / n_layers if n_layers else ctx
 
 
 def _resolve_past(dims: dict[str, Any]) -> int:
@@ -2078,6 +2801,7 @@ def _attention_extra_ops(
             if bpe is not None
             else None
         )
+        _set_sim([("gemm", (tokens, n, k, 1))])
         finished = _finish_op(op, "GEMM", "matrix", flops, byt, dtype, gpu_arch)
         finished.cost_source = "source" if width else "config"
         rows = [
@@ -2404,6 +3128,12 @@ def _dense_ffn_cost(
     down_flops = GEMM.flops_func(tokens, hidden, intermediate, _RT.mlp_bias)
     down_bytes = GEMM.bytes_func(
         tokens, hidden, intermediate, _RT.mlp_bias, wbpe, wbpe, bpe, bpe
+    )
+    _set_sim(
+        [
+            ("gemm", (tokens, 2 * intermediate, hidden, 1)),
+            ("gemm", (tokens, hidden, intermediate, 1)),
+        ]
     )
     flops = gate_up_flops + down_flops
     bytes_moved = None if bpe is None else gate_up_bytes + down_bytes
@@ -3129,6 +3859,20 @@ def _mtp_stack_ops(
     return ops
 
 
+def _experts_touched(experts: int, routed_rows: int) -> float:
+    """Expected distinct experts that ``routed_rows`` rows reach.
+
+    A row picks an expert uniformly, so an expert is missed with probability
+    ``(1 - 1/experts) ** routed_rows``. A few rows reach about one expert each;
+    many rows reach them all. Charging every expert whenever ``routed_rows``
+    exceeds the expert count would read weights no row selected: 256 rows over
+    128 experts reach about 111, not 128.
+    """
+    if experts <= 0 or routed_rows <= 0:
+        return 0.0
+    return experts * (1.0 - (1.0 - 1.0 / experts) ** routed_rows)
+
+
 def _moe_cost(
     dims: dict[str, Any],
     top_k: int | None,
@@ -3145,9 +3889,9 @@ def _moe_cost(
     declared, which is the wrong width for the routed experts this costs.
 
     The expert GEMMs are costed with :class:`GroupedGemm` over
-    ``G = min(num_experts, active_tokens)`` distinct expert weight matrices --
-    the weights actually streamed from HBM for this token count -- rather than a
-    single shared weight. FLOPs are unchanged (only the selected token-expert
+    ``G`` distinct expert weight matrices -- the experts ``active_tokens`` routed
+    rows are expected to reach under uniform routing, see
+    :func:`_experts_touched` -- rather than a single shared weight. FLOPs are unchanged (only the selected token-expert
     pairs compute); the weight-byte term now scales with the experts touched, so
     the memory-bound/compute-bound crossover tracks the real prefill-vs-decode
     behaviour instead of understating decode weight traffic by ~``G``x. When
@@ -3173,7 +3917,7 @@ def _moe_cost(
     intermediate_size = _shard(intermediate_size, _RT.tp)
     active_tokens = _shard(tokens * top_k, _RT.ep)
     experts_here = _shard(_RT.moe_num_experts, _RT.ep) if _RT.moe_num_experts else 0
-    groups = min(experts_here, active_tokens) if experts_here else 1
+    groups = _experts_touched(experts_here, active_tokens) if experts_here else 1
     wbpe = _RT.weight_bpe if _RT.weight_bpe is not None else bpe
     # gate_up_proj: [active_tokens, hidden] x per-expert [hidden, 2*intermediate].
     gate_up_flops = GroupedGemm.flops_func(active_tokens, hidden, 2 * intermediate_size)
@@ -3212,23 +3956,19 @@ def _formula_quant_rows(
     dtype: str | None,
     gpu_arch: dict[str, Any] | None,
 ) -> list[RooflineOp]:
-    """Quant rows for a formula-costed GEMM or MoE that is not an nn.Linear leaf."""
+    """Quant rows for a formula-costed GEMM that is not an nn.Linear leaf."""
+    if category == "MoE":
+        # A grouped expert GEMM reads its packed (e.g. MXFP4) weights directly,
+        # as the aiter/cktile and Triton MoE kernels do. No separate dequant pass
+        # runs beside it, so the expert weight bytes come from _moe_cost alone.
+        return []
     try:
         tokens = resolve_dim(dims["B"], dims) * resolve_dim(dims["S"], dims)
         hidden = resolve_dim(dims[Symbol.HIDDEN.value], dims)
     except (KeyError, DimResolutionError):
         return []
     matrices: list[tuple[int, int, int]] = []
-    if category == "MoE" and _RT.moe_top_k and _RT.moe_intermediate:
-        intermediate = _shard(_RT.moe_intermediate, _RT.tp)
-        active = _shard(tokens * _RT.moe_top_k, _RT.ep)
-        experts = _shard(_RT.moe_num_experts, _RT.ep) if _RT.moe_num_experts else 0
-        groups = min(experts, active) if experts else 1
-        matrices = [
-            (active, groups * 2 * intermediate, hidden),
-            (active, groups * hidden, intermediate),
-        ]
-    elif category == "GEMM" and role in ("ffn", "moe") and _RT.dense_intermediate:
+    if category == "GEMM" and role in ("ffn", "moe") and _RT.dense_intermediate:
         intermediate = _shard(_RT.dense_intermediate, _RT.tp)
         matrices = [
             (tokens, 2 * intermediate, hidden),
@@ -3414,6 +4154,7 @@ def _dispatch_op_cost(
     weight_bpe: float | None = None,
 ) -> tuple[str, str, float, float | None] | None:
     """Return ``(category, maf_type, flops, bytes)`` for an op, or ``None`` if unmodeled."""
+    _set_sim(None)
     if computation in _GEMM_NN_MODULE_COMPUTATIONS:
         return _gemm_cost_linear(
             input_shapes,
@@ -3526,6 +4267,7 @@ def _gemm_cost_linear(
     flops = GEMM.flops_func(m, n, k, bias)
     wbpe = weight_bpe if weight_bpe is not None else bpe
     bytes_moved = GEMM.bytes_func(m, n, k, bias, wbpe, wbpe, bpe, bpe)
+    _set_sim([("gemm", (m, n, k, 1))])
     return "GEMM", "matrix", flops, bytes_moved
 
 
@@ -3558,6 +4300,7 @@ def _gemm_cost_matmul(
         else bpe
     )
     bytes_moved = GEMM.bytes_func(m, n, k, False, bpe_a, bpe_b, bpe, bpe)
+    _set_sim([("gemm", (m, n, k, 1))])
     return "GEMM", "matrix", flops, bytes_moved
 
 
@@ -3626,7 +4369,9 @@ def conv_ops_from_meta(
     graph draws one conv per stage; each live instance here carries the geometry
     to cost that instance, and the CLI uses these rows in place of the graph's
     conv rows so the repeated stage is not counted twice."""
-    bpe = _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    bpe = (
+        _BYTES_PER_ELEMENT.get(torch_dtype_map(dtype)) if dtype else None
+    ) or _RT.act_bpe
     ops: list[RooflineOp] = []
     for conv in meta_convs or []:
         out_shape = tuple(conv.get("output_shape") or ())
@@ -3678,9 +4423,35 @@ def _sdpa_cost(
     causal = n_q == n_kv
     flops = SDPA.flops_func(b, n_q, h_q, n_kv, h_kv, d_h_qk, d_h_v, causal)
     bytes_moved = (
-        SDPA.bytes_func(b, n_q, h_q, n_kv, h_kv, d_h_qk, d_h_v, causal, bpe)
+        SDPA.bytes_func(
+            b,
+            n_q,
+            h_q,
+            n_kv,
+            h_kv,
+            d_h_qk,
+            d_h_v,
+            causal,
+            bpe,
+            kv_bytes_per_element=_RT.kv_cache_bpe,
+        )
         if bpe is not None
         else None
+    )
+    _set_sim(
+        [
+            (
+                "sdpa",
+                {
+                    "B": b,
+                    "H_Q": h_q,
+                    "N_Q": n_q,
+                    "N_KV": n_kv,
+                    "d_h": d_h_qk,
+                    "bytes": bytes_moved,
+                },
+            )
+        ]
     )
     return "SDPA", "matrix", flops, bytes_moved
 

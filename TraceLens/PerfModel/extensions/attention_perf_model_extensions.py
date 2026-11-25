@@ -285,14 +285,29 @@ class InferenceAttention:
             self._cap_gen_kv(self.param_details["g_sqsk"]),
         )
 
-    def bytes(self, bytes_per_element=None):
+    def _resolve_bytes_per_element(self, bytes_per_element, kv_bytes_per_element):
+        """Fill in ``(bytes_per_element, kv_bytes_per_element)`` from the trace.
+
+        The same rule as ``SDPA._resolve_bytes_per_element``. A caller who
+        passes ``bytes_per_element`` and no KV width gets one width for every
+        tensor. A caller who passes neither gets the widths the trace records
+        (``dtype_Q`` and ``dtype_KV``), or 2 bytes where it records none. A
+        KV width alone overrides only the traced KV width.
+        """
+        if bytes_per_element is not None:
+            return bytes_per_element, kv_bytes_per_element
+        q_bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
+        if kv_bytes_per_element is not None:
+            return q_bpe, kv_bytes_per_element
+        dtype_kv = self.param_details.get("dtype_KV")
+        return q_bpe, (name2bpe(dtype_kv) if dtype_kv else None) or q_bpe
+
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
         if self.param_details.get("_no_perf"):
             return None
-        bpe = bytes_per_element
-        if bpe is None:
-            bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
-        dtype_kv = self.param_details.get("dtype_KV")
-        bpe_kv = (name2bpe(dtype_kv) if dtype_kv else None) or bpe
+        bpe, bpe_kv = self._resolve_bytes_per_element(
+            bytes_per_element, kv_bytes_per_element
+        )
         return self.bytes_func(
             self.B,
             self.H_Q,
@@ -604,14 +619,14 @@ class pa_sparse_prefill_opus_fwd(InferenceAttention):
         # per pair, per head: QK (2*d_h_qk) + PV (2*d_h_v)
         return pairs * self.H_Q * 2 * (self.d_h_qk + self.d_h_v)
 
-    def bytes(self, bytes_per_element=None):
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
         if self.param_details.get("_no_perf"):
             return None
-        bpe = bytes_per_element
-        if bpe is None:
-            bpe = name2bpe(self.param_details.get("dtype_Q")) or 2
-        dtype_kv = self.param_details.get("dtype_KV")
-        bpe_kv = (name2bpe(dtype_kv) if dtype_kv else None) or bpe
+        bpe, bpe_kv = self._resolve_bytes_per_element(
+            bytes_per_element, kv_bytes_per_element
+        )
+        if bpe_kv is None:
+            bpe_kv = bpe
         pairs = self.param_details["prefill_pairs"]
         qo_bytes = 2 * self.N_Q * self.H_Q * self.d_h_qk * bpe
         kv_bytes = pairs * self.d_h_v * bpe_kv
@@ -688,12 +703,10 @@ class aiter_fmha_v3_varlen_fwd(InferenceAttention):
             return self._core_model().flops()
         return super().flops()
 
-    def bytes(self, bytes_per_element=None):
+    def bytes(self, bytes_per_element=None, kv_bytes_per_element=None):
         if self.param_details.get("_fallback_core"):
-            if bytes_per_element is None:
-                return self._core_model().bytes()
-            return self._core_model().bytes(bytes_per_element)
-        return super().bytes(bytes_per_element)
+            return self._core_model().bytes(bytes_per_element, kv_bytes_per_element)
+        return super().bytes(bytes_per_element, kv_bytes_per_element)
 
     def get_compute_precision(self):
         if self.param_details.get("_fallback_core"):

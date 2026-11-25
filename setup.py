@@ -208,6 +208,7 @@ setup(
             "TraceLens_visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main [Visualizer]",
             "visualize_model_in_explorer = TraceLens.Visualizer.model_explorer_export.cli:main [Visualizer]",
             "TraceLens_model_roofline_projection = TraceLens.Visualizer.model_explorer_export.roofline_cli:main [Visualizer]",
+            "TraceLens_e2e_roofline_plot = TraceLens.Visualizer.model_explorer_export.e2e_roofline:main",
             "TraceLens_split_trace = TraceLens.TraceUtils.split_trace.main:main",
             "TraceLens_resolve_kernel_source = TraceLens.TraceUtils.kernel_source.cli:main",
             "TraceLens_trace_index = TraceLens.TraceIndex.cli:main",

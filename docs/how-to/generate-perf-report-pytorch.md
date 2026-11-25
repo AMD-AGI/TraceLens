@@ -355,11 +355,37 @@ TraceLens's SDPA tile model: it times one Q·Kᵀ tile and one P·V tile on one
 CU with Origami, scales them by the number of waves, and adds softmax and
 memory terms. Its columns are labeled `SDPA Tile Origami`. It needs
 `num_cus`, `gemm_units_per_cu`, and `mem_bw_gbps` in the arch, and
-`l1_bw_gbps` for backward. The tile model, in
-`TraceLens/PerfModel/sdpa_tile.py`, times its tiles with whatever GEMM model
-it's given as `gemm_time`; the op projection passes Origami's. To use another
-GEMM model, write an op projection that returns
-`{"time_us": sdpa_tile_time_us(work.perf_model, arch, your_gemm_time, bwd=work.bwd)}`.
+`l1_bw_gbps` for backward. Dense inference attention (paged and varlen flash)
+is timed too, for forward only. Sparse and linear attention are not. The tile
+model, in `TraceLens/PerfModel/sdpa_tile.py`, times its tiles with whatever GEMM
+model it's given as `gemm_time`; the op projection passes Origami's. To use
+another GEMM model, write an op projection that picks the entry point by perf
+model type:
+
+```python
+from TraceLens.PerfModel import sdpa_tile
+from TraceLens.PerfModel.extensions.attention_perf_model_extensions import (
+    InferenceAttention,
+)
+from TraceLens.PerfModel.perf_model import SDPA
+
+
+def my_sdpa_tile_projection(work, arch):
+    if isinstance(work.perf_model, SDPA):
+        time_us = sdpa_tile.sdpa_tile_time_us(
+            work.perf_model, arch, your_gemm_time, bwd=work.bwd
+        )
+    elif isinstance(work.perf_model, InferenceAttention):
+        time_us = sdpa_tile.inference_attention_time_us(
+            work.perf_model, arch, your_gemm_time, bwd=work.bwd
+        )
+    else:
+        return None
+    return None if time_us is None else {"time_us": time_us}
+```
+
+`sdpa_tile_time_us` takes only `SDPA` perf models (SDPA and flash attention).
+Inference attention goes through `inference_attention_time_us`.
 
 ### Add a kernel filter
 

@@ -74,21 +74,21 @@ class JaxAnalyses:
             # (e.g. create_gpu_summary) can index into it unconditionally
             # even when the fallback below catches every event.
             cur_categorized_list.setdefault(
-                TraceEventUtils.JaxOpKeys.UncategorizedEventKey, [0, 0]
+                TraceEventUtils.KernelCategoryKeys.UncategorizedEventKey, [0, 0]
             )
 
             name = compute_event[TraceEventUtils.TraceKeys.Name]
             duration = compute_event[TraceEventUtils.TraceKeys.Duration]
 
             def _match_category(candidate):
-                """Return the first JaxOpKeys category whose substring
+                """Return the first KernelCategoryKeys category whose substring
                 filters match ``candidate``, or ``None``."""
                 if not isinstance(candidate, str) or not candidate:
                     return None
                 for (
                     category,
                     filters,
-                ) in TraceEventUtils.JaxOpKeys.ClassCategories.items():
+                ) in TraceEventUtils.KernelCategoryKeys.ClassCategories.items():
                     if any(f in candidate for f in filters):
                         return category
                 return None
@@ -111,7 +111,7 @@ class JaxAnalyses:
                     name = name.rstrip(string.digits)
                 add_event(
                     cur_categorized_list,
-                    TraceEventUtils.JaxOpKeys.UncategorizedEventKey,
+                    TraceEventUtils.KernelCategoryKeys.UncategorizedEventKey,
                     duration,
                 )
                 add_event(cur_uncategorized_list, name, duration)
@@ -194,7 +194,9 @@ class JaxAnalyses:
         )
         uncategorized_df = JaxAnalyses.create_breakdown_df(
             uncategorized_times,
-            categorized_times[TraceEventUtils.JaxOpKeys.UncategorizedEventKey][1],
+            categorized_times[TraceEventUtils.KernelCategoryKeys.UncategorizedEventKey][
+                1
+            ],
             num_gpus,
         )
         return (
@@ -537,7 +539,7 @@ class JaxAnalyses:
     @staticmethod
     def get_perf_model(event: dict):
         name = event[TraceEventUtils.TraceKeys.Name]
-        if any(f in name for f in TraceEventUtils.JaxOpKeys.GemmKeys):
+        if any(f in name for f in TraceEventUtils.KernelCategoryKeys.GemmKeys):
             return JaxAnalyses.JaxGemm
         return None
 

@@ -733,7 +733,7 @@ An op projection reads an op's work (its parameters, FLOPs, and bytes) and retur
 |-------|------|
 | `Roofline` | A GPU arch is given. |
 | `Origami` | `--enable-origami-gemm`; GEMMs only. |
-| `SDPA Tile Origami` | `--enable-origami-sdpa-tile`; attention, forward and backward. |
+| `SDPA Tile Origami` | `--enable-origami-sdpa-tile`; SDPA and flash attention, forward and backward; dense inference attention, forward only. |
 | Your label | An `op_projections` entry in `--extension_file`, or `External` for `external_op_projection`. |
 
 | Column | Description |
