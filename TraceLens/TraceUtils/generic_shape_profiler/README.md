@@ -150,9 +150,23 @@ so a perf model can address operands by name: slot *i* of an op is
 `schemas[op][i]`. `*args` and `**kwargs` parameters become one trailing
 `Tensor[]?` slot each.
 
-A parameter's slot type is fixed by the first value it is seen with (or its
-annotation when that value is `None`); a later value of another type records as
-empty rather than changing the op. Launch paths with no Python signature —
+A parameter's slot type is fixed by the first value it is seen with, or by its
+annotation when that value is `None`. An unannotated parameter first seen as
+`None` is guessed to be a tensor, and that guess is provisional: the first call
+that passes a real value of another type (say `eps=1e-5`) re-decides the slot,
+and the function continues under a new op `<op>__v2` with the corrected
+schema. Slot positions are unchanged, and the old op only holds calls on which
+that parameter was `None`. Each re-decided op is listed under
+`generic_shape_profiler_aliases`, so it can be merged into its replacement:
+
+```json
+"generic_shape_profiler_aliases": {
+  "launcher_shapes::fused_rms_fp8_group_quant": "launcher_shapes::fused_rms_fp8_group_quant__v2"
+}
+```
+
+A slot is re-decided at most once; any other type mismatch records as empty
+rather than changing the op. Launch paths with no Python signature —
 tvm-ffi functions, `run_hsaco`, `compiled[grid](...)` relaunches, TileLang
 kernels and `mark_launch` — record their arguments in call order instead
 (keywords sorted by name), with the same slot types; their slots are named

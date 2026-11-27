@@ -18,7 +18,8 @@ values:
 
 Both carry the same work; pick one granularity when summing FLOPs.
 Each parameter has a fixed slot in signature order; names are in the trace
-metadata under ``SCHEMA_METADATA_KEY``. See README.md for the design.
+metadata under ``SCHEMA_METADATA_KEY``, and ops replaced by a re-decided layout
+under ``ALIAS_METADATA_KEY``. See README.md for the design.
 
 Public API: ``install_hooks()``, ``enable()`` / ``disable()``,
 ``mark_launch(name, tensors)``, ``schema_table()``.
@@ -51,6 +52,7 @@ LAUNCHER_NAMESPACE = "launcher_shapes"
 SPAN_PREFIX = "jit::"
 
 SCHEMA_METADATA_KEY = "generic_shape_profiler_schemas"
+ALIAS_METADATA_KEY = "generic_shape_profiler_aliases"
 
 
 def _env_on(name: str, default: str = "1") -> bool:
@@ -128,6 +130,9 @@ _libs: Dict[str, Library] = {}  # namespace -> Library
 _ops: Dict[tuple, Any] = {}  # (namespace, name, spec) -> op callable / _BROKEN
 _taken: Dict[str, Set[str]] = {}  # namespace -> op names already defined
 _schemas: Dict[str, List[List[str]]] = {}  # "ns::op" -> [[param, schema type], ...]
+_op_names: Dict[tuple, str] = {}  # (namespace, name, spec) -> "ns::op"
+_aliases: Dict[str, str] = {}  # "ns::op" -> the "ns::op__v<N>" that replaced it
+_successors: Dict[tuple, tuple] = {}  # re-decided spec -> (previous spec, version)
 _layouts: Dict[Any, "_Layout"] = {}  # code object -> layout
 _obj_layouts: Dict[int, tuple] = {}  # id(obj) -> (obj, layout) when obj has no __dict__
 _installed: Dict[str, str] = {}  # hook id -> what was patched
@@ -201,12 +206,20 @@ def schema_table() -> Dict[str, List[List[str]]]:
         return {op: [list(p) for p in params] for op, params in _schemas.items()}
 
 
+def alias_table() -> Dict[str, str]:
+    """``{"ns::op": "ns::op__v<N>"}`` for ops whose layout was re-decided."""
+    with _lock:
+        return dict(_aliases)
+
+
 def add_schema_metadata(prof: Any) -> bool:
-    """Write ``schema_table()`` into ``prof``'s trace; call before it stops."""
+    """Write both tables into ``prof``'s trace; call before it stops."""
     if not _schemas:
         return False
     try:
         prof.add_metadata_json(SCHEMA_METADATA_KEY, json.dumps(schema_table()))
+        if _aliases:
+            prof.add_metadata_json(ALIAS_METADATA_KEY, json.dumps(alias_table()))
         return True
     except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
         logger.debug("could not add schema metadata: %s", exc)
@@ -244,15 +257,7 @@ def _define_op(namespace: str, name: str, spec: tuple):
         if key in _ops:
             return _ops[key]
 
-        # Another spec under the same name gets a "__<N>t" suffix.
-        taken = _taken.setdefault(namespace, set())
-        base = _sanitize(name)
-        n = len(spec)
-        op_name = base if base not in taken else f"{base}__{n}t"
-        suffix = 1
-        while op_name in taken:
-            suffix += 1
-            op_name = f"{base}__{n}t_{suffix}"
+        op_name = _new_op_name(namespace, name, spec)
 
         try:
             lib = _libs.get(namespace)
@@ -268,13 +273,42 @@ def _define_op(namespace: str, name: str, spec: tuple):
             _schemas[f"{namespace}::{op_name}"] = [
                 [param, kind.value] for param, kind in spec
             ]
+            _record_alias(namespace, name, spec, f"{namespace}::{op_name}")
         except Exception as exc:  # pragma: no cover - defensive  # noqa: BLE001
             logger.debug("could not define %s::%s: %s", namespace, name, exc)
             op = _BROKEN
 
-        taken.add(op_name)
+        _taken[namespace].add(op_name)
         _ops[key] = op
         return op
+
+
+def _new_op_name(namespace: str, name: str, spec: tuple) -> str:
+    """Re-decided layouts get "__v<N>"; another spec under a taken name "__<N>t"."""
+    taken = _taken.setdefault(namespace, set())
+    base = _sanitize(name)
+    successor = _successors.get(spec)
+    if successor is not None:
+        stem = f"{base}__v{successor[1]}"
+    else:
+        stem = base if base not in taken else f"{base}__{len(spec)}t"
+    op_name, suffix = stem, 1
+    while op_name in taken:
+        suffix += 1
+        op_name = f"{stem}_{suffix}"
+    return op_name
+
+
+def _record_alias(namespace: str, name: str, spec: tuple, full_name: str) -> None:
+    _op_names[(namespace, name, spec)] = full_name
+    successor = _successors.get(spec)
+    previous = successor and _op_names.get((namespace, name, successor[0]))
+    if not previous:
+        return
+    for old, new in list(_aliases.items()):
+        if new == previous:
+            _aliases[old] = full_name
+    _aliases[previous] = full_name
 
 
 def _op_for(namespace: str, name: str, spec: tuple):
@@ -329,7 +363,7 @@ def _record_launch(
 # paths avoid them.
 # ---------------------------------------------------------------------------
 class _Layout:
-    """A function's parameter slots; kinds are fixed by the first call."""
+    """Parameter slots; a slot guessed from None is re-decided once by its first value."""
 
     __slots__ = (
         "names",
@@ -341,6 +375,9 @@ class _Layout:
         "hints",
         "slots",
         "spec",
+        "provisional",
+        "version",
+        "extra",
     )
 
     def __init__(self, code: types.CodeType) -> None:
@@ -352,10 +389,14 @@ class _Layout:
         self.varargs = code.co_varnames[n] if flags & inspect.CO_VARARGS else None
         k = n + (self.varargs is not None)
         self.varkw = code.co_varnames[k] if flags & inspect.CO_VARKEYWORDS else None
-        self.defaults = [_UNSET] * n
+        # vals[extra] holds *args and vals[extra + 1] the **kwargs values.
+        self.extra = n
+        self.defaults = [_UNSET] * n + [(), ()]
         self.hints: Dict[str, str] = {}
         self.slots: Optional[tuple] = None  # ((param index, kind), ...)
         self.spec: Optional[tuple] = None
+        self.provisional: Set[int] = set()  # slot positions guessed from None
+        self.version = 1
 
     def add_function(self, func: types.FunctionType) -> None:
         defaults = func.__defaults__ or ()
@@ -468,47 +509,78 @@ def _decide_slots(layout: _Layout, vals: list) -> None:
             return
         slots = []
         for i, name in enumerate(layout.names):
-            kind = _kind_of(vals[i], layout.hints.get(name))
+            hint = layout.hints.get(name)
+            kind = _kind_of(vals[i], hint)
             if kind != SlotKind.NONE:
+                if not hint and (vals[i] is None or vals[i] is _UNSET):
+                    layout.provisional.add(len(slots))
                 slots.append((i, kind))
         if layout.varargs is not None:
-            slots.append((-1, SlotKind.TENSOR_LIST))
+            slots.append((layout.extra, SlotKind.TENSOR_LIST))
         if layout.varkw is not None:
-            slots.append((-2, SlotKind.TENSOR_LIST))
-        slots = tuple(slots[:_MAX_SLOTS])
-        names = []
-        for i, _ in slots:
-            if i >= 0:
-                names.append(layout.names[i])
-            else:
-                names.append("*" + layout.varargs if i == -1 else "**" + layout.varkw)
-        layout.spec = tuple(zip(names, (kind for _, kind in slots)))
-        layout.slots = slots
+            slots.append((layout.extra + 1, SlotKind.TENSOR_LIST))
+        _set_slots(layout, tuple(slots[:_MAX_SLOTS]))
 
 
-def _convert(
-    layout: _Layout, vals: list, extra_args: tuple, extra_kwargs
-) -> Optional[tuple]:
+def _set_slots(layout: _Layout, slots: tuple) -> None:
+    names = []
+    for i, _ in slots:
+        if i < layout.extra:
+            names.append(layout.names[i])
+        elif i == layout.extra:
+            names.append("*" + layout.varargs)
+        else:
+            names.append("**" + layout.varkw)
+    layout.spec = tuple(zip(names, (kind for _, kind in slots)))
+    layout.slots = slots
+
+
+def _redecide(layout: _Layout, vals: list) -> Optional[tuple]:
+    """Fix provisional slots from the values they now hold, then convert again."""
+    with _lock:
+        slots = list(layout.slots)
+        changed = False
+        for s in sorted(layout.provisional):
+            i, kind = slots[s]
+            v = vals[i]
+            if v is None or v is _UNSET:
+                continue
+            layout.provisional.discard(s)
+            new = _kind_of(v)
+            if new is not SlotKind.NONE and new is not kind:
+                slots[s] = (i, new)
+                changed = True
+        if changed:
+            previous = layout.spec
+            _set_slots(layout, tuple(slots))
+            layout.version += 1
+            _successors[layout.spec] = (previous, layout.version)
+    return _convert(layout, vals)
+
+
+def _convert(layout: _Layout, vals: list) -> Optional[tuple]:
     """One value per slot, or None when no tensor was passed."""
     out = [None] * _MAX_SLOTS
     has_tensor = False
     s = 0
     for i, kind in layout.slots:
-        v = vals[i] if i >= 0 else _extra_value(i, extra_args, extra_kwargs)
+        v = vals[i]
         if v is None or v is _UNSET:
             pass
         elif kind is SlotKind.TENSOR:
             if type(v) in _TENSOR_TYPES or isinstance(v, torch.Tensor):
                 out[s] = v
                 has_tensor = True
+                if s in layout.provisional:
+                    layout.provisional.discard(s)
+            elif s in layout.provisional:
+                return _redecide(layout, vals)
         elif kind is SlotKind.SCALAR:
-            out[s] = v if type(v) in _SCALAR_TYPES else _plain_number(v)
+            num = v if type(v) in _SCALAR_TYPES else _plain_number(v)
             # Scalar? only takes int64-range values (nan fails this too).
-            if out[s] is not None and not -_I64 <= out[s] < _I64:
-                out[s] = None
+            out[s] = num if num is not None and -_I64 <= num < _I64 else None
         elif kind is SlotKind.DTYPE:
-            if type(v) is torch.dtype:
-                out[s] = v
+            out[s] = v if type(v) is torch.dtype else None
         elif type(v) in _SEQ_TYPES:
             out[s] = _seq_value(kind, v)
             has_tensor = has_tensor or (
@@ -528,15 +600,6 @@ def _plain_number(value: Any) -> Optional[Any]:
     return None
 
 
-def _extra_value(i: int, extra_args: tuple, extra_kwargs) -> tuple:
-    """Slot -1 is ``*args``, slot -2 is ``**kwargs``."""
-    if i == -1:
-        return extra_args
-    if not extra_kwargs:
-        return ()
-    return tuple(extra_kwargs[k] for k in sorted(extra_kwargs))
-
-
 def _seq_value(kind: SlotKind, value: Any) -> Optional[list]:
     items = []
     for item in value[:_MAX_LIST]:
@@ -553,11 +616,10 @@ def _seq_value(kind: SlotKind, value: Any) -> Optional[list]:
 def _bind_record(layout: _Layout, args: tuple, kwargs: dict) -> Optional[tuple]:
     vals = layout.defaults[:]
     npos = layout.npos
-    extra_args = ()
     i = 0
     for a in args:
         if i == npos:
-            extra_args = args[i:]
+            vals[layout.extra] = args[i:]
             break
         vals[i] = a
         i += 1
@@ -570,9 +632,11 @@ def _bind_record(layout: _Layout, args: tuple, kwargs: dict) -> Optional[tuple]:
             if extra_kwargs is None:
                 extra_kwargs = {}
             extra_kwargs[k] = kwargs[k]
+    if extra_kwargs:
+        vals[layout.extra + 1] = tuple(extra_kwargs[k] for k in sorted(extra_kwargs))
     if layout.slots is None:
         _decide_slots(layout, vals)
-    return _convert(layout, vals, extra_args, extra_kwargs)
+    return _convert(layout, vals)
 
 
 def _frame_record(frame) -> Optional[tuple]:
@@ -585,15 +649,16 @@ def _frame_record(frame) -> Optional[tuple]:
         if name in local_vars:
             vals[i] = local_vars[name]
         i += 1
-    extra_args = ()
     if layout.varargs is not None and layout.varargs in local_vars:
-        extra_args = local_vars[layout.varargs]
+        vals[layout.extra] = local_vars[layout.varargs]
     extra_kwargs = None
     if layout.varkw is not None and layout.varkw in local_vars:
         extra_kwargs = local_vars[layout.varkw]
+    if extra_kwargs:
+        vals[layout.extra + 1] = tuple(extra_kwargs[k] for k in sorted(extra_kwargs))
     if layout.slots is None:
         _decide_slots(layout, vals)
-    return _convert(layout, vals, extra_args, extra_kwargs)
+    return _convert(layout, vals)
 
 
 def _positional_record(args: tuple, kwargs: dict) -> Optional[tuple]:
