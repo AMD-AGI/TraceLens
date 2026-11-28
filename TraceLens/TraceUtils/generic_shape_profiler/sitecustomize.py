@@ -127,6 +127,12 @@ def _patch_torch_profiler_profile() -> bool:
         return orig_start(self, *a, **kw)
 
     def _stop(self, *a, **kw):
+        if getattr(self, "_tracelens_incremented", False):
+            # Metadata is only accepted while recording.
+            try:
+                _get_tracer().add_schema_metadata(self)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             return orig_stop(self, *a, **kw)
         finally:
