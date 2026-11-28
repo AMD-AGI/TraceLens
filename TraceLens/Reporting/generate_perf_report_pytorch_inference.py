@@ -75,6 +75,10 @@ _INFERENCE_ANNOTATION_OP_PREFIXES = [
     "sgl_kernel::deepseek_v4_topk_transform_512",
     "sgl_kernel::fast_topk",
     "fused_k_norm_rope_q_flashmla",
+    "launcher_shapes::_triton_sparse_mla_fwd_splitk",
+    "launcher_shapes::triton_sparse_mla_decode_splitk",
+    "launcher_shapes::fp8_mqa_logits",
+    "launcher_shapes::Gfx950FusedIndexer_run",
 ]
 
 

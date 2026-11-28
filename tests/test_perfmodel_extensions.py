@@ -1058,8 +1058,8 @@ class TestPerfModelExtensions:
             self._mqa_logits_event(self._decode_annotation(3, 32768))
         )
         keys = 3 * 32768 // 4
-        assert model.param_details["keys"] == keys
-        assert model.flops() == keys * 64 * (2 * 128 + 2)
+        assert model.param_details["scored_pairs"] == keys
+        assert model.flops() == keys * 64 * 2 * 128
         assert model.bytes() == 3 * 64 * (64 + 4 + 2) + keys * (64 + 4 + 4 + 4 / 64)
         assert model.get_compute_precision() == "fp4"
         assert model.get_maf_type() == "matrix"
@@ -1071,9 +1071,9 @@ class TestPerfModelExtensions:
         model = aext.pa_mqa_logits_mxfp4(
             self._mqa_logits_event(annotation, rows=16, q_per_block=4)
         )
-        assert model.param_details["rows"] == 8
+        assert model.param_details["N_Q"] == 8
         keys = (64 - (64 - 8) // 2) // 4
-        assert model.param_details["keys"] == keys
+        assert model.param_details["scored_pairs"] == keys
         # Four rows per CTA share each KV tile; every row stores its own logits.
         assert model.bytes() == 8 * 64 * (64 + 4 + 2) + keys * (
             (64 + 4 + 4 / 64) / 4 + 4
