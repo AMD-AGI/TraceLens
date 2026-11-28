@@ -615,7 +615,7 @@ class pa_sparse_prefill_opus_fwd(SparseMLAAttention):
         Input Dims[5] = kv_indices_extend (P_extend,)   in-chunk local-window slots
 
     ``pairs = P_prefix + P_extend`` is the exact number of (query-token, KV-slot)
-    pairs the kernel attends.
+    pairs the kernel attends
 
     Roofline -- FLOPs:
         inherited from SparseMLAAttention:
@@ -1570,11 +1570,10 @@ class pa_mqa_logits_mxfp4(LightningIndexerScores):
         [1] q (T, H, D/2) uint8          [2] q_scale (T, H, D/32) uint8
         [3] kv_cache (pages, P, D/2)     [4] kv_scale (pages, P, D/32)
         [6] weights (T, H) bf16          Concrete Inputs[16] = q_per_block
-
-    FLOPs and bytes: LightningIndexerScores, with q and weight bytes per head
-    from the MXFP4 layout, key_row_bytes = (KV row + scale + page id share) /
-    q_per_block, and logits_bytes = scored_pairs * 4.
     """
+
+    category = "InferenceAttention"
+    bwd_category = None
 
     _PAGE_ID_BYTES = 4
     _LOGIT_BYTES = 4
@@ -1585,35 +1584,46 @@ class pa_mqa_logits_mxfp4(LightningIndexerScores):
             stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
             dims = event["args"]["Input Dims"]
             rows, heads, q_row = dims[1]
-            page_size = dims[3][1]
-            q_per_block = max(int(event["args"]["Concrete Inputs"][16]), 1)
-            scored = (
-                InferenceAttention._causal_kv_pairs(stats)
-                // _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
-            )
-            kv_per_key = (
-                dims[3][2] + dims[4][2] + pa_mqa_logits_mxfp4._PAGE_ID_BYTES / page_size
-            )
-            return {
+            params = {
                 "B": 1,
                 "N_Q": min(stats["c_sq"] + stats["g_sq"], rows),
                 "H_Q": heads,
-                "N_KV": scored,
                 "H_KV": 1,
                 "d_h_qk": 2 * q_row,
                 "d_h_v": 2 * q_row,
-                "scored_pairs": scored,
                 "q_bytes_per_head": q_row + dims[2][2],
+                "kv_row_bytes": dims[3][2] + dims[4][2],
+                "page_size": dims[3][1],
                 "weight_bytes_per_head": name2bpe(event["args"]["Input type"][6]),
-                "key_rows": scored,
-                "key_row_bytes": kv_per_key / q_per_block,
-                "logits_bytes": scored * pa_mqa_logits_mxfp4._LOGIT_BYTES,
-                "page_size": page_size,
-                "q_per_block": q_per_block,
-                "dtype_Q": "mxfp4",
+                "q_per_block": max(int(event["args"]["Concrete Inputs"][16]), 1),
             }
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return InferenceAttention.no_perf_param_details()
+        params["scored_pairs"] = (
+            InferenceAttention._causal_kv_pairs(stats)
+            // _V4PagedDecodeBase.CSA_COMPRESS_STRIDE
+        )
+        params["N_KV"] = params["key_rows"] = params["scored_pairs"]
+        params["key_row_bytes"] = (
+            params["kv_row_bytes"]
+            + pa_mqa_logits_mxfp4._PAGE_ID_BYTES / params["page_size"]
+        ) / params["q_per_block"]
+        params["logits_bytes"] = (
+            params["scored_pairs"] * pa_mqa_logits_mxfp4._LOGIT_BYTES
+        )
+        return params
+
+    def flops_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def bytes_bwd(self):
+        raise NotImplementedError("Backward pass for MQA logits is not defined.")
+
+    def get_compute_precision(self):
+        return None if self.param_details.get("_no_perf") else torch_dtype_map("mxfp4")
+
+    def get_maf_type(self):
+        return None if self.param_details.get("_no_perf") else "matrix"
 
 
 class rocm_aiter_sparse_attn_indexer(LightningIndexerScores):
@@ -1633,58 +1643,67 @@ class rocm_aiter_sparse_attn_indexer(LightningIndexerScores):
         [2] unsigned char (fp8 k cache), [3] Float8_e4m3fn (q), [4] BFloat16 (k)
     Expected Concrete Inputs from trace:
         [8] index_topk
-
-    FLOPs and bytes: LightningIndexerScores, with scored_pairs = causal
-    (query, key) pairs of the step, the cached keys read once (key_rows =
-    total_sk - N_Q, key_row_bytes = cache_row), the current-chunk keys as
-    extra_bytes, and the int32 top-k list as topk_bytes (logits are streamed).
     """
 
     @staticmethod
     def get_param_details(event):
         try:
-            stats = InferenceAttention._parse_chunk_stats(str(event.get("annotation")))
+            annotation = str(event.get("annotation"))
+            stats = InferenceAttention._parse_chunk_stats(annotation)
+
             dims = event["args"]["Input Dims"]
             types = event["args"].get("Input type", []) or []
             N_Q, H, head_dim = dims[3][0], dims[3][1], dims[3][2]
             # Cache row width (fp8 key + per-block e8m0 scales), 1 B/elem.
             cache_row = dims[2][-1] if len(dims) > 2 and dims[2] else head_dim
+
             concrete = event["args"].get("Concrete Inputs", []) or []
             index_topk = 0
             if len(concrete) > 8 and str(concrete[8]).strip().isdigit():
                 index_topk = int(concrete[8])
-            dtype_q = types[3] if len(types) > 3 else "c10::Float8_e4m3fn"
-            dtype_kcur = types[4] if len(types) > 4 else "c10::BFloat16"
-            total_sk = stats["c_sk"] + stats["g_sk"]
-            avg_ctx = total_sk / N_Q if N_Q else 0
-            topk = min(index_topk, avg_ctx) if index_topk else avg_ctx
-            return {
+
+            params = {
                 "B": 1,
                 "N_Q": N_Q,
                 "H_Q": H,
                 "H_KV": 1,  # MQA: single shared key per token
-                "N_KV": total_sk,
+                "N_KV": stats["c_sk"] + stats["g_sk"],
                 "d_h_qk": head_dim,
                 "d_h_v": head_dim,
+                "dropout": 0.0,
+                "causal": True,
+                "flash_impl": True,
                 "index_topk": index_topk,
                 "cache_row": cache_row,
-                "dtype_Q": dtype_q,
+                "dtype_Q": types[3] if len(types) > 3 else "c10::Float8_e4m3fn",
                 "dtype_KV": types[2] if len(types) > 2 else "unsigned char",
-                "dtype_Kcur": dtype_kcur,
-                "scored_pairs": InferenceAttention._causal_kv_pairs(stats),
-                "weight_bytes_per_head": 4,  # fp32 per-head weights (not in Input Dims)
-                "key_rows": max(total_sk - N_Q, 0),
-                "key_row_bytes": cache_row,
-                "extra_bytes": (
-                    N_Q * head_dim * name2bpe(dtype_kcur)
-                    if name2bpe(dtype_kcur)
-                    else None
-                ),
-                "topk_bytes": N_Q * topk * 4,
-                **stats,
+                "dtype_Kcur": types[4] if len(types) > 4 else "c10::BFloat16",
             }
+            total_sk = stats["c_sk"] + stats["g_sk"]
+            avg_ctx = total_sk / N_Q if N_Q else 0
+            topk = min(index_topk, avg_ctx) if index_topk else avg_ctx
+            bpe_kcur = name2bpe(params["dtype_Kcur"])
+            params.update(stats)
+            params.update(
+                scored_pairs=InferenceAttention._causal_kv_pairs(stats),
+                weight_bytes_per_head=4,  # fp32 per-head weights
+                key_rows=max(total_sk - N_Q, 0),  # cached keys, read once
+                key_row_bytes=cache_row,  # fp8 key + scales, 1 B/elem
+                extra_bytes=N_Q * head_dim * bpe_kcur if bpe_kcur else None,
+                topk_bytes=N_Q * topk * 4,  # int32 top-k list; logits are streamed
+            )
+            return params
         except (NotImplementedError, ValueError, IndexError, KeyError, TypeError):
             return InferenceAttention.no_perf_param_details()
+
+    def get_compute_precision(self):
+        if self.param_details.get("_no_perf"):
+            return None
+        dtype = self.param_details.get("dtype_Q")
+        return torch_dtype_map(dtype) if dtype else None
+
+    def get_maf_type(self):
+        return "matrix"
 
 
 class sglang_fp8_mqa_logits(LightningIndexerScores):
